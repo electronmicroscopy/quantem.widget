@@ -45,6 +45,9 @@ in the virtual image to update the diffraction panel immediately.
 - Click and drag scan position across the virtual image.
 - Verify diffraction updates at the current scan position and labels/readouts
   stay synchronized.
+- Hover scan positions without clicking and verify hover coordinates/readouts
+  update for the hovered position without committing a new selected scan
+  position or changing the diffraction panel until the user clicks or drags.
 - Use keyboard or slider navigation if available.
 - Record FPS or latency for scan-position movement.
 
@@ -79,6 +82,9 @@ inspect diffraction features without losing the linked scan context.
 
 - Pan and zoom the diffraction panel.
 - Change diffraction contrast, colormap, log/linear scale, and smoothing.
+- Hover diffraction features without selecting a new scan position or detector
+  and verify diffraction readouts follow the hovered pixel while detector and
+  virtual-image controls remain scoped to the explicitly selected state.
 - Verify detector overlays remain aligned during pan/zoom/resize.
 - Verify colorbar/histogram controls are readable on dark and light displays.
 
@@ -98,17 +104,15 @@ environment when possible.
 **Acceptance checks**:
 
 - Record WebGPU adapter availability in the report.
-- Record Python backend and data loader path: CUDA/Torch, raw Metal/MPS,
-  Torch-MPS, CPU, or browser/WebGPU.
+- Record the GPU backend and loader path: CUDA, raw Metal/MPS, Torch-MPS, or
+  browser WebGPU.
 - Verify accelerated detector/virtual-image updates when WebGPU is available.
 - Verify MacBook live-Jupyter browsing can use MPS/raw Metal loading and
   computation for first-pass review.
-- Verify backend="web" exported/offline pages use browser WebGPU and do not
+- Verify `backend="webgpu"` exported/offline pages use browser WebGPU and do not
   need Python, Torch, or MPS after export.
-- Verify fallback path is usable and clearly communicated when WebGPU is not
-  available.
-- Do not claim WebGPU performance from CPU fallback.
-- Do not claim MPS/raw-Metal performance from a Torch-MPS or CPU path.
+- Verify WebGPU unavailability produces a clear corrective error.
+- Do not claim MPS/raw-Metal performance from a Torch-MPS path.
 
 ### S4D-06: Save, Export, And Reopen 4D-STEM Views
 
@@ -206,6 +210,10 @@ page using comparable colors, labels, scale bars, and top toolbar actions.
   panel visually balanced on desktop, notebook, and narrow viewports.
 - Verify labels and readouts use the same row/column convention and units as the
   other storyboards.
+- Verify hover inspection follows the same rule as Show2D and Show3D: moving
+  the pointer over an unselected virtual image, diffraction panel, detector
+  mask, or ROI shows that target's readout without silently retargeting edit
+  controls.
 - Verify Export GUI choices match the Python API terms: ``mode``, ``encoding``,
   and ``downsample`` rather than older ambiguous names.
 - Drive the same user path in live Jupyter and exported HTML; document any GUI
@@ -239,8 +247,9 @@ dataset for reference parity.
 ### S4D-11: Use MacBook MPS For Live Loading And U8 Export
 
 **User story**: As a MacBook user opening large 4D-STEM data, I want first-pass
-browsing to use the fast Apple Silicon path, usually detector-binned U8, so the
-viewer opens quickly without exhausting unified memory.
+browsing to use the fast Apple Silicon path at native detector sampling when
+memory allows, and to use detector-binned U8 only when I explicitly choose a
+preview to avoid exhausting unified memory.
 
 **Primary widgets**: Show4DSTEM.
 
@@ -249,11 +258,14 @@ Jupyter server, plus a smaller deterministic fixture for export parity.
 
 **Acceptance checks**:
 
-- Load with ``load(path, backend="mps", det_bin=4 or 8, dtype="u8")`` and
-  construct ``Show4DSTEM`` from that result.
+- Load first with ``load(path, backend="mps", det_bin=1)`` when the Mac memory
+  budget allows, then construct ``Show4DSTEM`` from that result. Run
+  ``det_bin=4`` or ``8`` only as an explicitly labeled preview/capacity check.
 - Record load time, first paint, detector bin, dtype, resident memory, and
   whether the path is raw Metal/MPS, Torch-MPS, or CPU.
-- Export compact HTML with ``encoding="uint8"`` and reopen it in the browser.
+- Export full-detector WebGPU/HDF5 HTML when the gate is native detector
+  behavior; export compact HTML with ``encoding="uint8"`` only as an explicitly
+  labeled preview.
 - Verify reopened HTML uses browser/WebGPU for interaction when available, not
   the Python MPS backend.
 - Compare one virtual detector and one diffraction frame against a Python
@@ -323,10 +335,11 @@ mounted Jupyter Show4DSTEM to discover every newly completed acquisition,
 expose it exactly once without rebuilding or silently changing precision, and
 remain interactive while incomplete detector files finish writing.
 
-**Primary widgets**: ``Show4DSTEM.from_folder(...)``. Test the CUDA/CPU
+**Primary widgets**: ``Show4DSTEM.from_folder(...)``. Test the CUDA
 ``Dataset5dstem`` path and the public ``backend="mps"`` path separately because
-their paging and memory lifecycles differ. Standalone HTML is a snapshot and
-does not continue watching a filesystem.
+their paging and memory lifecycles differ. CPU is only a deterministic unit-test
+reference. Standalone HTML is a snapshot and does not continue watching a
+filesystem.
 
 **Data to use**: A temporary watched folder and at least three genuine 4D-STEM
 acquisition groups. Begin with one ready ``*_master.h5``. Introduce a second
@@ -343,7 +356,7 @@ control only and does not establish real-workflow signoff.
   model ID, browser container, Dataset/page, panel order, stars, hidden panels,
   detector ROI, scan cursor, zoom, and playback state.
 - Keep one compact accessible watch badge near the folder/title area in stable
-  DOM for both CUDA/CPU and MPS. Require green-dot ``Watching`` only while the
+  DOM for both CUDA and MPS. Require green-dot ``Watching`` only while the
   actual watcher worker is alive. Enter ``Updating`` while discovery is active
   and keep it through real master/chunk validation and append. An idle poll may
   briefly show ``Updating`` but must return to ``Watching`` without decode,
@@ -368,7 +381,7 @@ control only and does not establish real-workflow signoff.
   count, page control, or reserved placeholder paint; then selecting/requesting
   the new dataset to first virtual-image **and** diffraction paint. Do not call
   a Python trait update alone “append-to-paint.”
-- On CUDA/CPU, append each master as a cold lazy ``Dataset5dstem`` slot. Do not
+- On CUDA, append each master as a cold lazy ``Dataset5dstem`` slot. Do not
   eagerly load every arrival, clear unrelated reduced pages, exceed
   ``page_budget``, or silently change shape, dtype, detector bin, or scan bin.
   Recompute fit and placement safely after each append; cross-check the paging
@@ -381,15 +394,16 @@ control only and does not establish real-workflow signoff.
   Silicon. Identify the lazy MacBook/raw-Metal path explicitly, verify append
   ordering and memory, and report unsupported dtype or page-budget options as
   limitations rather than claiming CUDA ``Dataset5dstem`` behavior.
-- Run a small CPU fallback for lifecycle correctness, labeling it as
-  non-performance evidence. On the same genuine source, separately verify a
+- Run a small synthetic CPU reference only in tests for lifecycle correctness;
+  production must not route through it. On the same genuine source, verify a
   count-preserving full path such as ``det_bin=1, dtype="u16"`` and an explicit
-  browse/downsample path such as ``det_bin=4``; binned success is not proof of
+  reduced preview path such as ``det_bin=4``; binned success is not proof of
   full-resolution support.
 - After append, verify ``compare_dp_mode="selected"`` follows the clicked new
-  dataset and ``compare_dp_mode="average"`` matches a CPU reference over the
-  current visible ready page, excluding hidden and incomplete datasets. Compare
-  virtual images and diffraction patterns at two or more scan positions.
+  dataset. If the average-DP mode is part of the change, also verify
+  ``compare_dp_mode="average"`` matches a CPU reference over the current visible
+  ready page, excluding hidden and incomplete datasets. Compare virtual images
+  and diffraction patterns at two or more scan positions.
 - Drive the live path in real JupyterLab through the in-app browser while files
   arrive. Capture before/after screenshots, console errors, Debug UI FPS and
   folder/page/cache/memory counters, detector drag, scan movement, diffraction

@@ -12,6 +12,7 @@ import io as _io
 import json
 import math
 import pathlib
+import re
 import tempfile
 import textwrap
 import warnings
@@ -109,6 +110,28 @@ _SCALE_BAR_STYLE_KEYS = {
     "bar_width",
     "shadow_color",
 }
+
+
+def _nonnegative_int(value: object, *, name: str) -> int:
+    """Return a nonnegative integer for pixel-width options."""
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative integer, got {value!r}") from exc
+    if result < 0:
+        raise ValueError(f"{name} must be >= 0, got {result}")
+    return result
+
+
+def _nonnegative_float(value: object, *, name: str) -> float:
+    """Return a nonnegative float for stroke-width options."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative number, got {value!r}") from exc
+    if not np.isfinite(result) or result < 0:
+        raise ValueError(f"{name} must be a finite value >= 0, got {value!r}")
+    return result
 
 
 def _normalize_panel_title_style(style: Mapping[str, object] | None) -> dict[str, object]:
@@ -1910,7 +1933,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # js/displayFilter.ts filters client-side, so the sigma slider scrubs live
     # with no kernel round trip and kernel-less HTML exports keep working
     # knobs. tv panels always stay on this Python path.
-    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
+    # Default True: the browser owns display denoise. js/displayFilter.ts ships
+    # The browser has WGSL and CPU TypeScript filter paths that match NumPy, so
+    # every viewer filters client-side and Python never needs the scipy round
+    # trip, which re-sent the whole frame over comm on every knob edit. The
+    # frontend downgrades this to False only on a software (SwiftShader) adapter.
+    _webgpu_filter_ok = traitlets.Bool(True).tag(sync=True)
     # Chemistry-on-structure view: HAADF-modulated blend of an element map on
     # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
     # construction with underlay=True on exactly two grayscale inputs.
@@ -1932,6 +1960,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    frame_bytes_url = traitlets.Unicode("").tag(sync=True)
+    frame_bytes_urls = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     # Optional per-panel frame stacks. Static panels keep count=1 and are not
     # duplicated in panel_stack_bytes; offsets are -1 for those panels.
     panel_frame_counts = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
@@ -1939,6 +1969,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_playback_fps = traitlets.Float(10.0).tag(sync=True)
     panel_stack_offsets = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_stack_bytes = traitlets.Bytes(b"").tag(sync=True)
+    panel_stack_bytes_url = traitlets.Unicode("").tag(sync=True)
     _panel_stack_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     _panel_stack_maxs = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     # Offline mode: stack quantized to uint8 against global (min, max). 4x
@@ -1995,6 +2026,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
     panel_title_style = traitlets.Dict(default_value={}).tag(sync=True)
+    inter_panel_gap_px = traitlets.Int(0).tag(sync=True)
+    inter_panel_gap_color = traitlets.Unicode("").tag(sync=True)
+    gallery_outer_border_px = traitlets.Int(0).tag(sync=True)
+    gallery_outer_border_color = traitlets.Unicode("").tag(sync=True)
+    panel_inner_border_px = traitlets.Float(1.0).tag(sync=True)
+    panel_inner_border_color = traitlets.Unicode("#d0d0d0").tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
     gallery_gap_color = traitlets.Unicode("").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
@@ -2039,7 +2076,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     scale_bar_length = traitlets.Float(None, allow_none=True).tag(sync=True)
     scale_bar_label = traitlets.Unicode("").tag(sync=True)
     scale_bar_style = traitlets.Dict(default_value={}).tag(sync=True)
-    show_zoom_indicator = traitlets.Bool(True).tag(sync=True)
+    show_zoom_indicator = traitlets.Bool(False).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
     smooth = traitlets.Bool(False).tag(sync=True)
     initial_zoom = traitlets.Float(1.0).tag(sync=True)
@@ -2298,7 +2335,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         scale_bar_length: float | None = None,
         scale_bar_label: str | None = None,
         scale_bar_style: Mapping[str, object] | None = None,
-        show_zoom_indicator: bool = True,
+        show_zoom_indicator: bool = False,
         show_fft: bool = False,
         fft_window: bool = True,
         fft_metrics: bool = True,
@@ -2358,7 +2395,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         show_panel_titles: bool | None = None,
         panel_title_font_size: int = 11,
         panel_title_style: Mapping[str, object] | None = None,
-        gallery_gap_px: int = 0,
+        inter_panel_gap_px: int | None = None,
+        inter_panel_gap_color: str | None = None,
+        gallery_outer_border_px: int | None = None,
+        gallery_outer_border_color: str | None = None,
+        panel_inner_border_px: float | int | None = None,
+        panel_inner_border_color: str | None = None,
+        gallery_gap_px: int | None = None,
         gallery_gap_color: str | None = None,
         state=None,
         save_state: bool = False,
@@ -2391,6 +2434,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     ):
         import time as _time
         _t0 = _time.perf_counter()
+        skip_initial_frame_pack = bool(kwargs.pop("_skip_initial_frame_pack", False))
+        skip_initial_stats = bool(kwargs.pop("_skip_initial_stats", False))
+        preserve_input_dtype_for_export = bool(kwargs.pop("_preserve_input_dtype_for_export", False))
         requested_panel_cmaps = (
             [_cmap_name(item) for item in cmap]
             if _is_cmap_sequence(cmap)
@@ -2495,9 +2541,45 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ncols = int(ncols)
         if ncols < 1:
             raise ValueError(f"ncols must be >= 1, got {ncols}")
-        gallery_gap_px = int(gallery_gap_px)
-        if gallery_gap_px < 0:
-            raise ValueError(f"gallery_gap_px must be >= 0, got {gallery_gap_px}")
+        legacy_gap_used = gallery_gap_px is not None or gallery_gap_color is not None
+        resolved_inter_panel_gap_px = _nonnegative_int(
+            0 if inter_panel_gap_px is None and gallery_gap_px is None
+            else gallery_gap_px if inter_panel_gap_px is None
+            else inter_panel_gap_px,
+            name="inter_panel_gap_px",
+        )
+        resolved_inter_panel_gap_color = (
+            "" if (gallery_gap_color if inter_panel_gap_color is None else inter_panel_gap_color) is None
+            else str(gallery_gap_color if inter_panel_gap_color is None else inter_panel_gap_color)
+        )
+        if gallery_outer_border_px is None:
+            resolved_gallery_outer_border_px = (
+                resolved_inter_panel_gap_px
+                if legacy_gap_used and resolved_inter_panel_gap_px > 0 and resolved_inter_panel_gap_color
+                else 0
+            )
+        else:
+            resolved_gallery_outer_border_px = _nonnegative_int(
+                gallery_outer_border_px,
+                name="gallery_outer_border_px",
+            )
+        resolved_gallery_outer_border_color = (
+            resolved_inter_panel_gap_color
+            if gallery_outer_border_color is None
+            else str(gallery_outer_border_color)
+        )
+        resolved_panel_inner_border_px = (
+            1.0
+            if panel_inner_border_px is None
+            else _nonnegative_float(panel_inner_border_px, name="panel_inner_border_px")
+        )
+        resolved_panel_inner_border_color = (
+            resolved_inter_panel_gap_color
+            if panel_inner_border_color is None and legacy_gap_used and resolved_inter_panel_gap_color
+            else "#d0d0d0" if panel_inner_border_color is None else str(panel_inner_border_color)
+        )
+        gallery_gap_px = resolved_inter_panel_gap_px
+        gallery_gap_color = resolved_inter_panel_gap_color
         if (
             scale_bar_visible is not None
             and show_scale_bar is not None
@@ -2632,6 +2714,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
                 panel_title_style=panel_title_style,
+                inter_panel_gap_px=resolved_inter_panel_gap_px,
+                inter_panel_gap_color=resolved_inter_panel_gap_color,
+                gallery_outer_border_px=resolved_gallery_outer_border_px,
+                gallery_outer_border_color=resolved_gallery_outer_border_color,
+                panel_inner_border_px=resolved_panel_inner_border_px,
+                panel_inner_border_color=resolved_panel_inner_border_color,
                 gallery_gap_px=gallery_gap_px,
                 gallery_gap_color=gallery_gap_color,
                 verbose=verbose, state=state, _t0=_t0,
@@ -2648,7 +2736,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 underlay=underlay, underlay_alpha=underlay_alpha,
                 underlay_haadf_gain=underlay_haadf_gain,
                 underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
-                display_gamma=display_gamma, dual_gain=dual_gain)
+                display_gamma=display_gamma, dual_gain=dual_gain,
+                skip_initial_frame_pack=skip_initial_frame_pack,
+                skip_initial_stats=skip_initial_stats,
+                preserve_input_dtype_for_export=preserve_input_dtype_for_export)
 
     def _init_sync(self, *, data, labels, panel_title_spans, title, cmap, panel_cmaps, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
@@ -2668,6 +2759,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    pad_ratio, pad_fill_mode, pad_scope,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, panel_title_style,
+                   inter_panel_gap_px, inter_panel_gap_color,
+                   gallery_outer_border_px, gallery_outer_border_color,
+                   panel_inner_border_px, panel_inner_border_color,
                    gallery_gap_px, gallery_gap_color, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False,
@@ -2678,7 +2772,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    underlay=False, underlay_alpha=0.95,
                    underlay_haadf_gain=0.35, underlay_mode="haadf",
                    stretch_percentiles=(4.0, 99.0), display_gamma=0.75,
-                   dual_gain=(1.0, 1.0)):
+                   dual_gain=(1.0, 1.0), skip_initial_frame_pack=False,
+                   skip_initial_stats=False,
+                   preserve_input_dtype_for_export=False):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -2784,8 +2880,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if data.ndim == 2:
             data = data[np.newaxis, ...]
 
-        # Avoid redundant copy: np.asarray is a no-op when already float32 + contiguous
-        if data.dtype == np.float32:
+        # Avoid redundant copy: np.asarray is a no-op when already float32 + contiguous.
+        # Folder export can preserve uint8 stress fixtures because the browser
+        # receives explicit external bytes and does not need an intermediate
+        # float32 trait payload.
+        if preserve_input_dtype_for_export and data.dtype == np.uint8:
+            self._data = np.asarray(data)
+        elif data.dtype == np.float32:
             self._data = np.array(data, dtype=np.float32, copy=True)
         else:
             self._data = np.asarray(data, dtype=np.float32)
@@ -2898,8 +2999,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._panel_stacks = panel_stacks
         self._panel_stacks_original = [stack for stack in panel_stacks]
         self._panel_stack_originals_are_views = True
-        self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
-        self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
+        self._updating_panel_frames = True
+        try:
+            self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
+            self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
+        finally:
+            self._updating_panel_frames = False
         self.panel_stack_offsets = [-1] * self.n_images
         self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
         self.show_inset_plots = bool(show_inset_plots)
@@ -2954,6 +3059,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.show_panel_titles = bool(show_panel_titles)
         self.panel_title_font_size = int(panel_title_font_size)
         self.panel_title_style = dict(panel_title_style or {})
+        self.inter_panel_gap_px = int(inter_panel_gap_px)
+        self.inter_panel_gap_color = "" if inter_panel_gap_color is None else str(inter_panel_gap_color)
+        self.gallery_outer_border_px = int(gallery_outer_border_px)
+        self.gallery_outer_border_color = "" if gallery_outer_border_color is None else str(gallery_outer_border_color)
+        self.panel_inner_border_px = float(panel_inner_border_px)
+        self.panel_inner_border_color = (
+            "" if panel_inner_border_color is None else str(panel_inner_border_color)
+        )
         self.gallery_gap_px = int(gallery_gap_px)
         self.gallery_gap_color = "" if gallery_gap_color is None else str(gallery_gap_color)
         if starred is not None:
@@ -3328,10 +3441,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._view_ops_ready = True
 
         # Compute initial stats (from full-res data)
-        self._compute_all_stats()
+        if skip_initial_stats:
+            axes = (1, 2) if self._data.ndim == 3 else None
+            self.stats_mean = np.mean(self._data, axis=axes).ravel().tolist()
+            self.stats_min = np.min(self._data, axis=axes).ravel().tolist()
+            self.stats_max = np.max(self._data, axis=axes).ravel().tolist()
+            self.stats_std = np.std(self._data, axis=axes).ravel().tolist()
+        else:
+            self._compute_all_stats()
 
         # Send display data to JS (possibly binned)
-        self._update_all_frames()
+        if skip_initial_frame_pack:
+            self.frame_bytes = b""
+            self.panel_stack_bytes = b""
+        else:
+            self._update_all_frames()
 
         self.selected_idx = 0
 
@@ -4327,6 +4451,23 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         plt.close(fig)
         return path
 
+    def _gallery_export_chrome(self) -> dict[str, int | float | str]:
+        """Return resolved publication chrome for gallery exports and previews."""
+        gap_px = max(0, int(getattr(self, "inter_panel_gap_px", self.gallery_gap_px)))
+        gap_color = str(getattr(self, "inter_panel_gap_color", self.gallery_gap_color) or "")
+        outer_px = max(0, int(getattr(self, "gallery_outer_border_px", 0)))
+        outer_color = str(getattr(self, "gallery_outer_border_color", "") or gap_color)
+        panel_border_px = max(0.0, float(getattr(self, "panel_inner_border_px", 1.0)))
+        panel_border_color = str(getattr(self, "panel_inner_border_color", "#d0d0d0") or "#d0d0d0")
+        return {
+            "inter_panel_gap_px": gap_px,
+            "inter_panel_gap_color": gap_color,
+            "gallery_outer_border_px": outer_px,
+            "gallery_outer_border_color": outer_color,
+            "panel_inner_border_px": panel_border_px,
+            "panel_inner_border_color": panel_border_color,
+        }
+
     def export_svg(
         self,
         path: str | pathlib.Path | None = None,
@@ -4369,6 +4510,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         from PIL import Image
 
+        chrome = self._gallery_export_chrome()
         specs = self._static_panel_specs()
         if not specs:
             raise ValueError("Show2D has no visible panels to export")
@@ -4377,9 +4519,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         export_path.parent.mkdir(parents=True, exist_ok=True)
         export_scale = max(1.0, min(8.0, float(scale)))
         panel_w = int(round(self._static_canvas_css_px()))
-        gap = max(0, int(self.gallery_gap_px))
-        gap_color = str(getattr(self, "gallery_gap_color", "") or "")
-        frame = gap if gap > 0 and gap_color else 0
+        gap = int(chrome["inter_panel_gap_px"])
+        gap_color = str(chrome["inter_panel_gap_color"])
+        frame = int(chrome["gallery_outer_border_px"])
+        frame_color = str(chrome["gallery_outer_border_color"])
+        panel_border_px = float(chrome["panel_inner_border_px"])
+        panel_border_color = str(chrome["panel_inner_border_color"])
         ncols = max(1, min(int(self.ncols), len(specs)))
         title_text = self.title if title is None else str(title)
         title_h = 30 if title_text and self.show_title else 0
@@ -4445,6 +4590,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         def esc_attr(value: object) -> str:
             return html.escape(str(value), quote=True)
 
+        def svg_color(value: object, fallback: str = "") -> str:
+            text = str(value if value not in (None, "") else fallback).strip()
+            match = re.fullmatch(
+                r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(?:0|1|0?\.\d+)\s*\)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return f"rgb({int(match.group(1))}, {int(match.group(2))}, {int(match.group(3))})"
+            return text
+
         def wrap_svg_label(value: object, font_size: int, max_width: float, max_lines: int = 3) -> list[str]:
             text = str(value or "").strip()
             if not text:
@@ -4465,10 +4621,53 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             text = str(value or "").strip().strip("$")
             while "\\\\" in text:
                 text = text.replace("\\\\", "\\")
-            text = text.replace("{", "").replace("}", "")
             for key, symbol in latex_symbols.items():
                 text = text.replace(key, symbol)
-            return text
+            superscript = str.maketrans({
+                "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+                "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+                "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+                "n": "ⁿ", "i": "ⁱ",
+            })
+            subscript = str.maketrans({
+                "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+                "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+                "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+                "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+                "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
+                "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
+                "v": "ᵥ", "x": "ₓ",
+            })
+
+            def read_group(start: int) -> tuple[str, int]:
+                if start >= len(text) or text[start] != "{":
+                    return (text[start] if start < len(text) else ""), start + 1
+                depth = 0
+                for idx in range(start, len(text)):
+                    if text[idx] == "{":
+                        depth += 1
+                    elif text[idx] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return text[start + 1:idx], idx + 1
+                return text[start + 1:], len(text)
+
+            out: list[str] = []
+            idx = 0
+            while idx < len(text):
+                char = text[idx]
+                if char in {"^", "_"} and idx + 1 < len(text):
+                    raw, next_idx = read_group(idx + 1)
+                    table = superscript if char == "^" else subscript
+                    out.append(raw.translate(table))
+                    idx = next_idx
+                    continue
+                if char in {"{", "}"}:
+                    idx += 1
+                    continue
+                out.append(char)
+                idx += 1
+            return "".join(out)
 
         def span_text(span: Mapping[str, object]) -> str:
             if span.get("math") not in (None, ""):
@@ -4518,12 +4717,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     return radius * min(panel_w, panel_h)
                 return radius / max(view_w, view_h) * max(panel_w, panel_h)
 
-            stroke = str(spec.get("stroke", "#00e5ff"))
+            stroke = svg_color(spec.get("stroke"), "#00e5ff")
             stroke_width = max(0.0, float(spec.get("stroke_width", 2.0)))
             opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
             stroke_opacity = opacity * max(0.0, min(1.0, float(spec.get("stroke_opacity", 1.0))))
             fill_value = spec.get("fill", "none")
-            fill = "none" if fill_value in (None, "", "none", "None") else str(fill_value)
+            fill = "none" if fill_value in (None, "", "none", "None") else svg_color(fill_value)
             fill_opacity = opacity * max(0.0, min(1.0, float(spec.get("fill_opacity", 1.0 if fill != "none" else 0.0))))
             common = (
                 f' fill="{esc_attr(fill)}" fill-opacity="{fill_opacity:g}"'
@@ -4537,7 +4736,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 cx = to_x(col)
                 cy = to_y(row)
                 r = to_radius(radius)
-                return f'<circle data-show2d-panel-overlay-svg="true" cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
+                return f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
             spec_row0 = float(spec.get("row0", 0.0))
             spec_col0 = float(spec.get("col0", 0.0))
             spec_row1 = float(spec.get("row1", spec_row0))
@@ -4546,7 +4745,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             sx1 = to_x(max(spec_col0, spec_col1))
             sy0 = to_y(min(spec_row0, spec_row1))
             sy1 = to_y(max(spec_row0, spec_row1))
-            return f'<rect data-show2d-panel-overlay-svg="true" x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
+            return f'<rect x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
 
         def annotation_anchor(position: str) -> tuple[float, float, str, str]:
             if "left" in position:
@@ -4614,19 +4813,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             text_len = max(len(text), sum(len(span_text(span)) for span in spans) if isinstance(spans, Sequence) else 0)
             box_w = text_len * font_size * 0.62 + 2 * pad_x
             box_h = font_size * 1.25 + 2 * pad_y
-            fg = str(spec.get("fg", spec.get("color", "#fff")))
+            fg = svg_color(spec.get("fg", spec.get("color", "#fff")))
             variant = str(spec.get("variant", "badge"))
             outline_width = max(0.0, float(spec.get("outline_width", 0.0)))
-            outline_color = str(spec.get("outline_color", "rgba(0,0,0,0.85)"))
-            outline_attr = (
-                f' stroke="{esc_attr(outline_color)}" stroke-width="{outline_width:g}" '
-                'stroke-linejoin="round" paint-order="stroke fill"'
-                if outline_width > 0 else ""
-            )
-            parts = [f'<g data-show2d-panel-annotation-svg="true" opacity="{opacity:g}">']
+            outline_color = svg_color(spec.get("outline_color"), "rgba(0,0,0,0.85)")
+            parts = [f'<g opacity="{opacity:g}">']
             if variant != "plain":
-                bg = str(spec.get("bg", "rgba(0,0,0,0.72)"))
-                border = str(spec.get("border_color", "rgba(255,255,255,0.5)"))
+                bg = svg_color(spec.get("bg"), "rgba(0,0,0,0.72)")
+                border = svg_color(spec.get("border_color"), "rgba(255,255,255,0.5)")
                 border_width = max(0.0, float(spec.get("border_width", 1.0 if variant in {"outline", "callout"} else 0.0)))
                 rect_x = tx - box_w / 2 if anchor == "middle" else tx - box_w if anchor == "end" else tx
                 rect_y = ty - box_h / 2 if baseline == "middle" else ty - font_size - pad_y if baseline == "baseline" else ty
@@ -4636,21 +4830,28 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     f'stroke="{esc_attr(border)}" stroke-width="{border_width:g}"/>'
                 )
             text_y = ty + (font_size * 0.4 if baseline == "middle" else 0.0)
-            parts.append(
-                f'<text x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
+            text_attrs = (
+                f'x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
                 f'font-family="{esc_attr(font_family)}" '
-                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}" '
-                f'fill="{esc_attr(fg)}"{outline_attr}>'
+                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}"'
             )
+            fill_parts = []
             if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes, bytearray)):
                 for span in spans:
                     if not isinstance(span, Mapping):
                         continue
-                    color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
-                    parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+                    color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
+                    fill_parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
             else:
-                parts.append(esc_text(text))
-            parts.append("</text></g>")
+                fill_parts.append(esc_text(text))
+            fill_body = "".join(fill_parts)
+            if outline_width > 0:
+                plain = esc_text(text if text else "".join(span_text(span) for span in spans or [] if isinstance(span, Mapping)))
+                parts.append(
+                    f'<text {text_attrs} fill="none" stroke="{esc_attr(outline_color)}" '
+                    f'stroke-width="{outline_width:g}" stroke-linejoin="round">{plain}</text>'
+                )
+            parts.append(f'<text {text_attrs} fill="{esc_attr(fg)}">{fill_body}</text></g>')
             return "".join(parts)
 
         def inset_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, fallback_color: str) -> str:
@@ -4704,21 +4905,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             sx = lambda value: plot_x0 + (float(value) - xlim[0]) / (xlim[1] - xlim[0]) * plot_w
             sy = lambda value: plot_y0 + plot_h - (float(value) - ylim[0]) / (ylim[1] - ylim[0]) * plot_h
             points = " ".join(f"{sx(px):g},{sy(py):g}" for px, py in zip(xs, ys))
-            line_color = str(spec.get("color", fallback_color))
-            text_color = str(spec.get("text_color", "rgba(255,255,255,0.92)"))
-            tick_color = str(spec.get("tick_color", "rgba(255,255,255,0.72)"))
+            line_color = svg_color(spec.get("color"), fallback_color)
+            text_color = svg_color(spec.get("text_color"), "rgba(255,255,255,0.92)")
+            tick_color = svg_color(spec.get("tick_color"), "rgba(255,255,255,0.72)")
             parts = [
-                '<g data-show2d-inset-plot-svg="true">',
+                "<g>",
                 f'<rect x="{x0:g}" y="{y0:g}" width="{box_w:g}" height="{box_h:g}" '
-                f'fill="{esc_attr(spec.get("background", "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
-                f'stroke="{esc_attr(spec.get("border_color", "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
+                f'fill="{esc_attr(svg_color(spec.get("background"), "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
+                f'stroke="{esc_attr(svg_color(spec.get("border_color"), "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
                 f'<path d="M {plot_x0:g} {plot_y0:g} V {plot_y0 + plot_h:g} H {plot_x0 + plot_w:g}" fill="none" stroke="{esc_attr(tick_color)}" stroke-opacity="0.45" stroke-width="1"/>',
                 f'<polyline points="{points}" fill="none" stroke="{esc_attr(line_color)}" stroke-width="{max(1.4, float(spec.get("line_width", 2.0))):g}" stroke-linejoin="round" stroke-linecap="round"/>',
             ]
             if "point" in spec:
                 point = np.asarray(spec["point"], dtype=float).ravel()
                 if point.size == 2 and np.isfinite(point).all():
-                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(spec.get("point_color", "#fff"))}" stroke="#000" stroke-width="1.5"/>')
+                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(svg_color(spec.get("point_color"), "#fff"))}" stroke="#000" stroke-width="1.5"/>')
             if spec.get("title"):
                 parts.append(f'<text x="{x0 + 6:g}" y="{y0 + 12:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(text_color)}">{esc_text(spec["title"])}</text>')
             if spec.get("legend"):
@@ -4747,7 +4948,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmin = float(panel.get("vmin", 0.0))
             vmax = float(panel.get("vmax", 1.0))
             body = [
-                '<g data-show2d-colorbar-svg="true">',
+                "<g>",
                 f'<rect x="{bx - 1:g}" y="{by - 1:g}" width="{bar_w + 2:g}" height="{bar_h + 2:g}" fill="#000" fill-opacity="0.45"/>',
                 f'<rect x="{bx:g}" y="{by:g}" width="{bar_w:g}" height="{bar_h:g}" fill="url(#{grad_id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/>',
                 f'<text x="{bx - 4:g}" y="{by + 4:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmax))}</text>',
@@ -4762,10 +4963,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         elements: list[str] = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" '
+                f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{svg_w}" '
                 f'height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}" '
-                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}" '
-                f'data-show2d-svg-export="true" data-raster-scale="{export_scale:g}">'
+                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}">'
             ),
         ]
         defs: list[str] = []
@@ -4775,19 +4975,25 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
                 f'font-size="14" font-weight="700" fill="#111">{esc_text(title_text)}</text>'
             )
-        if gap > 0 and gap_color:
+        if frame > 0 and frame_color:
             elements.append(
                 f'<rect x="0" y="{title_h:g}" width="{svg_w:g}" height="{max(0, svg_h - title_h):g}" '
-                f'fill="{esc_attr(gap_color)}"/>'
+                f'fill="{esc_attr(svg_color(frame_color))}"/>'
+            )
+        if gap > 0 and gap_color:
+            elements.append(
+                f'<rect x="{frame:g}" y="{title_h + frame:g}" '
+                f'width="{max(0, svg_w - 2 * frame):g}" height="{max(0, svg_h - title_h - 2 * frame):g}" '
+                f'fill="{esc_attr(svg_color(gap_color))}"/>'
             )
 
         title_style = dict(getattr(self, "panel_title_style", {}) or {})
         title_font_family = str(title_style.get("font_family", "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"))
-        title_fg = str(title_style.get("fg", "#fff"))
+        title_fg = svg_color(title_style.get("fg"), "#fff")
         title_opacity = max(0.0, min(1.0, float(title_style.get("opacity", 0.95))))
         title_font_weight = title_style.get("font_weight", 700)
         title_outline_width = max(0.0, float(title_style.get("outline_width", 0.0)))
-        title_outline_color = str(title_style.get("outline_color", "rgba(0,0,0,0.85)"))
+        title_outline_color = svg_color(title_style.get("outline_color"), "rgba(0,0,0,0.85)")
 
         def title_anchor_for(value: str) -> str:
             if "right" in value:
@@ -4827,14 +5033,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return x + panel_w - 28.0, y + 6.0 + font_size, "end"
             return x + panel_w / 2.0, y + 6.0 + font_size, "middle"
 
-        def title_outline_attr() -> str:
-            if title_outline_width <= 0:
-                return ""
-            return (
-                f' stroke="{esc_attr(title_outline_color)}" stroke-width="{title_outline_width:g}" '
-                'stroke-linejoin="round" paint-order="stroke fill"'
-            )
-
         def title_text_attrs(anchor: str, *, shadow: bool = False) -> str:
             if shadow:
                 return (
@@ -4845,7 +5043,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return (
                 f'text-anchor="{anchor}" font-family="{esc_attr(title_font_family)}" '
                 f'font-size="{{font_size}}" font-weight="{esc_attr(title_font_weight)}" '
-                f'fill="{esc_attr(title_fg)}" fill-opacity="{title_opacity:g}"{title_outline_attr()}'
+                f'fill="{esc_attr(title_fg)}" fill-opacity="{title_opacity:g}"'
+            )
+
+        def title_outline_text(x_pos: float, y_pos: float, anchor: str, font_size: float, text: str) -> str:
+            return (
+                f'<text x="{x_pos:g}" y="{y_pos:g}" text-anchor="{anchor}" '
+                f'font-family="{esc_attr(title_font_family)}" font-size="{font_size:g}" '
+                f'font-weight="{esc_attr(title_font_weight)}" fill="none" '
+                f'stroke="{esc_attr(title_outline_color)}" stroke-width="{title_outline_width:g}" '
+                f'stroke-linejoin="round">{esc_text(text)}</text>'
             )
 
         y = title_h + frame
@@ -4860,27 +5067,31 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     f'<clipPath id="{clip_id}"><rect x="{x:g}" y="{y:g}" width="{panel_w:g}" height="{panel_h:g}"/></clipPath>'
                 )
                 marker_color = (
-                    self.marker_colors[panel_index]
+                    svg_color(self.marker_colors[panel_index])
                     if panel_index < len(self.marker_colors) and self.marker_colors[panel_index]
-                    else _IDENTITY_PALETTE[panel_index % len(_IDENTITY_PALETTE)]
+                    else ""
                 )
-                panel_stroke = gap_color if gap > 0 and gap_color else "#d0d0d0"
+                panel_stroke = svg_color(panel_border_color, "#d0d0d0")
                 elements.extend([
-                    f'<g id="show2d-panel-{panel_index}" data-show2d-panel="{panel_index}">',
+                    f'<g id="show2d-panel-{panel_index}">',
                     f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="#000"/>',
                     (
                         f'<image x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" '
-                        f'href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
+                        f'xlink:href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
                     ),
-                    f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="none" stroke="{esc_attr(panel_stroke)}" stroke-width="1"/>',
                 ])
-                if str(self.marker_style or "left") == "around":
+                if panel_border_px > 0:
+                    elements.append(
+                        f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="none" '
+                        f'stroke="{esc_attr(panel_stroke)}" stroke-width="{panel_border_px:g}"/>'
+                    )
+                if marker_color and str(self.marker_style or "left") == "around":
                     elements.append(
                         f'<rect x="{x + 1.5:g}" y="{y + 1.5:g}" width="{max(0, panel_w - 3):g}" '
                         f'height="{max(0, panel_h - 3):g}" fill="none" '
                         f'stroke="{esc_attr(marker_color)}" stroke-width="3"/>'
                     )
-                else:
+                elif marker_color:
                     elements.append(
                         f'<rect x="{x}" y="{y}" width="5" height="{panel_h}" fill="{esc_attr(marker_color)}"/>'
                     )
@@ -4898,15 +5109,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                                 + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
                                 + f'>{esc_text(plain)}</text>'
                             )
+                        else:
+                            elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, plain))
                         elements.append(
                             f'<text x="{title_x:g}" y="{line_y:g}" '
                             + title_text_attrs(title_anchor).format(font_size=font_size)
-                            + ' data-show2d-panel-title-spans-svg="true">'
+                            + ">"
                         )
                         for span in spans:
                             if not isinstance(span, Mapping):
                                 continue
-                            color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
+                            color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
                             elements.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
                         elements.append("</text>")
                     else:
@@ -4918,12 +5131,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                                     + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
                                     + f'>{esc_text(line)}</text>'
                                 )
+                            else:
+                                elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, line))
                             elements.append(
                                 f'<text x="{title_x:g}" y="{line_y:g}" '
                                 + title_text_attrs(title_anchor).format(font_size=font_size)
                                 + f'>{esc_text(line)}</text>'
                             )
-                elements.append(f'<g clip-path="url(#{clip_id})" data-show2d-vector-layer="true">')
+                elements.append(f'<g clip-path="url(#{clip_id})">')
                 if bool(self.show_inset_plots) and panel_index < len(self.inset_plots):
                     elements.append(inset_svg(self.inset_plots[panel_index], x, y, panel_w, panel_h, marker_color))
                 if panel_index < len(self.panel_overlays):
@@ -4960,27 +5175,35 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         )
                     )
                     scale_font_weight = scale_style.get("font_weight", "")
-                    scale_color = str(scale_style.get("color", "#fff"))
-                    scale_outline_color = str(scale_style.get("outline_color", "#000"))
+                    scale_color = svg_color(scale_style.get("color"), "#fff")
+                    scale_outline_color = svg_color(scale_style.get("outline_color"), "#000")
                     scale_outline_width = float(scale_style.get("outline_width", 0.0))
-                    shadow_color = str(scale_style.get("shadow_color", "#000"))
+                    shadow_value = scale_style.get("shadow_color")
+                    shadow_color = svg_color(shadow_value, "#000")
                     scale_left = self.scale_bar_position == "bottom-left"
                     bar_x = x + (12 if scale_left else panel_w - bar_px - 12) + offset_x
                     bar_y = y + panel_h - 12 + offset_y
                     font_weight_attr = f' font-weight="{esc_attr(scale_font_weight)}"' if scale_font_weight != "" else ""
-                    elements.extend([
-                        f'<rect x="{bar_x + 1:g}" y="{bar_y + 1:g}" width="{bar_px:g}" height="{bar_height:g}" fill="{esc_attr(shadow_color)}" fill-opacity="0.5"/>',
-                        f'<rect x="{bar_x:g}" y="{bar_y:g}" width="{bar_px:g}" height="{bar_height:g}" fill="{esc_attr(scale_color)}"/>',
-                    ])
+                    if shadow_value is not None:
+                        elements.append(
+                            f'<rect x="{bar_x + 1:g}" y="{bar_y + 1:g}" width="{bar_px:g}" '
+                            f'height="{bar_height:g}" fill="{esc_attr(shadow_color)}" fill-opacity="0.5"/>'
+                        )
+                    elements.append(
+                        f'<rect x="{bar_x:g}" y="{bar_y:g}" width="{bar_px:g}" height="{bar_height:g}" fill="{esc_attr(scale_color)}"/>'
+                    )
                     text_x = bar_x + bar_px / 2
                     text_y = bar_y - label_gap
                     if scale_outline_width > 0:
-                        elements.append(
+                        elements.extend([
                             f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
                             f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
-                            f'fill="{esc_attr(scale_color)}" stroke="{esc_attr(scale_outline_color)}" '
-                            f'stroke-width="{scale_outline_width:g}" paint-order="stroke fill">{esc_text(bar_text)}</text>'
-                        )
+                            f'fill="none" stroke="{esc_attr(scale_outline_color)}" '
+                            f'stroke-width="{scale_outline_width:g}" stroke-linejoin="round">{esc_text(bar_text)}</text>',
+                            f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="{esc_attr(scale_color)}">{esc_text(bar_text)}</text>',
+                        ])
                     else:
                         elements.extend([
                             f'<text x="{text_x + 1:g}" y="{text_y + 1:g}" text-anchor="middle" '
@@ -5008,6 +5231,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         marker_top = title_h + frame
         total_grid_h = sum(row_heights) + max(0, len(row_heights) - 1) * gap
         for raw_row, color in dict(self.row_markers or {}).items():
+            color = svg_color(color)
             try:
                 row_idx = int(raw_row)
             except (TypeError, ValueError):
@@ -5018,10 +5242,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             row_count = min(ncols, max(0, len(panels) - row_idx * ncols))
             row_w = row_count * panel_w + max(0, row_count - 1) * gap
             elements.extend([
-                f'<rect data-show2d-group-marker-svg="row" x="{frame:g}" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{frame:g}" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
                 f'<rect x="{frame + 3:g}" y="{row_y + 3:g}" width="{max(0, row_w - 6):g}" height="{max(0, row_heights[row_idx] - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
             ])
         for raw_col, color in dict(self.col_markers or {}).items():
+            color = svg_color(color)
             try:
                 col_idx = int(raw_col)
             except (TypeError, ValueError):
@@ -5037,7 +5262,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             col_y = marker_top + sum(row_heights[:row_min]) + row_min * gap
             col_h = sum(row_heights[row_min:row_max + 1]) + max(0, row_max - row_min) * gap
             elements.extend([
-                f'<rect data-show2d-group-marker-svg="col" x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
                 f'<rect x="{col_x + 3:g}" y="{col_y + 3:g}" width="{max(0, panel_w - 6):g}" height="{max(0, col_h - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
             ])
 
@@ -5900,6 +6125,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         specs = self._static_panel_specs()
         if not specs:
             return None
+        chrome = self._gallery_export_chrome()
+        gap_px = int(chrome["inter_panel_gap_px"])
+        gap_color = str(chrome["inter_panel_gap_color"])
+        outer_px = int(chrome["gallery_outer_border_px"])
+        outer_color = str(chrome["gallery_outer_border_color"])
+        panel_border_px = float(chrome["panel_inner_border_px"])
+        panel_border_color = str(chrome["panel_inner_border_color"])
         base_roi_items = self._static_roi_items()
         if base_roi_items:
             specs = [{**spec, "roi_items": base_roi_items} for spec in specs]
@@ -5929,10 +6161,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         aspect = (rows0.stop - rows0.start) / (cols0.stop - cols0.start)
         # inter-panel gutter is the widget's own gallery gap (CSS px of the
         # live canvas), identical horizontally and vertically
-        gap_frac = max(0, int(self.gallery_gap_px)) / css_w
+        gap_frac = gap_px / css_w
+        outer_frac = outer_px / css_w
         cell_w_in = max_px / dpi  # cell width in inches so 1 panel = max_px device px
         cell_h_in = cell_w_in * aspect
         gap_in = gap_frac * cell_w_in
+        outer_in = outer_frac * cell_w_in
+        fig_w_in = ncols * cell_w_in + (ncols - 1) * gap_in + 2 * outer_in
+        fig_h_in = nrows * cell_h_in + (nrows - 1) * gap_in + 2 * outer_in
         # Build an unmanaged Figure rather than registering one through
         # pyplot. In a live Jupyter kernel this renderer runs from a
         # ``post_execute`` callback, alongside matplotlib-inline's own figure
@@ -5943,15 +6179,33 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Jupyter's global figure-manager lifecycle.
         fig = matplotlib.figure.Figure(
             figsize=(
-                ncols * cell_w_in + (ncols - 1) * gap_in,
-                nrows * cell_h_in + (nrows - 1) * gap_in,
+                fig_w_in,
+                fig_h_in,
             )
         )
+        bg_color = outer_color if outer_px > 0 and outer_color else gap_color if gap_px > 0 and gap_color else "white"
+        fig.patch.set_facecolor(bg_color)
+        left = outer_in / fig_w_in if fig_w_in > 0 else 0.0
+        right = 1.0 - left
+        bottom = outer_in / fig_h_in if fig_h_in > 0 else 0.0
+        top = 1.0 - bottom
+        if gap_px > 0 and gap_color:
+            fig.patches.append(
+                matplotlib.patches.Rectangle(
+                    (left, bottom),
+                    max(0.0, right - left),
+                    max(0.0, top - bottom),
+                    transform=fig.transFigure,
+                    facecolor=gap_color,
+                    edgecolor="none",
+                    zorder=-10,
+                )
+            )
         # wspace/hspace are fractions of cell width/height; both resolve to
         # the same gap_in inches so the white gutters match to the pixel
         grid = fig.add_gridspec(nrows, ncols, wspace=gap_frac,
                                 hspace=gap_frac / aspect,
-                                left=0, right=1, bottom=0, top=1)
+                                left=left, right=right, bottom=bottom, top=top)
         font_family = _static_overlay_font()
         # the live canvas is css_w CSS px wide but the PNG panel is max_px
         # device px wide, so every CSS-px size renders scaled by max_px/css_w
@@ -5975,6 +6229,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             ax.imshow(rgb, interpolation="nearest")
             bin_h, bin_w = rgb.shape[:2]
             ax.set(xlim=(-0.5, bin_w - 0.5), ylim=(bin_h - 0.5, -0.5))
+            if panel_border_px > 0:
+                ax.add_patch(matplotlib.patches.Rectangle(
+                    (-0.5, -0.5),
+                    bin_w,
+                    bin_h,
+                    facecolor="none",
+                    edgecolor=panel_border_color,
+                    linewidth=panel_border_px * point,
+                    joinstyle="miter",
+                ))
             for roi in spec.get("roi_items", []):
                 self._draw_static_roi(
                     ax,
@@ -6007,15 +6271,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         path_effects=stroke)
             if self.scale_bar_visible:
                 # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick,
-                # 16px label centered 4px above the bar, optional zoom
-                # badge on the opposite corner sharing the bar's bottom edge,
-                # all under a soft (1,1)-offset half-black shadow
+                # 16px label centered 4px above the bar, optional zoom badge
+                # on the opposite corner sharing the bar's bottom edge.
                 scale_left = self.scale_bar_position == "bottom-left"
                 bar_x = 12 if scale_left else css_w - bar_css - 12
                 bar_y = css_h - 12
-                ax.add_patch(matplotlib.patches.Rectangle(
-                    css_xy(bar_x + 1, bar_y + 1), bar_css * k, 5 * k,
-                    facecolor=(0, 0, 0, 0.5), edgecolor="none"))
                 ax.add_patch(matplotlib.patches.Rectangle(
                     css_xy(bar_x, bar_y), bar_css * k, 5 * k,
                     facecolor="white", edgecolor="none"))
@@ -6044,7 +6304,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     line_color=line_color,
                 )
         buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, facecolor="white",
+        fig.savefig(buf, format="png", dpi=dpi, facecolor=fig.get_facecolor(),
                     bbox_inches="tight", pad_inches=0.05)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -6264,6 +6524,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "panel_title_font_size": self.panel_title_font_size,
             "panel_title_spans": list(self.panel_title_spans),
             "panel_title_style": dict(self.panel_title_style),
+            "inter_panel_gap_px": int(self.inter_panel_gap_px),
+            "inter_panel_gap_color": str(self.inter_panel_gap_color),
+            "gallery_outer_border_px": int(self.gallery_outer_border_px),
+            "gallery_outer_border_color": str(self.gallery_outer_border_color),
+            "panel_inner_border_px": float(self.panel_inner_border_px),
+            "panel_inner_border_color": str(self.panel_inner_border_color),
             "gallery_gap_px": int(self.gallery_gap_px),
             "gallery_gap_color": str(self.gallery_gap_color),
             "show_stats": self.show_stats,
@@ -6358,21 +6624,39 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def save(self, path: str):
         save_state_file(path, "Show2D", self.state_dict())
 
+    _HTML_EXPORT_SAFE_MB = 80.0
+
+    def _estimate_html_export_mb(self, *, quantized: bool, downsample: int) -> float:
+        """Rough MB an embedded single-file Show2D HTML would occupy."""
+        downsample_factor = max(1, int(downsample))
+        has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
+        if has_local_stacks and getattr(self, "_display_panel_stacks", None):
+            elements = sum(int(np.prod(stack.shape)) for stack in self._display_panel_stacks)
+        else:
+            data = self._display_data if self._display_data is not None else self._data
+            elements = int(np.prod(data.shape)) if data is not None else 0
+        elements //= downsample_factor**2
+        bytes_per = 1 if quantized else 4
+        payload_mb = elements * bytes_per * (4.0 / 3.0) / (1024 * 1024)
+        return payload_mb + 2.0
+
     def export_html(self, path: str | pathlib.Path | None = None,
                     *,
                     title: str | None = None,
                     mode: str = "single",
                     encoding: str = "full",
                     downsample: int | None = None,
-                    quantized: bool | None = None) -> pathlib.Path:
+                    quantized: bool | None = None,
+                    max_mb: float | None = _HTML_EXPORT_SAFE_MB) -> pathlib.Path:
         """Write a standalone HTML viewer for this widget.
 
         The exported file mounts the live anywidget JS bundle with the current
         widget state (data, labels, cmap, vmin/vmax, log_scale, sampling, ...).
         Opens in any browser without a Jupyter kernel.
         Preferred export options are ``mode="single"``, ``encoding="full"`` or
-        ``encoding="uint8"``, and ``downsample=None``. ``quantized`` is kept as
-        a compatibility alias for ``encoding="uint8"``.
+        ``encoding="uint8"``, and ``downsample=None``. Use ``downsample=2`` /
+        ``4`` / ``8`` with ``encoding="uint8"`` for compact visual reports.
+        ``quantized`` is kept as a compatibility alias for ``encoding="uint8"``.
 
         Parameters
         ----------
@@ -6393,17 +6677,45 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "the export clone rebuilds from the grayscale stack and would drop the color channels."
             )
 
-        quantized = self._normalise_html_export_options(
+        export_mode, quantized, downsample_factor = self._normalise_html_export_options(
             mode=mode,
             encoding=encoding,
             downsample=downsample,
             quantized=quantized,
         )
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(quantized)
-        self._write_html_export(export_path, quantized=quantized, title=title)
+        if export_mode == "single" and max_mb is not None:
+            estimate_mb = self._estimate_html_export_mb(
+                quantized=quantized,
+                downsample=downsample_factor,
+            )
+            if estimate_mb > float(max_mb):
+                uint8_mb = self._estimate_html_export_mb(
+                    quantized=True,
+                    downsample=downsample_factor,
+                )
+                raise ValueError(
+                    f"This export would embed about {estimate_mb:.0f} MB into one HTML file, "
+                    f"above the {float(max_mb):.0f} MB safe limit (large single-file exports often "
+                    f"fail to open under Chrome file://). Options: encoding='uint8' "
+                    f"(about {uint8_mb:.0f} MB), downsample=2 or 4 to shrink spatially, "
+                    f"mode='folder' for a thin HTML plus nearby data folder, or pass "
+                    f"max_mb={estimate_mb:.0f} to force this size."
+                )
+        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(
+            quantized,
+            downsample=downsample_factor,
+        )
+        self._write_html_export(
+            export_path,
+            quantized=quantized,
+            title=title,
+            mode=export_mode,
+            downsample=downsample_factor,
+        )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        label = self._export_mode_label(quantized)
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
+        label = self._export_mode_label(quantized, downsample=downsample_factor)
+        mode_label = "folder, " if export_mode == "folder" else ""
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {mode_label}{label})"
         return export_path
 
     def _normalise_html_export_options(
@@ -6413,7 +6725,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         encoding: str = "full",
         downsample: int | None = None,
         quantized: bool | None = None,
-    ) -> bool:
+    ) -> tuple[str, bool, int]:
         raw_mode = str(mode or "single").strip().lower().replace("_", "-")
         if raw_mode in {"exact", "full"}:
             raw_mode = "single"
@@ -6421,19 +6733,31 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         elif raw_mode in {"quantized", "uint8", "u8"}:
             raw_mode = "single"
             encoding = "uint8"
-        if raw_mode != "single":
-            raise ValueError("Show2D HTML export supports mode='single'")
-        if downsample not in (None, 1, "1", "", 0, "0"):
-            raise NotImplementedError("Show2D HTML export does not support downsample yet")
+        elif raw_mode in {"sidecar", "linked-folder", "linked-data-folder"}:
+            raw_mode = "folder"
+        if raw_mode not in {"single", "folder"}:
+            raise ValueError("Show2D HTML export supports mode='single' or mode='folder'")
+        if downsample in (None, "", 0, "0"):
+            downsample_factor = 1
+        else:
+            if isinstance(downsample, bool):
+                raise ValueError("Show2D HTML export downsample must be an integer factor, not bool")
+            downsample_factor = int(downsample)
+        if downsample_factor < 1:
+            raise ValueError(f"Show2D HTML export downsample must be >= 1, got {downsample!r}")
+        if downsample_factor not in {1, 2, 4, 8}:
+            raise ValueError("Show2D HTML export downsample must be one of 1, 2, 4, or 8")
         raw_encoding = str(encoding or "full").strip().lower().replace("_", "-")
         if quantized is True:
             raw_encoding = "uint8"
         elif quantized is False and raw_encoding in {"quantized", "uint8", "u8"}:
             raw_encoding = "uint8"
         if raw_encoding in {"full", "exact", "float32", "f32"}:
-            return False
+            if downsample_factor != 1:
+                raise ValueError("Show2D exact float32 HTML export does not support downsample; use encoding='uint8'")
+            return raw_mode, False, downsample_factor
         if raw_encoding in {"uint8", "u8", "quantized"}:
-            return True
+            return raw_mode, True, downsample_factor
         raise ValueError(f"unknown Show2D export encoding {encoding!r}; expected 'full' or 'uint8'")
 
     def _on_export_request_change(self, change: dict) -> None:
@@ -6448,26 +6772,29 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            quantized = self._normalise_html_export_options(
+            export_mode, quantized, downsample_factor = self._normalise_html_export_options(
                 mode=mode,
                 encoding=str(payload.get("encoding", "full")),
                 downsample=payload.get("downsample"),
                 quantized=None,
             )
             if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path(quantized).name)
+                filename = str(payload.get("filename") or self._default_html_export_path(
+                    quantized,
+                    downsample=downsample_factor,
+                ).name)
                 request_id = str(payload.get("id") or "")
                 self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes(quantized=quantized)
+                html = self._html_export_bytes(quantized=quantized, downsample=downsample_factor)
                 self.export_filename = filename
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                label = self._export_mode_label(quantized)
+                label = self._export_mode_label(quantized, downsample=downsample_factor)
                 self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
             else:
                 self.export_status = f"Exporting {mode} HTML..."
-                self.export_html(quantized=quantized)
+                self.export_html(mode=export_mode, quantized=quantized, downsample=downsample_factor)
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
 
@@ -6495,7 +6822,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         except Exception as exc:
             self.saved_view_status = f"State action failed: {exc}"
 
-    def _default_html_export_path(self, quantized: bool) -> pathlib.Path:
+    def _default_html_export_path(self, quantized: bool, *, downsample: int = 1) -> pathlib.Path:
         label = self.title.strip() or "show2d"
         slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
         while "__" in slug:
@@ -6503,11 +6830,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if not slug:
             slug = "show2d"
         mode = "quantized" if quantized else "exact"
+        suffix = f"_{int(downsample)}xdownsample" if quantized and int(downsample) > 1 else ""
         shape = f"{self.n_images}x{self.height}x{self.width}" if self.n_images > 1 else f"{self.height}x{self.width}"
-        return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}.html"
+        return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}{suffix}.html"
 
-    def _export_mode_label(self, quantized: bool) -> str:
-        return "uint8" if quantized else "full float32"
+    def _export_mode_label(self, quantized: bool, *, downsample: int = 1) -> str:
+        if not quantized:
+            return "full float32"
+        if int(downsample) > 1:
+            return f"uint8, {int(downsample)}x downsample"
+        return "uint8"
 
     def _write_html_export(
         self,
@@ -6515,6 +6847,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         *,
         quantized: bool,
         title: str | None = None,
+        mode: str = "single",
+        downsample: int = 1,
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
@@ -6523,8 +6857,57 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         page_title = title or self.title or "Show2D"
-        export_widget = self._clone_for_html_export(quantized=quantized)
+        has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
+        if mode == "folder" and not has_local_stacks and not any(self.is_rgb):
+            self._write_html_folder_export_fast(
+                export_path,
+                quantized=quantized,
+                title=page_title,
+            )
+            ensure_mobile_viewport(export_path)
+            return export_path
+        export_widget = self._clone_for_html_export(quantized=quantized, downsample=downsample)
         try:
+            if mode == "folder":
+                data_dir = export_path.parent / f"{export_path.stem}_files"
+                data_dir.mkdir(parents=True, exist_ok=True)
+                frame_name = "frame_bytes.bin"
+                frame_path = data_dir / frame_name
+                frame_path.write_bytes(bytes(export_widget.frame_bytes))
+                export_widget.frame_bytes = b""
+                export_widget.frame_bytes_url = f"{data_dir.name}/{frame_name}"
+                export_widget.frame_bytes_urls = []
+                panel_stack_size = 0
+                if export_widget.panel_stack_bytes:
+                    stack_name = "panel_stack_bytes.bin"
+                    stack_path = data_dir / stack_name
+                    stack_path.write_bytes(bytes(export_widget.panel_stack_bytes))
+                    panel_stack_size = stack_path.stat().st_size
+                    export_widget.panel_stack_bytes = b""
+                    export_widget.panel_stack_bytes_url = f"{data_dir.name}/{stack_name}"
+                else:
+                    export_widget.panel_stack_bytes_url = ""
+                (data_dir / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "format": "quantem.widget.show2d.folder.v1",
+                            "n_images": int(export_widget.n_images),
+                            "height": int(export_widget.height),
+                            "width": int(export_widget.width),
+                            "encoding": "uint8" if quantized else "float32",
+                            "frame_bytes": frame_name,
+                            "frame_bytes_size": frame_path.stat().st_size,
+                            "panel_stack_bytes": "panel_stack_bytes.bin" if panel_stack_size else "",
+                            "panel_stack_bytes_size": panel_stack_size,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                export_widget.frame_bytes_url = ""
+                export_widget.frame_bytes_urls = []
+                export_widget.panel_stack_bytes_url = ""
             state = dependency_state([export_widget], drop_defaults=False)
             embed_minimal_html(
                 str(export_path),
@@ -6538,13 +6921,160 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ensure_mobile_viewport(export_path)
         return export_path
 
-    def _html_export_bytes(self, *, quantized: bool) -> bytes:
+    def _folder_frame_payload(self, *, quantized: bool) -> tuple[bytes, list[float], list[float]]:
+        """Return packed display bytes and dequantization ranges for folder export."""
+        data = self._display_data if self._display_data is not None else self._data
+        data = self._crop_view_stack(data)
+        data = self._filtered_frames(data)
+        data = self._pad_view_stack(data)
+        if quantized:
+            if np.asarray(data).dtype == np.uint8:
+                arr = np.ascontiguousarray(data)
+                mins = [0.0] * int(arr.shape[0])
+                maxs = [255.0] * int(arr.shape[0])
+                return _b64_safe(arr.tobytes()), mins, maxs
+            arr = np.ascontiguousarray(data, dtype=np.float32)
+            flat = arr.reshape(arr.shape[0], -1)
+            out = np.empty(flat.shape, dtype=np.uint8)
+            mins, maxs = [], []
+            for i in range(flat.shape[0]):
+                finite = flat[i][np.isfinite(flat[i])]
+                lo = float(finite.min()) if finite.size else 0.0
+                hi = float(finite.max()) if finite.size else 1.0
+                rng = hi - lo if hi > lo else 1.0
+                out[i] = np.clip((flat[i] - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
+                mins.append(lo)
+                maxs.append(hi)
+            return _b64_safe(out.tobytes()), mins, maxs
+        arr = np.ascontiguousarray(data, dtype=np.float32)
+        return _b64_safe(arr.tobytes()), [], []
+
+    def _write_html_folder_export_fast(
+        self,
+        export_path: pathlib.Path,
+        *,
+        quantized: bool,
+        title: str,
+    ) -> None:
+        """Write folder-mode HTML without cloning or embedding pixel buffers."""
+        from ipywidgets.embed import dependency_state, embed_minimal_html
+
+        data_dir = export_path.parent / f"{export_path.stem}_files"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        frame_name = "frame_bytes.bin"
+        frame_bytes, mins, maxs = self._folder_frame_payload(quantized=quantized)
+        per_frame_bytes = int(self.height) * int(self.width)
+        identity_uint8 = (
+            quantized
+            and per_frame_bytes > 0
+            and len(frame_bytes) >= int(self.n_images) * per_frame_bytes
+            and len(mins) == int(self.n_images)
+            and len(maxs) == int(self.n_images)
+            and all(lo == 0.0 and hi == 255.0 for lo, hi in zip(mins, maxs, strict=False))
+        )
+        frame_file_names: list[str] = []
+        frame_bytes_size = 0
+        frame_path: pathlib.Path | None = None
+        if identity_uint8 and int(self.n_images) > 1:
+            view = memoryview(frame_bytes)
+            for image_index in range(int(self.n_images)):
+                name = f"frame_{image_index:06d}.bin"
+                start = image_index * per_frame_bytes
+                stop = start + per_frame_bytes
+                (data_dir / name).write_bytes(view[start:stop])
+                frame_file_names.append(name)
+            frame_name = ""
+            frame_bytes_size = sum((data_dir / name).stat().st_size for name in frame_file_names)
+        else:
+            frame_path = data_dir / frame_name
+            frame_path.write_bytes(frame_bytes)
+            frame_bytes_size = frame_path.stat().st_size
+
+        old_values = {
+            "_save_state": getattr(self, "_save_state", False),
+            "offline": self.offline,
+            "_export_light": self._export_light,
+            "frame_bytes": self.frame_bytes,
+            "frame_bytes_url": self.frame_bytes_url,
+            "frame_bytes_urls": list(self.frame_bytes_urls),
+            "panel_stack_bytes": self.panel_stack_bytes,
+            "panel_stack_bytes_url": self.panel_stack_bytes_url,
+            "_offline_mins": list(self._offline_mins),
+            "_offline_maxs": list(self._offline_maxs),
+            "_offline_min": self._offline_min,
+            "_offline_max": self._offline_max,
+            "_webgpu_filter_ok": self._webgpu_filter_ok,
+            "export_enabled": self.export_enabled,
+            "export_status": self.export_status,
+            "export_payload": self.export_payload,
+            "export_payload_id": self.export_payload_id,
+            "export_filename": self.export_filename,
+            "handoff_enabled": self.handoff_enabled,
+            "handoff_status": self.handoff_status,
+            "handoff_request": self.handoff_request,
+        }
+        try:
+            self._save_state = True
+            self.offline = quantized
+            self._export_light = True
+            self.frame_bytes = b""
+            self.frame_bytes_url = f"{data_dir.name}/{frame_name}" if frame_name else ""
+            self.frame_bytes_urls = [f"{data_dir.name}/{name}" for name in frame_file_names]
+            self.panel_stack_bytes = b""
+            self.panel_stack_bytes_url = ""
+            self._offline_mins = mins if quantized else []
+            self._offline_maxs = maxs if quantized else []
+            self._offline_min = mins[0] if mins else 0.0
+            self._offline_max = maxs[0] if maxs else 1.0
+            self._webgpu_filter_ok = True
+            self.export_enabled = False
+            self.export_status = ""
+            self.export_payload = b""
+            self.export_payload_id = ""
+            self.export_filename = ""
+            self.handoff_enabled = False
+            self.handoff_status = ""
+            self.handoff_request = ""
+            state = dependency_state([self], drop_defaults=False)
+            embed_minimal_html(
+                str(export_path),
+                views=[self],
+                title=title,
+                drop_defaults=False,
+                state=state,
+            )
+        finally:
+            for name, value in old_values.items():
+                setattr(self, name, value)
+        (data_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "quantem.widget.show2d.folder.v1",
+                    "n_images": int(self.n_images),
+                    "height": int(self.height),
+                    "width": int(self.width),
+                    "encoding": "uint8" if quantized else "float32",
+                    "frame_bytes": frame_name,
+                    "frame_bytes_files": frame_file_names,
+                    "frame_bytes_size": frame_bytes_size,
+                    "panel_stack_bytes": "",
+                    "panel_stack_bytes_size": 0,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _html_export_bytes(self, *, quantized: bool, downsample: int = 1) -> bytes:
         with tempfile.TemporaryDirectory(prefix="show2d-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path(quantized).name
-            self._write_html_export(path, quantized=quantized)
+            path = pathlib.Path(tmp) / self._default_html_export_path(
+                quantized,
+                downsample=downsample,
+            ).name
+            self._write_html_export(path, quantized=quantized, downsample=downsample)
             return path.read_bytes()
 
-    def _clone_for_html_export(self, *, quantized: bool) -> Self:
+    def _clone_for_html_export(self, *, quantized: bool, downsample: int = 1) -> Self:
         if any(self.is_rgb):
             raise NotImplementedError(
                 "HTML export is not supported when the gallery contains RGB panels; "
@@ -6553,17 +7083,36 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = self._display_data if self._display_data is not None else self._data
         if data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        downsample = int(downsample)
+
+        def downsample_frame(frame: np.ndarray) -> np.ndarray:
+            arr = np.ascontiguousarray(frame, dtype=np.float32)
+            if downsample <= 1:
+                return arr
+            from quantem.widget.utils.array import bin2d
+            return np.ascontiguousarray(bin2d(arr, factor=downsample, mode="mean"), dtype=np.float32)
+
+        def downsample_stack(stack: np.ndarray) -> np.ndarray:
+            arr = np.ascontiguousarray(stack, dtype=np.float32)
+            if downsample <= 1:
+                return arr
+            return np.ascontiguousarray(
+                np.stack([downsample_frame(frame) for frame in arr], axis=0),
+                dtype=np.float32,
+            )
+
         has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
         if has_local_stacks:
             display_stacks = getattr(self, "_display_panel_stacks", None)
             if not display_stacks:
                 raise ValueError("Cannot export local panel stacks after their data has been freed")
             export_data = [
-                np.ascontiguousarray(stack if stack.shape[0] > 1 else stack[0], dtype=np.float32)
+                downsample_stack(stack) if stack.shape[0] > 1 else downsample_frame(stack[0])
                 for stack in display_stacks
             ]
         else:
-            export_data = np.ascontiguousarray(data, dtype=np.float32)
+            export_data = downsample_stack(data)
+        export_pixel_size = self.pixel_size * downsample if self.pixel_size > 0 else self.pixel_size
         clone = type(self)(
             export_data,
             labels=list(self.labels),
@@ -6571,7 +7120,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             title=self.title,
             show_title=self.show_title,
             cmap=list(self.panel_cmaps) if self.panel_cmaps else self.cmap,
-            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            sampling=export_pixel_size if export_pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
             scale_bar_position=self.scale_bar_position,
@@ -6611,6 +7160,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=self.panel_title_font_size,
             panel_title_style=dict(self.panel_title_style),
+            inter_panel_gap_px=int(self.inter_panel_gap_px),
+            inter_panel_gap_color=str(self.inter_panel_gap_color),
+            gallery_outer_border_px=int(self.gallery_outer_border_px),
+            gallery_outer_border_color=str(self.gallery_outer_border_color),
+            panel_inner_border_px=float(self.panel_inner_border_px),
+            panel_inner_border_color=str(self.panel_inner_border_color),
+            gallery_gap_px=int(self.gallery_gap_px),
+            gallery_gap_color=str(self.gallery_gap_color),
             row_markers=dict(self.row_markers),
             col_markers=dict(self.col_markers),
             panel_annotations=list(self.panel_annotations),
@@ -6712,6 +7269,42 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 state.pop("gallery_gap_px")
         if "gallery_gap_color" in state and state["gallery_gap_color"] is not None:
             state["gallery_gap_color"] = str(state["gallery_gap_color"])
+        legacy_gap_color = str(state.get("gallery_gap_color") or "")
+        if "inter_panel_gap_px" not in state and "gallery_gap_px" in state:
+            state["inter_panel_gap_px"] = state["gallery_gap_px"]
+        if "inter_panel_gap_color" not in state and "gallery_gap_color" in state:
+            state["inter_panel_gap_color"] = state["gallery_gap_color"]
+        if "gallery_outer_border_px" not in state and legacy_gap_color and "gallery_gap_px" in state:
+            state["gallery_outer_border_px"] = state["gallery_gap_px"]
+        if "gallery_outer_border_color" not in state and legacy_gap_color:
+            state["gallery_outer_border_color"] = legacy_gap_color
+        if "panel_inner_border_color" not in state and legacy_gap_color:
+            state["panel_inner_border_color"] = legacy_gap_color
+        for key in ("inter_panel_gap_px", "gallery_outer_border_px"):
+            if key in state:
+                try:
+                    state[key] = _nonnegative_int(state[key], name=key)
+                except ValueError:
+                    state.pop(key)
+        if "panel_inner_border_px" in state:
+            try:
+                state["panel_inner_border_px"] = _nonnegative_float(
+                    state["panel_inner_border_px"],
+                    name="panel_inner_border_px",
+                )
+            except ValueError:
+                state.pop("panel_inner_border_px")
+        for key in (
+            "inter_panel_gap_color",
+            "gallery_outer_border_color",
+            "panel_inner_border_color",
+        ):
+            if key in state and state[key] is not None:
+                state[key] = str(state[key])
+        if "inter_panel_gap_px" in state:
+            state["gallery_gap_px"] = state["inter_panel_gap_px"]
+        if "inter_panel_gap_color" in state:
+            state["gallery_gap_color"] = state["inter_panel_gap_color"]
         if "scale_bar_style" in state:
             try:
                 state["scale_bar_style"] = _normalize_scale_bar_style(state["scale_bar_style"])

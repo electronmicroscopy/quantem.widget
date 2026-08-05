@@ -25,8 +25,11 @@ movie.save_mp4(
 )
 ```
 
-`Show3D.save_gif(...)` and `Show3D.save_mp4(...)` keep their current behavior
-but now route through this module after rendering the widget view.
+`Show3D.save_gif(...)` and `Show3D.save_mp4(...)` route through this module after
+rendering the widget view. They expose presentation controls such as
+`frame_start`, `frame_stop`, `every_n`, `max_frames`, `downsample`,
+`max_edge_px`, and `slides_preset=True` so slide-friendly GIFs can be made
+without changing the source stack.
 
 MP4 export accepts `backend="auto"`, `backend="cuda"`, or `backend="cpu"`.
 `auto` uses the NVIDIA CUDA MP4 path when available and otherwise uses the

@@ -2,7 +2,7 @@
 
 Calibration libraries (`_calibrations.json` and `~/quantem/calibrations.json`)
 get hammered concurrently by the dashboard's "Save calibration" button and
-the screener's auto-save thread, plus they're long-lived files that must
+an acquisition auto-save thread, plus they're long-lived files that must
 survive a Ctrl-C or SIGKILL mid-write.
 
 Two primitives:

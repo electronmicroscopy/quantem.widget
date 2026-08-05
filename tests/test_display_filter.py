@@ -104,6 +104,11 @@ def test_show2d_filter_knobs_rerender_live(capsys):
     counts = _sparse_eds_map(shape=(64, 64))
     kept = counts.copy()
     widget = Show2D(counts, verbose=False)
+    # These assertions watch the pixels Python puts on the wire, so pin the
+    # widget to the Python filter path. By default the browser owns the
+    # filter and Python ships raw (see
+    # test_browser_owns_display_filter_by_default).
+    widget._webgpu_filter_ok = False
     raw_bytes = widget.frame_bytes
     widget.denoise = "bin2_anscombe"  # compound alias -> (anscombe, bin 2)
     assert widget.frame_bytes != raw_bytes
@@ -151,6 +156,11 @@ def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
     stack = np.stack([_sparse_eds_map(seed=s, shape=(64, 64)) for s in range(3)])
     kept = stack.copy()
     widget = Show3D(stack, verbose=False, offline=False)
+    # These assertions watch the pixels Python puts on the wire, so pin the
+    # widget to the Python filter path. By default the browser owns the
+    # filter and Python ships raw (see
+    # test_browser_owns_display_filter_by_default).
+    widget._webgpu_filter_ok = False
     assert widget.denoise == "none"
     widget._send_buffer(0)  # what the browser's first prefetch triggers
     raw_buffer = widget._buffer_bytes
@@ -183,6 +193,11 @@ def test_show2d_per_panel_filter_lists():
         denoise_sigma=[0.0, 8.0],
         verbose=False,
     )
+    # These assertions watch the pixels Python puts on the wire, so pin the
+    # widget to the Python filter path. By default the browser owns the
+    # filter and Python ships raw (see
+    # test_browser_owns_display_filter_by_default).
+    widget._webgpu_filter_ok = False
     assert widget.denoise_scope == "panel"  # sequence => per-panel scope
     n = counts.size
     sent = np.frombuffer(widget.frame_bytes[: 2 * n * 4], dtype=np.float32).reshape(2, 64, 64)
@@ -212,6 +227,11 @@ def test_show2d_eight_panel_eds_gallery_scoped_and_linked_edits():
         denoise_sigma=[6.0, 8.0, 10.0, 12.0] + [4.0] * 4,
         verbose=False,
     )
+    # These assertions watch the pixels Python puts on the wire, so pin the
+    # widget to the Python filter path. By default the browser owns the
+    # filter and Python ships raw (see
+    # test_browser_owns_display_filter_by_default).
+    widget._webgpu_filter_ok = False
     assert widget.denoise_scope == "panel"  # per-panel lists => unlinked
     n = 64 * 64
     sent = np.frombuffer(widget.frame_bytes[: 8 * n * 4], dtype=np.float32).reshape(8, 64, 64)
@@ -380,15 +400,19 @@ def test_show2d_webgpu_negotiation_ships_raw_frames():
     counts = _sparse_eds_map(shape=(64, 64))
     widget = Show2D(counts, denoise="bin2_anscombe", denoise_sigma=8, verbose=False)
     n_bytes = counts.size * 4
-    python_view = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64).copy()
-    assert not np.array_equal(python_view, counts)  # kernel-filtered by default
-    widget._webgpu_filter_ok = True  # JS negotiation: real adapter present
+    # Default: the browser owns the filter, so RAW counts ship without any
+    # negotiation round trip. Regression guard - this used to default to the
+    # Python scipy path, which re-sent the whole frame over comm on every knob
+    # edit and made live sigma drags unusable.
     sent = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
-    np.testing.assert_array_equal(sent, counts)  # raw counts ship, browser filters
+    np.testing.assert_array_equal(sent, counts)
     assert "anscombe" in widget.denoise_banner  # reduction still announced
-    widget._webgpu_filter_ok = False  # reopened without WebGPU: Python fallback
-    back = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
-    np.testing.assert_array_equal(back, python_view)
+    widget._webgpu_filter_ok = False  # software adapter: Python fallback
+    python_view = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64).copy()
+    assert not np.array_equal(python_view, counts)  # scipy path filtered it
+    widget._webgpu_filter_ok = True  # back on a real adapter
+    again = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
+    np.testing.assert_array_equal(again, counts)
 
 
 def test_deprecated_display_filter_kwargs_warn_and_still_apply():
@@ -506,6 +530,11 @@ def test_set_denoise_scoped_to_one_panel_leaves_others_raw():
     a = _sparse_eds_map(shape=(64, 64))
     b = _sparse_eds_map(seed=9, shape=(64, 64))
     widget = Show2D([a, b], verbose=False)
+    # These assertions watch the pixels Python puts on the wire, so pin the
+    # widget to the Python filter path. By default the browser owns the
+    # filter and Python ships raw (see
+    # test_browser_owns_display_filter_by_default).
+    widget._webgpu_filter_ok = False
     widget.set_denoise("anscombe", sigma=8, panels=[1])
     assert widget.denoise_modes == ["none", "anscombe"]
     assert widget.denoise_scope == "panel"
@@ -525,3 +554,26 @@ def test_explicit_all_scope_with_per_panel_sequence_is_rejected():
     a = _sparse_eds_map(shape=(64, 64))
     with pytest.raises(ValueError, match="broadcasts one setting"):
         Show2D([a, a], denoise=["none", "anscombe"], denoise_scope="all", verbose=False)
+
+
+def test_browser_owns_display_filter_by_default():
+    """Python must never run the scipy display filter unless the frontend says
+    it has to. js/displayFilter.ts carries WGSL and CPU paths that match NumPy,
+    CPU port, so every viewer can filter client-side; leaving it to Python cost
+    a full frame re-send per knob edit (~0.5 s at 2048^2) and made the denoise
+    sliders feel broken. Guards the default on every widget that filters."""
+    import numpy as np
+
+    from quantem.widget import Show2D, Show3D
+
+    counts = _sparse_eds_map(shape=(32, 32))
+    two_d = Show2D(counts, denoise="gaussian", denoise_sigma=4, verbose=False)
+    assert two_d._webgpu_filter_ok is True
+
+    stack = np.stack([counts, counts])
+    three_d = Show3D(stack, denoise="gaussian", denoise_sigma=4, verbose=False)
+    assert three_d._webgpu_filter_ok is True
+
+    # With the default flag the wire frame is the raw frame: no scipy call.
+    frame = np.asarray(counts, dtype=np.float32)
+    np.testing.assert_array_equal(three_d._wire_frame(frame), frame)

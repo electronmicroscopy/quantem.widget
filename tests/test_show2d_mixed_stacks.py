@@ -212,6 +212,40 @@ def test_html_export_clone_keeps_all_local_frames(quantized: bool) -> None:
         clone.close()
 
 
+def test_html_export_clone_downsamples_uint8_visual_report() -> None:
+    widget = Show2D(
+        np.arange(4 * 8 * 10, dtype=np.float32).reshape(4, 8, 10),
+        verbose=False,
+    )
+
+    clone = widget._clone_for_html_export(quantized=True, downsample=2)
+    try:
+        assert clone.height == 4
+        assert clone.width == 5
+        assert clone.pixel_size == pytest.approx(widget.pixel_size)
+        assert clone.offline is True
+        assert 4 * 4 * 5 <= len(clone.frame_bytes) < 4 * 4 * 5 + 8
+    finally:
+        clone.close()
+
+
+def test_html_export_refuses_oversized_single_file_before_writing(tmp_path) -> None:
+    widget = Show2D(np.ones((4, 8, 10), dtype=np.float32), verbose=False)
+
+    with pytest.raises(ValueError, match="encoding='uint8'.*mode='folder'"):
+        widget.export_html(tmp_path / "too-large.html", max_mb=0.001)
+
+    assert not (tmp_path / "too-large.html").exists()
+
+
+def test_skip_initial_stats_keeps_std_nonzero() -> None:
+    data = np.arange(2 * 4 * 5, dtype=np.float32).reshape(2, 4, 5)
+    widget = Show2D(data, verbose=False, _skip_initial_stats=True)
+
+    assert widget.stats_mean == pytest.approx(data.mean(axis=(1, 2)).tolist())
+    assert widget.stats_std == pytest.approx(data.std(axis=(1, 2)).tolist())
+
+
 def test_notebook_state_drops_or_keeps_stack_payload_by_save_state() -> None:
     transient = Show2D(list(_mixed_data()), save_state=False, verbose=False)
     persisted = Show2D(list(_mixed_data()), save_state=True, verbose=False)

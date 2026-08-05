@@ -33,8 +33,8 @@ Resolution order at lookup time (most-specific wins):
   3. ``folders:`` lookup by master's first-level folder under session_dir
   4. else: ``None`` (acquisition is unconditioned)
 
-This module is the canonical reader. All callers (screen, ptycho_config,
-acquisitions_router, dashboard) go through ``resolve_condition()`` so a
+This module is the canonical reader. All acquisition and reconstruction callers
+go through ``resolve_condition()`` so a
 single yaml change updates every downstream surface.
 """
 from __future__ import annotations

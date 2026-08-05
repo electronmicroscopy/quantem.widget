@@ -62,7 +62,7 @@ _VALID_CMAPS = frozenset({
 })
 _VALID_SLICE_ALIGNMENT = frozenset({"off", "auto", "manual"})
 _MAX_PLAYBACK_FPS = 30.0
-# Registration settings used by the established full-resolution Samsung
+# Registration settings used by the established full-resolution experimental
 # reconstructed-stack analysis. The 20x local matrix-DFT refinement follows
 # Guizar-Sicairos et al., Opt. Lett. 33, 156-158 (2008),
 # https://doi.org/10.1364/OL.33.000156.

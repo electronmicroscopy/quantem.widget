@@ -71,6 +71,7 @@ def test_show4dstem_state_dict_keys(show4dstem_widget):
         "title",
         "dp_colormap",
         "vi_colormap",
+        "vi_source",
         "roi_mode",
         "vi_roi_reduce",
         "show_title",
@@ -111,6 +112,7 @@ def test_show4dstem_state_dict_roundtrip_mutated(show4dstem_widget):
         "compare_layout",
         "compare_dp_mode",
         "compare_group_mode",
+        "vi_source",
     }
     original = show4dstem_widget.state_dict()
     mutated = _mutate_state(original)

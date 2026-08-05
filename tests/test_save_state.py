@@ -893,7 +893,7 @@ def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
 
     out = widget.export_html(tmp_path / "binned.html", encoding="uint8", downsample=4)
     assert out.exists()
-    assert "4x binned" in widget.export_status
+    assert "4x downsample" in widget.export_status
     with pytest.raises(ValueError, match="exact float32"):
         widget.export_html(tmp_path / "bad.html", encoding="full", downsample=2)
     widget.close()
@@ -1172,7 +1172,7 @@ def test_show2d_static_scale_bar_label_matches_widget_format():
     effective_zoom = 500 / 512
     (label, zoom_text, bar_text, bar_px), = calibrated._static_overlay_texts()
     assert label == "cal"
-    assert zoom_text == "1.0×"
+    assert zoom_text == ""
     # 60 css px / effectiveZoom * 0.23 A = 14.1 A -> nice 10 A -> integer nm
     assert bar_text == "1 nm"
     assert bar_px == pytest.approx(10 / 0.23 * effective_zoom)
@@ -1192,7 +1192,7 @@ def test_show2d_static_zoom_badge_and_center_crop():
     shorten the bar to the zoomed field of view, and crop the central 1/zoom
     window exactly like the live canvas transform."""
     frame = np.random.default_rng(7).random((512, 512)).astype(np.float32)
-    widget = Show2D(frame, zoom=1.8, verbose=False)
+    widget = Show2D(frame, zoom=1.8, show_zoom_indicator=True, verbose=False)
     (_, zoom_text, bar_text, bar_px), = widget._static_overlay_texts()
     assert zoom_text == "1.8×"
     effective_zoom = 1.8 * 500 / 512
@@ -1466,7 +1466,7 @@ def test_show3d_static_overlay_matches_show2d_style_metadata():
     (label, zoom_text, bar_text, bar_px), = widget._static_overlay_texts([0], 1)
 
     assert label == "ADF · one 2/3"
-    assert zoom_text == "1.0×"
+    assert zoom_text == ""
     assert bar_text == "5 Å"
     assert bar_px == pytest.approx(5 / 0.23 * 500 / 128)
     assert widget._static_png_b64()
@@ -1513,6 +1513,8 @@ def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
         cmap=widget.cmap,
         auto_contrast=widget.auto_contrast,
         link_contrast=widget.link_contrast,
+        panel_inner_border_px=float(widget.panel_inner_border_px),
+        panel_inner_border_color=str(widget.panel_inner_border_color),
         show_stats=False,
         show_controls=False,
         verbose=False,
@@ -1616,6 +1618,8 @@ def test_show3d_static_png_pixel_matches_show2d_layout_matrix(
         cmap=widget.cmap,
         auto_contrast=widget.auto_contrast,
         link_contrast=widget.link_contrast,
+        panel_inner_border_px=float(widget.panel_inner_border_px),
+        panel_inner_border_color=str(widget.panel_inner_border_color),
         show_stats=False,
         show_controls=False,
         verbose=False,
@@ -1628,6 +1632,61 @@ def test_show3d_static_png_pixel_matches_show2d_layout_matrix(
     show2d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show2d_png))).convert("RGB"))
 
     np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
+
+
+def test_show2d_svg_gallery_chrome_layers_are_independent(tmp_path):
+    """C1: SVG export separates gutters, outer frame, and panel strokes."""
+    data = [np.full((16, 16), idx, dtype=np.float32) for idx in range(4)]
+    widget = Show2D(
+        data,
+        labels=["", "", "", ""],
+        ncols=2,
+        size=20,
+        show_title=False,
+        show_panel_titles=False,
+        scale_bar_visible=False,
+        show_zoom_indicator=False,
+        marker_colors=["none"] * 4,
+        inter_panel_gap_px=6,
+        inter_panel_gap_color="#111111",
+        gallery_outer_border_px=4,
+        gallery_outer_border_color="#000000",
+        panel_inner_border_px=2,
+        panel_inner_border_color="#ff00ff",
+        verbose=False,
+        save_state=False,
+    )
+
+    svg = widget.export_svg(tmp_path / "show2d_chrome.svg", scale=1).read_text()
+
+    assert 'width="54" height="54" viewBox="0 0 54 54"' in svg
+    assert '<rect x="0" y="0" width="54" height="54" fill="#000000"/>' in svg
+    assert '<rect x="4" y="4" width="46" height="46" fill="#111111"/>' in svg
+    assert '<image x="4" y="4" width="20" height="20"' in svg
+    assert '<image x="30" y="4" width="20" height="20"' in svg
+    assert 'stroke="#ff00ff" stroke-width="2"' in svg
+
+
+def test_show2d_gallery_gap_alias_populates_explicit_chrome():
+    """C1: old gallery_gap_* notebooks keep their black-grid behavior."""
+    widget = Show2D(
+        [np.zeros((8, 8), dtype=np.float32), np.ones((8, 8), dtype=np.float32)],
+        gallery_gap_px=3,
+        gallery_gap_color="#000000",
+        verbose=False,
+        save_state=False,
+    )
+
+    state = widget.state_dict()
+
+    assert widget.inter_panel_gap_px == 3
+    assert widget.inter_panel_gap_color == "#000000"
+    assert widget.gallery_outer_border_px == 3
+    assert widget.gallery_outer_border_color == "#000000"
+    assert widget.panel_inner_border_px == 1
+    assert widget.panel_inner_border_color == "#000000"
+    assert state["inter_panel_gap_px"] == 3
+    assert state["gallery_gap_px"] == 3
 
 
 # ---------------------------------------------------------------------------

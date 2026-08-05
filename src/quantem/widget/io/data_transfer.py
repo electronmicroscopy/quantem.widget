@@ -155,12 +155,21 @@ class DataTransferSummary:
 
 def _disk_of_existing(path: Path) -> str:
     """Return the physical disk for *path* or its nearest existing parent."""
-    from quantem.widget.io.hdf5 import disk_of
-
     probe = path.expanduser()
     while not probe.exists() and probe.parent != probe:
         probe = probe.parent
-    return disk_of(str(probe))
+    try:
+        device = probe.stat().st_dev
+        sys_device = Path(
+            f"/sys/dev/block/{os.major(device)}:{os.minor(device)}"
+        )
+        if not sys_device.exists():
+            return f"dev:{device}"
+        real = os.path.realpath(sys_device)
+        parent = os.path.basename(os.path.dirname(real))
+        return parent if parent and parent != "block" else os.path.basename(real)
+    except OSError:
+        return "?"
 
 
 def _master_sidecars(master: Path) -> list[Path]:
@@ -265,7 +274,7 @@ def collect_data_transfer_groups(
     recursive
         Search subfolders recursively when *source* is a folder.
     require_ready
-        If ``True``, groups whose master does not pass ``is_master_ready`` can
+        If ``True``, groups whose GPU inspection reports ``ready=False`` can
         be returned in the plan's skipped list by :func:`plan_data_transfer`.
     hash_algorithm
         Optional digest to include in the manifest. Use ``"sha256"`` only when
@@ -276,7 +285,7 @@ def collect_data_transfer_groups(
     list[DataTransferGroup]
         One group per master, including matching ``*_data_*.h5`` sidecars.
     """
-    from quantem.widget.io.hdf5 import is_master_ready
+    from quantem.gpu.io import inspect
 
     hash_algorithm = _normalize_hash_algorithm(hash_algorithm)
     if isinstance(source, (list, tuple)):
@@ -312,7 +321,7 @@ def collect_data_transfer_groups(
         missing_files: tuple[str, ...] = ()
         ready = False
         try:
-            ready = bool(is_master_ready(str(master)))
+            ready = bool(inspect(str(master)).ready)
         except Exception:
             ready = False
         if require_ready and not ready:

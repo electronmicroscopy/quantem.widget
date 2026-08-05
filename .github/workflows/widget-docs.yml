@@ -1,5 +1,5 @@
-# Build the quantem.widget Jupyter Book and publish it to GitHub Pages on the
-# bobleesj fork. The runner EXECUTES the tutorial notebooks at build time
+# Build the quantem.widget Jupyter Book and publish it to this repository's
+# GitHub Pages site. The runner EXECUTES the tutorial notebooks at build time
 # (execute_notebooks: force in docs/_config.yml): tutorial data downloads from
 # Hugging Face, widgets run on CPU torch, and myst-nb bakes the widget state
 # into the published HTML. Committed notebooks stay small (no baked state);
@@ -15,10 +15,8 @@ on:
       - ".github/workflows/widget-docs.yml"
   workflow_dispatch:
 
-# Origin-only. Builds + DEPLOYS the docs to GitHub Pages from this widget branch
-# (it holds the live docs). The `github-pages` environment allowlist on
-# bobleesj/quantem includes this branch, so the deploy is accepted; `main` is kept
-# for when the work merges. Published at https://bobleesj.github.io/quantem/.
+# Builds and deploys the docs from `main`; the Pages URL follows repository
+# ownership, so this workflow remains valid across an organization transfer.
 permissions:
   contents: read
   pages: write
@@ -30,7 +28,6 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'bobleesj/quantem.widget'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -41,13 +38,27 @@ jobs:
         with:
           node-version: "22"
       - uses: actions/configure-pages@v6
-      # The executed widgets load their JS from src/quantem/widget/static/,
-      # which is a build artifact (gitignored) — build it before the notebooks run.
-      - run: npm ci && npm run build
+      # Python deps must install BEFORE the frontend build: npm run build syncs
+      # the WebGPU engine sources from quantem.gpu (scripts/sync-gpu-webgpu.mjs),
+      # which imports quantem.gpu and its deps (numpy).
       - run: pip install -r docs/requirements.txt
       # .[hub] pulls quantem.data (widget_export tutorial); the loaders need
       # huggingface_hub + h5py + tifffile to download and read tutorial data.
       - run: pip install --extra-index-url https://test.pypi.org/simple/ -e ".[hub]" huggingface_hub h5py tifffile
+      # The TestPyPI quantem.gpu release can lag the webgpu module the sync
+      # script imports, so install quantem.gpu from its source tip instead
+      # (the installed quantem package is regular, not namespace, so a
+      # PYTHONPATH fallback cannot shadow a lagging site-packages release).
+      - uses: actions/checkout@v7
+        with:
+          repository: bobleesj/quantem.gpu
+          path: quantem-gpu-src
+      - run: pip install ./quantem-gpu-src
+      # The executed widgets load their JS from src/quantem/widget/static/,
+      # which is a build artifact (gitignored) — build it before the notebooks run.
+      - run: npm ci && npm run build
+        env:
+          QUANTEM_GPU_SRC: ${{ github.workspace }}/quantem-gpu-src/src
       # Cache the Hugging Face tutorial downloads across builds.
       - uses: actions/cache@v4
         with:
@@ -61,14 +72,15 @@ jobs:
           # baked into tutorial outputs on the published pages.
           HF_HUB_VERBOSITY: error
           QUANTEM_WIDGET_STATIC_FALLBACK: "0"
+      # Theme-drift guard: a page with two primary-toggle buttons means the
+      # mobile hamburger is dead (see scripts/check_docs_nav_toggle.py).
+      - run: python scripts/check_docs_nav_toggle.py docs/_build/html
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/_build/html
 
   deploy:
-    # Publish from the active widget branch (its docs are the live ones); main kept for when it merges.
-    # The github-pages environment allowlist includes this branch, so the deploy is accepted.
-    if: github.repository == 'bobleesj/quantem.widget' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:

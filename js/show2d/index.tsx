@@ -32,7 +32,16 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
-import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
+import {
+  applyStandaloneWidgetViewState,
+  downloadBlob,
+  extractBytes,
+  extractFloat32,
+  formatNumber,
+  preserveRestoredWidgetModelsOnSave,
+  standaloneHtmlWithCurrentWidgetState,
+  standaloneWidgetStaticHtmlFromDocument,
+} from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 import { MetadataSection } from "../widgetInfo";
@@ -74,6 +83,114 @@ const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "link_contrast" },
   { source: "show_fft" },
 ];
+
+const SHOW2D_STANDALONE_VIEW_STATE_KEYS = [
+  "auto_contrast",
+  "cmap",
+  "col_markers",
+  "contrast_preset",
+  "controls_collapsed",
+  "debug",
+  "denoise",
+  "denoise_bin",
+  "denoise_bins",
+  "denoise_enabled",
+  "denoise_modes",
+  "denoise_scope",
+  "denoise_sigma",
+  "denoise_sigmas",
+  "diff_mode",
+  "diff_reference",
+  "display_gamma",
+  "dual_gain",
+  "fft_metrics",
+  "fft_window",
+  "frequency_filter",
+  "frequency_filter_center",
+  "frequency_filter_centers",
+  "frequency_filter_cutoff",
+  "frequency_filter_cutoffs",
+  "frequency_filter_enabled",
+  "frequency_filter_modes",
+  "frequency_filter_scope",
+  "frequency_filter_width",
+  "frequency_filter_widths",
+  "gallery_gap_color",
+  "gallery_gap_px",
+  "gallery_outer_border_color",
+  "gallery_outer_border_px",
+  "hidden_page_slots",
+  "hidden_panels",
+  "image_flips_horizontal",
+  "image_flips_vertical",
+  "image_rotations",
+  "initial_zoom",
+  "inter_panel_gap_color",
+  "inter_panel_gap_px",
+  "inset_plots",
+  "link_contrast",
+  "link_pan",
+  "link_zoom",
+  "log_scale",
+  "marker_colors",
+  "marker_style",
+  "ncols",
+  "pad_fill_mode",
+  "pad_fill_modes",
+  "pad_ratio",
+  "pad_ratios",
+  "pad_scope",
+  "page_idx",
+  "panel_annotations",
+  "panel_cmaps",
+  "panel_frame_indices",
+  "panel_inner_border_color",
+  "panel_inner_border_px",
+  "panel_order",
+  "panel_overlays",
+  "panel_playback_fps",
+  "panel_title_font_size",
+  "panel_title_spans",
+  "panel_title_style",
+  "profile_line",
+  "roi_active",
+  "roi_list",
+  "roi_selected_idx",
+  "rotation_scope",
+  "row_markers",
+  "scale_bar_label",
+  "scale_bar_length",
+  "scale_bar_panels",
+  "scale_bar_position",
+  "scale_bar_style",
+  "scale_bar_visible",
+  "selected_idx",
+  "selected_panels",
+  "show_controls",
+  "show_denoise",
+  "show_fft",
+  "show_frequency_filter",
+  "show_inset_plots",
+  "show_panel_titles",
+  "show_stats",
+  "show_title",
+  "show_zoom_indicator",
+  "smooth",
+  "starred",
+  "stretch_percentiles",
+  "underlay_alpha",
+  "underlay_haadf_gain",
+  "underlay_mode",
+  "view_banner",
+  "view_box",
+  "view_crop",
+  "vmax",
+  "vmaxs",
+  "vmin",
+  "vmins",
+  "zoom_col",
+  "zoom_row",
+] as const;
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
@@ -182,6 +299,27 @@ type OverlayDragState = {
   startCol: number;
   original: PanelOverlaySpec;
 };
+type AnnotationSelection = { panel: number; annotation: number };
+type AnnotationDragState = {
+  panel: number;
+  annotation: number;
+  startClientX: number;
+  startClientY: number;
+  panelWidth: number;
+  panelHeight: number;
+  original: PanelAnnotationSpec;
+};
+type Show2DSvgExport = {
+  svg: string;
+  width: number;
+  height: number;
+  filename: string;
+  scale: number;
+};
+type Show2DSvgPreview = Show2DSvgExport & {
+  url: string;
+  size: number;
+};
 
 function styleNumber(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -190,6 +328,13 @@ function styleNumber(value: unknown, fallback: number): number {
 
 function styleString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function svgColor(value: unknown, fallback = ""): string {
+  return styleString(value, fallback).replace(
+    /rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(?:0|1|0?\.\d+)\s*\)/gi,
+    (_match, r, g, b) => `rgb(${Number(r)}, ${Number(g)}, ${Number(b)})`,
+  );
 }
 
 function withAlpha(color: string | undefined, alpha: number): string | undefined {
@@ -294,10 +439,13 @@ function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
   return nodes;
 }
 
+// Same UI font as panel titles / badges (not Cambria Math italic) so χ², λ, etc. match body text.
+const UI_MATH_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
 function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
   const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
   return (
-    <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: "Cambria Math, STIX Two Math, Times New Roman, serif", fontStyle: "italic" }}>
+    <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: UI_MATH_FONT, fontStyle: "normal" }}>
       {renderLatexMath(normalized, keyPrefix)}
     </span>
   );
@@ -502,6 +650,53 @@ function renderPanelAnnotation(spec: PanelAnnotationSpec, fallback = ""): React.
   return renderRichTitle(spec.spans, spec.text || fallback);
 }
 
+function annotationAnchorFractions(anchor: string | undefined): [number, number] {
+  const value = anchor || "top-left";
+  const x = value.endsWith("right") ? 1 : value.endsWith("center") || value === "center" ? 0.5 : 0;
+  const y = value.startsWith("bottom") ? 1 : value.startsWith("center") || value === "center" ? 0.5 : 0;
+  return [x, y];
+}
+
+function draggableAnnotationSpec(
+  spec: PanelAnnotationSpec,
+  element: HTMLElement,
+  container: HTMLElement,
+): PanelAnnotationSpec {
+  if (Array.isArray(spec.box) && spec.box.length === 4) return { ...spec };
+  if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) return { ...spec };
+  const containerRect = container.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  const anchor = spec.anchor || spec.position || "top-left";
+  const [fx, fy] = annotationAnchorFractions(anchor);
+  const panelWidth = Math.max(1, containerRect.width);
+  const panelHeight = Math.max(1, containerRect.height);
+  return {
+    ...spec,
+    anchor,
+    x: Math.max(0, Math.min(1, (elementRect.left - containerRect.left + elementRect.width * fx) / panelWidth)),
+    y: Math.max(0, Math.min(1, (elementRect.top - containerRect.top + elementRect.height * fy) / panelHeight)),
+  };
+}
+
+function updateAnnotationFromDrag(drag: AnnotationDragState, clientX: number, clientY: number): PanelAnnotationSpec {
+  const dx = (clientX - drag.startClientX) / Math.max(1, drag.panelWidth);
+  const dy = (clientY - drag.startClientY) / Math.max(1, drag.panelHeight);
+  const next = { ...drag.original };
+  if (Array.isArray(next.box) && next.box.length === 4) {
+    const [left, top, boxW, boxH] = next.box;
+    next.box = [
+      Math.max(0, Math.min(1 - Math.max(0, boxW), left + dx)),
+      Math.max(0, Math.min(1 - Math.max(0, boxH), top + dy)),
+      boxW,
+      boxH,
+    ];
+    return next;
+  }
+  next.x = Math.max(0, Math.min(1, styleNumber(next.x, 0) + dx));
+  next.y = Math.max(0, Math.min(1, styleNumber(next.y, 0) + dy));
+  return next;
+}
+
 
 function KeyboardShortcuts({ items }: { items: [string, string][] }) {
   return (
@@ -520,13 +715,18 @@ const upwardMenuProps = {
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
   sx: { zIndex: 9999 },
 };
-const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
+// Page galleries are normally used as a quick visual sweep, rather than as a
+// slow slide show. Keep 2 fps available for careful inspection, but make the
+// first-play experience responsive on cached local panels.
+const PAGE_PLAY_FPS_OPTIONS = [1, 2, 4, 8, 12] as const;
 const CONTRAST_PRESETS = [
   { value: "manual", label: "Manual", low: 0, high: 100 },
   { value: "0.5-99.5", label: "0.5–99.5", low: 0.5, high: 99.5 },
   { value: "1-99", label: "1–99", low: 1, high: 99 },
   { value: "2-98", label: "2–98", low: 2, high: 98 },
   { value: "3-97", label: "3–97", low: 3, high: 97 },
+  { value: "5-95", label: "5–95", low: 5, high: 95 },
+  { value: "10-90", label: "10–90", low: 10, high: 90 },
 ] as const;
 const IDENTITY_PALETTE = ["#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a"] as const;
 
@@ -1186,6 +1386,18 @@ type DetailTile = {
 // on a slow kernel->browser channel. Mirrors Show2D._DETAIL_BUDGET_BYTES.
 const DETAIL_BUDGET_BYTES = 8 * 1024 * 1024;
 const MAX_PANEL_COLUMNS = 12;
+
+function shouldIgnoreWidgetShortcut(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return target.closest([
+    "input", "textarea", "button", "select",
+    "[contenteditable='true']", "[role='button']", "[role='slider']",
+    "[role='switch']", "[role='textbox']", "[role='combobox']", "[role='menuitem']",
+    ".MuiSlider-root", ".MuiSelect-select",
+  ].join(",")) !== null;
+}
+
 type TouchZoomState = {
   idx: number;
   mode: "pan" | "pinch";
@@ -1204,6 +1416,11 @@ const SINGLE_IMAGE_TARGET = 500;
 const GALLERY_IMAGE_TARGET = 300;
 const DEFAULT_FFT_ZOOM = 2;
 const GALLERY_FFT_OVERVIEW_MAX_DIM = 2048;
+// A paged gallery may revisit many more panels than are visible at once. Keep
+// its overview FFTs small enough that a complete pass can stay in the bounded
+// LRU, rather than evicting the first page while the user is playing through
+// later pages. ROI FFTs remain native-resolution below.
+const PAGED_GALLERY_FFT_OVERVIEW_MAX_DIM = 1024;
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 type ROIItem = { row: number; col: number; shape: string; radius: number; radius_inner: number; width: number; height: number; color: string; line_width: number; highlight: boolean };
 const ROI_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
@@ -1220,6 +1437,15 @@ type Show2DPerfCounters = {
   galleryFftPending: number;
   galleryFftActiveKeys: string[];
   lastGalleryFftMs: number;
+  mainCanvasPaintCount: number;
+  lastMainCanvasPaintBatchPanels: number;
+  lastMainCanvasPaintAt: number;
+  lastMainCanvasPaintPanel: number | null;
+  zoomPanEventCount: number;
+  lastZoomPanEventAt: number;
+  lastZoomPanEventKind: string;
+  lastZoomPanPaintLatencyMs: number | null;
+  zoomPanPaintLatenciesMs: number[];
 };
 
 function show2dPerfDebug(): Show2DPerfCounters | null {
@@ -1237,9 +1463,50 @@ function show2dPerfDebug(): Show2DPerfCounters | null {
       galleryFftPending: 0,
       galleryFftActiveKeys: [],
       lastGalleryFftMs: 0,
+      mainCanvasPaintCount: 0,
+      lastMainCanvasPaintBatchPanels: 0,
+      lastMainCanvasPaintAt: 0,
+      lastMainCanvasPaintPanel: null,
+      zoomPanEventCount: 0,
+      lastZoomPanEventAt: 0,
+      lastZoomPanEventKind: "",
+      lastZoomPanPaintLatencyMs: null,
+      zoomPanPaintLatenciesMs: [],
     };
   }
   return host.__quantemShow2DPerf;
+}
+
+function recordShow2DZoomPanEvent(kind: string): void {
+  const perf = show2dPerfDebug();
+  if (!perf) return;
+  perf.lastZoomPanEventAt = performance.now();
+  perf.lastZoomPanEventKind = kind;
+  perf.zoomPanEventCount += 1;
+}
+
+function recordShow2DMainCanvasPaint(panel: number): void {
+  const perf = show2dPerfDebug();
+  if (!perf) return;
+  const now = performance.now();
+  perf.mainCanvasPaintCount += 1;
+  perf.lastMainCanvasPaintAt = now;
+  perf.lastMainCanvasPaintPanel = panel;
+  if (perf.lastZoomPanEventAt > 0) {
+    const latency = now - perf.lastZoomPanEventAt;
+    if (latency >= 0 && latency < 5000) {
+      const rounded = Number(latency.toFixed(1));
+      perf.lastZoomPanPaintLatencyMs = rounded;
+      perf.zoomPanPaintLatenciesMs.push(rounded);
+      if (perf.zoomPanPaintLatenciesMs.length > 120) perf.zoomPanPaintLatenciesMs.shift();
+    }
+  }
+}
+
+function recordShow2DMainCanvasPaintBatch(panelCount: number): void {
+  const perf = show2dPerfDebug();
+  if (!perf) return;
+  perf.lastMainCanvasPaintBatchPanels = panelCount;
 }
 
 function updateGalleryFftCacheDebug(
@@ -1879,12 +2146,47 @@ function svgDashAttributes(overlay: PanelOverlaySpec, lineWidth: number): string
 }
 
 function renderLatexMathToText(expr: string): string {
-  return String(expr || "")
+  const superscript: Record<string, string> = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+    n: "ⁿ", i: "ⁱ",
+  };
+  const subscript: Record<string, string> = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+    a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ",
+    l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ",
+    s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ",
+  };
+  const convertScript = (text: string, table: Record<string, string>, marker: string): string =>
+    text.split("").map((ch) => table[ch] || `${marker}${ch}`).join("");
+  const normalized = String(expr || "")
     .trim()
     .replace(/^\$|\$$/g, "")
     .replace(/\\+(?=[A-Za-z])/g, "\\")
-    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command)
-    .replace(/[{}]/g, "");
+    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command);
+  let out = "";
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    if ((ch === "^" || ch === "_") && i + 1 < normalized.length) {
+      const table = ch === "^" ? superscript : subscript;
+      const marker = ch;
+      if (normalized[i + 1] === "{") {
+        const group = readLatexGroup(normalized, i + 1);
+        out += convertScript(group.text, table, marker);
+        i = group.next - 1;
+      } else {
+        out += convertScript(normalized[i + 1], table, marker);
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "{" || ch === "}") continue;
+    out += ch;
+  }
+  return out;
 }
 
 function svgPanelOverlayElement(
@@ -1898,21 +2200,21 @@ function svgPanelOverlayElement(
   const opacity = styleNumber(overlay.opacity, 1);
   const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
   const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
-  const stroke = styleString(overlay.stroke, "#00e5ff");
-  const fill = overlay.fill ? styleString(overlay.fill, "none") : "none";
+  const stroke = svgColor(overlay.stroke, "#00e5ff");
+  const fill = overlay.fill ? svgColor(overlay.fill, "none") : "none";
   const lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
   const common = `fill="${escapeXmlAttr(fill)}" fill-opacity="${fillOpacity}" stroke="${escapeXmlAttr(stroke)}" stroke-width="${lineWidth}" stroke-opacity="${strokeOpacity}"${svgDashAttributes(overlay, lineWidth)}`;
   if (geom.shape === "circle") {
     const cx = toScreenX(geom.col);
     const cy = toScreenY(geom.row);
     const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - cx) + Math.abs(toScreenY(geom.row + geom.radius) - cy)) / 2);
-    return `<circle data-show2d-panel-overlay-svg="true" cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
   }
   const x0 = toScreenX(geom.col0);
   const y0 = toScreenY(geom.row0);
   const x1 = toScreenX(geom.col1);
   const y1 = toScreenY(geom.row1);
-  return `<rect data-show2d-panel-overlay-svg="true" x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
+  return `<rect x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
 }
 
 function svgTextFromRichSpans(spans: RichTitleSpan[] | undefined, fallback: string): { text: string; spans: Array<{ text: string; color?: string }> } {
@@ -1963,46 +2265,49 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
   const fontSize = Math.max(6, styleNumber(spec.font_size, 10));
   const rich = svgTextFromRichSpans(spec.math ? [{ math: spec.math }] : spec.spans, spec.text || "");
   const variant = spec.variant || "badge";
-  const fg = styleString(spec.fg ?? spec.color, "#fff");
+  const fg = svgColor(spec.fg ?? spec.color, "#fff");
   const opacity = Math.max(0, Math.min(1, styleNumber(spec.opacity, 1)));
   const fontFamily = styleString(spec.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
   const outlineWidth = Math.max(0, styleNumber(spec.outline_width, 0));
-  const outlineAttrs = outlineWidth > 0
-    ? ` stroke="${escapeXmlAttr(styleString(spec.outline_color, "rgba(0,0,0,0.85)"))}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
-    : "";
-  const chunks: string[] = [`<g data-show2d-panel-annotation-svg="true" opacity="${opacity}">`];
+  const outlineColor = svgColor(spec.outline_color, "rgba(0,0,0,0.85)");
+  const chunks: string[] = [`<g opacity="${opacity}">`];
   if (variant !== "plain") {
     const boxW = Math.max(12, rich.text.length * fontSize * 0.62 + 12);
     const boxH = fontSize * 1.25 + 4;
     const rx = anchor === "middle" ? tx - boxW / 2 : anchor === "end" ? tx - boxW : tx;
     const ry = baseline === "middle" ? ty - boxH / 2 : baseline === "baseline" ? ty - boxH : ty;
-    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(styleString(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(styleString(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
+    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(svgColor(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(svgColor(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
   }
-  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}"${outlineAttrs}>`);
-  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+  const textY = baseline === "middle" ? ty + fontSize * 0.35 : ty;
+  const textAttrs = `x="${tx}" y="${textY}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}"`;
+  if (outlineWidth > 0) {
+    chunks.push(`<text ${textAttrs} fill="none" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round">${escapeXmlText(rich.text)}</text>`);
+  }
+  chunks.push(`<text ${textAttrs} fill="${escapeXmlAttr(fg)}">`);
+  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(svgColor(span.color))}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
   chunks.push("</text></g>");
   return chunks.join("");
 }
 
-function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
+function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, _panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
   const geom = insetPlotGeometry(spec, panelW, panelH, scaleBarVisible);
   if (!geom || !spec) return "";
   const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
   const sx = (value: number) => x + plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
   const sy = (value: number) => y + plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
   const points = finite.map(([px, py]) => `${sx(px)},${sy(py)}`).join(" ");
-  const lineColor = spec.color || fallbackColor;
-  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
-  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const lineColor = svgColor(spec.color, fallbackColor);
+  const textColor = svgColor(spec.text_color, "rgba(255,255,255,0.92)");
+  const tickColor = svgColor(spec.tick_color, "rgba(255,255,255,0.72)");
   const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
   const chunks = [
-    `<g data-show2d-inset-plot-svg="true">`,
-    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(spec.background || "#0a0c10")}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(spec.border_color || "rgba(255,255,255,0.34)")}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
+    `<g>`,
+    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(svgColor(spec.background, "#0a0c10"))}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(svgColor(spec.border_color, "rgba(255,255,255,0.34)"))}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
     `<path d="M ${x + plotX0} ${y + plotY0} V ${y + plotY0 + plotH} H ${x + plotX0 + plotW}" fill="none" stroke="${escapeXmlAttr(tickColor)}" stroke-opacity="0.45" stroke-width="1"/>`,
     `<polyline points="${points}" fill="none" stroke="${escapeXmlAttr(lineColor)}" stroke-width="${Math.max(1.4, Number(spec.line_width ?? 2))}" stroke-linejoin="round" stroke-linecap="round"/>`,
   ];
   if (Array.isArray(spec.point) && spec.point.length >= 2) {
-    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(spec.point_color || "#fff")}" stroke="#000" stroke-width="1.5"/>`);
+    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(svgColor(spec.point_color, "#fff"))}" stroke="#000" stroke-width="1.5"/>`);
   }
   if (spec.title) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + 12}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(textColor)}">${escapeXmlText(spec.title)}</text>`);
   if (spec.legend) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + boxH - 6}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(lineColor)}">${escapeXmlText(spec.legend)}</text>`);
@@ -2022,7 +2327,7 @@ function svgColorbarElements(lut: Uint8Array, x: number, y: number, panelW: numb
   const by = y + 18;
   return {
     def: `<linearGradient id="${id}" x1="0" x2="0" y1="1" y2="0">${stops.join("")}</linearGradient>`,
-    body: `<g data-show2d-colorbar-svg="true"><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
+    body: `<g><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
   };
 }
 
@@ -2149,6 +2454,42 @@ function meanDownsample2D(data: Float32Array, width: number, height: number, fac
   return { data: out, width: outW, height: outH };
 }
 
+function renderSampledFrameToOffscreenReuse(
+  data: ArrayLike<number>,
+  sourceW: number,
+  sourceH: number,
+  lut: Uint8Array,
+  vmin: number,
+  vmax: number,
+  logScale: boolean,
+  offscreen: HTMLCanvasElement,
+  imgData: ImageData,
+): void {
+  const outW = Math.max(1, offscreen.width);
+  const outH = Math.max(1, offscreen.height);
+  const rgba = imgData.data;
+  const range = vmax > vmin ? vmax - vmin : 1;
+  const uniformData = !(vmax > vmin);
+  for (let y = 0; y < outH; y++) {
+    const sy = Math.min(sourceH - 1, Math.floor(((y + 0.5) * sourceH) / outH));
+    const row = sy * sourceW;
+    for (let x = 0; x < outW; x++) {
+      const sx = Math.min(sourceW - 1, Math.floor(((x + 0.5) * sourceW) / outW));
+      const raw = data[row + sx] ?? 0;
+      const value = logScale ? displayValue(raw, true) : raw;
+      const clipped = Math.max(vmin, Math.min(vmax, value));
+      const lutValue = uniformData ? 128 : Math.min(255, Math.floor(((clipped - vmin) / range) * 255));
+      const dst = (y * outW + x) * 4;
+      const src = lutValue * 3;
+      rgba[dst] = lut[src];
+      rgba[dst + 1] = lut[src + 1];
+      rgba[dst + 2] = lut[src + 2];
+      rgba[dst + 3] = 255;
+    }
+  }
+  offscreen.getContext("2d")!.putImageData(imgData, 0, 0);
+}
+
 function canvasLooksBlank(canvas: HTMLCanvasElement, maxSamples = 32): boolean {
   const ctx = canvas.getContext("2d");
   if (!ctx || canvas.width <= 0 || canvas.height <= 0) return true;
@@ -2211,9 +2552,10 @@ const imagePanelRadius = 0;
 function Show2D() {
   const isMobileViewport = useMobileViewport();
   const canvasRepaintSignal = useCanvasRepaintSignal();
-  const allowResizeControls = !isMobileViewport;
+  const allowResizeControls = true;
   const model = useModel();
   const folderWatchLive = useFolderWatchModelLive(model);
+  React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
@@ -2286,7 +2628,7 @@ function Show2D() {
   const isItemPaged = isPaged && pageKind === "items";
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
   const [pagePlaying, setPagePlaying] = React.useState(false);
-  const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
+  const [pagePlayFps, setPagePlayFps] = React.useState<number>(8);
   const [pageSliderPreviewIdx, setPageSliderPreviewIdxState] = React.useState<number | null>(null);
   const pageSliderPreviewIdxRef = React.useRef<number | null>(null);
   const currentPageIdxRef = React.useRef(0);
@@ -2351,29 +2693,115 @@ function Show2D() {
   React.useEffect(() => {
     if (!isPaged || (nPages || 1) <= 1) setPagePlaying(false);
   }, [isPaged, nPages]);
-  React.useEffect(() => {
-    if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
-    const timeout = window.setTimeout(() => {
-      const next = (currentPageIdx + 1) % Math.max(1, nPages || 1);
-      setPageSliderPreviewIdx(next);
-      setPageIdx(next);
-    }, 1000 / Math.max(1, pagePlayFps));
-    return () => window.clearTimeout(timeout);
-  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx, setPageSliderPreviewIdx]);
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [frameBytesUrl] = useModelState<string>("frame_bytes_url");
+  const [frameBytesUrlsTrait] = useModelState<string[]>("frame_bytes_urls");
   const [panelFrameCounts] = useModelState<number[]>("panel_frame_counts");
   const [panelFrameIndices, setPanelFrameIndices] = useModelState<number[]>("panel_frame_indices");
   const [panelPlaybackFpsTrait] = useModelState<number>("panel_playback_fps");
   const panelPlaybackFps = clampPanelPlaybackFps(panelPlaybackFpsTrait);
   const [panelStackOffsets] = useModelState<number[]>("panel_stack_offsets");
   const [panelStackBytes] = useModelState<DataView>("panel_stack_bytes");
+  const [panelStackBytesUrl] = useModelState<string>("panel_stack_bytes_url");
   const [panelStackMins] = useModelState<number[]>("_panel_stack_mins");
   const [panelStackMaxs] = useModelState<number[]>("_panel_stack_maxs");
   const [staticFallbackJpeg] = useModelState<string>("_static_fallback_jpeg");
   const [staticFallbackMime] = useModelState<string>("_static_fallback_mime");
-  const hasLiveFrameBytes = !!frameBytes && frameBytes.byteLength > 0;
+  const [fetchedFrameBytes, setFetchedFrameBytes] = React.useState<DataView | null>(null);
+  const [fetchedFrameBytePanels, setFetchedFrameBytePanels] = React.useState<(DataView | null)[]>([]);
+  const [fetchedPanelStackBytes, setFetchedPanelStackBytes] = React.useState<DataView | null>(null);
+  const frameBytesUrlList = React.useMemo(
+    () => Array.isArray(frameBytesUrlsTrait)
+      ? frameBytesUrlsTrait.filter(url => typeof url === "string" && url.length > 0)
+      : [],
+    [frameBytesUrlsTrait],
+  );
+  const frameBytesUrlListKey = frameBytesUrlList.join("\n");
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!frameBytesUrl) {
+      setFetchedFrameBytes(null);
+      return () => { cancelled = true; };
+    }
+    setFetchedFrameBytes(null);
+    fetch(new URL(frameBytesUrl, window.location.href).href)
+      .then(response => {
+        if (!response.ok) throw new Error(`frame_bytes_url HTTP ${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then(buffer => {
+        if (!cancelled) setFetchedFrameBytes(new DataView(buffer));
+      })
+      .catch(error => console.error("[Show2D] Failed to load folder frame bytes", error));
+    return () => { cancelled = true; };
+  }, [frameBytesUrl]);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (frameBytesUrlList.length === 0) {
+      setFetchedFrameBytePanels([]);
+      return () => { cancelled = true; };
+    }
+    const loaded: (DataView | null)[] = new Array(frameBytesUrlList.length).fill(null);
+    setFetchedFrameBytePanels(loaded.slice());
+    const loadFrames = async () => {
+      const eagerCount = Math.min(frameBytesUrlList.length, 20);
+      for (let i = 0; i < frameBytesUrlList.length; i++) {
+        const response = await fetch(new URL(frameBytesUrlList[i], window.location.href).href);
+        if (!response.ok) throw new Error(`frame_bytes_urls[${i}] HTTP ${response.status}`);
+        const buffer = await response.arrayBuffer();
+        if (cancelled) return;
+        loaded[i] = new DataView(buffer);
+        if (
+          i === 0
+          || (i + 1 <= eagerCount && (i + 1) % 4 === 0)
+          || i + 1 === eagerCount
+          || i + 1 === frameBytesUrlList.length
+        ) {
+          setFetchedFrameBytePanels(loaded.slice());
+        }
+        if (i + 1 === eagerCount && i + 1 < frameBytesUrlList.length) {
+          await new Promise<void>(resolve => window.setTimeout(resolve, 2500));
+          if (cancelled) return;
+        } else if (i + 1 > eagerCount && i + 1 < frameBytesUrlList.length) {
+          await new Promise<void>(resolve => window.setTimeout(resolve, 50));
+          if (cancelled) return;
+        }
+      }
+    };
+    loadFrames().catch(error => console.error("[Show2D] Failed to load per-panel folder frame bytes", error));
+    return () => { cancelled = true; };
+  }, [frameBytesUrlListKey]);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!panelStackBytesUrl) {
+      setFetchedPanelStackBytes(null);
+      return () => { cancelled = true; };
+    }
+    setFetchedPanelStackBytes(null);
+    fetch(new URL(panelStackBytesUrl, window.location.href).href)
+      .then(response => {
+        if (!response.ok) throw new Error(`panel_stack_bytes_url HTTP ${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then(buffer => {
+        if (!cancelled) setFetchedPanelStackBytes(new DataView(buffer));
+      })
+      .catch(error => console.error("[Show2D] Failed to load folder panel stack bytes", error));
+    return () => { cancelled = true; };
+  }, [panelStackBytesUrl]);
+  const effectiveFrameBytes = frameBytes && frameBytes.byteLength > 0 ? frameBytes : fetchedFrameBytes;
+  const effectivePanelStackBytes = panelStackBytes && panelStackBytes.byteLength > 0 ? panelStackBytes : fetchedPanelStackBytes;
+  const hasLiveFrameBytes = !!effectiveFrameBytes && effectiveFrameBytes.byteLength > 0;
+  const hasPerPanelFrameBytes = frameBytesUrlList.length > 0;
+  const fetchedFrameBytePanelCount = React.useMemo(
+    () => fetchedFrameBytePanels.reduce((count, view) => count + (view && view.byteLength > 0 ? 1 : 0), 0),
+    [fetchedFrameBytePanels],
+  );
+  const frameSourceKey = hasPerPanelFrameBytes
+    ? `panel-files:${frameBytesUrlListKey}:${fetchedFrameBytePanelCount}`
+    : `single-buffer:${effectiveFrameBytes?.byteLength ?? 0}`;
   const staticFallbackUrl = staticFallbackJpeg
     ? `data:${staticFallbackMime || "image/jpeg"};base64,${staticFallbackJpeg}`
     : "";
@@ -2398,6 +2826,12 @@ function Show2D() {
   const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
   const [galleryGapColor] = useModelState<string>("gallery_gap_color");
+  const [interPanelGapPxState] = useModelState<number>("inter_panel_gap_px");
+  const [interPanelGapColorState] = useModelState<string>("inter_panel_gap_color");
+  const [galleryOuterBorderPxState] = useModelState<number>("gallery_outer_border_px");
+  const [galleryOuterBorderColorState] = useModelState<string>("gallery_outer_border_color");
+  const [panelInnerBorderPxState] = useModelState<number>("panel_inner_border_px");
+  const [panelInnerBorderColorState] = useModelState<string>("panel_inner_border_color");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
@@ -2441,6 +2875,24 @@ function Show2D() {
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large galleries.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
+  const [sigmaFilterDraft, setSigmaFilterDraft] = React.useState<number | null>(null);
+  const sigmaFilterDraftRafRef = React.useRef<number | null>(null);
+  const sigmaFilterDraftPendingRef = React.useRef<number | null>(null);
+  const setSigmaDraftDuringDrag = React.useCallback((value: number) => {
+    setSigmaDraft(value);
+    sigmaFilterDraftPendingRef.current = value;
+    if (sigmaFilterDraftRafRef.current !== null) return;
+    sigmaFilterDraftRafRef.current = window.requestAnimationFrame(() => {
+      sigmaFilterDraftRafRef.current = null;
+      setSigmaFilterDraft(sigmaFilterDraftPendingRef.current);
+    });
+  }, []);
+  React.useEffect(() => () => {
+    if (sigmaFilterDraftRafRef.current !== null) {
+      window.cancelAnimationFrame(sigmaFilterDraftRafRef.current);
+      sigmaFilterDraftRafRef.current = null;
+    }
+  }, []);
   // Canonical method for the UI menu; compound aliases (bin2_anscombe, ...)
   // from older saved states resolve to their base method for display.
   const denoiseBaseMode = resolveDenoiseMode(displayFilter || "none", spatialBin || 1).mode;
@@ -2590,7 +3042,7 @@ function Show2D() {
   const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
   const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
   const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
-  const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelAnnotations, setPanelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
   const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
 
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
@@ -2602,6 +3054,10 @@ function Show2D() {
     const value = markerColors?.[panel];
     return value || IDENTITY_PALETTE[panel % IDENTITY_PALETTE.length];
   }, [markerColors]);
+  const hasPanelMarkers = React.useMemo(
+    () => Array.isArray(markerColors) && markerColors.some(Boolean),
+    [markerColors],
+  );
   const hasInsetPlots = React.useMemo(
     () => Array.isArray(insetPlots) && insetPlots.some(spec => Array.isArray(spec?.y) && spec.y.length >= 2),
     [insetPlots],
@@ -2714,6 +3170,7 @@ function Show2D() {
     if (Number(displaySigma ?? 4) !== nextSigma) setDisplaySigma(nextSigma);
     if (Number(spatialBin || 1) !== nextBin) setSpatialBin(nextBin);
     setSigmaDraft(null);
+    setSigmaFilterDraft(null);
   }, [isGallery, denoiseScopeAll, nImages, selectedIdx, displayFilters,
       displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
       setDisplayFilter, setDisplaySigma, setSpatialBin]);
@@ -2819,9 +3276,12 @@ function Show2D() {
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [overlayEditMode, setOverlayEditMode] = React.useState(false);
   const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [annotationSelection, setAnnotationSelection] = React.useState<AnnotationSelection | null>(null);
   const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isDraggingAnnotation, setIsDraggingAnnotation] = React.useState(false);
   const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
   const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const annotationDragRef = React.useRef<AnnotationDragState | null>(null);
   const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -2855,6 +3315,11 @@ function Show2D() {
   const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
+  const svgPreviewUrlRef = React.useRef<string | null>(null);
+  const svgPreviewImageRef = React.useRef<HTMLImageElement | null>(null);
+  const svgPreviewSnapRef = React.useRef({ x: 0, y: 0 });
+  const [svgPreview, setSvgPreview] = React.useState<Show2DSvgPreview | null>(null);
+  const [svgPreviewSnap, setSvgPreviewSnap] = React.useState({ x: 0, y: 0 });
   const pendingHtmlExportRef = React.useRef<{
     id: string;
     filename: string;
@@ -2863,6 +3328,8 @@ function Show2D() {
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
   const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  const hasPanelAnnotations = React.useMemo(() => (panelAnnotations || []).some((items) => items && items.length > 0), [panelAnnotations]);
+  const hasEditablePanelDecorations = hasPanelOverlays || hasPanelAnnotations;
   const scaleBarPanelSet = React.useMemo(() => new Set((scaleBarPanels || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))), [scaleBarPanels]);
   const panelHasScaleBar = React.useCallback((panel: number) => scaleBarVisible && (scaleBarPanelSet.size === 0 || scaleBarPanelSet.has(panel)), [scaleBarPanelSet, scaleBarVisible]);
   React.useEffect(() => {
@@ -2875,6 +3342,11 @@ function Show2D() {
     const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
     if (!exists) setOverlaySelection(null);
   }, [overlaySelection, panelOverlays]);
+  React.useEffect(() => {
+    if (!annotationSelection) return;
+    const exists = Boolean(panelAnnotations?.[annotationSelection.panel]?.[annotationSelection.annotation]);
+    if (!exists) setAnnotationSelection(null);
+  }, [annotationSelection, panelAnnotations]);
 
   const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
     const next = clonePanelOverlays(panelOverlays);
@@ -2883,6 +3355,55 @@ function Show2D() {
     next[panel][overlay] = nextSpec;
     setPanelOverlays(next);
   }, [panelOverlays, setPanelOverlays]);
+
+  const updatePanelAnnotation = React.useCallback((panel: number, annotation: number, nextSpec: PanelAnnotationSpec) => {
+    const next = (panelAnnotations || []).map((items) => (items || []).map((item) => ({ ...item })));
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || annotation < 0 || annotation >= next[panel].length) return;
+    next[panel][annotation] = nextSpec;
+    setPanelAnnotations(next);
+  }, [panelAnnotations, setPanelAnnotations]);
+
+  const beginPanelAnnotationDrag = React.useCallback((event: React.MouseEvent<HTMLElement>, panel: number, annotation: number) => {
+    if (!overlayEditMode) return;
+    const original = panelAnnotations?.[panel]?.[annotation];
+    const container = imageContainerRefs.current[panel];
+    if (!original || !container) return;
+    const draggableOriginal = draggableAnnotationSpec(original, event.currentTarget, container);
+    const rect = container.getBoundingClientRect();
+    annotationDragRef.current = {
+      panel,
+      annotation,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      panelWidth: Math.max(1, rect.width),
+      panelHeight: Math.max(1, rect.height),
+      original: draggableOriginal,
+    };
+    setAnnotationSelection({ panel, annotation });
+    setOverlaySelection(null);
+    setSelectedIdx(panel);
+    setIsDraggingAnnotation(true);
+    setIsDraggingPan(false);
+    setPanStart(null);
+    setPanningIdx(null);
+    const handleDocumentMove = (moveEvent: MouseEvent) => {
+      const drag = annotationDragRef.current;
+      if (!drag) return;
+      updatePanelAnnotation(drag.panel, drag.annotation, updateAnnotationFromDrag(drag, moveEvent.clientX, moveEvent.clientY));
+      moveEvent.preventDefault();
+    };
+    const handleDocumentUp = () => {
+      document.removeEventListener("mousemove", handleDocumentMove);
+      document.removeEventListener("mouseup", handleDocumentUp);
+      annotationDragRef.current = null;
+      setIsDraggingAnnotation(false);
+    };
+    document.addEventListener("mousemove", handleDocumentMove);
+    document.addEventListener("mouseup", handleDocumentUp);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [overlayEditMode, panelAnnotations, setSelectedIdx, updatePanelAnnotation]);
 
   const deleteSelectedOverlay = React.useCallback(() => {
     if (!overlaySelection) return;
@@ -2894,6 +3415,16 @@ function Show2D() {
     setOverlaySelection(null);
   }, [overlaySelection, panelOverlays, setPanelOverlays]);
 
+  const deleteSelectedAnnotation = React.useCallback(() => {
+    if (!annotationSelection) return;
+    const next = (panelAnnotations || []).map((items) => (items || []).map((item) => ({ ...item })));
+    const items = next[annotationSelection.panel];
+    if (!items || annotationSelection.annotation < 0 || annotationSelection.annotation >= items.length) return;
+    items.splice(annotationSelection.annotation, 1);
+    setPanelAnnotations(next);
+    setAnnotationSelection(null);
+  }, [annotationSelection, panelAnnotations, setPanelAnnotations]);
+
   const resetPanelOverlays = React.useCallback(() => {
     if (!overlayBaselineRef.current) return;
     setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
@@ -2901,6 +3432,14 @@ function Show2D() {
     overlayDragRef.current = null;
     setIsDraggingOverlay(false);
   }, [setPanelOverlays]);
+
+  const handleOverlayEditMenuToggle = React.useCallback((event?: React.SyntheticEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    setOverlayEditMode((value) => !value);
+    setMoreMenuAnchor(null);
+    window.setTimeout(() => setMoreMenuAnchor(null), 0);
+  }, []);
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
@@ -2932,7 +3471,11 @@ function Show2D() {
     setExportAnchor(null);
     const filename = makeHtmlExportFilename(title, nImages, height, width, standaloneHtmlMode);
     try {
-      const html = `<!doctype html>\n${document.documentElement.outerHTML}`;
+      const html = `<!doctype html>\n${standaloneHtmlWithCurrentWidgetState(
+        model,
+        standaloneWidgetStaticHtmlFromDocument(),
+        SHOW2D_STANDALONE_VIEW_STATE_KEYS,
+      )}`;
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       downloadBlob(blob, filename);
       setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
@@ -3085,6 +3628,19 @@ function Show2D() {
   const [zoomStates, setZoomStates] = React.useState<Map<number, ZoomState>>(new Map());
   const [linkedZoomState, setLinkedZoomState] = React.useState<ZoomState>(initialZoomState);
   const [linkedZoom, setLinkedZoom] = useModelState<boolean>("link_zoom");
+  // Wheel and trackpad events can arrive faster than the display refreshes.
+  // Keep an immediate mirror for correct cursor-anchored math, then commit at
+  // most once per animation frame. This keeps a large gallery responsive
+  // without dropping any accumulated zoom steps.
+  const zoomStateMirrorRef = React.useRef<{ linked: ZoomState; per: Map<number, ZoomState> }>({
+    linked: initialZoomState,
+    per: new Map(),
+  });
+  const pendingWheelZoomRef = React.useRef<{ idx: number; state: ZoomState } | null>(null);
+  const wheelZoomCommitRafRef = React.useRef(0);
+  const activeViewInteractionPanelRef = React.useRef<number | null>(null);
+  const settleViewPaintTimerRef = React.useRef(0);
+  const [settledViewPaintVersion, setSettledViewPaintVersion] = React.useState(0);
   const [isDraggingPan, setIsDraggingPan] = React.useState(false);
   const [panStart, setPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
 
@@ -3123,10 +3679,40 @@ function Show2D() {
     };
   }, [linkedZoom, linkPan, linkedZoomState, zoomStates, initialZoomState]);
 
+  React.useEffect(() => {
+    zoomStateMirrorRef.current = { linked: linkedZoomState, per: new Map(zoomStates) };
+  }, [linkedZoomState, zoomStates]);
+
+  const getImmediateZoomState = React.useCallback((idx: number): ZoomState => {
+    const mirror = zoomStateMirrorRef.current;
+    const per = mirror.per.get(idx) || initialZoomState;
+    return {
+      zoom: linkedZoom ? mirror.linked.zoom : per.zoom,
+      panX: linkPan ? mirror.linked.panX : per.panX,
+      panY: linkPan ? mirror.linked.panY : per.panY,
+    };
+  }, [initialZoomState, linkedZoom, linkPan]);
+
   // Helper to set zoom state for an image. zoom and pan honored independently:
   //   zoom: writes to linkedZoomState if linkedZoom, else per-image
   //   pan:  writes to linkedZoomState if linkPan, else per-image
   const setZoomState = React.useCallback((idx: number, state: ZoomState) => {
+    const mirror = zoomStateMirrorRef.current;
+    if (linkedZoom || linkPan) {
+      mirror.linked = {
+        zoom: linkedZoom ? state.zoom : mirror.linked.zoom,
+        panX: linkPan ? state.panX : mirror.linked.panX,
+        panY: linkPan ? state.panY : mirror.linked.panY,
+      };
+    }
+    if (!linkedZoom || !linkPan) {
+      const cur = mirror.per.get(idx) || initialZoomState;
+      mirror.per.set(idx, {
+        zoom: linkedZoom ? cur.zoom : state.zoom,
+        panX: linkPan ? cur.panX : state.panX,
+        panY: linkPan ? cur.panY : state.panY,
+      });
+    }
     if (linkedZoom || linkPan) {
       setLinkedZoomState(prev => ({
         zoom: linkedZoom ? state.zoom : prev.zoom,
@@ -3147,6 +3733,53 @@ function Show2D() {
       });
     }
   }, [linkedZoom, linkPan, initialZoomState]);
+
+  const scheduleWheelZoomState = React.useCallback((idx: number, state: ZoomState) => {
+    // Update the mirror immediately so several wheel events in one frame use
+    // the result of the previous event instead of stale React state.
+    const mirror = zoomStateMirrorRef.current;
+    if (linkedZoom || linkPan) {
+      mirror.linked = {
+        zoom: linkedZoom ? state.zoom : mirror.linked.zoom,
+        panX: linkPan ? state.panX : mirror.linked.panX,
+        panY: linkPan ? state.panY : mirror.linked.panY,
+      };
+    }
+    if (!linkedZoom || !linkPan) {
+      const cur = mirror.per.get(idx) || initialZoomState;
+      mirror.per.set(idx, {
+        zoom: linkedZoom ? cur.zoom : state.zoom,
+        panX: linkPan ? cur.panX : state.panX,
+        panY: linkPan ? cur.panY : state.panY,
+      });
+    }
+    pendingWheelZoomRef.current = { idx, state };
+    if (wheelZoomCommitRafRef.current) return;
+    wheelZoomCommitRafRef.current = requestAnimationFrame(() => {
+      wheelZoomCommitRafRef.current = 0;
+      const pending = pendingWheelZoomRef.current;
+      pendingWheelZoomRef.current = null;
+      if (pending) setZoomState(pending.idx, pending.state);
+    });
+  }, [initialZoomState, linkPan, linkedZoom, setZoomState]);
+  React.useEffect(() => () => {
+    cancelAnimationFrame(wheelZoomCommitRafRef.current);
+  }, []);
+
+  // During a non-linked gallery zoom, the user's gesture changes one panel.
+  // Repainting every nearby panel for each wheel event makes large report
+  // galleries feel sticky.  Paint the active panel during the gesture, then
+  // repaint the viewport once it settles so any unrelated display update is
+  // still reconciled without sacrificing interaction latency.
+  const beginViewInteraction = React.useCallback((idx: number) => {
+    activeViewInteractionPanelRef.current = idx;
+    window.clearTimeout(settleViewPaintTimerRef.current);
+    settleViewPaintTimerRef.current = window.setTimeout(() => {
+      activeViewInteractionPanelRef.current = null;
+      setSettledViewPaintVersion((version) => version + 1);
+    }, 140);
+  }, []);
+  React.useEffect(() => () => window.clearTimeout(settleViewPaintTimerRef.current), []);
 
   // FFT zoom/pan state (single mode)
   const [fftZoom, setFftZoom] = React.useState(DEFAULT_FFT_ZOOM);
@@ -3288,23 +3921,23 @@ function Show2D() {
   const [fftScaleMode, setFftScaleMode] = React.useState<"linear" | "log" | "power">("linear");
   const [fftAuto, setFftAuto] = React.useState(true);
   const [fftSmooth, setFftSmooth] = React.useState(true);
-  const [fftLinkedZoom, setFftLinkedZoom] = React.useState(false);
-  const [fftLinkPan, setFftLinkPan] = React.useState(false);
-  const [fftLinkedContrast, setFftLinkedContrast] = React.useState(true);
-  // Per-image FFT contrast (used when fftLinkedContrast=false)
+  const effectiveFftLinkedZoom = linkedZoom;
+  const effectiveFftLinkPan = linkPan;
+  const effectiveFftLinkedContrast = linkedContrast;
+  // Per-image FFT contrast (used when global linked contrast is off)
   const [fftContrastStates, setFftContrastStates] = React.useState<Map<number, { vminPct: number; vmaxPct: number }>>(new Map());
   const fftContrastFor = React.useCallback((idx: number) => {
-    if (fftLinkedContrast) return { vminPct: fftVminPct, vmaxPct: fftVmaxPct };
+    if (effectiveFftLinkedContrast) return { vminPct: fftVminPct, vmaxPct: fftVmaxPct };
     return fftContrastStates.get(idx) || { vminPct: 0, vmaxPct: 100 };
-  }, [fftLinkedContrast, fftVminPct, fftVmaxPct, fftContrastStates]);
+  }, [effectiveFftLinkedContrast, fftVminPct, fftVmaxPct, fftContrastStates]);
   const setFftContrastFor = React.useCallback((idx: number, val: { vminPct: number; vmaxPct: number }) => {
-    if (fftLinkedContrast) {
+    if (effectiveFftLinkedContrast) {
       setFftVminPct(val.vminPct);
       setFftVmaxPct(val.vmaxPct);
     } else {
       setFftContrastStates(prev => new Map(prev).set(idx, val));
     }
-  }, [fftLinkedContrast]);
+  }, [effectiveFftLinkedContrast]);
   const [fftStats, setFftStats] = React.useState<number[] | null>(null);
   const [fftQuality, setFftQuality] = React.useState<FftQualityMetrics | null>(null);
   const [galleryFftQuality, setGalleryFftQuality] = React.useState<Array<FftQualityMetrics | null>>([]);
@@ -3381,32 +4014,79 @@ function Show2D() {
   const getGalleryFftState = React.useCallback((idx: number) => {
     const per = galleryFftStates.get(idx) || { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 };
     return {
-      zoom: fftLinkedZoom ? linkedFftZoomState.zoom : per.zoom,
-      panX: fftLinkPan ? linkedFftZoomState.panX : per.panX,
-      panY: fftLinkPan ? linkedFftZoomState.panY : per.panY,
+      zoom: effectiveFftLinkedZoom ? linkedFftZoomState.zoom : per.zoom,
+      panX: effectiveFftLinkPan ? linkedFftZoomState.panX : per.panX,
+      panY: effectiveFftLinkPan ? linkedFftZoomState.panY : per.panY,
     };
-  }, [fftLinkedZoom, fftLinkPan, linkedFftZoomState, galleryFftStates]);
+  }, [effectiveFftLinkedZoom, effectiveFftLinkPan, linkedFftZoomState, galleryFftStates]);
   const setGalleryFftState = React.useCallback((idx: number, state: ZoomState) => {
-    if (fftLinkedZoom || fftLinkPan) {
+    if (effectiveFftLinkedZoom || effectiveFftLinkPan) {
       setLinkedFftZoomState(prev => ({
-        zoom: fftLinkedZoom ? state.zoom : prev.zoom,
-        panX: fftLinkPan ? state.panX : prev.panX,
-        panY: fftLinkPan ? state.panY : prev.panY,
+        zoom: effectiveFftLinkedZoom ? state.zoom : prev.zoom,
+        panX: effectiveFftLinkPan ? state.panX : prev.panX,
+        panY: effectiveFftLinkPan ? state.panY : prev.panY,
       }));
     }
-    if (!fftLinkedZoom || !fftLinkPan) {
+    if (!effectiveFftLinkedZoom || !effectiveFftLinkPan) {
       setGalleryFftStates(prev => {
         const cur = prev.get(idx) || { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 };
         const next = new Map(prev);
         next.set(idx, {
-          zoom: fftLinkedZoom ? cur.zoom : state.zoom,
-          panX: fftLinkPan ? cur.panX : state.panX,
-          panY: fftLinkPan ? cur.panY : state.panY,
+          zoom: effectiveFftLinkedZoom ? cur.zoom : state.zoom,
+          panX: effectiveFftLinkPan ? cur.panX : state.panX,
+          panY: effectiveFftLinkPan ? cur.panY : state.panY,
         });
         return next;
       });
     }
-  }, [fftLinkedZoom, fftLinkPan]);
+  }, [effectiveFftLinkedZoom, effectiveFftLinkPan]);
+  const previousEffectiveFftLinkRef = React.useRef({ zoom: effectiveFftLinkedZoom, pan: effectiveFftLinkPan, contrast: effectiveFftLinkedContrast });
+  React.useEffect(() => {
+    const previous = previousEffectiveFftLinkRef.current;
+    const zoomJustLinked = !previous.zoom && effectiveFftLinkedZoom;
+    const panJustLinked = !previous.pan && effectiveFftLinkPan;
+    const zoomJustUnlinked = previous.zoom && !effectiveFftLinkedZoom;
+    const panJustUnlinked = previous.pan && !effectiveFftLinkPan;
+    const contrastJustLinked = !previous.contrast && effectiveFftLinkedContrast;
+    const contrastJustUnlinked = previous.contrast && !effectiveFftLinkedContrast;
+    if (zoomJustLinked || panJustLinked) {
+      const current = galleryFftStates.get(selectedIdx) || { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 };
+      setLinkedFftZoomState(prev => ({
+        zoom: zoomJustLinked ? current.zoom : prev.zoom,
+        panX: panJustLinked ? current.panX : prev.panX,
+        panY: panJustLinked ? current.panY : prev.panY,
+      }));
+    }
+    if (zoomJustUnlinked || panJustUnlinked) {
+      const shared = linkedFftZoomState;
+      setGalleryFftStates(prev => {
+        const next = new Map(prev);
+        for (let idx = 0; idx < nImages; idx++) {
+          const current = next.get(idx) || { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 };
+          next.set(idx, {
+            zoom: zoomJustUnlinked ? shared.zoom : current.zoom,
+            panX: panJustUnlinked ? shared.panX : current.panX,
+            panY: panJustUnlinked ? shared.panY : current.panY,
+          });
+        }
+        return next;
+      });
+    }
+    if (contrastJustLinked) {
+      const current = fftContrastStates.get(selectedIdx) || { vminPct: fftVminPct, vmaxPct: fftVmaxPct };
+      setFftVminPct(current.vminPct);
+      setFftVmaxPct(current.vmaxPct);
+    }
+    if (contrastJustUnlinked) {
+      const shared = { vminPct: fftVminPct, vmaxPct: fftVmaxPct };
+      setFftContrastStates(prev => {
+        const next = new Map(prev);
+        for (let idx = 0; idx < nImages; idx++) next.set(idx, shared);
+        return next;
+      });
+    }
+    previousEffectiveFftLinkRef.current = { zoom: effectiveFftLinkedZoom, pan: effectiveFftLinkPan, contrast: effectiveFftLinkedContrast };
+  }, [effectiveFftLinkedZoom, effectiveFftLinkPan, effectiveFftLinkedContrast, galleryFftStates, linkedFftZoomState, fftContrastStates, fftVminPct, fftVmaxPct, nImages, selectedIdx]);
 
   // Resizable state (gallery starts smaller)
   const [canvasSize, setCanvasSize] = React.useState(nImages > 1 ? GALLERY_IMAGE_TARGET : SINGLE_IMAGE_TARGET);
@@ -3431,6 +4111,7 @@ function Show2D() {
   const filterInputSourceRef = React.useRef<{
     allFloats: Float32Array | null;
     allPanelStackFloats: Float32Array | null;
+    frameSourceKey: string;
     width: number;
     height: number;
     nImages: number;
@@ -3492,6 +4173,39 @@ function Show2D() {
   const galleryFftDimsRef = React.useRef<{ w: number; h: number } | null>(null);
   const galleryFftOverviewRef = React.useRef<{ downsample: number; sourceW: number; sourceH: number; fftW: number; fftH: number } | null>(null);
   const [galleryFftMagVersion, setGalleryFftMagVersion] = React.useState(0);
+  // Page playback must wait for a cached FFT to be painted, not merely for its
+  // magnitude to exist. Otherwise a rapid page change can show quality text
+  // above an unpainted black FFT canvas.
+  const [galleryFftOffscreenVersion, setGalleryFftOffscreenVersion] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
+    // The magnitude cache can already contain this page while its colorized
+    // canvas is still being uploaded. Hold here until the pixels exist so
+    // scientist-facing page playback never flashes a black FFT.
+    const fftPageReady = !effectiveShowFft || activePageIndices.every(
+      idx => !!fftOffscreensRef.current[idx],
+    );
+    if (!fftPageReady) return;
+    const timeout = window.setTimeout(() => {
+      const next = (currentPageIdx + 1) % Math.max(1, nPages || 1);
+      setPageSliderPreviewIdx(next);
+      setPageIdx(next);
+    }, 1000 / Math.max(1, pagePlayFps));
+    return () => window.clearTimeout(timeout);
+  }, [
+    activePageIndices,
+    currentPageIdx,
+    effectiveShowFft,
+    galleryFftOffscreenVersion,
+    isPaged,
+    nPages,
+    pagePlayFps,
+    pagePlaying,
+    setPageIdx,
+    setPageSliderPreviewIdx,
+  ]);
+
   const galleryFftPipelineRef = React.useRef<({
     displayData: Float32Array;
     displayMin: number;
@@ -3602,6 +4316,53 @@ function Show2D() {
     [hiddenPanelSet, orderedImageIndices]
   );
   visibleImageIndicesRef.current = visibleImageIndices;
+  // A large report gallery can have one hundred panels while a fullscreen
+  // viewport only shows a handful.  Keep data and panel state for every
+  // panel, but limit hot canvas repaint work (zoom/pan and overlays) to the
+  // viewport.  Without this, one wheel notch
+  // repaints every offscreen canvas in a full-detector report.
+  const [viewportPanelIndices, setViewportPanelIndices] = React.useState<number[]>([]);
+  React.useEffect(() => {
+    if (!isGallery || visibleImageIndices.length <= 12) {
+      setViewportPanelIndices([]);
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") {
+      setViewportPanelIndices(visibleImageIndices);
+      return;
+    }
+    const visible = new Set<number>();
+    const nodes = visibleImageIndices
+      .map((idx) => ({ idx, node: imageContainerRefs.current[idx] }))
+      .filter((item): item is { idx: number; node: HTMLDivElement } => !!item.node);
+    if (nodes.length === 0) return;
+    const commit = () => {
+      const next = visibleImageIndices.filter((idx) => visible.has(idx));
+      setViewportPanelIndices((previous) => (
+        previous.length === next.length && previous.every((idx, pos) => idx === next[pos])
+          ? previous
+          : next
+      ));
+    };
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const item = nodes.find((candidate) => candidate.node === entry.target);
+        if (!item) continue;
+        if (entry.isIntersecting) visible.add(item.idx);
+        else visible.delete(item.idx);
+      }
+      commit();
+    }, { root: null, rootMargin: "0px", threshold: 0.01 });
+    nodes.forEach(({ node }) => observer.observe(node));
+    return () => observer.disconnect();
+  }, [isGallery, visibleImageIndices]);
+  const viewportPaintImageIndices = React.useMemo(() => {
+    if (!isGallery || visibleImageIndices.length <= 12 || viewportPanelIndices.length === 0) {
+      return visibleImageIndices;
+    }
+    const inViewport = new Set(viewportPanelIndices);
+    return visibleImageIndices.filter((idx) => inViewport.has(idx));
+  }, [isGallery, visibleImageIndices, viewportPanelIndices]);
   const selectedPanelSet = React.useMemo(() => {
     const out = new Set<number>();
     for (const value of selectedPanels || []) {
@@ -3739,6 +4500,14 @@ function Show2D() {
       event.stopPropagation();
     } else {
       next = [panel];
+      if (
+        selectedIdx === panel &&
+        selectedVisiblePanels.length === 1 &&
+        selectedVisiblePanels[0] === panel
+      ) {
+        lastSelectedPanelRef.current = panel;
+        return false;
+      }
     }
     lastSelectedPanelRef.current = panel;
     setSelectedIdx(panel);
@@ -3861,11 +4630,15 @@ function Show2D() {
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
-  const galleryGapPx = Math.max(0, Number.isFinite(galleryGapPxState) ? galleryGapPxState : 8);
-  const galleryFramePx = isGallery && galleryGapPx > 0 && galleryGapColor ? galleryGapPx : 0;
+  const galleryGapPx = Math.max(0, Number.isFinite(interPanelGapPxState) ? interPanelGapPxState : (Number.isFinite(galleryGapPxState) ? galleryGapPxState : 0));
+  const galleryGapColorResolved = String(interPanelGapColorState || galleryGapColor || "");
+  const galleryOuterBorderPx = isGallery ? Math.max(0, Number.isFinite(galleryOuterBorderPxState) ? galleryOuterBorderPxState : 0) : 0;
+  const galleryOuterBorderColor = String(galleryOuterBorderColorState || galleryGapColorResolved || "");
+  const panelInnerBorderPx = Math.max(0, Number.isFinite(panelInnerBorderPxState) ? panelInnerBorderPxState : 1);
+  const panelInnerBorderColor = String(panelInnerBorderColorState || themeColors.border);
   const histogramWidthPx = 110;
   const histogramGapPx = 15;
-  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx + 2 * galleryFramePx : canvasW;
+  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx + 2 * galleryOuterBorderPx : canvasW;
   // Wrap against the actual notebook/container width. maxWidth below still
   // enforces the requested column count, while auto-fit avoids viewport-only
   // breakpoints that overflow narrow sidebars in a wide browser window.
@@ -3940,13 +4713,12 @@ function Show2D() {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0 || state.zoom <= 0) return;
     const row = height * (0.5 - state.panY / (state.zoom * canvasH));
     const col = width * (0.5 - state.panX / (state.zoom * canvasW));
-    setInitialZoom(state.zoom);
-    setZoomRowTrait(Math.max(0, Math.min(height - 1, row)));
-    setZoomColTrait(Math.max(0, Math.min(width - 1, col)));
-    // Sync the visible region (row0, row1, col0, col1) in image pixels so
-    // Python's current_view can capture the exact field of view for figures.
-    // Same inverse transform as the cursor readout: canvas -> image pixels.
-    // Debounced: wheel zoom calls persist per tick; one trait write per gesture.
+    const nextZoom = state.zoom;
+    const nextRow = Math.max(0, Math.min(height - 1, row));
+    const nextCol = Math.max(0, Math.min(width - 1, col));
+    // Persisting traits is for notebook/Python state and current_view capture.
+    // The visible canvas has already updated through local zoom state, so keep
+    // trait writes out of the high-frequency wheel/drag path.
     const cx = canvasW / 2;
     const cy = canvasH / 2;
     const row0 = Math.max(0, ((0 - cy - state.panY) / state.zoom + cy) / displayScale);
@@ -3954,7 +4726,12 @@ function Show2D() {
     const col0 = Math.max(0, ((0 - cx - state.panX) / state.zoom + cx) / displayScale);
     const col1 = Math.min(width, ((canvasW - cx - state.panX) / state.zoom + cx) / displayScale);
     window.clearTimeout(viewBoxTimerRef.current);
-    viewBoxTimerRef.current = window.setTimeout(() => setViewBoxTrait([row0, row1, col0, col1]), 100);
+    viewBoxTimerRef.current = window.setTimeout(() => {
+      setInitialZoom(nextZoom);
+      setZoomRowTrait(nextRow);
+      setZoomColTrait(nextCol);
+      setViewBoxTrait([row0, row1, col0, col1]);
+    }, 120);
   }, [canvasW, canvasH, width, height, displayScale, setInitialZoom, setZoomRowTrait, setZoomColTrait, setViewBoxTrait]);
 
   // Initial pan from zoom_row/zoom_col — runs once after first render with valid canvas dims.
@@ -4045,15 +4822,15 @@ function Show2D() {
           key: `${axis}-${rawKey}`,
           axis,
           color: String(color),
-          left: galleryFramePx + col0 * (canvasW + gap),
-          top: galleryFramePx + row0 * (canvasH + gap),
+          left: galleryOuterBorderPx + col0 * (canvasW + gap),
+          top: galleryOuterBorderPx + row0 * (canvasH + gap),
           width: (col1 - col0 + 1) * canvasW + Math.max(0, col1 - col0) * gap,
           height: (row1 - row0 + 1) * canvasH + Math.max(0, row1 - row0) * gap,
         };
       })
       .filter(Boolean) as Array<{ key: string; axis: "row" | "col"; color: string; left: number; top: number; width: number; height: number }>;
     return [...build(rowMarkers, "row"), ...build(colMarkers, "col")];
-  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryFramePx, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
+  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryOuterBorderPx, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
   const roiFftActive = effectiveShowFft && roiActive && roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0);
@@ -4073,22 +4850,61 @@ function Show2D() {
   const [offlineMax] = useModelState<number>("_offline_max");
   const [offlineMins] = useModelState<number[]>("_offline_mins");
   const [offlineMaxs] = useModelState<number[]>("_offline_maxs");
+  const expectedFrameValueCount = panelFloatOffsets[panelFloatOffsets.length - 1];
+  const uint8FolderIdentityEncoding = React.useMemo(() => {
+    if (!offline) return false;
+    if ((isRgbFlags || []).some(Boolean)) return false;
+    if (hasLocalPanelStacks) return false;
+    const n = Math.max(1, nImages || 1);
+    return Array.from({ length: n }).every((_, img) => {
+      const lo = (offlineMins && offlineMins.length > img) ? offlineMins[img] : offlineMin;
+      const hi = (offlineMaxs && offlineMaxs.length > img) ? offlineMaxs[img] : offlineMax;
+      return lo === 0 && hi === 255;
+    });
+  }, [hasLocalPanelStacks, isRgbFlags, nImages, offline, offlineMin, offlineMax, offlineMins, offlineMaxs]);
+  const uint8FolderFrameBytes = React.useMemo(() => {
+    if (!uint8FolderIdentityEncoding || !effectiveFrameBytes || effectiveFrameBytes.byteLength === 0) return null;
+    if (effectiveFrameBytes.byteLength !== expectedFrameValueCount) return null;
+    return new Uint8Array(effectiveFrameBytes.buffer, effectiveFrameBytes.byteOffset, effectiveFrameBytes.byteLength);
+  }, [effectiveFrameBytes, expectedFrameValueCount, uint8FolderIdentityEncoding]);
+  const uint8FolderPreviewMode = !!uint8FolderFrameBytes || (hasPerPanelFrameBytes && uint8FolderIdentityEncoding);
   const decodedFramesRef = React.useRef<Float32Array | null>(null);
   const allFloats = React.useMemo(() => {
-    const expectedLength = panelFloatOffsets[panelFloatOffsets.length - 1];
-    if (!frameBytes || frameBytes.byteLength === 0) {
+    const expectedLength = expectedFrameValueCount;
+    if (uint8FolderFrameBytes) {
+      decodedFramesRef.current = null;
+      return uint8FolderFrameBytes as unknown as Float32Array;
+    }
+    if (hasPerPanelFrameBytes) {
+      decodedFramesRef.current = null;
+      return new Float32Array(0);
+    }
+    if (!effectiveFrameBytes || effectiveFrameBytes.byteLength === 0) {
       const cached = decodedFramesRef.current;
+      if (frameBytesUrl) {
+        return cached !== null && cached.length === expectedLength ? cached : new Float32Array(0);
+      }
       return cached !== null && cached.length === expectedLength ? cached : new Float32Array(expectedLength);
     }
     let decoded: Float32Array;
-    if (offline && frameBytes && frameBytes.byteLength > 0) {
+    if (offline && effectiveFrameBytes && effectiveFrameBytes.byteLength > 0) {
       // Offline mode: bytes are uint8-quantized PER IMAGE. Dequantize each panel
       // with its own (lo, hi) so a gallery of differently-scaled panels stays
       // exact - a single global scale combs the narrow panels' histograms.
-      const u8 = new Uint8Array(frameBytes.buffer, frameBytes.byteOffset, frameBytes.byteLength);
-      const f32 = new Float32Array(u8.length);
+      const u8 = new Uint8Array(effectiveFrameBytes.buffer, effectiveFrameBytes.byteOffset, effectiveFrameBytes.byteLength);
       const per = width * height;
       const n = (offlineMins && offlineMins.length > 0) ? offlineMins.length : 1;
+      const rawUint8 = n > 0 && Array.from({ length: n }).every((_, img) => {
+        const lo = (offlineMins && offlineMins.length > img) ? offlineMins[img] : offlineMin;
+        const hi = (offlineMaxs && offlineMaxs.length > img) ? offlineMaxs[img] : offlineMax;
+        return lo === 0 && hi === 255;
+      });
+      if (rawUint8) {
+        decoded = new Float32Array(u8);
+        decodedFramesRef.current = decoded;
+        return decoded;
+      }
+      const f32 = new Float32Array(u8.length);
       for (let img = 0; img < n; img++) {
         // Fall back to the legacy global scalars if the per-image lists are absent.
         const lo = (offlineMins && offlineMins.length > img) ? offlineMins[img] : offlineMin;
@@ -4099,11 +4915,11 @@ function Show2D() {
       }
       decoded = f32;
     } else {
-      decoded = extractFloat32(frameBytes, expectedLength) ?? new Float32Array(expectedLength);
+      decoded = extractFloat32(effectiveFrameBytes, expectedLength) ?? new Float32Array(expectedLength);
     }
     decodedFramesRef.current = decoded;
     return decoded;
-  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height, panelFloatOffsets]);
+  }, [effectiveFrameBytes, expectedFrameValueCount, frameBytesUrl, hasPerPanelFrameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height, panelFloatOffsets, uint8FolderFrameBytes]);
 
   const panelStackFloatCount = React.useMemo(() => {
     const perImage = width * height;
@@ -4115,8 +4931,13 @@ function Show2D() {
   const decodedPanelStacksRef = React.useRef<Float32Array | null>(null);
   const allPanelStackFloats = React.useMemo(() => {
     if (panelStackFloatCount <= 0) return new Float32Array(0);
-    if (!panelStackBytes || panelStackBytes.byteLength === 0) {
+    if (!effectivePanelStackBytes || effectivePanelStackBytes.byteLength === 0) {
       const cached = decodedPanelStacksRef.current;
+      if (panelStackBytesUrl) {
+        return cached !== null && cached.length === panelStackFloatCount
+          ? cached
+          : new Float32Array(0);
+      }
       return cached !== null && cached.length === panelStackFloatCount
         ? cached
         : new Float32Array(panelStackFloatCount);
@@ -4124,9 +4945,9 @@ function Show2D() {
     let decoded: Float32Array;
     if (offline) {
       const u8 = new Uint8Array(
-        panelStackBytes.buffer,
-        panelStackBytes.byteOffset,
-        panelStackBytes.byteLength
+        effectivePanelStackBytes.buffer,
+        effectivePanelStackBytes.byteOffset,
+        effectivePanelStackBytes.byteLength
       );
       const f32 = new Float32Array(panelStackFloatCount);
       const perImage = width * height;
@@ -4144,13 +4965,14 @@ function Show2D() {
       }
       decoded = f32;
     } else {
-      decoded = extractFloat32(panelStackBytes, panelStackFloatCount)
+      decoded = extractFloat32(effectivePanelStackBytes, panelStackFloatCount)
         ?? new Float32Array(panelStackFloatCount);
     }
     decodedPanelStacksRef.current = decoded;
     return decoded;
   }, [
-    panelStackBytes,
+    effectivePanelStackBytes,
+    panelStackBytesUrl,
     panelStackFloatCount,
     offline,
     width,
@@ -4426,7 +5248,7 @@ function Show2D() {
   // drag, so scrubbing sigma is live with zero kernel round trips; the model
   // commit still happens on release. tv panels arrive Python-filtered and are
   // passed through untouched (browserFilterSupported is false).
-  const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
+  const sigmaDraftForFilter = browserFilterActive ? sigmaFilterDraft : null;
   const sigmaDraftPanel = sigmaDraftForFilter === null ? -1 : selectedIdx;
   const panelFilterKnobs = React.useCallback((panel: number) => {
     const { mode, sigma: resolvedSigma, bin } = resolvePanelDenoiseKnobs(
@@ -4549,7 +5371,9 @@ function Show2D() {
   const filterBannerText = browserFilterActive ? (browserFilterBanner ?? "") : (displayFilterBanner || "");
 
   React.useEffect(() => {
-    if (!allFloats || allFloats.length === 0) return;
+    const hasAggregateFrames = !!allFloats && allFloats.length > 0;
+    const hasPanelFrames = hasPerPanelFrameBytes && fetchedFrameBytePanelCount > 0;
+    if (!hasAggregateFrames && !hasPanelFrames) return;
     const dataArrays: Float32Array[] = [];
     const rgbArrays: (Float32Array | null)[] = [];
     const perImage = width * height;
@@ -4574,8 +5398,27 @@ function Show2D() {
         if (frameCount > 1 && stackOffset >= 0 && allPanelStackFloats.length >= stackOffset + (frameIndex + 1) * perImage) {
           const frameStart = stackOffset + frameIndex * perImage;
           dataArrays.push(new Float32Array(allPanelStackFloats.subarray(frameStart, frameStart + perImage)));
+        } else if (hasPerPanelFrameBytes) {
+          const view = fetchedFrameBytePanels[i] || null;
+          if (!view || view.byteLength === 0) {
+            dataArrays.push(new Float32Array(0));
+            continue;
+          }
+          const length = Math.min(perImage, view.byteLength);
+          const frame = new Uint8Array(view.buffer, view.byteOffset, length);
+          if (uint8FolderIdentityEncoding && length >= perImage) {
+            dataArrays.push(frame as unknown as Float32Array);
+          } else {
+            const decoded = new Float32Array(perImage);
+            const lo = (offlineMins && offlineMins.length > i) ? offlineMins[i] : offlineMin;
+            const hi = (offlineMaxs && offlineMaxs.length > i) ? offlineMaxs[i] : offlineMax;
+            const scale = (hi - lo) / 255.0;
+            for (let k = 0; k < length; k++) decoded[k] = frame[k] * scale + lo;
+            dataArrays.push(decoded);
+          }
         } else {
-          dataArrays.push(new Float32Array(allFloats.subarray(start, start + perImage)));
+          const frame = allFloats.subarray(start, start + perImage);
+          dataArrays.push(uint8FolderPreviewMode ? frame : new Float32Array(frame));
         }
       }
     }
@@ -4584,6 +5427,7 @@ function Show2D() {
     const sourceChanged = !previousSource
       || previousSource.allFloats !== allFloats
       || previousSource.allPanelStackFloats !== allPanelStackFloats
+      || previousSource.frameSourceKey !== frameSourceKey
       || previousSource.width !== width
       || previousSource.height !== height
       || previousSource.nImages !== nImages;
@@ -4610,7 +5454,7 @@ function Show2D() {
       rawDataRef.current = arrays;
       rgbDataRef.current = rgbArrays;
       lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
-      filterInputSourceRef.current = { allFloats, allPanelStackFloats, width, height, nImages };
+      filterInputSourceRef.current = { allFloats, allPanelStackFloats, frameSourceKey, width, height, nImages };
       appliedPanelViewSignaturesRef.current = panelViewSignatures;
       const epochs = galleryFftPanelEpochsRef.current.length === nImages
         ? [...galleryFftPanelEpochsRef.current]
@@ -4662,7 +5506,7 @@ function Show2D() {
       setDetailStreamStatus("preview");
       // Upload to GPU colormap engine if available (ref check, no state trigger)
       const engine = gpuCmapRef.current;
-      if (engine && gpuCmapReadyRef.current) {
+      if (!uint8FolderPreviewMode && engine && gpuCmapReadyRef.current) {
         for (let i = 0; i < arrays.length; i++) engine.uploadData(i, arrays[i], width, height);
         gpuDataVersionRef.current++;
         setGpuCmapVersion(v => v + 1);
@@ -4691,6 +5535,14 @@ function Show2D() {
     height,
     panelFloatOffsets,
     isRgbFlags,
+    fetchedFrameBytePanelCount,
+    fetchedFrameBytePanels,
+    frameSourceKey,
+    hasPerPanelFrameBytes,
+    offlineMin,
+    offlineMax,
+    offlineMins,
+    offlineMaxs,
     panelFrameCounts,
     panelStackOffsets,
     browserFilterActive,
@@ -4698,6 +5550,8 @@ function Show2D() {
     filterFrameForPanel,
     frequencyFilterEnabled,
     panelFrequencyKnobs,
+    uint8FolderIdentityEncoding,
+    uint8FolderPreviewMode,
   ]);
 
   React.useEffect(() => {
@@ -4799,19 +5653,31 @@ function Show2D() {
   // Initialize reusable offscreen canvases (one per image, resized when dimensions change)
   React.useEffect(() => {
     if (width <= 0 || height <= 0 || nImages <= 0) return;
+    if (uint8FolderPreviewMode && (canvasW <= 0 || canvasH <= 0)) return;
+    const offscreenW = uint8FolderPreviewMode ? Math.max(1, Math.round(canvasW)) : width;
+    const offscreenH = uint8FolderPreviewMode ? Math.max(1, Math.round(canvasH)) : height;
+    const current = mainOffscreensRef.current;
+    if (
+      current.length === nImages
+      && current.every(canvas => canvas && canvas.width === offscreenW && canvas.height === offscreenH)
+      && mainImgDatasRef.current.length === nImages
+      && mainImgDatasRef.current.every(imgData => imgData.width === offscreenW && imgData.height === offscreenH)
+    ) {
+      return;
+    }
     const canvases: HTMLCanvasElement[] = [];
     const imgDatas: ImageData[] = [];
     for (let i = 0; i < nImages; i++) {
       const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
+      canvas.width = offscreenW;
+      canvas.height = offscreenH;
       canvases.push(canvas);
-      imgDatas.push(canvas.getContext("2d")!.createImageData(width, height));
+      imgDatas.push(canvas.getContext("2d")!.createImageData(offscreenW, offscreenH));
     }
     mainOffscreensRef.current = canvases;
     mainImgDatasRef.current = imgDatas;
-    logBufferRef.current = new Float32Array(width * height);
-  }, [width, height, nImages]);
+    logBufferRef.current = new Float32Array(offscreenW * offscreenH);
+  }, [width, height, nImages, canvasW, canvasH, uint8FolderPreviewMode]);
 
   // Compute histogram data for the displayed image (reflects log scale)
   // GPU path: uses persistent per-slot histogram buffers — no CPU data scan
@@ -4920,6 +5786,7 @@ function Show2D() {
   // This prevents an early raw upload from winning deterministically when the
   // filter commit completed before/after engine initialization.
   React.useEffect(() => {
+    if (uint8FolderPreviewMode) return;
     const engine = gpuCmapRef.current;
     const arrays = rawDataRef.current;
     if (!engine || !gpuCmapReadyRef.current || !arrays || arrays.length === 0) return;
@@ -4931,7 +5798,7 @@ function Show2D() {
     engine.uploadLUT(cmapRef.current, lut);
     gpuDataVersionRef.current++;
     setGpuCmapVersion(v => v + 1);
-  }, [dataVersion, gpuCmapReadyVersion, width, height]);
+  }, [dataVersion, gpuCmapReadyVersion, width, height, uint8FolderPreviewMode]);
   // Generation counter for colormap — coalesces rapid slider events to ≤1 render per frame
   // Cached per-image data ranges — only recomputed when data or logScale changes, NOT on slider drag
   const dataRangesRef = React.useRef<{ min: number; max: number }[]>([]);
@@ -4957,7 +5824,7 @@ function Show2D() {
     const engine = gpuCmapRef.current;
     const nImg = rawDataRef.current.length;
 
-    if (engine && gpuCmapReadyRef.current && engine.slotCount >= nImg) {
+    if (!uint8FolderPreviewMode && engine && gpuCmapReadyRef.current && engine.slotCount >= nImg) {
       // GPU path: batch compute min/max on GPU (async, updates refs when done)
       const indices = Array.from({ length: nImg }, (_, i) => i);
       engine.computeRangeBatch(indices).then(rawRanges => {
@@ -4978,7 +5845,7 @@ function Show2D() {
       dataRangesRef.current = logScale ? logRanges : rawRanges;
     }
     logDataCacheRef.current = rawDataRef.current.slice();
-  }, [dataVersion, gpuCmapVersion]);
+  }, [dataVersion, gpuCmapVersion, uint8FolderPreviewMode]);
 
   // When logScale toggles, just swap cached ranges (no data scan)
   React.useEffect(() => {
@@ -4993,6 +5860,7 @@ function Show2D() {
   // One GPU submission for all images. Caches results for synchronous use in render.
   React.useEffect(() => {
     if (!autoContrast) { autoContrastCacheRef.current = []; return; }
+    if (uint8FolderPreviewMode) return;
     const engine = gpuCmapRef.current;
     if (!engine || !gpuCmapReadyRef.current || !rawDataRef.current) return;
     const cachedRanges = dataRangesRef.current;
@@ -5086,7 +5954,7 @@ function Show2D() {
       console.log(`[Show2D] GPU auto-contrast: ${nImg} images, ${allBins.length} histograms`);
       setAutoContrastVersion(v => v + 1);
     })();
-  }, [autoContrast, dataVersion, logScale, gpuCmapVersion, linkedContrast, traitVmin, traitVmax, traitVmins, traitVmaxs]);
+  }, [autoContrast, dataVersion, logScale, gpuCmapVersion, linkedContrast, traitVmin, traitVmax, traitVmins, traitVmaxs, uint8FolderPreviewMode]);
 
   // -------------------------------------------------------------------------
   // Data effect: normalize + colormap → reusable offscreen canvases
@@ -5232,9 +6100,13 @@ function Show2D() {
         if (!offscreen || !imgData) continue;
         const raw = rawDataRef.current?.[i];
         if (!raw) continue;
-        const processed = logScale ? applyLogScale(raw) : raw;
         const panelLut = COLORMAPS[panelCmapNames[i]] || COLORMAPS.inferno;
-        renderToOffscreenReuse(processed, panelLut, ranges[i].vmin, ranges[i].vmax, offscreen, imgData);
+        if (uint8FolderPreviewMode) {
+          renderSampledFrameToOffscreenReuse(raw, width, height, panelLut, ranges[i].vmin, ranges[i].vmax, logScale, offscreen, imgData);
+        } else {
+          const processed = logScale ? applyLogScale(raw) : raw;
+          renderToOffscreenReuse(processed, panelLut, ranges[i].vmin, ranges[i].vmax, offscreen, imgData);
+        }
       }
       if (isCurrentRender()) setOffscreenVersion(v => v + 1);
     };
@@ -5244,7 +6116,7 @@ function Show2D() {
     // commit into the retained offscreens. This also prevents a late black GPU
     // clear frame from overwriting a newer foreground repaint.
     const engine = gpuCmapRef.current;
-    const gpuReady = !hasMixedPanelCmaps && engine && gpuCmapReadyRef.current && engine.slotCount >= nImages;
+    const gpuReady = !uint8FolderPreviewMode && !hasMixedPanelCmaps && engine && gpuCmapReadyRef.current && engine.slotCount >= nImages;
     if (gpuReady) {
       engine!.uploadLUT(cmap, lut);
       const capturedRanges = ranges.slice();
@@ -5329,7 +6201,7 @@ function Show2D() {
       cancelled = true;
       if (renderRaf !== null) window.cancelAnimationFrame(renderRaf);
     };
-  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal, visibleImageIndices]);
+  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, canvasW, canvasH, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal, visibleImageIndices, uint8FolderPreviewMode]);
 
   // -------------------------------------------------------------------------
   // Maps-style detail fetch (preview binned only, _display_bin_factor > 1).
@@ -5482,8 +6354,13 @@ function Show2D() {
   // -------------------------------------------------------------------------
   React.useLayoutEffect(() => {
     if (mainOffscreensRef.current.length === 0) return;
+    const activePanel = activeViewInteractionPanelRef.current;
+    const paintIndices = (
+      isGallery && !linkedZoom && !linkPan && activePanel !== null
+    ) ? [activePanel] : viewportPaintImageIndices;
+    recordShow2DMainCanvasPaintBatch(paintIndices.length);
 
-    for (const i of visibleImageIndices) {
+    for (const i of paintIndices) {
       const canvas = canvasRefs.current[i];
       const offscreen = mainOffscreensRef.current[i];
       if (!canvas || !offscreen) continue;
@@ -5528,7 +6405,7 @@ function Show2D() {
         ctx.translate(flipX ? drawW : 0, flipY ? drawH : 0);
         ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
       }
-      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, drawW, drawH);
+      ctx.drawImage(offscreen, 0, 0, offscreen.width, offscreen.height, 0, 0, drawW, drawH);
       // Detail tile on top of the preview (same zoom/pan transform): tile
       // coordinates are full-res pixels, so divide by the preview bin factor
       // to land in the preview's coordinate space. Outside the tile the
@@ -5555,14 +6432,19 @@ function Show2D() {
         }
       }
       ctx.restore();
+      recordShow2DMainCanvasPaint(i);
     }
-  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal, imageFlipsHorizontal, imageFlipsVertical, offlineForTheme, rotationForPanel, visibleImageIndices]);
+  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, isGallery, linkedZoom, linkPan, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal, imageFlipsHorizontal, imageFlipsVertical, offlineForTheme, rotationForPanel, viewportPaintImageIndices, settledViewPaintVersion]);
 
   // -------------------------------------------------------------------------
   // Render Overlays (scale bar, colorbar, zoom indicator)
   // -------------------------------------------------------------------------
   React.useEffect(() => {
-    for (const i of visibleImageIndices) {
+    const activePanel = activeViewInteractionPanelRef.current;
+    const paintIndices = (
+      isGallery && !linkedZoom && !linkPan && activePanel !== null
+    ) ? [activePanel] : viewportPaintImageIndices;
+    for (const i of paintIndices) {
       const overlay = overlayRefs.current[i];
       if (!overlay) continue;
       const ctx = overlay.getContext("2d");
@@ -5580,13 +6462,16 @@ function Show2D() {
           ctx.scale(DPR, DPR);
           const barColor = styleString(scaleBarStyle?.color, "#fff");
           const shadowColor = styleString(scaleBarStyle?.shadow_color, "rgba(0,0,0,0.85)");
+          const barShadowColor = scaleBarStyle?.shadow_color == null ? "" : shadowColor;
           const outlineColor = styleString(scaleBarStyle?.outline_color, "rgba(0,0,0,0.85)");
           const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
           const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
-          ctx.fillStyle = shadowColor;
-          ctx.globalAlpha = 0.5;
-          ctx.fillRect(geom.barX + 1, geom.barY + 1, geom.barPx, geom.barHeight);
-          ctx.globalAlpha = 1;
+          if (barShadowColor) {
+            ctx.fillStyle = barShadowColor;
+            ctx.globalAlpha = 0.5;
+            ctx.fillRect(geom.barX + 1, geom.barY + 1, geom.barPx, geom.barHeight);
+            ctx.globalAlpha = 1;
+          }
           ctx.fillStyle = barColor;
           ctx.fillRect(geom.barX, geom.barY, geom.barPx, geom.barHeight);
           ctx.font = scaleBarCanvasFont(scaleBarStyle);
@@ -5845,7 +6730,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices, panelOverlays, overlaySelection]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkPan, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, viewportPaintImageIndices, panelOverlays, overlaySelection, settledViewPaintVersion]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -6542,7 +7427,12 @@ function Show2D() {
 
       const useRoiCrop = roiFftActive && roiList && roiSelectedIdx >= 0 && roiSelectedIdx < roiList.length;
       const roi = useRoiCrop ? roiList[roiSelectedIdx] : null;
-      const overviewDownsample = roi ? 1 : Math.max(1, Math.ceil(Math.max(width, height) / GALLERY_FFT_OVERVIEW_MAX_DIM));
+      const overviewMaxDim = isPaged
+        ? PAGED_GALLERY_FFT_OVERVIEW_MAX_DIM
+        : GALLERY_FFT_OVERVIEW_MAX_DIM;
+      const overviewDownsample = roi
+        ? 1
+        : Math.max(1, Math.ceil(Math.max(width, height) / overviewMaxDim));
       const fftPanelIndices = visibleImageIndices;
       const visibleFftSet = new Set(fftPanelIndices);
       for (let idx = 0; idx < nImages; idx++) {
@@ -6846,7 +7736,6 @@ function Show2D() {
 
   // Gallery FFT data effect: normalize + colormap → cached offscreen canvases
   // (does NOT depend on gallery zoom/pan states)
-  const [galleryFftOffscreenVersion, setGalleryFftOffscreenVersion] = React.useState(0);
   React.useEffect(() => {
     if (!effectiveShowFft || !isGallery) return;
     const lut = COLORMAPS[fftColormap] || COLORMAPS.inferno;
@@ -6995,7 +7884,7 @@ function Show2D() {
 
     renderGalleryFft();
     return () => { cancelled = true; };
-  }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, fftLinkedContrast, fftContrastStates, canvasRepaintSignal, visibleImageIndices]);
+  }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, effectiveFftLinkedContrast, fftContrastStates, canvasRepaintSignal, visibleImageIndices]);
 
   React.useEffect(() => {
     if (!effectiveShowFft || !isGallery || !fftMetricsEnabled) {
@@ -7041,7 +7930,7 @@ function Show2D() {
       ctx.drawImage(offscreen, 0, 0, fftW, fftH, 0, 0, canvasW, canvasH);
       ctx.restore();
     }
-  }, [effectiveShowFft, isGallery, nImages, canvasW, canvasH, width, height, galleryFftOffscreenVersion, galleryFftStates, fftLinkedZoom, linkedFftZoomState, fftSmooth, canvasRepaintSignal, visibleImageIndices]);
+  }, [effectiveShowFft, isGallery, nImages, canvasW, canvasH, width, height, galleryFftOffscreenVersion, galleryFftStates, effectiveFftLinkedZoom, effectiveFftLinkPan, linkedFftZoomState, fftSmooth, canvasRepaintSignal, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Mouse Handlers for Zoom/Pan
@@ -7055,7 +7944,7 @@ function Show2D() {
     const rect = canvas.getBoundingClientRect();
     
     // Get current zoom state
-    const zs = getZoomState(idx);
+    const zs = getImmediateZoomState(idx);
     
     // Mouse position relative to canvas (in canvas pixel coordinates)
     const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
@@ -7083,7 +7972,9 @@ function Show2D() {
     const newPanY = mouseCanvasY - (mouseImageY - cy) * newZoom - cy;
 
     const nextState = { zoom: newZoom, panX: newPanX, panY: newPanY };
-    setZoomState(idx, nextState);
+    recordShow2DZoomPanEvent("wheel");
+    beginViewInteraction(idx);
+    scheduleWheelZoomState(idx, nextState);
     persistZoomState(nextState);
   };
 
@@ -7386,14 +8277,14 @@ function Show2D() {
 
   // Gallery FFT zoom/pan handlers (only selected image's FFT responds)
   const handleGalleryFftWheel = (e: React.WheelEvent, idx: number) => {
-    if (isGallery && idx !== selectedIdx && !fftLinkedZoom) return;
+    if (isGallery && idx !== selectedIdx && !effectiveFftLinkedZoom) return;
     const zs = getGalleryFftState(idx);
     const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
     setGalleryFftState(idx, { ...zs, zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zs.zoom * zoomFactor)) });
   };
 
   const handleGalleryFftMouseDown = (e: React.MouseEvent, idx: number) => {
-    if (isGallery && idx !== selectedIdx) {
+    if (isGallery && idx !== selectedIdx && !effectiveFftLinkPan) {
       setSelectedIdx(idx);
       return; // Select first, don't start panning
     }
@@ -7796,6 +8687,7 @@ function Show2D() {
         const original = panelOverlays?.[idx]?.[hit.overlay];
         if (!original) return;
         setOverlaySelection({ panel: idx, overlay: hit.overlay });
+        setAnnotationSelection(null);
         overlayDragRef.current = {
           mode: hit.mode,
           panel: idx,
@@ -7813,6 +8705,7 @@ function Show2D() {
         return;
       }
       setOverlaySelection(null);
+      setAnnotationSelection(null);
     }
     if (profileActive) {
       const { imgCol, imgRow } = screenToImg(e, idx);
@@ -7894,6 +8787,13 @@ function Show2D() {
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
     if (updateInsetPlotDrag(e, idx)) return;
+    if (annotationDragRef.current) {
+      const drag = annotationDragRef.current;
+      if (idx !== drag.panel) return;
+      updatePanelAnnotation(drag.panel, drag.annotation, updateAnnotationFromDrag(drag, e.clientX, e.clientY));
+      e.preventDefault();
+      return;
+    }
     if (overlayDragRef.current) {
       const drag = overlayDragRef.current;
       if (idx !== drag.panel) return;
@@ -7916,6 +8816,7 @@ function Show2D() {
       const dx = (e.clientX - panStart.x) * scaleX;
       const dy = (e.clientY - panStart.y) * scaleY;
       const zs = getZoomState(idx);
+      recordShow2DZoomPanEvent("pan");
       setZoomState(idx, { ...zs, panX: panStart.pX + dx, panY: panStart.pY + dy });
       return;
     }
@@ -8125,6 +9026,11 @@ function Show2D() {
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
     if (finishInsetPlotDrag(e, idx)) return;
+    if (annotationDragRef.current) {
+      annotationDragRef.current = null;
+      setIsDraggingAnnotation(false);
+      return;
+    }
     if (overlayDragRef.current) {
       overlayDragRef.current = null;
       setIsDraggingOverlay(false);
@@ -8263,6 +9169,25 @@ function Show2D() {
       setPanningIdx(null);
     }
   };
+  const clearTransientHoverInspection = () => {
+    setCursorInfo(null);
+    insetHoverKeyRef.current = "";
+    setInsetHoverInfo(null);
+    setIsHoveringOverlay(false);
+    setIsHoveringResize(false);
+    setIsHoveringResizeInner(false);
+    setHoveredProfileEndpoint(null);
+    setIsHoveringProfileLine(false);
+  };
+  const handleRootMouseMoveCapture = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!cursorInfo && !insetHoverInfo && !isHoveringOverlay && !isHoveringResize && !isHoveringResizeInner && hoveredProfileEndpoint === null && !isHoveringProfileLine) return;
+    const target = e.target instanceof Element ? e.target : null;
+    if (target?.closest("[data-show2d-image-panel], [data-show2d-fft-panel]")) return;
+    clearTransientHoverInspection();
+  };
+  const handleRootMouseLeave = () => {
+    clearTransientHoverInspection();
+  };
 
   // -------------------------------------------------------------------------
   // Copy to clipboard handler
@@ -8279,44 +9204,44 @@ function Show2D() {
     }
   }, [isGallery, selectedIdx, labels]);
 
-  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
-    setExportAnchor(null);
+  const buildSvgExport = React.useCallback((scale: number = 3): Show2DSvgExport => {
     const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
     const panels = isGallery ? visibleImageIndices : [0];
     if (panels.length === 0 || canvasW <= 0 || canvasH <= 0) {
-      setLocalExportStatus("Export failed: no visible Show2D panels");
-      return;
+      throw new Error("no visible Show2D panels");
     }
     const cols = isGallery ? Math.max(1, Math.min(clampedNcols, panels.length)) : 1;
     const rows = Math.max(1, Math.ceil(panels.length / cols));
     const gap = isGallery ? galleryGapPx : 0;
-    const frame = gap > 0 && galleryGapColor ? gap : 0;
+    const frame = isGallery ? galleryOuterBorderPx : 0;
+    const frameColor = galleryOuterBorderColor;
+    const gapColor = galleryGapColorResolved;
     const titleHeight = showTitle !== false && title ? 30 : 0;
     const svgWidth = 2 * frame + cols * canvasW + (cols - 1) * gap;
     const svgHeight = titleHeight + 2 * frame + rows * canvasH + (rows - 1) * gap;
     const filename = makeSvgExportFilename(title, panels.length, height, width, exportScale);
 
-    try {
+    {
       const defs: string[] = [];
       const body: string[] = [];
-      if (gap > 0 && galleryGapColor) {
-        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(galleryGapColor)}"/>`);
+      if (frame > 0 && frameColor) {
+        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(svgColor(frameColor))}"/>`);
+      }
+      if (gap > 0 && gapColor) {
+        body.push(`<rect x="${frame}" y="${titleHeight + frame}" width="${Math.max(0, svgWidth - 2 * frame)}" height="${Math.max(0, svgHeight - titleHeight - 2 * frame)}" fill="${escapeXmlAttr(svgColor(gapColor))}"/>`);
       }
       if (titleHeight > 0) {
         body.push(
-          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(themeColors.text)}">${escapeXmlText(title)}</text>`
+          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(svgColor(themeColors.text))}">${escapeXmlText(title)}</text>`
         );
       }
 
       const titleFontFamily = styleString(panelTitleStyle?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
-      const titleFg = styleString(panelTitleStyle?.fg, "#fff");
+      const titleFg = svgColor(panelTitleStyle?.fg, "#fff");
       const titleWeight = panelTitleStyle?.font_weight ?? 700;
       const titleOpacity = Math.max(0, Math.min(1, styleNumber(panelTitleStyle?.opacity, 0.95)));
       const titleOutlineWidth = Math.max(0, styleNumber(panelTitleStyle?.outline_width, 0));
-      const titleOutlineColor = styleString(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
-      const titleOutlineAttrs = titleOutlineWidth > 0
-        ? ` stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
-        : "";
+      const titleOutlineColor = svgColor(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
       const titleTextAnchor = (anchor: string): string => {
         if (anchor.includes("right")) return "end";
         if (anchor.includes("center")) return "middle";
@@ -8344,6 +9269,8 @@ function Show2D() {
         if (align === "right" || align === "end") return { x: px + canvasW - 28, y: py + 6 + fontSize, anchor: "end" };
         return { x: px + canvasW / 2, y: py + 6 + fontSize, anchor: "middle" };
       };
+      const titleOutlineText = (xPos: number, yPos: number, anchor: string, fontSize: number, text: string): string =>
+        `<text x="${xPos}" y="${yPos}" text-anchor="${anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="none" stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round">${escapeXmlText(text)}</text>`;
 
       groupMarkerOverlays.forEach((marker) => {
         body.push(
@@ -8363,13 +9290,15 @@ function Show2D() {
         const clipId = `show2d-svg-clip-${slot}`;
         defs.push(`<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}"/></clipPath>`);
         const dataUrl = scaledCanvasPngDataUrl(canvas, exportScale, smooth);
-        const panelStroke = frame > 0 && galleryGapColor ? galleryGapColor : themeColors.border;
+        const panelStroke = svgColor(panelInnerBorderColor, themeColors.border);
         body.push(
-          `<g id="show2d-panel-${panel}" data-show2d-panel="${panel}">`,
+          `<g id="show2d-panel-${panel}">`,
           `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="#000"/>`,
-          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
-          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(panelStroke)}" stroke-width="1"/>`
+          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" xlink:href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`
         );
+        if (panelInnerBorderPx > 0) {
+          body.push(`<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(panelStroke)}" stroke-width="${panelInnerBorderPx}"/>`);
+        }
         const markerColor = panelMarkerColor(panel);
         if (markerAround) {
           body.push(
@@ -8394,9 +9323,11 @@ function Show2D() {
               const lineY = titlePos.y;
               if (titleOutlineWidth <= 0) {
                 body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`);
+              } else {
+                body.push(titleOutlineText(titlePos.x, lineY, titlePos.anchor, fontSize, rich.text));
               }
-              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs} data-show2d-panel-title-spans-svg="true">`);
-              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}">`);
+              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(svgColor(span.color))}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
               body.push("</text>");
             } else {
               const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
@@ -8405,8 +9336,10 @@ function Show2D() {
                 const lineY = titlePos.y + lineIdx * fontSize * 1.2;
                 if (titleOutlineWidth <= 0) {
                   body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`);
+                } else {
+                  body.push(titleOutlineText(titlePos.x, lineY, titlePos.anchor, fontSize, line));
                 }
-                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs}>${escapeXmlText(line)}</text>`);
+                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}">${escapeXmlText(line)}</text>`);
               });
             }
             body.push(`</g>`);
@@ -8437,7 +9370,7 @@ function Show2D() {
           vectorLayer.push(svgPanelAnnotationElement(annotation, x, y, canvasW, canvasH));
         });
         if (vectorLayer.some(Boolean)) {
-          body.push(`<g clip-path="url(#${clipId})" data-show2d-vector-layer="true">${vectorLayer.join("")}</g>`);
+          body.push(`<g data-show2d-vector-layer="true" clip-path="url(#${clipId})">${vectorLayer.join("")}</g>`);
         }
 
         if (panelHasScaleBar(panel)) {
@@ -8449,21 +9382,23 @@ function Show2D() {
           if (geom) {
             const barY = y + geom.barY;
             const barX = x + geom.barX;
-            const barColor = styleString(scaleBarStyle?.color, "#fff");
-            const shadowColor = styleString(scaleBarStyle?.shadow_color, "#000");
-            const outlineColor = styleString(scaleBarStyle?.outline_color, "#000");
+            const barColor = svgColor(scaleBarStyle?.color, "#fff");
+            const shadowColor = svgColor(scaleBarStyle?.shadow_color, "#000");
+            const barShadowColor = scaleBarStyle?.shadow_color == null ? "" : shadowColor;
+            const outlineColor = svgColor(scaleBarStyle?.outline_color, "#000");
             const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
             const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
             const fontAttrs = scaleBarSvgFontAttrs(scaleBarStyle);
             const labelX = barX + geom.barPx / 2;
             const labelY = barY - labelGap;
-            body.push(
-              `<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.5"/>`,
-              `<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(barColor)}"/>`
-            );
+            if (barShadowColor) {
+              body.push(`<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(barShadowColor)}" fill-opacity="0.5"/>`);
+            }
+            body.push(`<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(barColor)}"/>`);
             if (outlineWidth > 0) {
               body.push(
-                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill">${escapeXmlText(geom.label)}</text>`
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="none" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round">${escapeXmlText(geom.label)}</text>`,
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(geom.label)}</text>`
               );
             } else {
               body.push(
@@ -8487,46 +9422,22 @@ function Show2D() {
 
       const svg = [
         `<?xml version="1.0" encoding="UTF-8"?>`,
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}" data-show2d-svg-export="true" data-raster-scale="${exportScale}">`,
+        `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}">`,
         `<defs>${defs.join("")}</defs>`,
         body.join(""),
         `</svg>`,
       ].join("\n");
-      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-      const picker = (window as Show2DWindow).showSaveFilePicker;
-      let handle: Show2DFileHandle | null = null;
-      if (picker) {
-        try {
-          handle = await picker({
-            suggestedName: filename,
-            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
-          });
-        } catch (err) {
-          if (isAbortLikeError(err)) {
-            setLocalExportStatus("Export canceled");
-            return;
-          }
-          throw err;
-        }
-      }
-      if (handle) {
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } else {
-        downloadBlob(blob, filename);
-      }
-      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
-    } catch (err) {
-      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { svg, width: svgWidth, height: svgHeight, filename, scale: exportScale };
     }
   }, [
     canvasH,
     canvasW,
     clampedNcols,
     cmap,
-    galleryGapColor,
     galleryGapPx,
+    galleryGapColorResolved,
+    galleryOuterBorderColor,
+    galleryOuterBorderPx,
     getZoomState,
     groupMarkerOverlays,
     height,
@@ -8536,6 +9447,8 @@ function Show2D() {
     markerAround,
     panelMarkerColor,
     panelHasScaleBar,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
     panelAnnotations,
     panelOverlays,
     panelTitleFontSize,
@@ -8560,6 +9473,113 @@ function Show2D() {
     visibleImageIndices,
     width,
   ]);
+
+  const clearSvgPreview = React.useCallback(() => {
+    if (svgPreviewUrlRef.current) {
+      window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      svgPreviewUrlRef.current = null;
+    }
+    setSvgPreview(null);
+  }, []);
+
+  React.useEffect(() => () => {
+    if (svgPreviewUrlRef.current) {
+      window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      svgPreviewUrlRef.current = null;
+    }
+  }, []);
+
+  const snapSvgPreviewToDevicePixels = React.useCallback(() => {
+    const el = svgPreviewImageRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    const current = svgPreviewSnapRef.current;
+    const layoutLeft = rect.left - current.x;
+    const layoutTop = rect.top - current.y;
+    const x = Math.ceil(layoutLeft * dpr) / dpr - layoutLeft;
+    const y = Math.ceil(layoutTop * dpr) / dpr - layoutTop;
+    svgPreviewSnapRef.current = { x, y };
+    setSvgPreviewSnap((prev) => (
+      Math.abs(prev.x - x) < 0.001 && Math.abs(prev.y - y) < 0.001
+        ? prev
+        : { x, y }
+    ));
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!svgPreview) {
+      svgPreviewSnapRef.current = { x: 0, y: 0 };
+      setSvgPreviewSnap((prev) => (prev.x === 0 && prev.y === 0 ? prev : { x: 0, y: 0 }));
+      return undefined;
+    }
+    let frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
+    const timers = [
+      window.setTimeout(snapSvgPreviewToDevicePixels, 40),
+      window.setTimeout(snapSvgPreviewToDevicePixels, 160),
+      window.setTimeout(snapSvgPreviewToDevicePixels, 400),
+    ];
+    const onResize = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      timers.forEach((timer) => window.clearTimeout(timer));
+      window.removeEventListener("resize", onResize);
+    };
+  }, [snapSvgPreviewToDevicePixels, svgPreview]);
+
+  const handleSvgPreview = React.useCallback((scale: number = 3) => {
+    setExportAnchor(null);
+    try {
+      const built = buildSvgExport(scale);
+      const blob = new Blob([built.svg], { type: "image/svg+xml;charset=utf-8" });
+      if (svgPreviewUrlRef.current) window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      const url = window.URL.createObjectURL(blob);
+      svgPreviewUrlRef.current = url;
+      setSvgPreview({ ...built, url, size: blob.size });
+      setLocalExportStatus(`Preview ${built.filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Preview failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [buildSvgExport]);
+
+  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
+    setExportAnchor(null);
+    try {
+      const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
+      const built = svgPreview && svgPreview.scale === exportScale ? svgPreview : buildSvgExport(exportScale);
+      const blob = new Blob([built.svg], { type: "image/svg+xml;charset=utf-8" });
+      const picker = (window as Show2DWindow).showSaveFilePicker;
+      let handle: Show2DFileHandle | null = null;
+      if (picker) {
+        try {
+          handle = await picker({
+            suggestedName: built.filename,
+            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
+          });
+        } catch (err) {
+          if (isAbortLikeError(err)) {
+            setLocalExportStatus("Export canceled");
+            return;
+          }
+          throw err;
+        }
+      }
+      if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        downloadBlob(blob, built.filename);
+      }
+      setLocalExportStatus(`Saved ${built.filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [buildSvgExport, svgPreview]);
 
   const handleHandoffToShow3D = React.useCallback(() => {
     const panels = visibleImageIndices;
@@ -8656,6 +9676,7 @@ function Show2D() {
   // Keyboard shortcuts
   // -------------------------------------------------------------------------
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (shouldIgnoreWidgetShortcut(e.target)) return;
     // Number keys 1-9 select gallery images (avoids arrow key conflicts with Jupyter)
     if (isGallery && e.key >= "1" && e.key <= "9") {
       const target = pageShortcutTarget(
@@ -8710,6 +9731,17 @@ function Show2D() {
           setMeasurePoints([]);
         }
         break;
+      case "h":
+      case "H":
+        if (isGallery) {
+          const candidates = selectedVisiblePanels.length > 0 ? selectedVisiblePanels : [selectedIdx];
+          const hideable = candidates.filter((panel) => visibleImageIndices.includes(panel));
+          if (hideable.length > 0 && visibleImageCount - hideable.length >= 1) {
+            e.preventDefault();
+            setPanelsHidden(hideable, true);
+          }
+        }
+        break;
       case "]":
         {
           e.preventDefault();
@@ -8732,7 +9764,10 @@ function Show2D() {
         break;
       case "Delete":
       case "Backspace":
-        if (overlayEditMode && overlaySelection) {
+        if (overlayEditMode && annotationSelection) {
+          e.preventDefault();
+          deleteSelectedAnnotation();
+        } else if (overlayEditMode && overlaySelection) {
           e.preventDefault();
           deleteSelectedOverlay();
         } else if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
@@ -8744,14 +9779,25 @@ function Show2D() {
         break;
     }
   };
+  const handleRootMouseDownCapture = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (shouldIgnoreWidgetShortcut(e.target)) return;
+    staticFallbackRootRef.current?.focus({ preventScroll: true });
+  };
 
   // -------------------------------------------------------------------------
   // Render (Show3D-style layout)
   // -------------------------------------------------------------------------
   const needsReset = getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 || getZoomState(isGallery ? selectedIdx : 0).panX !== 0 || getZoomState(isGallery ? selectedIdx : 0).panY !== 0;
-  const statsIdx = isGallery ? selectedIdx : 0;
+  // Scientists inspect across galleries by moving the mouse, not by selecting
+  // every panel first. Keep control state tied to selectedIdx, but let the
+  // stats/readout strip follow the hovered panel while the cursor is over it.
+  const hoverStatsIdx = isGallery && cursorInfo && visibleImageIndices.includes(cursorInfo.idx)
+    ? cursorInfo.idx
+    : null;
+  const statsIdx = isGallery ? (hoverStatsIdx ?? selectedIdx) : 0;
   const currentFrameStats = localPanelFrameStats.get(statsIdx);
   const svgExportAvailable = canvasW > 0 && canvasH > 0 && visibleImageIndices.length > 0;
+  const isDraggingEditableDecoration = isDraggingOverlay || isDraggingAnnotation;
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
@@ -8923,7 +9969,15 @@ function Show2D() {
       ref={staticFallbackRootRef}
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      onMouseDownCapture={handleRootMouseDownCapture}
+      onMouseMoveCapture={handleRootMouseMoveCapture}
+      onMouseLeave={handleRootMouseLeave}
       data-show2d-panel-playback-fps={panelPlaybackFps}
+      data-show2d-folder-frame-files={frameBytesUrlList.length}
+      data-show2d-folder-frame-files-loaded={fetchedFrameBytePanelCount}
+      data-show2d-selected-panel={selectedIdx}
+      data-show2d-selected-panels={(selectedPanels || []).join(",")}
+      data-show2d-visible-panel-count={visibleImageCount}
       data-show2d-canvas-repaint-signal={canvasRepaintSignal}
       data-show2d-fft-cache-hits={galleryFftDebug?.galleryFftCacheHits ?? 0}
       data-show2d-fft-cache-misses={galleryFftDebug?.galleryFftCacheMisses ?? 0}
@@ -8935,6 +9989,11 @@ function Show2D() {
       data-frequency-filter-backend={frequencyFilterEnabled ? frequencyFilterBackend : "off"}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
+      {overlayEditMode && (
+        <style>
+          {".MuiModal-backdrop.MuiBackdrop-invisible { pointer-events: none !important; }"}
+        </style>
+      )}
       <FolderWatchBadge
         state={folderWatchState}
         detail={folderWatchDetail}
@@ -9052,7 +10111,7 @@ function Show2D() {
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Poisson (Anscombe): counting noise grows with signal (variance = mean), so a plain blur over-smooths bright regions. The Anscombe transform y = 2&radic;(x + 3/8) makes the noise variance about 1 everywhere, a Gaussian of width &sigma; is applied, then the inverse (y/2)&sup2; - 3/8 maps back to counts. Best for sparse EDS; pair with Bin 2 and &sigma; 6 to 10.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Gaussian: a simple blur of width &sigma;, fine for decent-dose images. None: raw counts, for any quantitative measurement.</Typography>
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
-              <KeyboardShortcuts items={isGallery ? [["← / →", hasLocalPanelStacks ? "Prev / Next frame in a selected stack; otherwise select panel" : "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["← / →", hasLocalPanelStacks ? "Prev / Next frame" : "No action"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
+              <KeyboardShortcuts items={isGallery ? [["← / →", hasLocalPanelStacks ? "Prev / Next frame in a selected stack; otherwise select panel" : "Prev / Next image"], ["1 – 9", "Select image"], ["Shift-click", "Select panel range"], ["Ctrl/⌘-click", "Toggle panel selection"], ["H", "Hide selected panels"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["← / →", hasLocalPanelStacks ? "Prev / Next frame" : "No action"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
 	            </Box>} theme={themeInfo.theme} />}
 	            {showControls && (
 	              <Button
@@ -9182,7 +10241,7 @@ function Show2D() {
 	                </IconButton>
 	                <Select
 	                  value={String(pagePlayFps)}
-	                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+	                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 8)}
 	                  size="small"
 	                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
 	                  MenuProps={themedTopMenuProps}
@@ -9432,6 +10491,9 @@ function Show2D() {
                 onClose={() => setMoreMenuAnchor(null)}
                 MenuListProps={{ "aria-label": "More tools" }}
                 {...themedTopMenuProps}
+                BackdropProps={{
+                  sx: { pointerEvents: overlayEditMode ? "none" : "auto" },
+                }}
               >
                 <MenuItem dense onClick={handleSaveViewState} sx={{ fontSize: 12 }}>
                   Save State
@@ -9488,15 +10550,23 @@ function Show2D() {
                     </Typography>
                   </Box>
                 )}
-                {hasPanelOverlays && (
-                  <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
-                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">
+                {hasEditablePanelDecorations && (
+                  <MenuItem
+                    dense
+                    onMouseDown={handleOverlayEditMenuToggle}
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") handleOverlayEditMenuToggle(event);
+                    }}
+                    sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined labels, circles, and rectangles. Drag labels or shape interiors to move; drag shape edges to resize.">
                       Overlay Edit
                     </Typography>
                     <Switch
                       checked={overlayEditMode}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setOverlayEditMode(event.target.checked)}
+                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                      onChange={(event) => { event.preventDefault(); event.stopPropagation(); }}
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
@@ -9831,6 +10901,8 @@ function Show2D() {
                 {exportBusy ? "Exporting" : "Export"}
               </Button>
               <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+                {svgExportAvailable && !svgPreview && <MenuItem onClick={() => handleSvgPreview(3)} sx={{ fontSize: 12 }}>Preview SVG</MenuItem>}
+                {svgPreview && <MenuItem onClick={() => { setExportAnchor(null); clearSvgPreview(); setLocalExportStatus("Exited SVG preview"); }} sx={{ fontSize: 12 }}>Exit SVG preview</MenuItem>}
                 {svgExportAvailable && <MenuItem onClick={() => handleSvgExport(3)} sx={{ fontSize: 12 }}>SVG</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
@@ -9874,25 +10946,82 @@ function Show2D() {
 	          </Stack>
 	          )}
 
-          {isGallery ? (
+          {svgPreview ? (
+            <Box
+              data-show2d-svg-preview="true"
+              sx={{
+                width: svgPreview.width,
+                boxSizing: "content-box",
+                bgcolor: "#fff",
+                overflowX: "auto",
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 1,
+                  px: 0.75,
+                  py: 0.4,
+                  bgcolor: themeColors.bgAlt,
+                  borderBottom: `1px solid ${themeColors.border}`,
+                  boxSizing: "border-box",
+                  width: svgPreview.width,
+                }}
+              >
+                <Typography sx={{ ...typography.label, color: themeColors.accent }}>
+                  SVG preview
+                </Typography>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                  <Button size="small" sx={compactButton} onClick={() => handleSvgPreview(svgPreview.scale)}>Refresh</Button>
+                  <Button size="small" sx={compactButton} onClick={() => { clearSvgPreview(); setLocalExportStatus("Exited SVG preview"); }}>Exit</Button>
+                </Box>
+              </Box>
+              <img
+                ref={svgPreviewImageRef}
+                data-show2d-svg-preview-image="true"
+                src={svgPreview.url}
+                alt={`${title || "Show2D"} SVG preview`}
+                onLoad={snapSvgPreviewToDevicePixels}
+                style={{
+                  display: "block",
+                  width: svgPreview.width,
+                  height: svgPreview.height,
+                  maxWidth: "none",
+                  objectFit: "contain",
+                  marginLeft: svgPreviewSnap.x,
+                  marginTop: svgPreviewSnap.y,
+                  marginRight: -svgPreviewSnap.x,
+                  marginBottom: -svgPreviewSnap.y,
+                }}
+              />
+            </Box>
+          ) : isGallery ? (
             /* Gallery mode */
-            <Box sx={{ position: "relative", maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box" }}>
+            <Box sx={{
+              position: "relative",
+              maxWidth: galleryGridWidth,
+              width: "100%",
+              boxSizing: "border-box",
+              p: galleryOuterBorderPx > 0 ? `${galleryOuterBorderPx}px` : 0,
+              bgcolor: galleryOuterBorderPx > 0 ? galleryOuterBorderColor : "transparent",
+            }}>
             <Box sx={{
               display: "grid",
               gridTemplateColumns: galleryGridColumns,
               gap: `${galleryGapPx}px`,
-              p: galleryFramePx > 0 ? `${galleryFramePx}px` : 0,
               width: "100%",
               boxSizing: "border-box",
               justifyContent: "start",
-              bgcolor: galleryFramePx > 0 ? galleryGapColor : "transparent",
+              bgcolor: galleryGapPx > 0 ? galleryGapColorResolved : "transparent",
             }}>
               {visibleImageIndices.map((i) => (
                 <Box
                   key={i}
                   sx={{
                     minWidth: 0,
-                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
+                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingEditableDecoration ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
                     opacity: draggedPanelRef.current === i ? 0.62 : 1,
                     transform: dragOverPanel === i ? "translateY(-2px)" : "translateY(0)",
                     transition: "transform 120ms ease, opacity 120ms ease",
@@ -9927,7 +11056,12 @@ function Show2D() {
 	                        boxShadow: `inset 0 0 0 ${selectedPanelSet.has(i) ? 3 : 2}px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && (i === selectedIdx || selectedPanelSet.has(i)) ? themeColors.accent : "transparent"}`,
 	                      },
                       "&::before": {
-                        display: "none",
+                        content: '""',
+                        position: "absolute",
+                        inset: 0,
+                        pointerEvents: "none",
+                        zIndex: 4,
+                        boxShadow: panelInnerBorderPx > 0 ? `inset 0 0 0 ${panelInnerBorderPx}px ${panelInnerBorderColor}` : "none",
                       },
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
@@ -9956,7 +11090,7 @@ function Show2D() {
                     onTouchEnd={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                     onTouchCancel={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                   >
-                    {markerAround ? (
+                    {hasPanelMarkers && (markerAround ? (
                       <Box
                         data-show2d-marker-color={panelMarkerColor(i)}
                         data-show2d-marker-style="around"
@@ -9987,8 +11121,9 @@ function Show2D() {
                           zIndex: 8,
                         }}
                       />
-                    )}
+                    ))}
                     <canvas
+                      data-show2d-main-canvas={i}
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
                       style={responsiveCanvasStyle}
@@ -10037,7 +11172,16 @@ function Show2D() {
                         data-show2d-panel-annotation-position={annotation.position || "top-left"}
                         data-show2d-panel-annotation-variant={annotation.variant || "badge"}
                         title={annotation.text}
-                        sx={panelAnnotationSx(annotation)}
+                        onMouseDown={(event: React.MouseEvent<HTMLElement>) => beginPanelAnnotationDrag(event, i, annotationIdx)}
+                        sx={{
+                          ...panelAnnotationSx(annotation),
+                          pointerEvents: overlayEditMode ? "auto" : "none",
+                          cursor: overlayEditMode ? (isDraggingAnnotation ? "grabbing" : "grab") : "inherit",
+                          ...(overlayEditMode && annotationSelection?.panel === i && annotationSelection.annotation === annotationIdx ? {
+                            outline: "1px dashed rgba(255,255,255,0.9)",
+                            outlineOffset: 2,
+                          } : {}),
+                        }}
                       >
                         {renderPanelAnnotation(annotation)}
                       </Box>
@@ -10318,7 +11462,7 @@ function Show2D() {
 	                        },
                         cursor: "grab",
                       }}
-                      onWheel={(i === selectedIdx || fftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
+                      onWheel={(i === selectedIdx || effectiveFftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
                       onDoubleClick={() => setGalleryFftState(i, { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 })}
                       onMouseDown={(e) => handleGalleryFftMouseDown(e, i)}
                       onMouseMove={(e) => handleGalleryFftMouseMove(e, i)}
@@ -10507,7 +11651,7 @@ function Show2D() {
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingEditableDecoration ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}
@@ -10519,8 +11663,9 @@ function Show2D() {
               onTouchEnd={(e) => handleTouchEnd(e, 0)}
               onTouchCancel={(e) => handleTouchEnd(e, 0)}
             >
-              <canvas
-                ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
+            <canvas
+              data-show2d-main-canvas={0}
+              ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
                 width={canvasW} height={canvasH}
                 style={responsiveCanvasStyle}
               />
@@ -10573,7 +11718,16 @@ function Show2D() {
                   data-show2d-panel-annotation-position={annotation.position || "top-left"}
                   data-show2d-panel-annotation-variant={annotation.variant || "badge"}
                   title={annotation.text}
-                  sx={panelAnnotationSx(annotation)}
+                  onMouseDown={(event: React.MouseEvent<HTMLElement>) => beginPanelAnnotationDrag(event, 0, annotationIdx)}
+                  sx={{
+                    ...panelAnnotationSx(annotation),
+                    pointerEvents: overlayEditMode ? "auto" : "none",
+                    cursor: overlayEditMode ? (isDraggingAnnotation ? "grabbing" : "grab") : "inherit",
+                    ...(overlayEditMode && annotationSelection?.panel === 0 && annotationSelection.annotation === annotationIdx ? {
+                      outline: "1px dashed rgba(255,255,255,0.9)",
+                      outlineOffset: 2,
+                    } : {}),
+                  }}
                 >
                   {renderPanelAnnotation(annotation)}
                 </Box>
@@ -10704,7 +11858,14 @@ function Show2D() {
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx}>Color</Typography>
-                        <Select size="small" value={selectedCmap} onChange={(e) => setSelectedCmap(String(e.target.value))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
+                        <Select
+                          size="small"
+                          value={selectedCmap}
+                          onChange={(e) => setSelectedCmap(String(e.target.value))}
+                          MenuProps={themedMenuProps}
+                          sx={{ ...themedSelect, minWidth: 60 }}
+                          inputProps={{ "aria-label": colorShared ? "Shared colormap for all panels" : "Selected panel colormap" }}
+                        >
                           {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                         </Select>
                       </Box>
@@ -10814,8 +11975,8 @@ function Show2D() {
                         <Slider
                           value={sigmaDraft ?? Number(displaySigma ?? 4)}
                           min={0} max={20} step={0.5}
-                          onChange={(_, v) => { if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setSigmaDraft(v as number); }}
-                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setDenoiseEnabled(true); }}
+                          onChange={(_, v) => { if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setSigmaDraftDuringDrag(v as number); }}
+                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); setSigmaFilterDraft(null); sigmaFilterDraftPendingRef.current = null; if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setDenoiseEnabled(true); }}
                           size="small" sx={{ ...sliderStyles.small, width: 60 }}
                         />
                       </Box>
@@ -11125,16 +12286,16 @@ function Show2D() {
                     <>
                       <Box sx={controlPairSx}>
                         <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
-                        <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link FFT zoom across panels" } }} />
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across image and FFT panels.">Zoom</Typography>
+                        <Switch checked={effectiveFftLinkedZoom} onChange={() => { setLinkedZoom(!linkedZoom); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link FFT zoom across panels" } }} />
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
-                        <Switch checked={fftLinkPan} onChange={() => { setFftLinkPan(!fftLinkPan); }} size="small" sx={switchStyles.small} />
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan image and FFT panels together.">Pan</Typography>
+                        <Switch checked={effectiveFftLinkPan} onChange={() => { setLinkPan(!linkPan); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link FFT pan across panels" } }} />
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share FFT contrast slider across panels (FFT-only).">Contrast</Typography>
-                        <Switch checked={fftLinkedContrast} onChange={() => { setFftLinkedContrast(!fftLinkedContrast); }} size="small" sx={switchStyles.small} />
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share image and FFT contrast sliders across panels.">Contrast</Typography>
+                        <Switch checked={effectiveFftLinkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link FFT contrast across panels" } }} />
                       </Box>
                     </>
                   )}
@@ -11143,7 +12304,7 @@ function Show2D() {
               {(
                 <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 1 auto", maxWidth: "100%", opacity: 1, pointerEvents: "auto" }}>
                   {fftHistogramData && (
-                    !fftLinkedContrast && isGallery ? (
+                    !effectiveFftLinkedContrast && isGallery ? (
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
                         {/* Match the image-histogram grid: current page only, hidden panels skipped. */}
                         {visibleImageIndices.map((i) => {

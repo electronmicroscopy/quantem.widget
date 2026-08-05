@@ -1,9 +1,9 @@
 """
 show4dstem: Fast interactive 4D-STEM viewer widget.
 
-Single chunked-torch path on every device (CUDA / MPS / CPU). Reductions cast
-uint16 → float32 in scan-row chunks bounded by _CHUNK_BYTE_BUDGET, so transient
-memory stays the same regardless of total dataset size.
+The public factory routes Apple chunk-backed loads to the MPS Metal viewer. This
+base viewer keeps CUDA CuPy inputs resident so ``quantem.gpu`` can use its
+RawKernel virtual-image reducers. NumPy inputs remain useful for small UI tests.
 
 To reduce data size, bin k-space at the dataset level before viewing:
 
@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Self, Sequence
 
 if TYPE_CHECKING:
@@ -52,6 +53,83 @@ _CHUNK_BYTE_BUDGET = 600 * 1024 * 1024
 # Sparse detector-mask gathers are fastest with smaller transient slabs; large
 # slabs burn time in allocation/copy overhead on full no-bin CUDA compare grids.
 _SPARSE_MASK_CHUNK_BYTE_BUDGET = 64 * 1024 * 1024
+
+
+def _local_h5_url_path(url: str, base_dir: pathlib.Path) -> pathlib.Path | None:
+    """Resolve a local HDF5 URL used by browser-source exports."""
+    if not url or "://" in url:
+        return None
+    clean = url.split("?", 1)[0].split("#", 1)[0]
+    path = pathlib.Path(clean)
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
+
+
+def _h5_bad_pixel_json_for_export(url: str, base_dir: pathlib.Path) -> str | None:
+    """Return a JSON bad-pixel list for a local HDF5 master, or None if unreadable."""
+    path = _local_h5_url_path(url, base_dir)
+    if path is None or not path.exists():
+        return None
+    try:
+        from quantem.gpu.io import inspect
+
+        mask = inspect(path).pixel_mask
+    except Exception:
+        return None
+    if mask is None:
+        return None
+    bad = np.flatnonzero(np.asarray(mask).reshape(-1) > 0).astype(int).tolist()
+    return json.dumps(bad)
+
+
+def _show4dstem_h5_webgpu_tuning(*, dtype: str, h5_uint8_lossless: bool) -> str:
+    """Return runtime settings for browser-owned HDF5 WebGPU exports."""
+    decode_dtype = "uint8" if dtype == "uint8" else "u2"
+    low8 = "true" if h5_uint8_lossless else "false"
+    return (
+        "<script>\n"
+        "if (globalThis.location?.protocol === \"file:\") {\n"
+        "  globalThis.__QT_REQUIRE_LOCAL_H5_FILES = true;\n"
+        "}\n"
+        f'globalThis.__QT_H5_DECODE_DTYPE ??= "{decode_dtype}";\n'
+        f"globalThis.__QT_H5_FORCE_LOW8 ??= {low8};\n"
+        f"globalThis.__BSLZ4_LOW8_ONLY ??= {low8};\n"
+        "globalThis.__BSLZ4_FRAME_WG ??= 64;\n"
+        "globalThis.__BSLZ4_PIPELINE_STAGING ??= false;\n"
+        "globalThis.__QT_H5_FETCH_WINDOW ??= 8;\n"
+        "globalThis.__QT_H5_DECODE_QUEUE ??= 8;\n"
+        "globalThis.__QT_H5_PRELOAD_WINDOW ??= 1;\n"
+        "globalThis.__QT_H5_LOCAL_GROUP ??= 8;\n"
+        "globalThis.__QT_H5_LOCAL_WORKERS ??= 8;\n"
+        "</script>\n"
+    )
+
+
+def _inject_show4dstem_h5_webgpu_tuning(
+    path: pathlib.Path,
+    *,
+    dtype: str,
+    h5_uint8_lossless: bool,
+) -> None:
+    """Inject HDF5 WebGPU runtime settings into an exported HTML page."""
+    text = path.read_text(encoding="utf-8")
+    has_runtime_tuning = (
+        "__QT_H5_DECODE_DTYPE" in text
+        and "__BSLZ4_PIPELINE_STAGING" in text
+    )
+    has_file_guard = "__QT_REQUIRE_LOCAL_H5_FILES = true" in text
+    if has_runtime_tuning and has_file_guard:
+        return
+    script = _show4dstem_h5_webgpu_tuning(
+        dtype=dtype,
+        h5_uint8_lossless=h5_uint8_lossless,
+    )
+    if "<head>" in text:
+        text = text.replace("<head>", "<head>\n" + script, 1)
+    else:
+        text = script + text
+    path.write_text(text, encoding="utf-8")
 
 
 def _is_recoverable_allocation_error(exc: BaseException) -> bool:
@@ -118,6 +196,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Bright field disk radius in pixels. If not provided, estimated as 1/8 of detector size.
     precompute_virtual_images : bool, default True
         Precompute BF/ABF/LAADF/HAADF virtual images for preset switching.
+    DPC_row, DPC_col, SSB : array_like, optional
+        Precomputed real-space maps to expose in the image panel alongside the
+        ROI-derived virtual image. Each map must be real-valued with shape
+        ``(scan_rows, scan_cols)`` or ``(n_frames, scan_rows, scan_cols)``.
+        ``SSB`` is the phase map; complex SSB inputs are rejected so amplitude
+        is not selected silently.
+    vi_source : {"roi", "DPC_row", "DPC_col", "SSB"}, optional
+        Initial image-panel source. Defaults to the ROI-derived virtual image.
     frame_dim_label : str, optional
         Label for the frame dimension when 5D data is provided.
         Defaults to "Frame". Common values: "Tilt", "Time", "Focus".
@@ -125,8 +211,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Scientific layout mode. ``"single"`` shows one selected frame/dataset.
         ``"multiple"`` shows a grid of virtual images for the first ready
         frames/datasets while sharing the detector ROI and scan cursor with the
-        existing diffraction panel. Legacy aliases ``"temporal"`` and
-        ``"compare"`` are accepted as ``"single"`` and ``"multiple"``.
+        existing diffraction panel.
     compare_layout : {"side", "top"}, default "side"
         Frontend layout hint for ``view_mode="multiple"``. The current widget
         renders ``"side"`` as the default shared-DP plus virtual-image grid.
@@ -195,10 +280,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     >>> Show4DSTEM(np.random.rand(64, 64, 128, 128))
 
-    PyTorch tensor (CPU or GPU):
+    PyTorch CUDA tensor:
 
     >>> import torch
-    >>> Show4DSTEM(torch.rand(64, 64, 128, 128))
+    >>> Show4DSTEM(torch.rand(64, 64, 128, 128, device="cuda"))
 
     With explicit calibration (real-space Å, k-space mrad):
 
@@ -300,6 +385,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     virtual_image_bytes = traitlets.Bytes(b"").tag(
         sync=True
     )  # Raw float32 (JS computes stats + range)
+    vi_source = traitlets.Unicode("roi").tag(sync=True)
+    vi_product_labels = traitlets.List(
+        traitlets.Unicode(), default_value=[]
+    ).tag(sync=True)
+    vi_product_map_frames = traitlets.Int(0).tag(sync=True)
+    vi_product_maps_bytes = traitlets.Bytes(b"").tag(sync=True)
+    vi_preset_labels = traitlets.List(
+        traitlets.Unicode(), default_value=[]
+    ).tag(sync=True)
+    vi_preset_map_frames = traitlets.Int(0).tag(sync=True)
+    vi_preset_maps_bytes = traitlets.Bytes(b"").tag(sync=True)
 
     # Offline / browser-compute mode: ship a compact 4D stack so JS runs the
     # virtual-image and DP-from-ROI reductions with no Python kernel. Inline gzip
@@ -327,15 +423,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # multi-volume {volumes:[{base,chunks,badPx}], ...}. The browser decode is
     # bit-exact to the uint8-clipped reference (verified).
     _offline_bslz4 = traitlets.Unicode("").tag(sync=True)
-    # H5-source mode: the HTML points at a sibling float32 .h5 file (the merged data); the
-    # JS reads it straight off disk via WebGPU (jsfive parse + GPU bitshuffle+LZ4 decode) -
-    # NOTHING embedded, the data stays a file. Needs HTTP (fetch CORS-blocked under file://).
-    # The "click HTML, GPU decompresses the merged H5, real Show4DSTEM renders it" path.
+    # Browser-source mode: normal CLI exports point at sibling HDF5 files for
+    # on-demand byte-range frame reads.
     _h5_url = traitlets.Unicode("").tag(sync=True)
+    _h5_urls = traitlets.Unicode("").tag(sync=True)
+    _h5_uint8_lossless = traitlets.Bool(False).tag(sync=True)
     # Lazy mode: a sidecar bundle URL (radial profile + CoM + frame index + data files). The JS
     # derives the virtual image from the ~100 MB profile in VRAM and lazy-fetches CBED frames from
     # disk - nothing bulk-loads. Real-time scrub + detector with no 38 GB resident.
     _lazy_url = traitlets.Unicode("").tag(sync=True)
+    _lazy_urls = traitlets.Unicode("").tag(sync=True)
     # Hot/dead detector pixel indices (JSON list) auto-applied by the offline WebGPU
     # compute - mirrors CUDA load(apply_mask=True) so the browser data is filtered
     # automatically (no saturated pixel dominating the VI/DP).
@@ -350,6 +447,27 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     export_payload = traitlets.Bytes(b"").tag(sync=True)
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
+
+    # Kernel-backed SSB compute. Exported/static HTML can display precomputed
+    # SSB maps, but cannot launch this Python/CUDA path.
+    ssb_compute_request = traitlets.Unicode("").tag(sync=True)
+    ssb_compute_status = traitlets.Unicode("").tag(sync=True)
+    ssb_compute_busy = traitlets.Bool(False).tag(sync=True)
+    ssb_compute_enabled = traitlets.Bool(True).tag(sync=True)
+    ssb_compute_n_trials = traitlets.Int(200).tag(sync=True)
+    ssb_compute_refine = traitlets.Bool(True).tag(sync=True)
+    ssb_compute_bf_subsample = traitlets.Float(1.0).tag(sync=True)
+    ssb_compute_bf_pixels = traitlets.Int(0).tag(sync=True)
+    ssb_compute_bf_selected_pixels = traitlets.Int(0).tag(sync=True)
+    ssb_compute_manual_aberrations = traitlets.Bool(False).tag(sync=True)
+    ssb_compute_lock_c10 = traitlets.Bool(False).tag(sync=True)
+    ssb_compute_lock_c12 = traitlets.Bool(False).tag(sync=True)
+    ssb_compute_c10_nm = traitlets.Float(0.0).tag(sync=True)
+    ssb_compute_c12_nm = traitlets.Float(0.0).tag(sync=True)
+    ssb_compute_phi12_deg = traitlets.Float(0.0).tag(sync=True)
+    ssb_compute_rotation_angle_deg = traitlets.Float(0.0).tag(sync=True)
+    ssb_compute_calibration_json = traitlets.Unicode("").tag(sync=True)
+    ssb_compute_calibration_filename = traitlets.Unicode("").tag(sync=True)
 
     # =========================================================================
     # VI ROI (real-space region selection for summed DP)
@@ -411,7 +529,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     vi_colormap = traitlets.Unicode("inferno").tag(sync=True)
     fft_colormap = traitlets.Unicode("inferno").tag(sync=True)
 
-    dp_scale_mode = traitlets.Unicode("linear").tag(sync=True)  # "linear" | "log"
+    dp_scale_mode = traitlets.Unicode("log").tag(sync=True)  # "linear" | "log"
     vi_scale_mode = traitlets.Unicode("linear").tag(sync=True)  # "linear" | "log"
     fft_scale_mode = traitlets.Unicode("linear").tag(sync=True)  # "linear" | "log"
 
@@ -531,10 +649,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     @staticmethod
     def _normalise_view_mode(value: str) -> str:
         mode = str(value or "single").strip().lower().replace("-", "_")
-        if mode in {"default", "normal", "temporal"}:
-            mode = "single"
-        elif mode in {"compare", "multi"}:
-            mode = "multiple"
         if mode not in {"single", "multiple"}:
             raise ValueError(f"view_mode must be 'single' or 'multiple', got {value!r}")
         return mode
@@ -576,6 +690,642 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return mode
 
+    def _multiple_view_active(self) -> bool:
+        """Return True when the multiple-panel virtual-image surface is visible."""
+        return self.view_mode == "multiple" and self.n_frames > 1
+
+    @staticmethod
+    def _normalise_vi_source(value: str | None) -> str:
+        source = str(value or "roi").strip()
+        key = source.lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "": "roi",
+            "roi": "roi",
+            "virtual": "roi",
+            "virtual_image": "roi",
+            "bf": "roi",
+            "dpc_row": "DPC_row",
+            "dpc_com_row": "DPC_row",
+            "dpc_r": "DPC_row",
+            "dpcr": "DPC_row",
+            "dpc_col": "DPC_col",
+            "dpc_com_col": "DPC_col",
+            "dpc_c": "DPC_col",
+            "dpcc": "DPC_col",
+            "ssb": "SSB",
+            "ssb_phase": "SSB",
+            "phase": "SSB",
+        }
+        return aliases.get(key, source)
+
+    def _normalise_vi_product_array(self, label: str, value: Any) -> np.ndarray:
+        arr = np.asarray(to_numpy(value))
+        if np.iscomplexobj(arr):
+            raise ValueError(
+                f"{label} must be a real-valued map. Pass the SSB phase map "
+                "rather than a complex reconstruction or amplitude stack."
+            )
+        if arr.ndim == 2:
+            if arr.shape != (self.shape_rows, self.shape_cols):
+                raise ValueError(
+                    f"{label} shape {arr.shape} does not match the scan shape "
+                    f"{self.shape_rows}x{self.shape_cols}."
+                )
+            arr = arr.reshape(1, self.shape_rows, self.shape_cols)
+        elif arr.ndim == 3:
+            if arr.shape[0] != self.n_frames:
+                raise ValueError(
+                    f"{label} has {arr.shape[0]} frames, but Show4DSTEM has "
+                    f"{self.n_frames} frame(s)."
+                )
+            if arr.shape[1:] != (self.shape_rows, self.shape_cols):
+                raise ValueError(
+                    f"{label} frame shape {arr.shape[1:]} does not match the "
+                    f"scan shape {self.shape_rows}x{self.shape_cols}."
+                )
+        else:
+            raise ValueError(
+                f"{label} must have shape (scan_rows, scan_cols) or "
+                f"(n_frames, scan_rows, scan_cols); got {arr.shape}."
+            )
+        return np.ascontiguousarray(arr, dtype=np.float32)
+
+    def _set_vi_product_maps(self, maps: dict[str, Any]) -> None:
+        products: dict[str, np.ndarray] = {}
+        for label in ("DPC_row", "DPC_col", "SSB"):
+            value = maps.get(label)
+            if value is None:
+                continue
+            products[label] = self._normalise_vi_product_array(label, value)
+
+        self._vi_product_maps = products
+        labels = list(products)
+        self.vi_product_labels = labels
+        if not products:
+            self.vi_product_map_frames = 0
+            self.vi_product_maps_bytes = b""
+            return
+
+        frame_count = max(arr.shape[0] for arr in products.values())
+        stacked = []
+        for label in labels:
+            arr = products[label]
+            if arr.shape[0] == 1 and frame_count > 1:
+                arr = np.broadcast_to(arr, (frame_count, self.shape_rows, self.shape_cols))
+            elif arr.shape[0] != frame_count:
+                raise ValueError(
+                    f"{label} has {arr.shape[0]} product frame(s), but another "
+                    f"product map has {frame_count}."
+                )
+            stacked.append(np.ascontiguousarray(arr, dtype=np.float32))
+        self.vi_product_map_frames = int(frame_count)
+        self.vi_product_maps_bytes = np.ascontiguousarray(
+            np.stack(stacked, axis=0), dtype=np.float32
+        ).tobytes()
+
+    def _set_vi_preset_maps(self, maps: dict[str, Any]) -> None:
+        presets: dict[str, np.ndarray] = {}
+        for label in ("BF", "ABF", "ADF", "HAADF"):
+            value = maps.get(label)
+            if value is None:
+                continue
+            presets[label] = self._normalise_vi_product_array(label, value)
+
+        self._vi_preset_maps = presets
+        labels = list(presets)
+        self.vi_preset_labels = labels
+        if not presets:
+            self.vi_preset_map_frames = 0
+            self.vi_preset_maps_bytes = b""
+            return
+
+        frame_count = max(arr.shape[0] for arr in presets.values())
+        stacked = []
+        for label in labels:
+            arr = presets[label]
+            if arr.shape[0] == 1 and frame_count > 1:
+                arr = np.broadcast_to(arr, (frame_count, self.shape_rows, self.shape_cols))
+            elif arr.shape[0] != frame_count:
+                raise ValueError(
+                    f"{label} has {arr.shape[0]} preset frame(s), but another "
+                    f"preset map has {frame_count}."
+                )
+            stacked.append(np.ascontiguousarray(arr, dtype=np.float32))
+        self.vi_preset_map_frames = int(frame_count)
+        self.vi_preset_maps_bytes = np.ascontiguousarray(
+            np.stack(stacked, axis=0), dtype=np.float32
+        ).tobytes()
+
+    def _current_vi_product_map(self, source: str | None = None) -> np.ndarray | None:
+        label = self._normalise_vi_source(source or self.vi_source)
+        arr = getattr(self, "_vi_product_maps", {}).get(label)
+        if arr is None:
+            return None
+        frame_count = int(arr.shape[0])
+        frame = 0 if frame_count == 1 else max(0, min(int(self.frame_idx), frame_count - 1))
+        return np.ascontiguousarray(arr[frame], dtype=np.float32)
+
+    def set_vi_product_map(self, label: str, value: Any) -> Self:
+        """Attach or replace a static virtual-image product map."""
+        label = self._normalise_vi_source(label)
+        if label not in {"DPC_row", "DPC_col", "SSB"}:
+            raise ValueError(
+                f"Unsupported virtual-image product {label!r}. "
+                "Use one of 'DPC_row', 'DPC_col', or 'SSB'."
+            )
+        maps = dict(getattr(self, "_vi_product_maps", {}))
+        maps[label] = value
+        self._set_vi_product_maps(maps)
+        if self._normalise_vi_source(self.vi_source) == label:
+            self._refresh_compare_virtual_images()
+        return self
+
+    def set_vi_preset_map(self, label: str, value: Any) -> Self:
+        """Attach or replace a static BF/ABF/ADF/HAADF preset map."""
+        raw = str(label or "").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "BRIGHT_FIELD": "BF",
+            "BRIGHTFIELD": "BF",
+            "DARK_FIELD": "ADF",
+            "DARKFIELD": "ADF",
+        }
+        label = aliases.get(raw, raw)
+        if label not in {"BF", "ABF", "ADF", "HAADF"}:
+            raise ValueError(
+                f"Unsupported virtual-image preset {label!r}. "
+                "Use one of 'BF', 'ABF', 'ADF', or 'HAADF'."
+            )
+        maps = dict(getattr(self, "_vi_preset_maps", {}))
+        maps[label] = value
+        self._set_vi_preset_maps(maps)
+        return self
+
+    @staticmethod
+    def _ssb_positive_pair(value: Any, *, name: str) -> tuple[float, float]:
+        if isinstance(value, (int, float)) or np.isscalar(value):
+            pair = (float(value), float(value))
+        else:
+            pair = tuple(float(v) for v in value)
+            if len(pair) != 2:
+                raise ValueError(f"{name} must be a scalar or length-2 pair.")
+        if pair[0] <= 0 or pair[1] <= 0:
+            raise ValueError(f"{name} must be positive, got {pair}.")
+        return pair
+
+    @staticmethod
+    def _ssb_unit_key(unit: str | None) -> str:
+        key = str(unit or "").strip().lower()
+        key = key.replace("µ", "u").replace("μ", "u").replace("å", "a")
+        key = key.replace("angstroms", "angstrom").replace("angstrom", "a")
+        key = key.replace(" per pixel", "").replace("/pixel", "").replace("/px", "")
+        key = key.replace(" ", "").replace("_", "")
+        return key
+
+    @classmethod
+    def _to_angstrom(cls, value: float, unit: str, *, axis: str) -> float:
+        key = cls._ssb_unit_key(unit)
+        factors = {
+            "a": 1.0,
+            "ang": 1.0,
+            "nm": 10.0,
+            "pm": 0.01,
+        }
+        if key in factors:
+            out = float(value) * factors[key]
+            if out <= 0:
+                raise ValueError(f"{axis} sampling must be positive, got {out}.")
+            return out
+        raise ValueError(
+            "Compute SSB needs real-space scan sampling in Angstroms. "
+            "Pass ssb_scan_sampling_A=(row_A, col_A), or construct "
+            "Show4DSTEM with sampling=(scan_row, scan_col, ..., ...) and "
+            "units=('A', 'A', ..., ...)."
+        )
+
+    @classmethod
+    def _to_mrad(cls, value: float, unit: str) -> float:
+        key = cls._ssb_unit_key(unit)
+        factors = {
+            "mrad": 1.0,
+            "rad": 1000.0,
+            "urad": 0.001,
+        }
+        if key not in factors:
+            raise ValueError("Detector sampling is not an angular unit.")
+        out = float(value) * factors[key]
+        if out <= 0:
+            raise ValueError(f"Detector sampling must be positive, got {out}.")
+        return out
+
+    def _resolved_ssb_scan_sampling_A(self, value: Any | None) -> tuple[float, float]:
+        if value is not None:
+            return self._ssb_positive_pair(value, name="ssb_scan_sampling_A")
+        sampling = getattr(self, "_axis_sampling", (self.pixel_size, self.pixel_size))
+        units = getattr(self, "_axis_units", [self.pixel_unit, self.pixel_unit])
+        row = self._to_angstrom(
+            float(sampling[0]), units[0] if len(units) > 0 else self.pixel_unit, axis="scan row"
+        )
+        col = self._to_angstrom(
+            float(sampling[1] if len(sampling) > 1 else sampling[0]),
+            units[1] if len(units) > 1 else self.pixel_unit,
+            axis="scan col",
+        )
+        return (row, col)
+
+    def _resolved_ssb_det_sampling_mrad(
+        self, value: Any | None
+    ) -> tuple[float, float] | None:
+        if value is not None:
+            return self._ssb_positive_pair(value, name="ssb_det_sampling_mrad")
+        sampling = getattr(self, "_axis_sampling", ())
+        units = getattr(self, "_axis_units", [])
+        if len(sampling) < 4 or len(units) < 4:
+            return None
+        try:
+            row = self._to_mrad(float(sampling[2]), units[2])
+            col = self._to_mrad(float(sampling[3]), units[3])
+        except ValueError:
+            return None
+        return (row, col)
+
+    def _resolved_ssb_semiangle_mrad(
+        self,
+        value: float | None,
+        det_sampling: tuple[float, float] | None,
+    ) -> float:
+        if value is not None:
+            semiangle = float(value)
+        elif det_sampling is not None and float(self.bf_radius) > 0:
+            semiangle = float(self.bf_radius) * float(det_sampling[1])
+        else:
+            raise ValueError(
+                "Compute SSB needs ssb_semiangle_mrad, or calibrated detector "
+                "sampling in mrad/pixel plus a detected BF radius."
+            )
+        if semiangle <= 0:
+            raise ValueError(f"ssb_semiangle_mrad must be positive, got {semiangle}.")
+        return semiangle
+
+    @staticmethod
+    def _ssb_selected_bf_count(full_num_bf: int, ratio: float | None) -> int:
+        """Return the BF subset count used by the quantem.gpu stride sampler."""
+        full = max(0, int(full_num_bf))
+        if full == 0 or ratio is None or float(ratio) >= 1.0:
+            return full
+        ratio_f = float(ratio)
+        if ratio_f <= 0.0:
+            raise ValueError(f"bf_subsample must be in (0, 1], got {ratio}.")
+        stride = max(1, int(round(1.0 / ratio_f)))
+        return int((full + stride - 1) // stride)
+
+    def _ssb_cupy_frame(self):
+        """Return the current 4D frame as a CuPy array plus an owner reference."""
+        try:
+            import cupy as cp
+        except ImportError as exc:
+            raise ImportError(
+                "Compute SSB requires CuPy and the CUDA quantem.gpu SSB engine."
+            ) from exc
+
+        frame = self._frame_data
+        if hasattr(frame, "chunks") or getattr(frame, "_is_gpu_frames", False):
+            raise ValueError(
+                "Compute SSB from Show4DSTEM currently requires a resident CUDA "
+                "or CuPy 4D frame. For MPS/chunked data, "
+                "precompute SSB separately and pass SSB=phase_map."
+            )
+        if isinstance(frame, torch.Tensor):
+            if frame.device.type == "cuda":
+                owner = frame.contiguous()
+                device_index = owner.device.index
+                if device_index is None:
+                    device_index = torch.cuda.current_device()
+                with cp.cuda.Device(int(device_index)):
+                    return cp.from_dlpack(owner), owner
+            raise ValueError(
+                f"Compute SSB requires CUDA/CuPy; got Torch device {frame.device}."
+            )
+
+        if type(frame).__module__.split(".", 1)[0] == "cupy":
+            return cp.asarray(frame), frame
+
+        raise ValueError(
+            "Compute SSB requires a CUDA tensor or CuPy array; CPU transfer is "
+            "not a scientific fallback."
+        )
+
+    def _compute_ssb_phase(
+        self,
+        *,
+        semiangle_mrad: float | None = None,
+        scan_sampling_A: float | tuple[float, float] | None = None,
+        det_sampling_mrad: float | tuple[float, float] | None = None,
+        voltage_kV: float | None = None,
+        energy_eV: float | None = None,
+        bf_radius: int | None = None,
+        aberrations: dict[str, float] | None = None,
+        rotation_angle_deg: float | None = None,
+        bf_intensity_threshold: float | None = None,
+        n_trials: int | None = None,
+        refine: bool | None = None,
+        lock_aberrations: bool = False,
+        lock_c10: bool = False,
+        lock_c12: bool = False,
+        seed: int | None = None,
+        bf_subsample: float | None = None,
+        verbose: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run the CUDA SSB solver for the current 4D frame.
+
+        Returns ``(phase, dpc_row, dpc_col)``. The DPC center-of-mass maps come
+        for free: the 4D frame is already resident on the GPU for SSB, so CoM
+        is two cheap reductions, aligned with the solved scan rotation.
+        """
+        if self.n_frames != 1:
+            raise ValueError(
+                "Compute SSB currently runs on a single 4D Show4DSTEM frame. "
+                "For a 5D stack, open the target frame as a 4D widget or pass "
+                "precomputed SSB=(n_frames, scan_rows, scan_cols)."
+            )
+        if (self.shape_rows, self.shape_cols) not in ((128, 128), (256, 256), (512, 512)):
+            raise ValueError(
+                "Compute SSB currently supports square 128x128, 256x256, or "
+                f"512x512 scan grids; got {self.shape_rows}x{self.shape_cols}."
+            )
+
+        cfg = dict(getattr(self, "_ssb_compute_config", {}))
+        scan_sampling = self._resolved_ssb_scan_sampling_A(
+            scan_sampling_A if scan_sampling_A is not None else cfg.get("scan_sampling_A")
+        )
+        det_sampling = self._resolved_ssb_det_sampling_mrad(
+            det_sampling_mrad if det_sampling_mrad is not None else cfg.get("det_sampling_mrad")
+        )
+        semiangle = self._resolved_ssb_semiangle_mrad(
+            semiangle_mrad if semiangle_mrad is not None else cfg.get("semiangle_mrad"),
+            det_sampling,
+        )
+        voltage = voltage_kV if voltage_kV is not None else cfg.get("voltage_kV")
+        energy = energy_eV if energy_eV is not None else cfg.get("energy_eV")
+        if voltage is None and energy is None:
+            raise ValueError(
+                "Compute SSB needs ssb_voltage_kV or ssb_energy_eV. "
+                "Example: Show4DSTEM(data, ssb_voltage_kV=300, ...)."
+            )
+        trials = cfg.get("n_trials", 200) if n_trials is None else n_trials
+        trials = int(trials)
+        if trials < 0:
+            raise ValueError(f"n_trials must be >= 0, got {trials}.")
+        do_refine = bool(cfg.get("refine", True) if refine is None else refine)
+        seed = int(cfg.get("seed", 42) if seed is None else seed)
+        bf_subsample = cfg.get("bf_subsample") if bf_subsample is None else bf_subsample
+        if bf_subsample is not None:
+            bf_subsample = float(bf_subsample)
+            if bf_subsample <= 0.0:
+                raise ValueError(f"bf_subsample must be in (0, 1], got {bf_subsample}.")
+        bf_threshold = (
+            cfg.get("bf_intensity_threshold", 0.5)
+            if bf_intensity_threshold is None
+            else bf_intensity_threshold
+        )
+        bf_radius = cfg.get("bf_radius") if bf_radius is None else bf_radius
+        aberrations = cfg.get("aberrations") if aberrations is None else aberrations
+        rotation = (
+            cfg.get("rotation_angle_deg", 0.0)
+            if rotation_angle_deg is None
+            else rotation_angle_deg
+        )
+        optimize_aberrations = None
+        if aberrations is not None:
+            c10 = float(aberrations.get("C10", aberrations.get("C10_nm", 0.0)))
+            c12 = float(aberrations.get("C12", aberrations.get("C12_nm", 0.0)))
+            if "phi12_deg" in aberrations:
+                phi12_deg = float(aberrations["phi12_deg"])
+                phi12 = math.radians(phi12_deg)
+            else:
+                phi12 = float(aberrations.get("phi12", 0.0))
+                phi12_deg = math.degrees(phi12)
+            aberrations = {"C10": c10, "C12": c12, "phi12": phi12}
+            if lock_aberrations:
+                optimize_aberrations = {
+                    "C10_nm": c10,
+                    "C12_nm": c12,
+                    "phi12_deg": phi12_deg,
+                }
+        if optimize_aberrations is None and (lock_c10 or lock_c12):
+            base = aberrations or {}
+            locked_c10 = float(base.get("C10", self.ssb_compute_c10_nm))
+            locked_c12 = float(base.get("C12", self.ssb_compute_c12_nm))
+            locked_phi12_deg = (
+                math.degrees(float(base["phi12"]))
+                if "phi12" in base
+                else float(self.ssb_compute_phi12_deg)
+            )
+            # Scalar pins the coefficient; tuple keeps the production search
+            # range from SSB.optimize defaults. Locking C12 pins phi12 too:
+            # astigmatism is a magnitude+angle pair.
+            optimize_aberrations = {
+                "C10_nm": locked_c10 if lock_c10 else (-400.0, 400.0),
+                "C12_nm": locked_c12 if lock_c12 else (0.0, 100.0),
+                "phi12_deg": locked_phi12_deg if lock_c12 else (-90.0, 90.0),
+            }
+
+        try:
+            from quantem.gpu.ssb import SSB as QuantemSSB
+        except ImportError as exc:
+            raise ImportError(
+                "Compute SSB requires quantem.gpu with the CUDA SSB engine installed."
+            ) from exc
+
+        self.ssb_compute_status = "Preparing SSB data..."
+        data_gpu, owner = self._ssb_cupy_frame()
+        try:
+            self.ssb_compute_status = "Building SSB engine..."
+            ssb = QuantemSSB(
+                data_gpu,
+                semiangle=float(semiangle),
+                scan_sampling=scan_sampling,
+                det_sampling=det_sampling,
+                voltage_kV=None if voltage is None else float(voltage),
+                energy=None if energy is None else float(energy),
+                scan_shape=(self.shape_rows, self.shape_cols) if data_gpu.ndim == 3 else None,
+                bf_intensity_threshold=float(bf_threshold),
+                bf_radius=None if bf_radius is None else int(bf_radius),
+                aberrations=aberrations,
+                rotation_angle_deg=float(rotation),
+            )
+            full_bf = int(len(ssb.bf_inds_row))
+            selected_bf = self._ssb_selected_bf_count(full_bf, bf_subsample)
+            self.ssb_compute_bf_pixels = full_bf
+            self.ssb_compute_bf_selected_pixels = selected_bf
+            if lock_aberrations and aberrations is not None:
+                self.ssb_compute_status = (
+                    f"Using manual SSB coefficients "
+                    f"({selected_bf}/{full_bf} BF pixels)..."
+                )
+            elif trials > 0:
+                self.ssb_compute_status = (
+                    f"Optimizing SSB ({trials} trials, "
+                    f"{selected_bf}/{full_bf} BF pixels)..."
+                )
+                ssb.optimize(
+                    aberrations=optimize_aberrations,
+                    rotation_angle_deg=float(rotation),
+                    n_trials=trials,
+                    seed=seed,
+                    verbose=verbose,
+                    bf_subsample=bf_subsample,
+                )
+            # The GPU Nelder-Mead refiner has no locked mode yet; with a pinned
+            # coefficient the Optuna search already respects the lock, so skip
+            # refine rather than let it move the pinned value.
+            if do_refine and not (lock_aberrations and aberrations is not None) and not (lock_c10 or lock_c12):
+                self.ssb_compute_status = (
+                    f"Refining SSB ({selected_bf}/{full_bf} BF pixels)..."
+                )
+                ssb.refine(verbose=verbose, bf_subsample=bf_subsample)
+            self.ssb_compute_status = "Reconstructing SSB phase..."
+            result = ssb.result()
+            phase = result.phase
+            result_aberrations = dict(
+                getattr(result, "aberrations", None)
+                or getattr(ssb, "aberrations", {})
+                or {}
+            )
+            c10_nm = float(result_aberrations.get("C10", self.ssb_compute_c10_nm))
+            c12_nm = float(result_aberrations.get("C12", self.ssb_compute_c12_nm))
+            phi12_rad = float(
+                result_aberrations.get(
+                    "phi12",
+                    math.radians(float(self.ssb_compute_phi12_deg)),
+                )
+            )
+            rotation_final = float(
+                getattr(result, "rotation_angle_deg", float(rotation))
+            )
+            self.ssb_compute_c10_nm = c10_nm
+            self.ssb_compute_c12_nm = c12_nm
+            self.ssb_compute_phi12_deg = math.degrees(phi12_rad)
+            self.ssb_compute_rotation_angle_deg = rotation_final
+            self.ssb_compute_calibration_json = json.dumps(
+                {
+                    "schema": "quantem.ssb.calibration.v1",
+                    "created_utc": datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "source": {
+                        "widget": "Show4DSTEM",
+                        "title": self.title,
+                        "frame_idx": int(self.frame_idx),
+                        "scan_shape": [int(self.shape_rows), int(self.shape_cols)],
+                        "detector_shape": [int(self.det_rows), int(self.det_cols)],
+                    },
+                    "aberrations": {
+                        "C10": c10_nm,
+                        "C12": c12_nm,
+                        "phi12": phi12_rad,
+                    },
+                    "aberration_units": {
+                        "C10": "nm",
+                        "C12": "nm",
+                        "phi12": "rad",
+                    },
+                    "rotation_angle_deg": rotation_final,
+                    "calibration": {
+                        "voltage_kV": None if voltage is None else float(voltage),
+                        "energy_eV": None if energy is None else float(energy),
+                        "semiangle_mrad": float(semiangle),
+                        "scan_sampling_A": [float(x) for x in scan_sampling],
+                        "det_sampling_mrad": [float(x) for x in det_sampling],
+                        "bf_radius": None if bf_radius is None else int(bf_radius),
+                        "bf_intensity_threshold": float(bf_threshold),
+                        "bf_subsample": None if bf_subsample is None else float(bf_subsample),
+                        "bf_pixels": full_bf,
+                        "bf_selected_pixels": selected_bf,
+                    },
+                    "run": {
+                        "n_trials": trials,
+                        "refine": do_refine,
+                        "manual_locked": bool(lock_aberrations and aberrations is not None),
+                        "seed": seed,
+                        "loss": (
+                            None
+                            if getattr(result, "loss", None) is None
+                            else float(getattr(result, "loss"))
+                        ),
+                        "elapsed_s": (
+                            None
+                            if getattr(result, "elapsed", None) is None
+                            else float(getattr(result, "elapsed"))
+                        ),
+                        "refine_method": getattr(result, "refine_method", None),
+                        "refine_nfev": getattr(result, "refine_nfev", None),
+                        "refine_elapsed_s": (
+                            None
+                            if getattr(result, "refine_elapsed", None) is None
+                            else float(getattr(result, "refine_elapsed"))
+                        ),
+                    },
+                },
+                indent=2,
+            )
+            self.ssb_compute_calibration_filename = self._default_ssb_calibration_filename()
+            if hasattr(phase, "get"):
+                phase = phase.get()
+            phase_np = np.asarray(phase, dtype=np.float32)
+            # DPC comes for free here: the 4D frame is already resident on the
+            # GPU, so CoM row/col is two cheap reductions. Align with the SSB
+            # scan rotation so the maps follow the shared aligned-DPC convention.
+            from quantem.gpu.dpc import center_of_mass
+            com_k_row, com_k_col = center_of_mass(
+                data_gpu, scan_shape=(self.shape_rows, self.shape_cols)
+            )
+            theta = math.radians(rotation_final)
+            cos_t, sin_t = math.cos(theta), math.sin(theta)
+            dpc_row_np = np.ascontiguousarray(
+                cos_t * com_k_row - sin_t * com_k_col, dtype=np.float32
+            )
+            dpc_col_np = np.ascontiguousarray(
+                sin_t * com_k_row + cos_t * com_k_col, dtype=np.float32
+            )
+        finally:
+            del owner
+            gc.collect()
+
+        if phase_np.shape != (self.shape_rows, self.shape_cols):
+            raise ValueError(
+                f"SSB result shape {phase_np.shape} does not match the widget "
+                f"scan shape {self.shape_rows}x{self.shape_cols}."
+            )
+        return np.ascontiguousarray(phase_np, dtype=np.float32), dpc_row_np, dpc_col_np
+
+    def compute_ssb(self, *, set_source: bool = True, verbose: bool = False, **kwargs) -> np.ndarray:
+        """Compute SSB phase in the live kernel and attach it as the SSB map."""
+        if self.ssb_compute_busy:
+            raise RuntimeError("Compute SSB is already running.")
+        start = time.perf_counter()
+        self.ssb_compute_busy = True
+        self.ssb_compute_status = "Computing SSB..."
+        self.ssb_compute_calibration_json = ""
+        self.ssb_compute_calibration_filename = ""
+        try:
+            phase, dpc_row, dpc_col = self._compute_ssb_phase(verbose=verbose, **kwargs)
+            self.set_vi_product_map("DPC_row", dpc_row)
+            self.set_vi_product_map("DPC_col", dpc_col)
+            self.set_vi_product_map("SSB", phase)
+            if set_source:
+                self.vi_source = "SSB"
+            elapsed = time.perf_counter() - start
+            self.ssb_compute_status = (
+                f"SSB ready ({phase.shape[0]}x{phase.shape[1]}, {elapsed:.1f}s)"
+            )
+            return phase
+        except Exception as exc:
+            self.ssb_compute_status = f"SSB failed: {exc}"
+            raise
+        finally:
+            self.ssb_compute_busy = False
+
     def __init__(
         self,
         data: "Dataset4dstem | np.ndarray",
@@ -585,6 +1335,28 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         center: tuple[float, float] | None = None,
         bf_radius: float | None = None,
         precompute_virtual_images: bool = True,
+        DPC_row: Any | None = None,
+        DPC_col: Any | None = None,
+        SSB: Any | None = None,
+        vi_source: str | None = None,
+        ssb_semiangle_mrad: float | None = None,
+        ssb_scan_sampling_A: float | tuple[float, float] | None = None,
+        ssb_det_sampling_mrad: float | tuple[float, float] | None = None,
+        ssb_voltage_kV: float | None = None,
+        ssb_energy_eV: float | None = None,
+        ssb_bf_radius: int | None = None,
+        ssb_bf_intensity_threshold: float = 0.5,
+        ssb_aberrations: dict[str, float] | None = None,
+        ssb_rotation_angle_deg: float = 0.0,
+        ssb_n_trials: int = 200,
+        ssb_refine: bool = True,
+        ssb_seed: int = 42,
+        ssb_bf_subsample: float | None = 1.0,
+        ssb_manual_aberrations: bool = False,
+        ssb_c10_nm: float = 0.0,
+        ssb_c12_nm: float = 0.0,
+        ssb_phi12_deg: float = 0.0,
+        ssb_compute_enabled: bool = True,
         frame_dim_label: str | None = None,
         frame_labels: list[str] | None = None,
         view_mode: str = "single",
@@ -602,6 +1374,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data_url: str | None = None,
         offline_codec: str = "gzip",
         offline_dtype: str = "uint8",
+        h5_url: str | None = None,
+        h5_urls: Sequence[str] | None = None,
+        lazy_url: str | None = None,
+        lazy_urls: Sequence[str] | None = None,
+        h5_uint8_lossless: bool = False,
+        detector_shape: tuple[int, int] | None = None,
         show_fft: bool = False,
         fft_window: bool = True,
         show_controls: bool | None = None,
@@ -711,23 +1489,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         self.compare_max_panels = compare_max_panels
         self.compare_group_mode = self._normalise_compare_group_mode(compare_group_mode)
-        # Backend selector. ONLY two values:
-        #   None  -> auto-pick Python compute (TorchBackend on torch
-        #            tensors, MetalRawBackend on ChunkedFrames). Default.
-        #   'web' -> kernel ships a packed stack via _offline_stack
-        #            trait; JS Show4DSTEMCompute does all reductions in
-        #            browser WebGPU. Kernel stays alive. Universal GPU
-        #            compute (any modern GPU).
-        # Legacy aliases (kept for one release):
-        #   - 'browser' / 'webgpu' -> same as 'web'
-        #   - offline=True          -> same as backend='web'
-        if backend in ("web", "browser", "webgpu"):
+        # ``webgpu`` moves detector reductions into the browser. Native CUDA
+        # and MPS are inferred from the typed data payload.
+        if backend == "webgpu":
             offline = True  # routes the rest of __init__ through the offline pack path
         elif backend is not None:
             raise ValueError(
-                f"backend must be 'web' or None, got {backend!r}. "
-                f"Python compute backend is auto-selected from the data type "
-                f"(torch tensor -> TorchBackend; ChunkedFrames -> MetalRawBackend)."
+                f"backend must be 'webgpu' or None, got {backend!r}. "
+                "Native CUDA or MPS compute is selected from the data payload."
             )
         self._backend_choice = backend
         offline_dtype = str(offline_dtype).strip().lower().replace("_", "")
@@ -745,29 +1514,63 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         _verbose = verbose
 
         _io_labels = None
+        webgpu_lazy_urls = [str(value) for value in (lazy_urls or [])]
+        if lazy_url:
+            webgpu_lazy_urls = [str(lazy_url), *webgpu_lazy_urls]
+        webgpu_lazy_urls = list(dict.fromkeys(webgpu_lazy_urls))
+        webgpu_h5_urls = [str(value) for value in (h5_urls or [])]
+        if h5_url:
+            webgpu_h5_urls = [str(h5_url), *webgpu_h5_urls]
+        # Preserve order but drop accidental duplicates; repeated URLs would waste
+        # browser VRAM and create indistinguishable compare panels.
+        if webgpu_h5_urls and webgpu_lazy_urls:
+            raise ValueError("Use h5_urls= or lazy_urls=, not both.")
+        webgpu_source_count = len(webgpu_lazy_urls) or len(webgpu_h5_urls)
+        if webgpu_source_count:
+            webgpu_h5_urls = list(dict.fromkeys(webgpu_h5_urls))
+            if scan_shape is None:
+                raise ValueError(
+                    "Show4DSTEM(..., h5_urls=... or lazy_url/lazy_urls=...) "
+                    "requires scan_shape=(rows, cols)."
+                )
+            if detector_shape is None:
+                raise ValueError(
+                    "Show4DSTEM(..., h5_urls=... or lazy_url/lazy_urls=...) "
+                    "requires detector_shape=(rows, cols)."
+                )
+            if backend not in (None, "webgpu"):
+                raise ValueError(
+                    "Browser-source Show4DSTEM uses WebGPU; backend must be "
+                    f"'webgpu' or None, got {backend!r}."
+                )
+            offline = True
+            backend = "webgpu"
 
         # Extract underlying array / tensor + auto-calibrate from Dataset input
         # (duck-typed via the dual-slot private attributes _tensor / _array).
-        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(
-            data, "frame"
-        )
-        tensor = None if is_dataset5dstem_input else getattr(data, "_tensor", None)
-        array = None if is_dataset5dstem_input else getattr(data, "_array", None)
-        if tensor is not None or array is not None:
-            if not title and getattr(data, "name", ""):
-                title = str(data.name)
-            if sampling is None:
-                sampling = tuple(float(s) for s in data.sampling)
-            if units is None:
-                units = list(data.units)
-            data = tensor if tensor is not None else array
-        elif is_dataset5dstem_input:
-            if not title and getattr(data, "name", ""):
-                title = str(data.name)
-            if sampling is None:
-                sampling = tuple(float(s) for s in data.sampling)
-            if units is None:
-                units = list(data.units)
+        if not webgpu_h5_urls:
+            is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(
+                data, "frame"
+            )
+            tensor = None if is_dataset5dstem_input else getattr(data, "_tensor", None)
+            array = None if is_dataset5dstem_input else getattr(data, "_array", None)
+            if tensor is not None or array is not None:
+                if not title and getattr(data, "name", ""):
+                    title = str(data.name)
+                if sampling is None:
+                    sampling = tuple(float(s) for s in data.sampling)
+                if units is None:
+                    units = list(data.units)
+                data = tensor if tensor is not None else array
+            elif is_dataset5dstem_input:
+                if not title and getattr(data, "name", ""):
+                    title = str(data.name)
+                if sampling is None:
+                    sampling = tuple(float(s) for s in data.sampling)
+                if units is None:
+                    units = list(data.units)
+        else:
+            is_dataset5dstem_input = False
 
         # Resolve sampling + units (4 axes for 4D-STEM):
         # [scan_row, scan_col, k_row, k_col]. Scalar/None broadcast to (1, 1, 1, 1).
@@ -786,10 +1589,49 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         self.title = title
         self.show_title = show_title
+        self._axis_sampling = tuple(float(s) for s in sampling)
+        self._axis_units = list(units)
         self.pixel_size = sampling[1]  # scan_col axis (horizontal scale bar)
         self.pixel_unit = units[1] if len(units) > 1 else "pixels"
         self.k_pixel_size = sampling[3] if len(sampling) > 3 else 1.0
         self.k_pixel_unit = units[3] if len(units) > 3 else "pixels"
+        self._ssb_compute_config = {
+            "semiangle_mrad": ssb_semiangle_mrad,
+            "scan_sampling_A": ssb_scan_sampling_A,
+            "det_sampling_mrad": ssb_det_sampling_mrad,
+            "voltage_kV": ssb_voltage_kV,
+            "energy_eV": ssb_energy_eV,
+            "bf_radius": ssb_bf_radius,
+            "bf_intensity_threshold": float(ssb_bf_intensity_threshold),
+            "aberrations": ssb_aberrations,
+            "rotation_angle_deg": float(ssb_rotation_angle_deg),
+            "n_trials": int(ssb_n_trials),
+            "refine": bool(ssb_refine),
+            "seed": int(ssb_seed),
+            "bf_subsample": ssb_bf_subsample,
+        }
+        self.ssb_compute_enabled = bool(ssb_compute_enabled)
+        self.ssb_compute_n_trials = int(ssb_n_trials)
+        self.ssb_compute_refine = bool(ssb_refine)
+        self.ssb_compute_bf_subsample = 1.0 if ssb_bf_subsample is None else float(ssb_bf_subsample)
+        self.ssb_compute_manual_aberrations = bool(ssb_manual_aberrations)
+        self.ssb_compute_c10_nm = float(
+            ssb_aberrations.get("C10", ssb_c10_nm)
+            if ssb_aberrations is not None
+            else ssb_c10_nm
+        )
+        self.ssb_compute_c12_nm = float(
+            ssb_aberrations.get("C12", ssb_c12_nm)
+            if ssb_aberrations is not None
+            else ssb_c12_nm
+        )
+        phi12_default = (
+            math.degrees(float(ssb_aberrations.get("phi12", math.radians(ssb_phi12_deg))))
+            if ssb_aberrations is not None
+            else ssb_phi12_deg
+        )
+        self.ssb_compute_phi12_deg = float(phi12_default)
+        self.ssb_compute_rotation_angle_deg = float(ssb_rotation_angle_deg)
         # k-space considered calibrated when its unit is real (mrad, 1/Å, etc.).
         self.k_calibrated = self.k_pixel_unit not in ("pixels", "")
         self.show_fft = show_fft
@@ -807,61 +1649,74 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._path_points: list[tuple[int, int]] = []
         # Suppress per-trait recompute during apply_preset batch writes
         self._suppress_roi_recompute = False
-        # Accept the io.load(...) output directly so `Show4DSTEM(load(path))` just
-        # works on any backend. Unwrap a LoadResult NamedTuple, then wrap a raw MPS
-        # chunked-load (MPSChunked4DSTEM) for the Metal compute path.
-        if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
-            data = data.data
-        # Dataset5dstem is the CUDA/MPS-friendly 5D series wrapper. Keep it as a
-        # frame-backed object instead of calling `.tensor`: sharded CUDA series may
-        # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
-        # gather everything onto one card.
-        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(
-            data, "frame"
-        )
-        if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
-            from quantem.gpu.compute.mps import ChunkedFrames
-
-            data = ChunkedFrames(
-                data, row_prefix=bool(getattr(data, "row_prefix", False))
-            )
-        # cupy array (io.load default on CUDA) -> ZERO-COPY torch tensor on the same
-        # GPU via dlpack. Without this, the fallback cp.asnumpy round-trips the whole
-        # block to CPU and re-uploads (a 19.3 GB no-bin load -> ~58 GB transient and
-        # an OOM kernel crash). dlpack keeps it on-device, no copy.
-        if type(data).__module__.split(".")[0] == "cupy":
-            data = torch.from_dlpack(data)
-        # Torch tensor input keeps its device (lets user pin a specific GPU via
-        # `data.cuda(1)`). NumPy / Dataset input gets default-validated device.
-        if is_dataset5dstem:
-            self._device = data.device
-            self._data_pre = data
-            data_np = None
-        elif isinstance(data, torch.Tensor) or getattr(data, "_is_gpu_frames", False):
-            # `_is_gpu_frames` lets a duck-typed GPU array (e.g. a chunk-backed
-            # no-bin stack that can't be one tensor) take the GPU path without a
-            # numpy round-trip. It must expose .shape/.dtype/.ndim/.device and
-            # single-frame integer indexing.
-            self._device = data.device
-            self._data_pre = data
-            data_np = None
-        else:
-            device_str, _ = _validate_device(None)
-            self._device = torch.device(device_str)
-            data_np = to_numpy(data)
+        # The public factory unwraps LoadResult explicitly. This implementation
+        # receives the typed GPU data payload.
+        self._webgpu_h5_source = bool(webgpu_source_count)
+        self._cuda_compute_data = None
+        self._cuda_compare_compute_backends: OrderedDict[int, Any] = OrderedDict()
+        if self._webgpu_h5_source:
+            self._device = torch.device("cpu")
             self._data_pre = None
-            self._saturation_value = (
-                65535
-                if data_np.dtype == np.uint16
-                else 255
-                if data_np.dtype == np.uint8
-                else None
+            data_np = None
+            rows, cols = (int(scan_shape[0]), int(scan_shape[1]))
+            det_r, det_c = (int(detector_shape[0]), int(detector_shape[1]))
+            if rows <= 0 or cols <= 0 or det_r <= 0 or det_c <= 0:
+                raise ValueError(
+                    "scan_shape and detector_shape entries must all be positive."
+                )
+            shape = (
+                (webgpu_source_count, rows, cols, det_r, det_c)
+                if webgpu_source_count > 1
+                else (rows, cols, det_r, det_c)
             )
-        # Handle dimensionality — 5D loads eagerly for instant frame switching
-        # Resolve shape from whichever input path we took
-        shape = (
-            tuple(self._data_pre.shape) if self._data_pre is not None else data_np.shape
-        )
+        else:
+            # Dataset5dstem is the CUDA/MPS-friendly 5D series wrapper. Keep it as a
+            # frame-backed object instead of calling `.tensor`: sharded CUDA series may
+            # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
+            # gather everything onto one card.
+            is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(
+                data, "frame"
+            )
+            # cupy array (io.load default on CUDA) -> ZERO-COPY torch tensor on the same
+            # GPU via dlpack. Without this, the fallback cp.asnumpy round-trips the whole
+            # block to CPU and re-uploads (a 19.3 GB no-bin load -> ~58 GB transient and
+            # an OOM kernel crash). dlpack keeps it on-device, no copy.
+            if type(data).__module__.split(".")[0] == "cupy":
+                self._cuda_compute_data = data
+                data = torch.from_dlpack(data)
+            # Torch tensor input keeps its device (lets user pin a specific GPU via
+            # `data.cuda(1)`). NumPy / Dataset input gets default-validated device.
+            if is_dataset5dstem:
+                self._device = data.device
+                self._data_pre = data
+                data_np = None
+            elif isinstance(data, torch.Tensor) or getattr(data, "_is_gpu_frames", False):
+                # `_is_gpu_frames` lets a duck-typed GPU array (e.g. a chunk-backed
+                # no-bin stack that can't be one tensor) take the GPU path without a
+                # numpy round-trip. It must expose .shape/.dtype/.ndim/.device and
+                # single-frame integer indexing.
+                self._device = data.device
+                self._data_pre = data
+                data_np = None
+            else:
+                device_str, _ = _validate_device(None)
+                self._device = torch.device(device_str)
+                data_np = to_numpy(data)
+                self._data_pre = None
+                self._saturation_value = (
+                    65535
+                    if data_np.dtype == np.uint16
+                    else 255
+                    if data_np.dtype == np.uint8
+                    else None
+                )
+            # Handle dimensionality — 5D loads eagerly for instant frame switching
+            # Resolve shape from whichever input path we took
+            shape = (
+                tuple(self._data_pre.shape)
+                if self._data_pre is not None
+                else data_np.shape
+            )
         ndim = len(shape)
         _tc = time.perf_counter()
         if ndim == 5:
@@ -890,7 +1745,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(
                 f"Show4DSTEM expects a 3D ((N, det_h, det_w) flat-scan), 4D ((scan_h, scan_w, det_h, det_w)), or 5D ((n_frames, scan_h, scan_w, det_h, det_w)) array. Got {ndim}D."
             )
-        if self._data_pre is not None:
+        if self._webgpu_h5_source:
+            self._data = None
+            self._dataset_page_config = None
+        elif self._data_pre is not None:
             self._data = (
                 self._data_pre
                 if is_dataset5dstem or self._data_pre.device == self._device
@@ -949,7 +1807,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     chunk.masked_fill_(chunk == -1, 0)
         # Keep native dtype (uint8/uint16) to bound memory at ~ data_size.
         # Reductions cast in chunks (bounded transient).
-        if _verbose:
+        if _verbose and not self._webgpu_h5_source:
             if str(self._device) == "mps":
                 torch.mps.synchronize()
             n_bytes = (
@@ -965,6 +1823,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.shape_cols = self._scan_shape[1]
         self.det_rows = self._det_shape[0]
         self.det_cols = self._det_shape[1]
+        self._set_vi_product_maps(
+            {
+                "DPC_row": DPC_row,
+                "DPC_col": DPC_col,
+                "SSB": SSB,
+            }
+        )
+        initial_vi_source = self._normalise_vi_source(vi_source or "roi")
+        if initial_vi_source != "roi" and initial_vi_source not in self._vi_product_maps:
+            available = ["roi", *self.vi_product_labels]
+            raise ValueError(
+                f"vi_source={vi_source!r} requires a matching map. "
+                f"Available image sources: {available}."
+            )
+        self.vi_source = initial_vi_source
         # Initial position at center
         self.pos_row = self.shape_rows // 2
         self.pos_col = self.shape_cols // 2
@@ -977,6 +1850,122 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._frame_labels = resolved_labels
         if resolved_labels:
             self.frame_labels = list(resolved_labels)
+        if self._webgpu_h5_source:
+            self._offline_codec = offline_codec
+            self._h5_url = webgpu_h5_urls[0] if len(webgpu_h5_urls) == 1 else ""
+            self._h5_urls = json.dumps(webgpu_h5_urls) if len(webgpu_h5_urls) > 1 else ""
+            self._lazy_url = webgpu_lazy_urls[0] if len(webgpu_lazy_urls) == 1 else ""
+            self._lazy_urls = (
+                json.dumps(webgpu_lazy_urls) if len(webgpu_lazy_urls) > 1 else ""
+            )
+            self._h5_uint8_lossless = bool(h5_uint8_lossless)
+            self.offline = True
+            self._offline_stack = b""
+            self._offline_url = ""
+            self._offline_chunks = ""
+            self._offline_bslz4 = ""
+            self._offline_bad_px = ""
+            self._offline_gzip = False
+            self.ssb_compute_enabled = False
+            self.dp_global_min = MIN_LOG_VALUE
+            self.dp_global_max = 1.0
+            self._det_row_coords = torch.arange(
+                self.det_rows, device=self._device, dtype=torch.float32
+            )[:, None]
+            self._det_col_coords = torch.arange(
+                self.det_cols, device=self._device, dtype=torch.float32
+            )[None, :]
+            self._scan_row_coords = torch.arange(
+                self.shape_rows, device=self._device, dtype=torch.float32
+            )[:, None]
+            self._scan_col_coords = torch.arange(
+                self.shape_cols, device=self._device, dtype=torch.float32
+            )[None, :]
+            det_size = min(self.det_rows, self.det_cols)
+            if center is not None:
+                self.center_row = float(center[0])
+                self.center_col = float(center[1])
+            else:
+                self.center_row = float(self.det_rows / 2)
+                self.center_col = float(self.det_cols / 2)
+            self.bf_radius = float(
+                bf_radius if bf_radius is not None else det_size * DEFAULT_BF_RATIO
+            )
+            self._cached_bf_virtual = None
+            self._cached_abf_virtual = None
+            self._cached_adf_virtual = None
+            self._cached_haadf_virtual = None
+            self._compare_virtual_page_cache = OrderedDict()
+            self._compare_virtual_page_cache_bytes = 0
+            self._compare_diffraction_cache = OrderedDict()
+            self._compare_diffraction_cache_bytes = 0
+            self._compare_cache_pages = max(0, int(compare_cache_pages))
+            self._compare_cache_max_bytes = (
+                None
+                if compare_cache_max_bytes is None
+                else max(0, int(compare_cache_max_bytes))
+            )
+            self._compare_compute_lock = threading.RLock()
+            self._compare_cache_lock = threading.RLock()
+            self._compare_cache_generation = 0
+            self._compare_cache_warm_stop = None
+            self._compare_cache_warm_thread = None
+            self._compare_cache_warm_status = "idle"
+            self._compare_page_stop = None
+            self._compare_page_thread = None
+            self._compare_maintenance_stop = None
+            self._compare_maintenance_thread = None
+            self._compare_page_worker_lock = threading.Lock()
+            self._compare_page_request_lock = threading.RLock()
+            self._compare_page_generation_counter = 0
+            self._compare_page_last_error = ""
+            self._compare_page_last_send_error = ""
+            self._compare_page_fresh_indices = set()
+            self._compare_page_working_images = {}
+            self._compare_page_paint_clients = set()
+            self._compare_page_paint_ack_enabled = False
+            self._folder_update_page_idx = -1
+            self._folder_update_expected_indices = ()
+            self._folder_update_backend_complete_generation = 0
+            self._folder_update_painted_generation = 0
+            self._folder_update_painted_page_idx = -1
+            self._folder_update_paint_timeout_seconds = 30.0
+            self._folder_update_paint_timeout = None
+            self._folder_update_paint_timeout_generation = 0
+            self.roi_mode = "circle"
+            self.roi_center_col = self.center_col
+            self.roi_center_row = self.center_row
+            self.roi_center = [self.center_row, self.center_col]
+            self.roi_radius = float(max(1.0, self.bf_radius))
+            self.roi_active = True
+            self.virtual_image_bytes = np.zeros(
+                self.shape_rows * self.shape_cols, dtype=np.float32
+            ).tobytes()
+            self.frame_bytes = np.zeros(
+                self.det_rows * self.det_cols, dtype=np.float32
+            ).tobytes()
+            visible_count = (
+                min(int(self.n_frames), max(1, int(compare_max_panels)))
+                if self._multiple_view_active()
+                else 0
+            )
+            if visible_count:
+                self.compare_panel_count = 0
+                self.compare_panel_indices = []
+                self.compare_virtual_image_bytes = b""
+                self.compare_status = (
+                    f"Loading {visible_count}/{int(self.n_frames)} browser WebGPU panels"
+                )
+            self.compare_page_count = max(
+                1, math.ceil(max(1, int(self.n_frames)) / max(1, int(compare_max_panels)))
+            )
+            self.gpu_memory_label = (
+                "Browser WebGPU lazy source"
+                if webgpu_lazy_urls
+                else "Browser WebGPU HDF5 source"
+            )
+            self.memory_warning = ""
+            return
         # Histogram axis range — first frame is enough (JS does per-frame percentile clipping).
         # Cast to float for min/max reductions: PyTorch CUDA lacks integer min/max kernels,
         # and the first slice is tiny (144 KB at 192×192) so the cast is free.
@@ -1068,7 +2057,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._compare_page_fresh_indices: set[int] = set()
         self._compare_page_working_images: dict[int, np.ndarray] = {}
         self._compare_page_paint_clients: set[str] = set()
-        self._compare_page_paint_legacy_active = False
         self._compare_page_paint_ack_enabled = False
         self._folder_update_page_idx = -1
         self._folder_update_expected_indices: tuple[int, ...] = ()
@@ -1113,6 +2101,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         # Observe compound roi_center for batched updates from JS
         self.observe(self._on_roi_center_change, names=["roi_center"])
+        self.observe(self._on_vi_source_change, names=["vi_source"])
         # Invalidate precomputed virtual image caches when calibration changes
         self.observe(
             self._on_calibration_change, names=["center_row", "center_col", "bf_radius"]
@@ -1162,6 +2151,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.observe(self._on_path_index_change, names=["path_index"])
         self.observe(self._on_gif_export, names=["_gif_export_requested"])
         self.observe(self._on_export_request_change, names=["export_request"])
+        self.observe(self._on_ssb_compute_request_change, names=["ssb_compute_request"])
 
         # Frame animation (5D): observe frame_idx changes from frontend
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
@@ -1235,10 +2225,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # compute class first (raw Metal / cupy), else the torch device.
             cls = self._compute.__class__.__name__
             backend, where = {
-                "MetalCompute": ("Apple GPU (raw Metal)", "Apple unified memory"),
+                "MetalRawBackend": ("Apple GPU (raw Metal)", "Apple unified memory"),
                 "CudaKernelCompute": ("NVIDIA GPU (CUDA, cupy)", "GPU VRAM"),
             }.get(cls, (None, None))
-            if backend is None:  # TorchCompute — backend depends on the torch device
+            if backend is None:  # TorchBackend depends on the torch device
                 dev = str(self._device)
                 if "cuda" in dev:
                     backend, where = "NVIDIA GPU (CUDA, torch)", "GPU VRAM"
@@ -1276,6 +2266,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         def _resend():
             for name in (
                 "virtual_image_bytes",
+                "vi_product_labels",
+                "vi_product_map_frames",
+                "vi_product_maps_bytes",
+                "vi_preset_labels",
+                "vi_preset_map_frames",
+                "vi_preset_maps_bytes",
                 "frame_bytes",
                 "compare_virtual_image_bytes",
             ):
@@ -1315,9 +2311,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         if self._data.ndim not in (4, 5):
             return
-        # H5-source / lazy mode: the merged data stays files on disk, read by WebGPU at runtime.
-        # No uint8 pack, nothing embedded - the JS fetches the sidecars/frames and decodes on GPU.
-        if getattr(self, "_h5_url", "") or getattr(self, "_lazy_url", ""):
+        # Browser-source mode: the raw frames stay as files on disk and WebGPU
+        # reads HDF5 byte ranges or an explicitly supplied internal lazy source
+        # at runtime. Do not pack/embed data for these browser-source paths.
+        if (
+            getattr(self, "_h5_url", "")
+            or getattr(self, "_h5_urls", "")
+            or getattr(self, "_lazy_url", "")
+            or getattr(self, "_lazy_urls", "")
+        ):
             self.offline = True
             return
         offline_dtype = getattr(self, "_offline_dtype", "uint8")
@@ -1449,7 +2451,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ``real_space_bin``) bins scan pixels by mean over ``scan_bin x scan_bin``
         blocks. ``dtype`` may be ``"uint8"`` or ``"uint16"``.
         """
-        if self._data is None:
+        if self._data is None and not getattr(self, "_webgpu_h5_source", False):
             raise ValueError(
                 "Cannot export HTML after free(); rebuild the widget first."
             )
@@ -1490,11 +2492,29 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 scan_bin=scan_bin,
                 title=title,
             )
+            # The interactive export fetches its data file over HTTP (CORS blocks
+            # file://), so write a double-click launcher that serves the folder
+            # and opens this page in Chrome. The static "report" kind is
+            # self-contained and needs no launcher.
+            from quantem.widget.command_launcher import write_command_launcher
+
+            write_command_launcher(
+                export_path.parent, "Show4DSTEM", viewer_html=export_path.name
+            )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        self.export_status = (
-            f"Exported {export_path.name} "
-            f"({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin, scan_bin, export_kind=kind)})"
-        )
+        mode = self._export_mode_label(dtype, det_bin, scan_bin, export_kind=kind)
+        if kind == "report":
+            # Self-contained single HTML: no data file, opens by double-click.
+            how = "self-contained HTML - double-click to open, no server needed"
+        else:
+            # Interactive: HTML + a data file fetched over HTTP (CORS blocks
+            # file://), so it needs the local server, not a bare double-click.
+            how = (
+                f"WebGPU folder - reads its data file over HTTP; double-click "
+                f"Show4DSTEM.command in {export_path.parent.name}/ to open (a bare "
+                f"double-click of the HTML will not load the data)"
+            )
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {mode}) - {how}"
         return export_path
 
     def _on_export_request_change(self, change: dict) -> None:
@@ -1689,6 +2709,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         suffix = f"{prefix}_rbin{scan_bin}_kbin{det_bin}"
         return pathlib.Path.cwd() / f"{slug}_{shape}_{suffix}.html"
 
+    def _default_ssb_calibration_filename(self) -> str:
+        label = self.title.strip() or "show4dstem"
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if not slug:
+            slug = "show4dstem"
+        shape = f"{self.shape_rows}x{self.shape_cols}x{self.det_rows}x{self.det_cols}"
+        return f"{slug}_{shape}_ssb_calibration.json"
+
     def _write_html_export(
         self,
         path: str | pathlib.Path,
@@ -1704,6 +2734,44 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         out = pathlib.Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        if getattr(self, "_webgpu_h5_source", False):
+            if det_bin != 1 or scan_bin != 1:
+                raise ValueError(
+                    "Binned interactive raw export is not available for browser-source "
+                    "Show4DSTEM exports because the browser reads the real H5 data "
+                    "directly. Use det_bin=1 and scan_bin=1 to preserve the full data."
+                )
+            prev_enabled = self.export_enabled
+            prev_save_state = self._save_state
+            prev_bad_px = self._offline_bad_px
+            self.export_enabled = False
+            self._save_state = True
+            try:
+                if not self._offline_bad_px and self._h5_url:
+                    embedded_bad_px = _h5_bad_pixel_json_for_export(
+                        self._h5_url,
+                        out.parent,
+                    )
+                    if embedded_bad_px is not None:
+                        self._offline_bad_px = embedded_bad_px
+                embed_minimal_html(
+                    str(out),
+                    views=[self],
+                    title=title or self.title or "Show4DSTEM",
+                    drop_defaults=False,
+                    state=dependency_state([self], drop_defaults=False),
+                )
+                _inject_show4dstem_h5_webgpu_tuning(
+                    out,
+                    dtype=dtype,
+                    h5_uint8_lossless=bool(self._h5_uint8_lossless),
+                )
+            finally:
+                self.export_enabled = prev_enabled
+                self._save_state = prev_save_state
+                self._offline_bad_px = prev_bad_px
+            ensure_mobile_viewport(out)
+            return out
         if self._offline_bslz4:
             if det_bin != 1 or scan_bin != 1:
                 raise ValueError(
@@ -1764,7 +2832,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _clone_for_html_export(
         self, *, dtype: str, det_bin: int, scan_bin: int = 1
-    ) -> Self:
+    ) -> "Show4DSTEM":
         data = self._export_data_array(dtype=dtype, det_bin=det_bin, scan_bin=scan_bin)
         k_scale = float(det_bin)
         scan_scale = float(scan_bin)
@@ -1776,13 +2844,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         units = [self.pixel_unit, self.pixel_unit, self.k_pixel_unit, self.k_pixel_unit]
         center = (self.center_row / k_scale, self.center_col / k_scale)
-        clone = type(self)(
+        product_kwargs = self._export_vi_product_kwargs(scan_bin=scan_bin)
+        export_vi_source = (
+            self.vi_source
+            if self.vi_source == "roi" or self.vi_source in product_kwargs
+            else "roi"
+        )
+        # Export data is a compact tensor, so always use the universal base
+        # viewer. Backend-specific subclasses require their native storage
+        # handles and must not be reconstructed from this tensor payload.
+        clone = Show4DSTEM(
             data,
             sampling=sampling,
             units=units,
             center=center,
             bf_radius=max(1.0, self.bf_radius / k_scale),
             precompute_virtual_images=False,
+            vi_source=export_vi_source,
             frame_dim_label=self.frame_dim_label,
             frame_labels=list(self.frame_labels),
             title=self.title,
@@ -1803,7 +2881,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             compare_max_panels=self.compare_max_panels,
             compare_group_mode=self.compare_group_mode,
             compare_dp_mode=self.compare_dp_mode,
+            ssb_compute_enabled=False,
             verbose=False,
+            **product_kwargs,
         )
         clone.load_state_dict(self._export_state_for_bin(det_bin, scan_bin=scan_bin))
         clone._pack_export_inline(dtype=dtype)
@@ -1812,8 +2892,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         clone.export_payload = b""
         clone.export_payload_id = ""
         clone.export_filename = ""
+        clone.ssb_compute_enabled = False
+        clone.ssb_compute_status = ""
+        clone.ssb_compute_request = ""
+        clone.ssb_compute_busy = False
+        clone.ssb_compute_calibration_json = ""
+        clone.ssb_compute_calibration_filename = ""
         clone._save_state = True
         return clone
+
+    def _export_vi_product_kwargs(self, *, scan_bin: int = 1) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for label, arr in getattr(self, "_vi_product_maps", {}).items():
+            binned = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
+            binned = np.ascontiguousarray(binned, dtype=np.float32)
+            out[label] = binned[0] if binned.shape[0] == 1 else binned
+        return out
 
     def _export_data_array(
         self, *, dtype: str, det_bin: int, scan_bin: int = 1
@@ -1967,6 +3061,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return arr.reshape(
                 sr // scan_bin, scan_bin, sc // scan_bin, scan_bin, dr, dc
             ).mean(axis=(1, 3))
+        if arr.ndim == 3:
+            nf, sr, sc = arr.shape
+            return arr.reshape(
+                nf, sr // scan_bin, scan_bin, sc // scan_bin, scan_bin
+            ).mean(axis=(2, 4))
         if arr.ndim == 2:
             sr, sc = arr.shape
             return arr.reshape(sr // scan_bin, scan_bin, sc // scan_bin, scan_bin).mean(
@@ -2371,8 +3470,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ]
         if not to_release:
             return
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             data.release(idx=to_release)
         finally:
@@ -2787,6 +3885,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "vi_roi_width": self.vi_roi_width,
             "vi_roi_height": self.vi_roi_height,
             "vi_roi_reduce": self.vi_roi_reduce,
+            "vi_source": self.vi_source,
             "dp_colormap": self.dp_colormap,
             "vi_colormap": self.vi_colormap,
             "fft_colormap": self.fft_colormap,
@@ -2860,6 +3959,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     val = self._normalise_compare_dp_mode(val)
                 elif key == "compare_group_mode":
                     val = self._normalise_compare_group_mode(val)
+                elif key == "vi_source":
+                    val = self._normalise_vi_source(val)
+                    if val != "roi" and val not in getattr(self, "_vi_product_maps", {}):
+                        val = "roi"
                 setattr(self, key, val)
         if pending_frame_idx is not None:
             self.frame_idx = int(max(0, min(int(pending_frame_idx), self.n_frames - 1)))
@@ -2916,6 +4019,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         import gc
 
         data = self._data
+        self._cuda_compute_data = None
+        self._cuda_compare_compute_backends.clear()
         cuda_indices: set[int] = set()
         needs_mps_clear = False
 
@@ -2946,8 +4051,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         # Every holder of the data storage (verified via a gc storage scan):
         # the widget's own ref, the compute backend's view cache, and the per-op cache.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         if type(data).__name__ == "Dataset5dstem" and hasattr(data, "free"):
             data.free()
         self._data = None
@@ -3087,30 +4191,36 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         return self._data
 
     @property
+    def _compute_frame_data(self):
+        """Current frame data for backend reductions, preserving CuPy when present."""
+        cuda_data = getattr(self, "_cuda_compute_data", None)
+        if cuda_data is not None:
+            if self.n_frames > 1:
+                return cuda_data[self.frame_idx]
+            return cuda_data
+        return self._frame_data
+
+    @property
     def _compute(self):
-        """UI-agnostic Python compute backend for the CURRENT frame's data,
-        rebuilt when the frame changes. Two families:
-
-        * ``TorchBackend`` — torch tensor on CUDA / MPS / CPU (universal default).
-        * ``MetalRawBackend`` — chunk-backed Metal frames (a 19 GB no-bin
-          stack where torch.MPS overflows).
-
-        ``backend='web'`` does NOT install a third Python backend; it sets
-        ``offline=True`` so the kernel ships a uint8-packed stack to the browser
-        and the JS ``Show4DSTEMCompute`` does all reductions in WebGPU. The
-        Python ``_compute`` stays a Torch/MetalRaw backend for any kernel-side
-        fallbacks (e.g. ``_pack_offline`` initial compute, snapshot PNG).
-
-        Construction is cheap (views, no copy) so the backend rebuilds when
-        ``_frame_data`` changes (5D time-series scrub).
-        """
-        fd = self._frame_data
+        """Return the current frame's GPU detector session."""
+        fd = self._compute_frame_data
         if getattr(self, "_compute_for", None) is not fd:
-            from quantem.gpu.compute.backends import compute_backend
+            from quantem.gpu.detector import prepare
 
-            self._compute_backend = compute_backend(fd)
+            previous = getattr(self, "_compute_backend", None)
+            if previous is not None:
+                previous.close()
+            self._compute_backend = prepare(fd)
             self._compute_for = fd
         return self._compute_backend
+
+    def _close_compute(self) -> None:
+        """Close the current detector session before releasing its data."""
+        session = getattr(self, "_compute_backend", None)
+        if session is not None:
+            session.close()
+        self._compute_backend = None
+        self._compute_for = None
 
     # =========================================================================
     # Line Profile
@@ -3261,6 +4371,101 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.apply_preset(name)
             self._preset_request = ""  # consume trigger
 
+    def _on_ssb_compute_request_change(self, change):
+        """JS More → Compute SSB request."""
+        raw = str(change.get("new") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"action": raw}
+        action = str(payload.get("action", "compute_ssb")).strip().lower()
+        self.ssb_compute_request = ""  # consume trigger before any long work
+        if action in {"clear", "reset"}:
+            self.ssb_compute_status = ""
+            return
+        if action not in {"compute_ssb", "ssb", "compute"}:
+            self.ssb_compute_status = f"SSB failed: unknown request {action!r}"
+            return
+        if not self.ssb_compute_enabled:
+            self.ssb_compute_status = (
+                "Compute SSB is available only in a live Python kernel. "
+                "Precompute SSB before exporting standalone HTML."
+            )
+            return
+        if self.ssb_compute_busy:
+            self.ssb_compute_status = "SSB compute is already running."
+            return
+
+        kwargs: dict[str, Any] = {}
+        key_map = {
+            "semiangle_mrad": "semiangle_mrad",
+            "scan_sampling_A": "scan_sampling_A",
+            "det_sampling_mrad": "det_sampling_mrad",
+            "voltage_kV": "voltage_kV",
+            "energy_eV": "energy_eV",
+            "bf_radius": "bf_radius",
+            "bf_intensity_threshold": "bf_intensity_threshold",
+            "rotation_angle_deg": "rotation_angle_deg",
+            "n_trials": "n_trials",
+            "refine": "refine",
+            "seed": "seed",
+            "bf_subsample": "bf_subsample",
+            "lock_aberrations": "lock_aberrations",
+        }
+        for src_key, dst_key in key_map.items():
+            if src_key in payload:
+                kwargs[dst_key] = payload[src_key]
+        if "n_trials" in kwargs:
+            self.ssb_compute_n_trials = int(kwargs["n_trials"])
+        if "refine" in kwargs:
+            self.ssb_compute_refine = bool(kwargs["refine"])
+        if "bf_subsample" in kwargs:
+            self.ssb_compute_bf_subsample = float(kwargs["bf_subsample"])
+
+        manual_aberrations = bool(payload.get("manual_aberrations", False))
+        self.ssb_compute_manual_aberrations = manual_aberrations
+        if manual_aberrations:
+            c10 = float(payload.get("c10_nm", self.ssb_compute_c10_nm))
+            c12 = float(payload.get("c12_nm", self.ssb_compute_c12_nm))
+            phi12_deg = float(payload.get("phi12_deg", self.ssb_compute_phi12_deg))
+            rotation_deg = float(
+                payload.get("rotation_angle_deg", self.ssb_compute_rotation_angle_deg)
+            )
+            self.ssb_compute_c10_nm = c10
+            self.ssb_compute_c12_nm = c12
+            self.ssb_compute_phi12_deg = phi12_deg
+            self.ssb_compute_rotation_angle_deg = rotation_deg
+            kwargs["aberrations"] = {
+                "C10": c10,
+                "C12": c12,
+                "phi12": math.radians(phi12_deg),
+            }
+            kwargs["rotation_angle_deg"] = rotation_deg
+            kwargs["lock_aberrations"] = True
+        lock_c10 = bool(payload.get("lock_c10", self.ssb_compute_lock_c10))
+        lock_c12 = bool(payload.get("lock_c12", self.ssb_compute_lock_c12))
+        self.ssb_compute_lock_c10 = lock_c10
+        self.ssb_compute_lock_c12 = lock_c12
+        if not manual_aberrations:
+            kwargs["lock_c10"] = lock_c10
+            kwargs["lock_c12"] = lock_c12
+
+        def worker() -> None:
+            try:
+                self.compute_ssb(verbose=bool(payload.get("verbose", False)), **kwargs)
+            except Exception:
+                # compute_ssb already publishes the concise failure string.
+                return
+
+        thread = threading.Thread(
+            target=worker,
+            name="Show4DSTEM-compute-SSB",
+            daemon=True,
+        )
+        thread.start()
+
     def _on_compare_config_change(self, change=None) -> None:
         """Refresh compare-grid payload after relevant config/readiness changes."""
         if getattr(self, "_suppress_folder_append_refresh", False):
@@ -3277,9 +4482,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         progressive = self._uses_progressive_compare_pages()
         self._refresh_compare_virtual_images()
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             # A page change normally moves the selected diffraction panel to
-            # the first visible slot. Suppress that observer's legacy eager
+            # the first visible slot. Suppress that observer's direct eager
             # frame load while a folder page is being streamed in the worker.
             self._suppress_progressive_frame_update = progressive
             try:
@@ -3298,7 +4503,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.compare_dp_mode = self._normalise_compare_dp_mode(
                 change.get("new", "average")
             )
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             self._update_frame()
 
     def _on_frame_idx_change(self, change=None):
@@ -3314,7 +4519,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             self._sync_compare_page_to_frame_idx()
             if getattr(self, "_suppress_progressive_frame_update", False) or (
                 self._uses_progressive_compare_pages()
@@ -3324,7 +4529,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Recompute virtual image only when it is visible. In multiple mode the
         # visible virtual-image surface is the compare grid; switching back to
         # single recomputes the per-frame virtual image in _on_compare_config_change.
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._update_frame()
         # Recompute reduced DP if VI ROI is active
@@ -3534,15 +4739,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         >>> widget.auto_detect_center()  # Auto-detect and apply
         """
         # Sum diffraction patterns over scan positions to find BF disk centroid.
-        # Chunked torch INTEGER path: works identically on CUDA / MPS / CPU.
+        # Chunked torch integer reference path used by small tests.
         # int64 accumulator, no float32 cast of the stack — keeps the data in its
         # native dtype (a float32 cast doubles memory and is lossy above 2^24),
         # is bit-exact, and avoids the MPS "tensor dims larger than INT_MAX"
         # error a single full-stack reduce hits once positions*det > 2^31 (a bin2
         # 512x512x96x96 stack = 2.42e9 elements). The chunk cap keeps each op's
         # element count well under 2^31; the (det, det) accumulator is tiny.
-        # Mean DP over all scan positions via the compute backend (TorchCompute
-        # int64-accumulates in chunks; MetalCompute uses the raw detector_sum
+        # Mean DP over all scan positions via the compute backend (TorchBackend
+        # int64-accumulates in chunks; MetalRawBackend uses the raw detector_sum
         # kernel). Centroid + radius are scale-invariant, so mean vs sum is the
         # same center/radius. The (det, det) result is tiny - torch for the centroid.
         mean_dp = torch.as_tensor(self._compute.mean_dp(), device=self._device).float()
@@ -3621,6 +4826,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         return (rgba[..., :3] * 255).astype(np.uint8)
 
     def _get_virtual_image_array(self) -> np.ndarray:
+        product = self._current_vi_product_map()
+        if product is not None:
+            return np.asarray(product, dtype=np.float32).copy()
         if not self.virtual_image_bytes:
             return np.zeros((self.shape_rows, self.shape_cols), dtype=np.float32)
         arr = np.frombuffer(self.virtual_image_bytes, dtype=np.float32)
@@ -4055,7 +5263,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 unit = "mrad" if self.k_calibrated else "px"
                 self._draw_scalebar_overlay(out, float(self.k_pixel_size), unit)
             elif panel_key == "virtual":
-                self._draw_scalebar_overlay(out, float(self.pixel_size), "Å")
+                self._draw_scalebar_overlay(
+                    out, float(self.pixel_size), self.pixel_unit or "px"
+                )
         return out
 
     def _render_panel_image(
@@ -4315,6 +5525,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         try:
             if preset_name == "bf":
                 with self.hold_trait_notifications():
+                    self.vi_source = "roi"
                     self.roi_active = True
                     self.roi_mode = "circle"
                     self.roi_center_row = center_row
@@ -4322,6 +5533,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     self.roi_radius = float(max(1.0, bf))
             elif preset_name == "abf":
                 with self.hold_trait_notifications():
+                    self.vi_source = "roi"
                     self.roi_active = True
                     self.roi_mode = "annular"
                     self.roi_center_row = center_row
@@ -4330,6 +5542,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     self.roi_radius = float(max(1.0, bf))
             elif preset_name == "adf":
                 with self.hold_trait_notifications():
+                    self.vi_source = "roi"
                     self.roi_active = True
                     self.roi_mode = "annular"
                     self.roi_center_row = center_row
@@ -4338,6 +5551,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     self.roi_radius = float(max(bf + 1.0, bf * 2.0))
             elif preset_name == "haadf":
                 with self.hold_trait_notifications():
+                    self.vi_source = "roi"
                     self.roi_active = True
                     self.roi_mode = "annular"
                     self.roi_center_row = center_row
@@ -4351,7 +5565,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         finally:
             self._suppress_roi_recompute = False
         # Single recompute with final, consistent state.
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
         return self
@@ -4686,7 +5900,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         if getattr(self, "_suppress_roi_recompute", False):
             return
-        if self.view_mode != "multiple":
+        if self.vi_source != "roi":
+            return
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
 
@@ -4711,8 +5927,27 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.observe(
                 self._on_roi_change, names=["roi_center_col", "roi_center_row"]
             )
-        if self.view_mode != "multiple":
+        if self.vi_source != "roi":
+            return
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
+        self._refresh_compare_virtual_images()
+
+    def _on_vi_source_change(self, change=None):
+        """Switch the image panel between detector-ROI VI and product maps."""
+        source = self._normalise_vi_source(change.get("new") if change else self.vi_source)
+        if source != self.vi_source:
+            self.vi_source = source
+            return
+        if source != "roi" and source not in getattr(self, "_vi_product_maps", {}):
+            self.vi_source = "roi"
+            return
+
+        if source == "roi":
+            if not self._multiple_view_active():
+                self._compute_virtual_image_from_roi()
+            self._refresh_compare_virtual_images()
+            return
         self._refresh_compare_virtual_images()
 
     def _on_vi_roi_center_change(self, change=None):
@@ -4771,10 +6006,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if n_positions == 0:
             self.vi_roi_dp_bytes = b""
             return
-        # Flat scan indices inside the ROI, reduced (mean/sum/max) by the compute
-        # backend (torch gather on tensor data, Metal mean_frames on chunk-backed
-        # frames). One path for every backend; gives consistent results across
-        # CUDA / MPS instead of the old torch-vs-subclass index-math divergence.
+        # Flat scan indices inside the ROI, reduced (mean/sum/max) by the
+        # compute backend (CUDA RawKernel, raw Metal for chunk-backed frames, or
+        # Torch/NumPy fallback). One widget call path keeps results consistent
+        # across backends.
         indices = (
             torch.nonzero(mask.reshape(-1), as_tuple=False).flatten().cpu().numpy()
         )
@@ -5262,10 +6497,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 return
             active = bool(content.get("active", True))
             client_id = content.get("client_id")
-            if client_id is None:
-                # Compatibility with frontend bundles predating per-view IDs.
-                self._compare_page_paint_legacy_active = active
-            elif (
+            if (
                 isinstance(client_id, str)
                 and bool(client_id)
                 and len(client_id) <= 128
@@ -5277,8 +6509,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             else:
                 return
             self._compare_page_paint_ack_enabled = bool(
-                self._compare_page_paint_legacy_active
-                or self._compare_page_paint_clients
+                self._compare_page_paint_clients
             )
             if not self._compare_page_paint_ack_enabled and bool(
                 getattr(self, "_folder_update_pending", False)
@@ -5549,7 +6780,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         if type(getattr(self, "_data", None)).__name__ != "Dataset5dstem":
             raise RuntimeError("poll_folder() requires a lazy Dataset5dstem backing.")
-        from quantem.widget.io import discover_masters, inspect_master_readiness
+        from quantem.gpu import io as gpu_io
 
         poll_lock = getattr(self, "_folder_poll_lock", None)
         if poll_lock is None:
@@ -5570,7 +6801,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     # Do not pre-filter on frame count: incomplete candidates must
                     # stay visible to the readiness protocol so users see why a
                     # matching master has not appeared yet.
-                    masters = discover_masters(
+                    masters = gpu_io.discover(
                         str(source["folder"]),
                         pattern=source["pattern"],
                         recursive=source["recursive"],
@@ -5608,7 +6839,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                         continue
 
                     try:
-                        report = inspect_master_readiness(
+                        report = gpu_io.inspect(
                             master,
                             scan_shape=source["scan_shape"],
                         )
@@ -6065,8 +7296,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         # Drop compute views first; they may be the last reference to a frame that
         # is about to become a cold lazy slot.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             released = data.release(idx=list(panels))
         except Exception:
@@ -6281,13 +7511,35 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
         """Compute one compare tile for a chunked MPS dataset slot."""
-        from quantem.gpu.compute.backends import compute_backend
+        from quantem.gpu.detector import prepare
 
         mask_np = (
             mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
         )
-        backend = compute_backend(dataset)
+        backend = prepare(dataset)
         return np.asarray(backend.masked_sum(mask_np), dtype=np.float32)
+
+    def _cuda_compare_backend_for_index(self, idx: int):
+        """Return a cached CUDA compute backend for one compare-grid panel."""
+        cuda_data = getattr(self, "_cuda_compute_data", None)
+        if cuda_data is None:
+            return None
+        key = int(idx) if self.n_frames > 1 else 0
+        cache = self._cuda_compare_compute_backends
+        backend = cache.get(key)
+        if backend is not None:
+            cache.move_to_end(key)
+            return backend
+
+        from quantem.gpu.detector import prepare
+
+        frame = cuda_data[key] if self.n_frames > 1 else cuda_data
+        backend = prepare(frame)
+        cache[key] = backend
+        max_entries = max(1, int(getattr(self, "compare_max_panels", 1)) * 2)
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
+        return backend
 
     def _detector_mask_area(self, mask) -> float:
         """Number of detector pixels contributing to the current ROI."""
@@ -6304,8 +7556,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         # Drop cached compute views before the backing series releases old page
         # frames. Otherwise _compute_for can keep an evicted 18 GB frame alive.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             data.preload([int(idx) for idx in indices])
         except AttributeError:
@@ -6687,7 +7938,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
             and type(data).__name__ == "Dataset5dstem"
             and getattr(data, "is_lazy", False)
-            and self.view_mode == "multiple"
+            and self._multiple_view_active()
         )
 
     def _compare_page_request_is_current(
@@ -7722,7 +8973,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if getattr(self, "_data", None) is None:
             self._clear_compare_virtual_images()
             return
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             if self.compare_panel_count or self.compare_virtual_image_bytes:
                 self._clear_compare_virtual_images()
             return
@@ -7741,6 +8992,25 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             else None
         )
         try:
+            if self.vi_source != "roi":
+                if self._normalise_vi_source(self.vi_source) not in getattr(
+                    self, "_vi_product_maps", {}
+                ):
+                    self._clear_compare_virtual_images()
+                    return
+                shown_indices = [int(idx) for idx in indices]
+                with self.hold_trait_notifications():
+                    self.compare_panel_count = len(shown_indices)
+                    self.compare_panel_indices = shown_indices
+                    self.compare_status = self._compare_status_for_indices(
+                        shown_indices,
+                        all_groups=(
+                            self._normalise_compare_group_mode(self.compare_group_mode)
+                            == "all"
+                        ),
+                    )
+                self._clear_gpu_memory_warning()
+                return
             cached = self._get_cached_compare_preset(indices)
             if cached is not None:
                 payload, cached_indices, _ = cached
@@ -7949,25 +9219,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         key = self._compare_preset_cache_key(indices, preset_name=preset_name)
         if key is None:
             return None
-        with self._compare_cache_lock:
-            cached = self._compare_virtual_page_cache.get(key)
-            if cached is None:
-                return None
-        payload, cached_indices, status, _, source_token = cached
-        if source_token is not None:
-            current_token = self._compare_source_signature_token(cached_indices)
-            if current_token != source_token:
-                with self._compare_cache_lock:
-                    current = self._compare_virtual_page_cache.get(key)
-                    if current is cached:
-                        self._compare_virtual_page_cache.pop(key, None)
-                        self._compare_virtual_page_cache_bytes -= cached[3]
-                return None
-        with self._compare_cache_lock:
-            if self._compare_virtual_page_cache.get(key) is not cached:
-                return None
-            self._compare_virtual_page_cache.move_to_end(key)
-            return payload, cached_indices, status
+        while True:
+            with self._compare_cache_lock:
+                cached = self._compare_virtual_page_cache.get(key)
+                if cached is None:
+                    return None
+            payload, cached_indices, status, _, source_token = cached
+            current_token = (
+                self._compare_source_signature_token(cached_indices)
+                if source_token is not None
+                else None
+            )
+            with self._compare_cache_lock:
+                current = self._compare_virtual_page_cache.get(key)
+                if current is not cached:
+                    # A background refresh published a newer value while the
+                    # source signature was checked. Validate that value instead
+                    # of exposing a transient cache miss to the visible page.
+                    continue
+                if source_token is not None and current_token != source_token:
+                    self._compare_virtual_page_cache.pop(key, None)
+                    self._compare_virtual_page_cache_bytes -= cached[3]
+                    return None
+                self._compare_virtual_page_cache.move_to_end(key)
+                return payload, cached_indices, status
 
     def _store_cached_compare_preset(
         self,
@@ -8359,6 +9634,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self, indices: Sequence[int], mask
     ) -> list[np.ndarray]:
         mask_area = self._detector_mask_area(mask)
+        cuda_data = getattr(self, "_cuda_compute_data", None)
+        if cuda_data is not None:
+            mask_np = (
+                mask.detach().cpu().numpy()
+                if hasattr(mask, "detach")
+                else np.asarray(mask)
+            )
+            images: list[np.ndarray] = []
+            for idx in indices:
+                backend = self._cuda_compare_backend_for_index(int(idx))
+                if backend is None:
+                    continue
+                image = backend.masked_sum(mask_np)
+                images.append(
+                    np.ascontiguousarray(
+                        image / mask_area,
+                        dtype=np.float32,
+                    ).reshape(self.shape_rows, self.shape_cols)
+                )
+            return images
         tensor_images: list[torch.Tensor] = []
         allocation_failed = False
         needs_fallback = False
@@ -8451,9 +9746,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _fast_masked_sum(self, mask) -> np.ndarray:
         """Virtual image: sum data over scan positions weighted by a detector mask.
 
-        Delegates to the compute backend (TorchCompute chunked tensordot on any
-        torch device, MetalCompute raw kernel on chunk-backed Metal frames) so the
-        widget runs identically on CUDA / MPS / CPU and on the MacBook fast path.
+        Delegates to the compute backend (TorchBackend chunked tensordot on any
+        torch device, MetalRawBackend raw kernel on chunk-backed Metal frames) so the
+        widget follows the same detector geometry across CUDA, MPS, and test references.
         Returns numpy (scan_r, scan_c) float32; the only consumer is
         `_to_float32_bytes`. Verified bit-identical to the old inline tensordot
         (tests/kernels/test_backend_parity.py + frozen widget baseline)."""
@@ -8482,6 +9777,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _compute_virtual_image_from_roi(self):
         """Compute virtual image based on ROI mode."""
         if self._data is None:
+            return
+        if self.vi_source != "roi":
             return
         cached = self._get_cached_preset()
         if cached is not None:

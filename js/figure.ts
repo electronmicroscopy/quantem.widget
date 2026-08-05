@@ -115,13 +115,13 @@ export function drawScaleBarHiDPI(
   const position = options.position || "bottom-right";
   const barX = position === "bottom-left" ? margin : cssWidth - barPx - margin;
 
+  ctx.fillStyle = "white";
+  ctx.fillRect(barX, barY, barPx, barThickness);
+
   ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
   ctx.shadowBlur = 2;
   ctx.shadowOffsetX = 1;
   ctx.shadowOffsetY = 1;
-
-  ctx.fillStyle = "white";
-  ctx.fillRect(barX, barY, barPx, barThickness);
 
   const label = formatScaleLabel(nicePhysical, unit);
   ctx.font = `${fontSize}px ${FONT}`;
@@ -130,7 +130,7 @@ export function drawScaleBarHiDPI(
   ctx.textBaseline = "bottom";
   ctx.fillText(label, barX + barPx / 2, barY - 4);
 
-  if (options.showZoomIndicator !== false) {
+  if (options.showZoomIndicator === true) {
     const zoomX = position === "bottom-left" ? cssWidth - margin : margin;
     ctx.textAlign = position === "bottom-left" ? "right" : "left";
     ctx.textBaseline = "bottom";
@@ -151,7 +151,7 @@ export function drawFFTScaleBarHiDPI(
   fftPixelSize: number,
   imageWidth: number,
   unit: string = "1/px",
-  showZoomIndicator: boolean = true,
+  showZoomIndicator: boolean = false,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx || fftPixelSize <= 0) return;
@@ -176,13 +176,13 @@ export function drawFFTScaleBarHiDPI(
   const barY = cssHeight - margin;
   const barX = cssWidth - barPx - margin;
 
+  ctx.fillStyle = "white";
+  ctx.fillRect(barX, barY, barPx, barThickness);
+
   ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
   ctx.shadowBlur = 2;
   ctx.shadowOffsetX = 1;
   ctx.shadowOffsetY = 1;
-
-  ctx.fillStyle = "white";
-  ctx.fillRect(barX, barY, barPx, barThickness);
 
   const label = formatScaleLabel(nicePhysical, unit);
   ctx.font = `${fontSize}px ${FONT}`;

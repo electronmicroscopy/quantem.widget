@@ -263,6 +263,35 @@ def test_show3d_panel_title_style_and_group_markers_round_trip():
     ]
 
 
+def test_show3d_gallery_chrome_round_trip_and_panel_gap_alias():
+    """C1: Show3D exposes explicit gallery gap/frame/border controls."""
+    rng = np.random.default_rng(182)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(2)]
+    widget = Show3D(
+        *panels,
+        panel_gap=5,
+        inter_panel_gap_color="#111111",
+        gallery_outer_border_px=3,
+        gallery_outer_border_color="#000000",
+        panel_inner_border_px=2,
+        panel_inner_border_color="#ff00ff",
+        verbose=False,
+    )
+
+    restored = Show3D(*panels, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert widget.inter_panel_gap_px == 5
+    assert widget.panel_gap == 5
+    assert restored.inter_panel_gap_px == 5
+    assert restored.panel_gap == 5
+    assert restored.inter_panel_gap_color == "#111111"
+    assert restored.gallery_outer_border_px == 3
+    assert restored.gallery_outer_border_color == "#000000"
+    assert restored.panel_inner_border_px == pytest.approx(2)
+    assert restored.panel_inner_border_color == "#ff00ff"
+
+
 def test_show3d_panel_annotations_accept_flat_panel_targets():
     """C1: multi-panel stack annotations can target the same panel repeatedly."""
     rng = np.random.default_rng(25)

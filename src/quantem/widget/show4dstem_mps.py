@@ -1,26 +1,24 @@
-"""MacBook raw-Metal widget adapter for the public Show4DSTEM factory.
+"""Metal widget adapter for the public :class:`Show4DSTEM` factory.
 
-Normal users should call ``quantem.widget.Show4DSTEM(load(..., backend="mps"))``.
-The names in this module stay importable for compatibility and for backend
-tests, but they are implementation details behind the single public widget API.
+Normal users call
+``quantem.widget.Show4DSTEM(quantem.gpu.io.load(..., backend="mps"))``.
+This module is an implementation detail behind the single public widget API.
 
 This file is deliberately one cohesive adapter rather than many small MPS UI
 modules. The responsibilities split across layers like this:
 
 * ``show4dstem_factory`` decides whether public ``Show4DSTEM(...)`` should route
   to the base viewer or this MPS adapter.
-* ``kernels/io/mps.py`` owns HDF5/Metal decode and detector binning.
-* ``quantem.gpu.compute.backends.MetalRawBackend`` owns masked-sum compute,
+* ``quantem.gpu.io`` owns HDF5/Metal decode and detector binning.
+* ``quantem.gpu.detector.DetectorSession`` owns masked-sum compute,
   fast-sidecar/radial-cache lifecycles, and lazy multi-dataset backend state.
 * ``Show4DSTEMMPS`` owns only widget-facing traitlets, observers, preset caches,
   ROI mask translation, and status updates needed by the frontend.
 
-See ``quantem.gpu.compute.backend`` for the protocol and
-``quantem.gpu.compute.backends.MetalRawBackend`` for the compute implementation.
+The widget does not import backend implementation modules.
 """
 from __future__ import annotations
 
-import gc
 import threading
 import time
 
@@ -28,19 +26,19 @@ import numpy as np
 import traitlets
 
 from quantem.widget.show4dstem import Show4DSTEM
-from quantem.widget.detector import detector_mask
-from quantem.gpu.compute.mps import (
-    ChunkedFrames,
-    _DEFAULT_COMPACT_TARGET_BYTES,
-    _bin_mask,
-    _upsample_bin_dp,
-)
+from quantem.gpu.detector import detector_mask
 
 
-def _drop_cached_decompressor():
-    """Release decoder scratch buffers before allocating interaction sidecars."""
-    from quantem.widget.io import clear_mps_cache
-    clear_mps_cache()
+def _upsample_detector_image(
+    image: np.ndarray,
+    output_shape: tuple[int, int],
+    factor: int,
+) -> np.ndarray:
+    """Nearest-neighbor expand a reduced detector image for display."""
+
+    array = np.asarray(image, dtype=np.float32)
+    expanded = np.repeat(np.repeat(array, factor, axis=0), factor, axis=1)
+    return expanded[: output_shape[0], : output_shape[1]]
 
 
 class Show4DSTEMMPS(Show4DSTEM):
@@ -74,9 +72,9 @@ class Show4DSTEMMPS(Show4DSTEM):
         verbose = bool(kwargs.pop("verbose", True))
         if full_resolution_interaction:
             raise ValueError(
-                "full_resolution_interaction has been disabled on the MacBook "
-                "viewer path. Use load(...) plus show_4dstem_mps(...) for the "
-                "supported real-time fast path."
+                "full_resolution_interaction has been disabled on the MPS "
+                "viewer path. Load with quantem.gpu.io.load(..., backend='mps') "
+                "and pass the result to Show4DSTEM."
             )
         self._fast_interaction_verbose = bool(fast_interaction_verbose)
         self._fast_interaction_async = bool(fast_interaction_async)
@@ -96,14 +94,9 @@ class Show4DSTEMMPS(Show4DSTEM):
         self._det_col_coords_np = np.arange(self.det_cols, dtype=np.float32)[None, :]
         self._wire_multi_dataset()
         self.observe(self._on_fast_interaction_change, names=["fast_interaction"])
-        pre_binned_fast = (
-            isinstance(self._data, ChunkedFrames)
-            and int(getattr(self._data, "det_bin", 1)) > 1
-        )
-        fused_fast = (
-            isinstance(self._data, ChunkedFrames)
-            and getattr(self._data, "fast_vi", None) is not None
-        )
+        session = self._compute
+        pre_binned_fast = int(self._data.det_bin) > 1
+        fused_fast = session.fast_ready
         if pre_binned_fast:
             fast_interaction = False
             self.fast_interaction_ready = True
@@ -123,11 +116,8 @@ class Show4DSTEMMPS(Show4DSTEM):
             self._clear_virtual_image_caches()
             self._compute_virtual_image_from_roi()
         if verbose:
-            det_bin = int(getattr(self._data, "det_bin", 1)) if isinstance(
-                self._data, ChunkedFrames
-            ) else 1
-            fb = int(getattr(self._data, "fast_bin", 2)) if isinstance(
-                self._data, ChunkedFrames) else 2
+            det_bin = int(self._data.det_bin)
+            fb = int(session.fast_bin)
             mode = (
                 f"fast detector-bin{det_bin}"
                 if det_bin > 1 else
@@ -232,15 +222,11 @@ class Show4DSTEMMPS(Show4DSTEM):
     # radial path, scan-position column fallback).
 
     def _fast_masked_sum(self, mask):
-        """Override to keep ChunkedFrames-only logic; falls back to parent torch
-        path for any other data type."""
+        """Compute one MPS virtual detector through the public GPU session."""
         import torch
-        data = self._data
-        if not isinstance(data, ChunkedFrames):
-            return super()._fast_masked_sum(mask)
         mask_np = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
         b = self._compute
-        if self.fast_interaction and self.fast_interaction_ready and b.has_fast:
+        if self.fast_interaction and self.fast_interaction_ready and b.fast_ready:
             self._ensure_fast_interaction_ready()
         vi = b.masked_sum(mask_np)  # routes through fast_vi when ready
         return torch.from_numpy(vi).reshape(self._scan_shape)
@@ -270,25 +256,19 @@ class Show4DSTEMMPS(Show4DSTEM):
         return None
 
     def _get_frame(self, row: int, col: int) -> np.ndarray:
-        data = self._data
-        if not isinstance(data, ChunkedFrames):
-            return super()._get_frame(row, col)
         return self._compute.frame(row * self.shape_cols + col)
 
     # ----------------------------------------------------------------- auto_detect_center
     def auto_detect_center(self, update_roi: bool = True):
-        data = self._data
-        if not isinstance(data, ChunkedFrames):
-            return super().auto_detect_center(update_roi)
         sample = self.auto_detect_frames
-        if sample is not None and int(sample) > 0 and int(sample) < data._n:
+        if (
+            sample is not None
+            and int(sample) > 0
+            and int(sample) < self._compute.num_frames
+        ):
             sample = int(sample)
-            first = data.chunks[0]
-            if sample <= int(first.shape[0]) and not data.vi.row_prefix_enabled:
-                mean_dp = np.asarray(first[:sample], dtype=np.float32).mean(axis=0)
-            else:
-                indices = np.arange(sample, dtype=np.uint32)
-                mean_dp = self._compute.reduce_frames(indices, "mean")
+            indices = np.arange(sample, dtype=np.uint32)
+            mean_dp = self._compute.reduce_frames(indices, "mean")
         else:
             mean_dp = self._compute.mean_dp()
         mean_dp = np.asarray(mean_dp, dtype=np.float32)
@@ -330,12 +310,11 @@ class Show4DSTEMMPS(Show4DSTEM):
         self._set_virtual_image_bytes_np(preview)
 
     def _compute_virtual_image_from_roi(self):
-        data = self._data
         if getattr(self, "_mps_initializing", False):
             self.virtual_image_bytes = b""
             return
-        if not isinstance(data, ChunkedFrames):
-            return super()._compute_virtual_image_from_roi()
+        if self.vi_source != "roi":
+            return
         cached = self._get_cached_preset()
         if cached is not None:
             self.virtual_image_bytes = cached
@@ -353,12 +332,10 @@ class Show4DSTEMMPS(Show4DSTEM):
         start_radial_background = False
         if (not self.fast_interaction
                 and self.roi_mode in ("circle", "annular")
-                and float(self.roi_radius) > 0
-                and "radial_cache" in b.capabilities):
+                and float(self.roi_radius) > 0):
             inner = float(self.roi_radius_inner) if self.roi_mode == "annular" else 0.0
-            radial_vi = b.radial_masked_sum(
-                center_row=float(self.roi_center_row),
-                center_col=float(self.roi_center_col),
+            radial_vi = b.radial_sum(
+                (float(self.roi_center_row), float(self.roi_center_col)),
                 outer_radius=float(self.roi_radius),
                 inner_radius=inner,
                 build=False,
@@ -374,19 +351,9 @@ class Show4DSTEMMPS(Show4DSTEM):
             # pixel under the marker).
             row = int(max(0, min(round(float(self.roi_center_row)), self.det_rows - 1)))
             col = int(max(0, min(round(float(self.roi_center_col)), self.det_cols - 1)))
-            if self.fast_interaction and self.fast_interaction_ready and b.has_fast:
-                self._ensure_fast_interaction_ready()
-                fast_vi = data.fast_vi
-                fast_rows, fast_cols = fast_vi.det
-                scale_r = self.det_rows / fast_rows
-                scale_c = self.det_cols / fast_cols
-                fast_row = int(max(0, min(round(row / scale_r), fast_rows - 1)))
-                fast_col = int(max(0, min(round(col / scale_c), fast_cols - 1)))
-                fast_mask = np.zeros((fast_rows, fast_cols), dtype=bool)
-                fast_mask[fast_row, fast_col] = True
-                self._set_virtual_image_bytes_np(fast_vi.masked_sum(fast_mask))
-            else:
-                self._set_virtual_image_bytes_np(data.column(row, col))
+            point_mask = np.zeros((self.det_rows, self.det_cols), dtype=bool)
+            point_mask[row, col] = True
+            self._set_virtual_image_bytes_np(b.masked_sum(point_mask))
             if start_radial_background:
                 self._kick_radial_background()
             return
@@ -437,7 +404,7 @@ class Show4DSTEMMPS(Show4DSTEM):
 
     def _cache_fast_presets(self):
         b = self._compute
-        if "fast_sidecar" not in b.capabilities or not b.has_fast:
+        if not b.supports_fast or not b.fast_ready:
             return
         if not self.fast_interaction_ready:
             return
@@ -475,9 +442,9 @@ class Show4DSTEMMPS(Show4DSTEM):
 
     def _ensure_fast_interaction_ready(self) -> bool:
         b = self._compute
-        if "fast_sidecar" not in b.capabilities:
+        if not b.supports_fast:
             return False
-        ok = b.ensure_fast_sidecar(verbose=self._fast_interaction_verbose)
+        ok = b.prepare_fast()
         if ok:
             self.fast_interaction_ready = True
         return ok
@@ -496,7 +463,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         if self.fast_interaction_ready or self.fast_interaction_building:
             return
         b = self._compute
-        if "fast_sidecar" not in b.capabilities:
+        if not b.supports_fast:
             return
         self.fast_interaction_building = True
         self._fast_interaction_error = None
@@ -505,7 +472,7 @@ class Show4DSTEMMPS(Show4DSTEM):
             if self._fast_interaction_async:
                 time.sleep(0.05)
             try:
-                ok = b.ensure_fast_sidecar(verbose=self._fast_interaction_verbose)
+                ok = b.prepare_fast()
                 if ok:
                     self.fast_interaction_ready = True
                     self._clear_virtual_image_caches()
@@ -536,22 +503,23 @@ class Show4DSTEMMPS(Show4DSTEM):
     def _kick_radial_background(self):
         """Ask the backend to build the radial cache at the current ROI center."""
         b = self._compute
-        if "radial_cache" not in b.capabilities:
-            return
-        center_row = float(self.roi_center_row)
-        center_col = float(self.roi_center_col)
-        if b.radial_cache_ready(center_row, center_col):
+        center = (float(self.roi_center_row), float(self.roi_center_col))
+        if b.radial_ready(center):
             self.radial_interaction_ready = True
             return
         self.radial_interaction_ready = False
         self.radial_interaction_building = True
-        b.ensure_radial_cache(center_row, center_col)
+        try:
+            b.prepare_radial(center)
+        except RuntimeError:
+            self.radial_interaction_building = False
+            return
 
         # Poll for completion on a worker thread; flips traits when done.
         def _watch():
             while b.radial_building:
                 time.sleep(0.1)
-            if b.radial_error is None and b.radial_cache_ready(center_row, center_col):
+            if b.radial_error is None and b.radial_ready(center):
                 self.radial_interaction_ready = True
             self.radial_interaction_building = False
 
@@ -560,8 +528,6 @@ class Show4DSTEMMPS(Show4DSTEM):
 
     def wait_for_radial_interaction(self, timeout: float | None = None) -> bool:
         b = self._compute
-        if "radial_cache" not in b.capabilities:
-            return False
         # Wait for backend's internal thread to settle.
         deadline = None if timeout is None else (time.perf_counter() + timeout)
         while b.radial_building:
@@ -625,9 +591,6 @@ class Show4DSTEMMPS(Show4DSTEM):
         return np.flatnonzero(mask.reshape(-1)).astype(np.uint32, copy=False)
 
     def _compute_summed_dp_from_vi_roi(self):
-        data = self._data
-        if not isinstance(data, ChunkedFrames):
-            return super()._compute_summed_dp_from_vi_roi()
         if self.vi_roi_mode == "off":
             self._clear_vi_roi_dp()
             return
@@ -638,15 +601,14 @@ class Show4DSTEMMPS(Show4DSTEM):
             return
         dp = self._compute.reduce_frames(indices, "mean")
         b = self._compute
-        if self.fast_interaction and self.fast_interaction_ready and b.has_fast:
+        if self.fast_interaction and self.fast_interaction_ready and b.fast_ready:
             # backend returned a bin2 DP; upsample to full det
-            dp = _upsample_bin_dp(dp, (self.det_rows, self.det_cols), b.fast_bin)
+            dp = _upsample_detector_image(
+                dp, (self.det_rows, self.det_cols), b.fast_bin
+            )
         self._set_vi_roi_dp(dp, n_positions)
 
     def _compute_vi_roi_dp(self):
-        data = self._data
-        if not isinstance(data, ChunkedFrames):
-            return super()._compute_vi_roi_dp()
         if self.vi_roi_mode == "off":
             self._clear_vi_roi_dp()
             return
@@ -661,8 +623,10 @@ class Show4DSTEMMPS(Show4DSTEM):
             dp = b.reduce_frames(indices, "mean")
             if reduce == "sum":
                 dp = dp * float(n_positions)
-            if self.fast_interaction and self.fast_interaction_ready and b.has_fast:
-                dp = _upsample_bin_dp(dp, (self.det_rows, self.det_cols), b.fast_bin)
+            if self.fast_interaction and self.fast_interaction_ready and b.fast_ready:
+                dp = _upsample_detector_image(
+                    dp, (self.det_rows, self.det_cols), b.fast_bin
+                )
         elif reduce == "max":
             dp = b.reduce_frames(indices, "max")
         else:
@@ -732,64 +696,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         super().close()
 
 
-# =====================================================================
-# Back-compat factories. Preferred path is ``Show4DSTEM(load(...))``.
-# =====================================================================
-
-def load_4dstem_mps(
-    master_path: str,
-    *,
-    scan_shape=None,
-    fast_interaction: bool = True,
-    fast_interaction_async: bool = True,
-    full_resolution_interaction: bool = False,
-    det_bin: int = 1,
-    compact: bool = False,
-    compact_target_gb: float = _DEFAULT_COMPACT_TARGET_BYTES / 1e9,
-    auto_detect_frames: int | None = 64,
-    initial_preset: str | None = "BF",
-    skip_mps_memory_check: bool | None = None,
-    **kwargs,
-):
-    """Deprecated combo loader+viewer. Use ``Show4DSTEM(load(path, backend='mps'))``."""
-    import warnings as _w
-    _w.warn(
-        "load_4dstem_mps is deprecated. Use "
-        "Show4DSTEM(load(path, backend='mps', det_bin=...)) instead.",
-        DeprecationWarning, stacklevel=2,
-    )
-    verbose = kwargs.pop("verbose", True)
-    if full_resolution_interaction:
-        raise ValueError(
-            "full_resolution_interaction has been disabled. Use load(...) and "
-            "show_4dstem_mps(...) for fast interaction."
-        )
-    from quantem.widget.io import load_mps_4dstem
-
-    data = load_mps_4dstem(
-        master_path,
-        scan_shape=scan_shape,
-        verbose=verbose,
-        compact=compact,
-        compact_target_gb=compact_target_gb,
-        det_bin=det_bin,
-        skip_mps_memory_check=skip_mps_memory_check,
-    )
-    return _build_mps_viewer(
-        data,
-        scan_shape=scan_shape,
-        fast_interaction=fast_interaction,
-        fast_interaction_async=fast_interaction_async,
-        full_resolution_interaction=full_resolution_interaction,
-        fast_interaction_verbose=verbose,
-        auto_detect_frames=auto_detect_frames,
-        initial_preset=initial_preset,
-        verbose=verbose,
-        **kwargs,
-    )
-
-
-def _build_mps_viewer(
+def _build_mps_widget(
     data,
     *,
     scan_shape=None,
@@ -802,28 +709,16 @@ def _build_mps_viewer(
     verbose: bool = True,
     **kwargs,
 ):
-    """Internal MPS viewer builder. Public callers should use
-    ``Show4DSTEM(load(path, backend='mps'))`` — this function is used by the
-    quantem.widget.__init__ factory + the legacy show_4dstem_mps shim."""
+    """Build the internal MPS viewer used by the public factory."""
     if full_resolution_interaction:
         raise ValueError(
-            "full_resolution_interaction has been disabled. Use load(...) and "
-            "show_4dstem_mps(...) for fast interaction."
+            "full_resolution_interaction has been disabled. Use "
+            "quantem.gpu.io.load(...) and Show4DSTEM(...) instead."
         )
-    if isinstance(data, ChunkedFrames):
-        frames = data
-    else:
-        if hasattr(data, "scan_shape") and scan_shape is None:
-            scan_shape = data.scan_shape
-        row_prefix = bool(
-            getattr(data, "row_prefix", False)
-            or getattr(data, "metadata", {}).get("row_prefix", False)
-        )
-        frames = ChunkedFrames(data, row_prefix=row_prefix)
-    if scan_shape is None and hasattr(data, "metadata"):
-        scan_shape = data.metadata.get("scan_shape")
+    if scan_shape is None:
+        scan_shape = data.scan_shape
     return Show4DSTEMMPS(
-        frames,
+        data,
         scan_shape=scan_shape,
         fast_interaction=fast_interaction,
         fast_interaction_async=fast_interaction_async,
@@ -834,18 +729,6 @@ def _build_mps_viewer(
         verbose=verbose,
         **kwargs,
     )
-
-
-def show_4dstem_mps(*args, **kwargs):
-    """Deprecated. Use ``Show4DSTEM(load(path, backend='mps'))`` —
-    the unified factory auto-detects ChunkedFrames and routes to MetalRawBackend."""
-    import warnings as _w
-    _w.warn(
-        "show_4dstem_mps is deprecated. Use "
-        "Show4DSTEM(load(path, backend='mps')) instead.",
-        DeprecationWarning, stacklevel=2,
-    )
-    return _build_mps_viewer(*args, **kwargs)
 
 
 def _meta_number(meta: dict, *keys: str):
@@ -865,7 +748,7 @@ def _meta_number(meta: dict, *keys: str):
     return None
 
 
-def Show4DSTEM_MACBOOK(
+def _show4dstem_mps(
     data,
     meta: dict | None = None,
     *,
@@ -907,7 +790,7 @@ def Show4DSTEM_MACBOOK(
             "mrad" if det_sampling_mrad_per_px is not None else "pixels",
         )
     verbose = bool(kwargs.get("verbose", True))
-    viewer = _build_mps_viewer(data, sampling=sampling, units=units, **kwargs)
+    viewer = _build_mps_widget(data, sampling=sampling, units=units, **kwargs)
     inferred_det_sampling = False
     if det_sampling_mrad_per_px is None and semiangle_mrad is not None:
         bf_radius = float(getattr(viewer, "bf_radius", 0) or 0)
@@ -922,7 +805,7 @@ def Show4DSTEM_MACBOOK(
     if scan_sampling_A is not None:
         viewer.pixel_size = float(scan_sampling_A)
         viewer.pixel_unit = "Å"
-    viewer.macbook_sampling = {
+    viewer.mps_sampling = {
         "scan_sampling_A": scan_sampling_A,
         "det_sampling_mrad_per_px": det_sampling_mrad_per_px,
         "semiangle_mrad": semiangle_mrad,
@@ -935,13 +818,5 @@ def Show4DSTEM_MACBOOK(
         if det_sampling_mrad_per_px is not None:
             source = " from BF radius" if inferred_det_sampling else ""
             parts.append(f"detector {float(det_sampling_mrad_per_px):.4g} mrad/px{source}")
-        print(f"MacBook sampling: {', '.join(parts)}")
+        print(f"MPS sampling: {', '.join(parts)}")
     return viewer
-
-
-__all__ = [
-    "Show4DSTEMMPS",
-    "Show4DSTEM_MACBOOK",
-    "show_4dstem_mps",
-    "load_4dstem_mps",
-]

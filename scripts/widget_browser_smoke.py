@@ -40,6 +40,7 @@ STORY_IDS_BY_VARIANT = {
     "show3d-four-panel-downsample": ["S3D-14", "S3D-15", "S3D-16"],
     "show4dstem": ["S4D-01", "S4D-02", "S4D-03", "S4D-06", "S4D-09"],
     "show4dstem-compare": ["S4D-02", "S4D-03", "S4D-07", "S4D-16"],
+    "showptycho-webgpu-folder": ["SP-01", "SP-02", "SP-05", "SP-09"],
     "showfolder": ["SF-2", "SF-5", "SF-8"],
 }
 
@@ -116,6 +117,13 @@ def _sha256(data: bytes) -> str:
 
 def _safe_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in name)
+
+
+def _served_export_path(artifact_dir: Path, path: str | Path) -> str:
+    try:
+        return Path(path).resolve().relative_to(artifact_dir.resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
 
 
 def _visible_canvas_boxes(page) -> list[dict[str, float]]:
@@ -384,6 +392,381 @@ def _measure_fps(page, duration_ms: int) -> float:
     )
 
 
+def _start_canvas_update_probe(page, *, selector: str = "canvas", label: str = "interaction") -> dict[str, Any]:
+    """Start sampling visible canvas pixels on every browser animation frame.
+
+    This measures whether the user-visible pixels actually change during a
+    pointer interaction. It is deliberately separate from requestAnimationFrame
+    FPS, which only proves that the browser event loop is alive.
+    """
+
+    return dict(
+        page.evaluate(
+            r"""({selector, label}) => {
+              const existing = window.__quantemCanvasUpdateProbe;
+              if (existing) existing.active = false;
+              const viewportW = window.innerWidth || 0;
+              const viewportH = window.innerHeight || 0;
+              const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width >= 24 && rect.height >= 24 &&
+                  rect.right > 0 && rect.bottom > 0 &&
+                  rect.left < viewportW && rect.top < viewportH &&
+                  node.width > 0 && node.height > 0 &&
+                  style.display !== "none" && style.visibility !== "hidden";
+              };
+              const candidates = [...document.querySelectorAll(selector)]
+                .map((canvas, domIndex) => {
+                  const rect = canvas.getBoundingClientRect();
+                  return {
+                    canvas,
+                    domIndex,
+                    rect,
+                    area: rect.width * rect.height,
+                    visible: visible(canvas),
+                  };
+                })
+                .filter((item) => item.visible)
+                .sort((a, b) => b.area - a.area);
+              const item = candidates[0];
+              if (!item) {
+                return {started: false, selector, label, reason: "no visible canvas"};
+              }
+              const canvas = item.canvas;
+              const ctx = canvas.getContext("2d", {willReadFrequently: true});
+              if (!ctx) {
+                return {started: false, selector, label, reason: "canvas 2d context unavailable"};
+              }
+              const hashCanvas = () => {
+                try {
+                  const sw = Math.max(1, Math.min(48, Math.floor(canvas.width / 4) || canvas.width));
+                  const sh = Math.max(1, Math.min(48, Math.floor(canvas.height / 4) || canvas.height));
+                  const x0 = Math.max(0, Math.min(canvas.width - sw, Math.floor(canvas.width * 0.38 - sw / 2)));
+                  const y0 = Math.max(0, Math.min(canvas.height - sh, Math.floor(canvas.height * 0.38 - sh / 2)));
+                  const data = ctx.getImageData(x0, y0, sw, sh).data;
+                  let h1 = 2166136261 >>> 0;
+                  let h2 = 16777619 >>> 0;
+                  let sum = 0;
+                  for (let i = 0; i < data.length; i += 16) {
+                    const v = data[i] + 3 * data[i + 1] + 5 * data[i + 2] + 7 * data[i + 3];
+                    sum += v;
+                    h1 ^= v & 255;
+                    h1 = Math.imul(h1, 16777619) >>> 0;
+                    h2 ^= (v >>> 8) & 255;
+                    h2 = Math.imul(h2, 2166136261) >>> 0;
+                  }
+                  return `${h1.toString(16)}:${h2.toString(16)}:${sum}`;
+                } catch (error) {
+                  return `error:${String(error).slice(0, 120)}`;
+                }
+              };
+              const start = performance.now();
+              const probe = {
+                active: true,
+                selector,
+                label,
+                start,
+                samples: 0,
+                changes: [],
+                events: [],
+                initialHash: null,
+                lastHash: null,
+                lastSampleMs: 0,
+                target: {
+                  domIndex: item.domIndex,
+                  x: Math.round(item.rect.x),
+                  y: Math.round(item.rect.y),
+                  width: Math.round(item.rect.width),
+                  height: Math.round(item.rect.height),
+                  backingWidth: canvas.width,
+                  backingHeight: canvas.height,
+                },
+              };
+              const recordEvent = (event) => {
+                if (!probe.active) return;
+                probe.events.push({
+                  type: event.type,
+                  t: Number((performance.now() - start).toFixed(1)),
+                  x: Math.round(event.clientX),
+                  y: Math.round(event.clientY),
+                });
+              };
+              const eventTypes = ["pointerdown", "pointermove", "pointerup", "mousedown", "mousemove", "mouseup", "wheel"];
+              eventTypes.forEach((type) => canvas.addEventListener(type, recordEvent, {passive: true}));
+              probe.cleanup = () => eventTypes.forEach((type) => canvas.removeEventListener(type, recordEvent));
+              window.__quantemCanvasUpdateProbe = probe;
+              const sample = (now) => {
+                if (!probe.active) return;
+                const t = now - start;
+                const hash = hashCanvas();
+                probe.samples += 1;
+                probe.lastSampleMs = t;
+                if (probe.initialHash === null) {
+                  probe.initialHash = hash;
+                  probe.lastHash = hash;
+                } else if (hash !== probe.lastHash) {
+                  probe.changes.push({t: Number(t.toFixed(1)), hash});
+                  probe.lastHash = hash;
+                }
+                requestAnimationFrame(sample);
+              };
+              requestAnimationFrame(sample);
+              return {started: true, selector, label, target: probe.target};
+            }""",
+            {"selector": selector, "label": label},
+        )
+        or {}
+    )
+
+
+def _stop_canvas_update_probe(page) -> dict[str, Any]:
+    """Stop the canvas pixel-update probe and summarize visible-change timing."""
+
+    return dict(
+        page.evaluate(
+            r"""() => {
+              const probe = window.__quantemCanvasUpdateProbe;
+              if (!probe) return {started: false, reason: "probe was not started"};
+              probe.active = false;
+              if (probe.cleanup) probe.cleanup();
+              const durationMs = Math.max(1, performance.now() - probe.start);
+              const changeTimes = probe.changes.map((item) => Number(item.t));
+              const eventTimes = (probe.events || []).map((item) => Number(item.t));
+              const intervals = [];
+              for (let i = 1; i < changeTimes.length; i += 1) {
+                intervals.push(changeTimes[i] - changeTimes[i - 1]);
+              }
+              const percentile = (values, pct) => {
+                if (!values.length) return null;
+                const sorted = [...values].sort((a, b) => a - b);
+                const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+                return Number(sorted[idx].toFixed(1));
+              };
+              const stallCandidates = [];
+              if (changeTimes.length) {
+                stallCandidates.push(changeTimes[0]);
+                stallCandidates.push(...intervals);
+                stallCandidates.push(durationMs - changeTimes[changeTimes.length - 1]);
+              } else {
+                stallCandidates.push(durationMs);
+              }
+              return {
+                started: true,
+                selector: probe.selector,
+                label: probe.label,
+                target: probe.target,
+                duration_ms: Number(durationMs.toFixed(1)),
+                sample_count: probe.samples,
+                browser_raf_fps: Number((probe.samples * 1000 / durationMs).toFixed(1)),
+                event_count: eventTimes.length,
+                first_event_ms: eventTimes.length ? Number(eventTimes[0].toFixed(1)) : null,
+                last_event_ms: eventTimes.length ? Number(eventTimes[eventTimes.length - 1].toFixed(1)) : null,
+                first_event_to_first_change_ms: (
+                  eventTimes.length && changeTimes.length
+                    ? Number((changeTimes[0] - eventTimes[0]).toFixed(1))
+                    : null
+                ),
+                visual_changes: changeTimes.length,
+                visual_update_hz: Number((changeTimes.length * 1000 / durationMs).toFixed(1)),
+                first_change_ms: changeTimes.length ? Number(changeTimes[0].toFixed(1)) : null,
+                last_change_ms: changeTimes.length ? Number(changeTimes[changeTimes.length - 1].toFixed(1)) : null,
+                inter_change_p50_ms: percentile(intervals, 50),
+                inter_change_p95_ms: percentile(intervals, 95),
+                max_visual_stall_ms: Number(Math.max(...stallCandidates).toFixed(1)),
+                events: (probe.events || []).slice(0, 40),
+                truncated_events: (probe.events || []).length > 40,
+                change_times_ms: changeTimes.slice(0, 40),
+                truncated_change_times: changeTimes.length > 40,
+              };
+            }"""
+        )
+        or {}
+    )
+
+
+def _start_zoom_continuity_probe(page) -> dict[str, Any]:
+    """Sample the visible canvas composition through a rapid wheel gesture.
+
+    A zoom must transform already painted pixels.  In particular, an exported
+    viewer must not briefly swap a stable 2D canvas for a newly cleared WebGPU
+    presentation canvas.  The probe therefore watches both the composed canvas
+    visibility signature and a small pixel sample on every animation frame.
+    """
+
+    return dict(
+        page.evaluate(
+            r"""() => {
+              const existing = window.__quantemZoomContinuityProbe;
+              if (existing) existing.active = false;
+              const visible = (canvas) => {
+                const rect = canvas.getBoundingClientRect();
+                const style = getComputedStyle(canvas);
+                return rect.width >= 24 && rect.height >= 24 &&
+                  rect.right > 0 && rect.bottom > 0 &&
+                  rect.left < innerWidth && rect.top < innerHeight &&
+                  canvas.width > 0 && canvas.height > 0 &&
+                  style.display !== "none" && style.visibility !== "hidden" &&
+                  Number(style.opacity || "1") > 0.05;
+              };
+              const candidates = [...document.querySelectorAll("canvas")]
+                .map((canvas, index) => ({canvas, index, rect: canvas.getBoundingClientRect()}))
+                .filter((item) => visible(item.canvas))
+                .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+              const target = candidates[0];
+              if (!target) return {started: false, reason: "no visible canvas"};
+              const fingerprint = () => [...document.querySelectorAll("canvas")]
+                .map((canvas, index) => {
+                  const rect = canvas.getBoundingClientRect();
+                  const style = getComputedStyle(canvas);
+                  return [
+                    index, Math.round(rect.width), Math.round(rect.height),
+                    style.display, style.visibility, style.opacity || "1",
+                  ].join(":");
+                }).join("|");
+              const isFlat = () => {
+                const canvas = target.canvas;
+                const ctx = canvas.getContext("2d", {willReadFrequently: true});
+                if (!ctx) return null;
+                try {
+                  const sw = Math.max(1, Math.min(48, canvas.width));
+                  const sh = Math.max(1, Math.min(48, canvas.height));
+                  const x0 = Math.max(0, Math.min(canvas.width - sw, Math.floor(canvas.width * 0.45 - sw / 2)));
+                  const y0 = Math.max(0, Math.min(canvas.height - sh, Math.floor(canvas.height * 0.45 - sh / 2)));
+                  const data = ctx.getImageData(x0, y0, sw, sh).data;
+                  let min = 255;
+                  let max = 0;
+                  for (let i = 0; i < data.length; i += 16) {
+                    min = Math.min(min, data[i], data[i + 1], data[i + 2]);
+                    max = Math.max(max, data[i], data[i + 1], data[i + 2]);
+                  }
+                  return max - min < 8;
+                } catch (_) {
+                  return null;
+                }
+              };
+              const probe = {
+                active: true,
+                frames: 0,
+                compositionChanges: 0,
+                flatFrames: 0,
+                readableFrames: 0,
+                baseline: fingerprint(),
+                target: {index: target.index, width: target.canvas.width, height: target.canvas.height},
+              };
+              window.__quantemZoomContinuityProbe = probe;
+              const sample = () => {
+                if (!probe.active) return;
+                probe.frames += 1;
+                if (fingerprint() !== probe.baseline) probe.compositionChanges += 1;
+                const flat = isFlat();
+                if (flat !== null) {
+                  probe.readableFrames += 1;
+                  if (flat) probe.flatFrames += 1;
+                }
+                requestAnimationFrame(sample);
+              };
+              requestAnimationFrame(sample);
+              return {started: true, target: probe.target};
+            }"""
+        )
+        or {}
+    )
+
+
+def _stop_zoom_continuity_probe(page) -> dict[str, Any]:
+    """Stop the rapid-zoom continuity probe and return its frame evidence."""
+
+    return dict(
+        page.evaluate(
+            """() => {
+              const probe = window.__quantemZoomContinuityProbe;
+              if (!probe) return {started: false, reason: "probe was not started"};
+              probe.active = false;
+              return {
+                started: true,
+                frame_count: probe.frames,
+                composition_changes: probe.compositionChanges,
+                flat_frames: probe.flatFrames,
+                readable_frames: probe.readableFrames,
+                target: probe.target,
+              };
+            }"""
+        )
+        or {}
+    )
+
+
+def _exercise_zoom_continuity(page, box: dict[str, float]) -> dict[str, Any]:
+    """Perform rapid zoom in/out with continuity and paint-latency evidence.
+
+    Browser rAF cadence can remain high even if wheel input takes a long time
+    to alter scientific pixels. Keep the two signals separate so this smoke
+    report cannot accidentally present an idle FPS as interaction proof.
+    """
+
+    probe = _start_zoom_continuity_probe(page)
+    if not probe.get("started"):
+        return probe
+    paint_probe = _start_canvas_update_probe(page, label="rapid zoom")
+    x = box["x"] + box["width"] * 0.52
+    y = box["y"] + box["height"] * 0.52
+    page.mouse.move(x, y)
+    for delta_y in (-420, -420, 840):
+        page.mouse.wheel(0, delta_y)
+        page.wait_for_timeout(45)
+    page.wait_for_timeout(180)
+    continuity = _stop_zoom_continuity_probe(page)
+    continuity["paint_latency"] = _stop_canvas_update_probe(page)
+    return continuity
+
+
+def _exercise_show3d_smooth_zoom(page, box: dict[str, float]) -> dict[str, Any]:
+    """Verify both Smooth states survive an offline Show3D zoom gesture.
+
+    This is intentionally an interaction check, not a source inspection: the
+    cached display composite must never briefly reuse pixels sampled under the
+    opposite Smooth setting.
+    """
+    control = page.locator('input[aria-label="Toggle bilinear smoothing"]')
+    if control.count() != 1:
+        return {"found": False}
+
+    def visible_rendering() -> str | None:
+        return page.evaluate(
+            """() => {
+              const canvas = [...document.querySelectorAll('canvas')]
+                .map((node) => ({node, rect: node.getBoundingClientRect(), style: getComputedStyle(node)}))
+                .filter(({rect, style}) => rect.width > 100 && rect.height > 100 &&
+                  style.display !== 'none' && style.visibility !== 'hidden' &&
+                  Number(style.opacity || '1') > 0.05)
+                .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0];
+              return canvas ? canvas.style.imageRendering : null;
+            }"""
+        )
+
+    initial = bool(control.is_checked())
+    if initial:
+        control.click()
+    page.wait_for_timeout(120)
+    off = {
+        "checked": bool(control.is_checked()),
+        "image_rendering": visible_rendering(),
+        "continuity": _exercise_zoom_continuity(page, box),
+    }
+    control.click()
+    page.wait_for_timeout(120)
+    on = {
+        "checked": bool(control.is_checked()),
+        "image_rendering": visible_rendering(),
+        "continuity": _exercise_zoom_continuity(page, box),
+    }
+    if not initial:
+        control.click()
+        page.wait_for_timeout(80)
+    return {"found": True, "initial": initial, "off": off, "on": on}
+
+
 def _click_text_controls(page, labels: list[str]) -> list[str]:
     clicked: list[str] = []
     for label in labels:
@@ -545,7 +928,7 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
     target = boxes[-1]
     start_x = source["x"] + source["width"] * 0.5
     start_y = source["y"] + source["height"] * 0.5
-    end_x = target["x"] + target["width"] * 0.78
+    end_x = target["x"] + target["width"] * 0.9
     end_y = target["y"] + target["height"] * 0.5
     page.mouse.move(start_x, start_y)
     page.mouse.down()
@@ -553,6 +936,7 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
     ghost_start = _show3d_reorder_ghost(page)
     page.mouse.move(start_x + (end_x - start_x) * 0.35, start_y + (end_y - start_y) * 0.25, steps=6)
     page.mouse.move(start_x + (end_x - start_x) * 0.85, start_y + (end_y - start_y) * 0.1, steps=8)
+    page.mouse.move(end_x, end_y, steps=8)
     page.wait_for_timeout(220)
     ghost_mid = _show3d_reorder_ghost(page)
     during = _show3d_reorder_labels(page)
@@ -587,6 +971,13 @@ def _story_ids_for(row: dict[str, Any]) -> list[str]:
     if variant.startswith("show4dstem"):
         return STORY_IDS_BY_VARIANT["show4dstem"]
     return STORY_IDS_BY_VARIANT.get(variant, [])
+
+
+def _panel_text_key(value: Any) -> str:
+    text = str(value)
+    for token in ("Unavailable", "★", "☆", "\u200b", "\n", " "):
+        text = text.replace(token, "")
+    return text
 
 
 def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, Any]:
@@ -635,7 +1026,7 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
     }
     show3d_column_targets = {
         "show3d-hidden-panel": 1,
-        "show3d-four-panel-downsample": 2,
+        "show3d-four-panel-downsample": 1,
     }
     if variant in show2d_column_targets:
         column_check = _exercise_column_select(page, "Gallery columns", show2d_column_targets[variant])
@@ -865,7 +1256,11 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         ):
             errors.append(f"Show4DSTEM compare grid has tiny/invalid panels: {compare}")
         compare_text = str(compare.get("text", ""))
-        if "Multiple grid" not in compare_text and "Compare grid" not in compare_text:
+        if (
+            "Multiple grid" not in compare_text
+            and "Compare grid" not in compare_text
+            and "Multiple ROI" not in compare_text
+        ):
             errors.append("Show4DSTEM multiple grid label is not visible")
         if not after_frame_text:
             errors.append("Show4DSTEM compare panel click did not select the second dataset")
@@ -873,14 +1268,34 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
             errors.append(f"Show4DSTEM compare panel controls failed: {compare_actions['error']}")
         if "Unstar" not in str(compare_actions.get("star_after", "")):
             errors.append(f"Show4DSTEM compare star button did not toggle: {compare_actions}")
-        if not compare_actions.get("after_reorder", [""])[0].startswith("scan-1"):
+        after_reorder_key = _panel_text_key((compare_actions.get("after_reorder") or [""])[0])
+        if not after_reorder_key.startswith("scan-1"):
             errors.append(f"Show4DSTEM compare reorder did not move scan-1 first: {compare_actions}")
         if compare_actions.get("count_after_hide") != 13:
             errors.append(f"Show4DSTEM compare hide did not remove one panel: {compare_actions}")
         if compare_actions.get("count_after_show_all") != 14:
             errors.append(f"Show4DSTEM compare show-all did not restore panels: {compare_actions}")
-        if not compare_actions.get("after_reset", [""])[0].startswith("scan-0"):
+        after_reset_key = _panel_text_key((compare_actions.get("after_reset") or [""])[0])
+        if not after_reset_key.startswith("scan-0"):
             errors.append(f"Show4DSTEM compare reset did not restore natural order: {compare_actions}")
+
+    if variant == "showptycho-webgpu-folder":
+        body_text = str(page.evaluate("document.body.innerText"))
+        showptycho_text = {
+            "has_bf": "BF" in body_text,
+            "has_c10": "C10" in body_text,
+            "has_higher_order": "Higher-order" in body_text,
+            "has_webgpu_status": "WebGPU" in body_text,
+        }
+        checks["showptycho_text"] = showptycho_text
+        if not showptycho_text["has_bf"]:
+            errors.append("ShowPtycho BF control/status is not visible")
+        if not showptycho_text["has_c10"]:
+            errors.append("ShowPtycho C10 control is not visible")
+        if not showptycho_text["has_higher_order"]:
+            errors.append("ShowPtycho higher-order panel control is not visible")
+        if not showptycho_text["has_webgpu_status"]:
+            errors.append("ShowPtycho WebGPU status text is not visible")
 
     checks["errors"] = errors
     return checks
@@ -899,6 +1314,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
         f"<td>{html.escape(str(row['switches_clicked']))}</td>"
         f"<td>{html.escape(str(row['slider_dragged']))}</td>"
         f"<td>{html.escape(str(row['canvas_changed']))}</td>"
+        f"<td>{html.escape(str(row.get('zoom_continuity', {})))}</td>"
         f"<td><a href='{html.escape(row['screenshot'])}'>{html.escape(row['screenshot'])}</a></td>"
         f"<td>{html.escape('; '.join(row['errors']))}</td>"
         f"<td>{html.escape('; '.join(row.get('console_warnings', [])))}</td>"
@@ -928,7 +1344,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
   drives basic widget interactions.</p>
   <p>Passed: <strong>{report['passed']}</strong> / {len(report['pages'])}</p>
   <table>
-    <thead><tr><th>Viewport</th><th>Widget</th><th>Variant</th><th>Status</th><th>Canvases</th><th>FPS</th><th>Stories</th><th>Switches</th><th>Slider</th><th>Canvas changed</th><th>Screenshot</th><th>Errors</th><th>Warnings</th></tr></thead>
+    <thead><tr><th>Viewport</th><th>Widget</th><th>Variant</th><th>Status</th><th>Canvases</th><th>FPS</th><th>Stories</th><th>Switches</th><th>Slider</th><th>Canvas changed</th><th>Zoom continuity</th><th>Screenshot</th><th>Errors</th><th>Warnings</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h2>Machine-readable report</h2>
@@ -960,6 +1376,12 @@ def _check_page(
     def _handle_console(msg) -> None:
         if msg.type != "error" or "Failed to load resource:" in msg.text:
             return
+        if (
+            "[showptycho] WebGPU preview failed" in msg.text
+            and "WebGPU device unavailable" in msg.text
+        ):
+            console_warnings.append(msg.text)
+            return
         if "Unable to preventDefault inside passive event listener invocation." in msg.text:
             console_warnings.append(msg.text)
             return
@@ -983,13 +1405,14 @@ def _check_page(
         "widget": widget,
         "variant": variant,
         "viewport": viewport_label,
-        "url": f"{base_url}/{Path(str(row['path'])).name}",
+        "url": f"{base_url}/{_served_export_path(artifact_dir, str(row['path']))}",
         "screenshot": screenshot_name,
         "canvas_screenshot": canvas_name,
         "story_ids": _story_ids_for(row),
         "canvas_count": 0,
         "canvas_nonblank": False,
         "canvas_changed": False,
+        "zoom_continuity": {},
         "fps": 0.0,
         "min_fps": min_fps,
         "fps_passed": False,
@@ -1021,6 +1444,49 @@ def _check_page(
             result["canvas_stats"] = image_stats
             if not nonblank:
                 result["errors"].append("primary canvas is blank or flat")
+
+            if widget in {"show2d", "show3d", "showptycho"}:
+                continuity = _exercise_zoom_continuity(page, box)
+                result["zoom_continuity"] = continuity
+                if not continuity.get("started"):
+                    result["errors"].append(f"zoom continuity probe did not start: {continuity}")
+                elif continuity.get("composition_changes", 0) > 0:
+                    result["errors"].append(
+                        "zoom changed the visible canvas composition; retained pixels were not preserved"
+                    )
+                elif continuity.get("readable_frames", 0) and continuity.get("flat_frames", 0) > 0:
+                    result["errors"].append("zoom exposed a blank or flat canvas frame")
+
+            if widget == "show3d":
+                smooth_zoom = _exercise_show3d_smooth_zoom(page, box)
+                result["smooth_zoom"] = smooth_zoom
+                if not smooth_zoom.get("found"):
+                    result["errors"].append("Show3D Smooth toggle could not be found")
+                else:
+                    off = smooth_zoom["off"]
+                    on = smooth_zoom["on"]
+                    if off["checked"] or off["image_rendering"] != "pixelated":
+                        result["errors"].append(
+                            f"Smooth off did not keep nearest-neighbour rendering: {off}"
+                        )
+                    if not on["checked"] or on["image_rendering"] != "auto":
+                        result["errors"].append(
+                            f"Smooth on did not restore interpolated rendering: {on}"
+                        )
+                    for state_name, state in (("off", off), ("on", on)):
+                        continuity = state["continuity"]
+                        if not continuity.get("started"):
+                            result["errors"].append(
+                                f"Show3D Smooth {state_name} zoom probe did not start: {continuity}"
+                            )
+                        elif continuity.get("composition_changes", 0) > 0:
+                            result["errors"].append(
+                                f"Show3D Smooth {state_name} changed visible canvas composition during zoom"
+                            )
+                        elif continuity.get("readable_frames", 0) and continuity.get("flat_frames", 0) > 0:
+                            result["errors"].append(
+                                f"Show3D Smooth {state_name} exposed a blank or flat canvas frame"
+                            )
 
             _drive_canvas(page, box)
             after = locator.screenshot(timeout=timeout_ms)

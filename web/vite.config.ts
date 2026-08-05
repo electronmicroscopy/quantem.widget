@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 
 // Standalone WebGPU 4D-STEM browser. No backend: the GUI is the quantem.live
 // Browse page, the data layer reads a locally-picked folder of Arina .h5 files
-// and decodes them on the GPU via the shared js/engine WGSL engine.
+// and decodes them on the GPU via the generated quantem.gpu WebGPU engine.
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetRoot = resolve(here, "..");
 
@@ -21,7 +21,7 @@ export default defineConfig({
   plugins: [react(), ...(offline ? [viteSingleFile()] : [])],
   define: { __QWIDGET_OFFLINE_HTML__: JSON.stringify(offline) },
   server: {
-    // allow importing the engine symlink target (widget/js/engine) + jsfive from
+    // allow importing generated quantem.gpu engine sources + jsfive from
     // the parent node_modules, both outside the web/ root.
     fs: { allow: [here, widgetRoot] },
   },

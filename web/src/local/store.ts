@@ -1,12 +1,12 @@
 // Local data layer for the standalone WebGPU 4D-STEM browser. Replaces the
 // quantem.live server: a locally-picked folder of Arina .h5 files is scanned into
 // the same Session/MasterFile tree the Browse GUI expects, and every image
-// (virtual image, CBED frame, summed DP) is produced on the GPU by the shared
-// js/engine WGSL engine. No Python, no network.
+// (virtual image, CBED frame, summed DP) is produced on the GPU by the generated
+// quantem.gpu WebGPU engine. No Python, no network.
 
-import { readH5Volume } from "../engine/h5reader";
-import { Show4DSTEMCompute } from "../engine/compute";
-import { decodeBslz4Batch, type Bslz4Spec } from "../engine/bslz4";
+import { readH5Volume } from "../../../js/.generated/engine/io/backends/webgpu/h5reader";
+import { DetectorCompute } from "../../../js/.generated/engine/detector/compute/webgpu/backend";
+import { decodeBslz4Batch, type Bslz4Spec } from "../../../js/.generated/engine/io/backends/webgpu/bslz4";
 import type { Session, MasterFile, RawData, DetectorMode, DetShape, ShapeParams, DetBin, BrowseDtype } from "../pages/browse/types";
 
 // A picked file, uniform over File System Access handles and <input webkitdirectory>.
@@ -87,7 +87,7 @@ const DATA_RE = /_data_\d+\.h5$/i;
 
 interface Handles { master: LocalFile | null; dataFiles: LocalFile[]; }
 interface LoadedDS {
-  compute: Show4DSTEMCompute;
+  compute: DetectorCompute;
   meanDP: Float32Array;
   scanRows: number; scanCols: number; detRows: number; detCols: number; detSize: number; scanCount: number;
   bf: { cy: number; cx: number; r_bf: number };
@@ -468,7 +468,7 @@ async function ensureLoaded(source: string, date: string, name: string, detBin: 
     await drain();
     if (!device) throw new Error("WebGPU unavailable");
     const tC = performance.now();
-    const compute = Show4DSTEMCompute.fromGpuChunks(device, chunks, startScan, residentDetSize, residentMode);
+    const compute = DetectorCompute.fromGpuChunks(device, chunks, startScan, residentDetSize, residentMode);
     compute.badPx = binBadPx(geom.badPx, geom.detRows, geom.detCols, detBin);
     const meanDP = await compute.reduceFrames(new Uint32Array(startScan).fill(1), true);
     PERF.push({ key: k, loadDecodeMs: Math.round(tC - tA), reduceMs: Math.round(performance.now() - tC), totalMs: Math.round(performance.now() - tA) });
@@ -609,10 +609,9 @@ export async function datasetMeanDp(source: string, date: string, name: string, 
   const ds = await ensureLoaded(source, date, name, detBin, dtype); return ds.meanDP;
 }
 
-// GPU-resident virtual image for the 60fps aperture-drag fast path: returns the maskedSum result
-// as a GPU buffer (NO readback) so the caller colormaps it straight to the canvas. Only the
-// mask modes (BF/ADF/DF) - CoM/iCoM need a CPU post-process (descan, integrate) so they stay on
-// the readback path. Returns null for those (caller falls back to the normal path).
+// GPU-resident virtual image for the 60fps aperture-drag fast path: returns the maskedSum/DPC
+// result as a GPU buffer (NO readback) so the caller colormaps it straight to the canvas.
+// CoMmag/iCoM still need CPU post-processing, so they stay on the readback path.
 export async function virtualImageBufferGpu(
   source: string, date: string, name: string, mode: DetectorMode,
   inner: number, outer: number, cx: number | null, cy: number | null, detBin: DetBin = 1, dtype: BrowseDtype = "uint8",
@@ -622,8 +621,13 @@ export async function virtualImageBufferGpu(
   let mask: Uint32Array;
   if (mode === "BF") mask = diskMask(ds.detRows, ds.detCols, ccy, ccx, (outer || 1) * r);
   else if (mode === "ADF" || mode === "DF") mask = annulusMask(ds.detRows, ds.detCols, ccy, ccx, (inner || 1.2) * r, (outer || 4) * r);
+  else if (mode === "CoMx" || mode === "CoMy") mask = diskMask(ds.detRows, ds.detCols, ccy, ccx, 1.5 * r);
   else return null;
-  const { buffer } = ds.compute.maskedSumBuffer(mask);
+  const { buffer } = mode === "CoMx"
+    ? ds.compute.maskedDpcBuffer(mask, ds.detCols, "col")
+    : mode === "CoMy"
+      ? ds.compute.maskedDpcBuffer(mask, ds.detCols, "row")
+      : ds.compute.maskedSumBuffer(mask);
   return { buffer, width: ds.scanCols, height: ds.scanRows };
 }
 
@@ -642,6 +646,12 @@ export async function virtualImage(
     return reshapeVI(await ds.compute.maskedSum(mask), ds); }
   // CoM / iCoM (DPC): intensity-weighted centroid over the BF disk per scan position.
   const comMask = diskMask(ds.detRows, ds.detCols, ccy, ccx, 1.5 * r);
+  if (mode === "CoMx" || mode === "CoMy") {
+    return reshapeVI(
+      await ds.compute.maskedDpc(comMask, ds.detCols, mode === "CoMx" ? "col" : "row"),
+      ds,
+    );
+  }
   const { comY, comX } = await ds.compute.maskedCoM(comMask, ds.detCols);
   const my = mean(comY), mx = mean(comX);
   const dy = new Float32Array(comY.length), dx = new Float32Array(comX.length);

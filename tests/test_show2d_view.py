@@ -158,9 +158,11 @@ def test_export_svg_writes_hybrid_figure(tmp_path):
     svg = out.read_text(encoding="utf-8")
 
     assert out.name == "figure.svg"
-    assert 'data-show2d-svg-export="true"' in svg
-    assert 'data-raster-scale="3"' in svg
+    assert "data-show2d-" not in svg
+    assert "data-raster-scale" not in svg
+    assert 'xmlns:xlink="http://www.w3.org/1999/xlink"' in svg
     assert svg.count("<image ") == 3
+    assert svg.count("xlink:href=") == 3
     assert "data:image/png;base64," in svg
     assert ">Show2D Figure<" in svg
     assert ">raw<" in svg
@@ -180,12 +182,13 @@ def test_export_svg_respects_hidden_panels_and_order(tmp_path):
     out = w.export_svg(tmp_path / "ordered.svg", scale=3, include_scale_bar=False)
     svg = out.read_text(encoding="utf-8")
 
-    assert 'data-raster-scale="3"' in svg
+    assert "data-show2d-" not in svg
+    assert "data-raster-scale" not in svg
     assert svg.count("<image ") == 3
-    assert 'data-show2d-panel="2"' in svg
-    assert 'data-show2d-panel="3"' in svg
-    assert 'data-show2d-panel="1"' in svg
-    assert 'data-show2d-panel="0"' not in svg
+    assert 'id="show2d-panel-2"' in svg
+    assert 'id="show2d-panel-3"' in svg
+    assert 'id="show2d-panel-1"' in svg
+    assert 'id="show2d-panel-0"' not in svg
     assert ">c<" in svg
     assert ">d<" in svg
     assert ">b<" in svg
@@ -253,19 +256,16 @@ def test_export_svg_writes_publication_layers_as_vectors(tmp_path):
     out = w.export_svg(tmp_path / "publication.svg", include_colorbar=True)
     svg = out.read_text(encoding="utf-8")
 
-    assert 'data-show2d-vector-layer="true"' in svg
-    assert 'data-show2d-panel-title-spans-svg="true"' in svg
-    assert 'data-show2d-panel-overlay-svg="true"' in svg
-    assert 'data-show2d-panel-annotation-svg="true"' in svg
-    assert 'data-show2d-inset-plot-svg="true"' in svg
-    assert 'data-show2d-colorbar-svg="true"' in svg
-    assert 'data-show2d-group-marker-svg="row"' in svg
-    assert 'data-show2d-group-marker-svg="col"' in svg
+    assert "data-show2d-" not in svg
+    assert "rgba(" not in svg
     assert "<circle " in svg
+    assert "<rect " in svg
     assert "<polyline " in svg
+    assert "<linearGradient " in svg
     assert "stroke-dasharray" in svg
     assert "λ=0.03" in svg
-    assert "χ^2" in svg
+    assert "χ²" in svg
+    assert "χ^2" not in svg
     assert "ACF" in svg
 
 
@@ -348,8 +348,40 @@ def test_export_svg_respects_publication_text_and_scale_bar_panels(tmp_path):
     assert 'stroke="#111111"' in svg
     assert 'stroke-width="1.25"' in svg
     assert 'stroke="#000000"' in svg
-    assert 'paint-order="stroke fill"' in svg
+    assert 'paint-order=' not in svg
+    assert 'fill="none" stroke="#111111"' in svg
     assert 'text-anchor="start"' in svg
+
+
+def test_export_svg_scale_bar_shadow_is_opt_in(tmp_path):
+    """C6: default publication scale bar has no bar underlay; shadow remains opt-in."""
+    data = np.random.default_rng(183).random((24, 24), dtype=np.float32)
+    default = Show2D(
+        data,
+        sampling=0.2,
+        units="nm",
+        scale_bar_length=1.0,
+        scale_bar_style={"bar_height": 3},
+        show_zoom_indicator=False,
+        verbose=False,
+    )
+    default_svg = default.export_svg(tmp_path / "default_scale_bar.svg").read_text(encoding="utf-8")
+
+    assert 'height="3" fill="#fff"' in default_svg
+    assert 'fill-opacity="0.5"' not in default_svg
+
+    shadowed = Show2D(
+        data,
+        sampling=0.2,
+        units="nm",
+        scale_bar_length=1.0,
+        scale_bar_style={"bar_height": 3, "shadow_color": "#123456"},
+        show_zoom_indicator=False,
+        verbose=False,
+    )
+    shadowed_svg = shadowed.export_svg(tmp_path / "shadowed_scale_bar.svg").read_text(encoding="utf-8")
+
+    assert 'fill="#123456" fill-opacity="0.5"' in shadowed_svg
 
 
 def test_current_view_uses_zoom_center():
@@ -530,6 +562,9 @@ def test_crop_applies_before_denoise():
 
     image = _image(256)
     w = Show2D(image, denoise="gaussian", denoise_sigma=3, view_box=(32, 32, 64), verbose=False)
+    # Exercise the Python reference path explicitly. Browser/WebGPU filtering
+    # intentionally ships the cropped frame raw and applies denoise in-browser.
+    w._webgpu_filter_ok = False
     w.crop_to_view()
     sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=64 * 64).reshape(64, 64)
     expected = apply_display_filter(image[32:96, 32:96], mode="gaussian", sigma=3.0)
@@ -599,7 +634,7 @@ def test_padding_keeps_fft_and_scale_bar_geometry_compatible():
     specs = w._static_panel_specs()
     assert specs[0]["frame"].shape == (w.height, w.width)
     _label, zoom_text, bar_text, bar_px = w._static_overlay_texts(specs)[0]
-    assert zoom_text == "1.0×"
+    assert zoom_text == ""
     assert bar_text.endswith("nm")
     assert bar_px > 0
 

@@ -1,6 +1,7 @@
 import json
 import math
 import sys
+from collections import namedtuple
 
 import numpy as np
 import pytest
@@ -9,7 +10,8 @@ import torch
 from quantem.widget import ShowDiffraction
 from quantem.widget import Phase
 from quantem.widget.showdiffraction import build_measurement_records, measurement_metadata
-from quantem.widget.io import LoadResult
+
+LoadResult = namedtuple("LoadResult", ("data", "metadata"))
 
 
 def _disk_dp(size=64, center=(32, 30), radius=6):
@@ -1429,8 +1431,7 @@ def test_search_phases_and_identify_request():
 
 
 def test_search_phases_absurd_calibration_bounded():
-    # a wrong calibration must not hang enumeration (max_index is capped); the
-    # bound is generous so it only trips on an unbounded regression, not CI load
+    # a wrong calibration must not hang the reflection enumeration
     import time
 
     w = ShowDiffraction(

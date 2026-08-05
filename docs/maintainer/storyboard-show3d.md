@@ -40,6 +40,9 @@ for parity.
 
 - Compare labels, scale bars, color maps, panel borders, stats, and histogram
   controls against Show2D.
+- Hover unselected movie panels and verify the cursor readout, frame-aware
+  stats, and Color dropdown/reporting context follow the hovered panel without
+  changing which panel the edit controls will modify.
 - Pass ``cmap=["RdBu", "viridis", ...]`` for a multi-panel Show3D comparison
   and verify every panel keeps its own colormap in the Python API, live UI,
   saved state, static notebook fallback, and standalone HTML export. Hover or
@@ -105,6 +108,10 @@ label, histogram, and slider to stay synchronized at the selected FPS.
 - Press Play/Pause at 30 FPS and verify image and slider stay synchronized.
 - Increase FPS and record whether the slider lags the image.
 - Drag the frame slider slowly and quickly.
+- [x] **S3D-PLAY-4**: In an exported/offline multi-panel Show3D, zoom or pan a
+  packed panel, press Play, then keep dragging while playback is active. Verify
+  the current frame repaints in the zoomed viewport without touching the
+  histogram or any other control.
 - [x] **S3-DN-3**: Start with browser-side Gaussian denoise enabled, scrub from
   the initial frame to a later frame, and verify both canvases remain visibly
   smooth rather than briefly or permanently showing raw pixels.
@@ -112,6 +119,40 @@ label, histogram, and slider to stay synchronized at the selected FPS.
 - Change averaging window during playback.
 - Toggle Loop and Bounce and verify end-of-stack behavior.
 - Verify no background flash, stale frame, or delayed label appears.
+
+### S3D-05A: Keep Multi-Panel Display State Independent
+
+**User story**: As a scientist comparing several reconstructions over many
+pages, I want each panel to retain its own contrast, colormap, zoom, pan, and
+border state unless I explicitly link it, so I can inspect one result without
+silently changing another or seeing an empty canvas between pages.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: a real or real-derived multi-panel stack with at least three
+pages and visibly different intensity ranges between panels.
+
+**Acceptance checks**:
+
+- With Link Contrast off, move one panel's histogram handle. Only that panel's
+  clip range and pixels may change; neighboring panels keep their own histogram,
+  color, and pixels.
+- Change page by slider, keyboard, and Page Play while playback is running.
+  The prior complete scientific pixels must remain until the next direct paint
+  is ready; no black, white, or empty panel is acceptable during the change.
+- Zoom, pan, resize, and hover any unselected panel. None of these actions may
+  alter another panel's contrast, colormap, Smooth state, selected panel, or
+  border.
+- Verify title, scale bar, panel border, histogram, and frame label remain
+  synchronized across the same page/frame transition.
+- The canvas has one authoritative direct rendering path from the current
+  frame and that panel's current state. Do not add a prebuilt
+  `HTMLCanvasElement`/composite display cache or a separate display-cache state
+  machine; numerical caches such as decoded source frames and FFT magnitudes are
+  allowed only when they cannot own zoom, contrast, page, or panel state.
+- Run the scenario in a live Jupyter widget and a freshly exported HTML file.
+  Capture one transition-time screenshot or pixel sample, not only the final
+  settled view.
 
 ### S3D-05B: Explore Time-Series Dynamics With Playback Presets
 
@@ -138,7 +179,7 @@ because collaborators often review time series outside Jupyter.
 - Configure denoise plus a low-pass, high-pass, or band-pass FFT filter before
   pressing Play; verify transitions stay visibly filtered and smooth, the
   slider remains honest, and the viewer does not flash raw/noisy frames while
-  cached filtered frames warm.
+  the current filtered display settles.
 - Run at least one organic notebook trial that starts from a plain
   `Show3D(stack)` or similarly minimal call. A reviewer should turn Denoise,
   Filter, FFT, Loop/Bounce, playback style, and speed/range controls on from
@@ -174,6 +215,9 @@ and linked contrast to be fast and reversible.
 - Toggle linked contrast; verify contrast changes apply consistently when
   linked and independently when unlinked.
 - Change scale mode, colormap, Smooth, and histogram range while scrubbing.
+- While one panel is selected for controls, hover neighboring panels during
+  scrub/playback and verify readout/stats follow the hovered panel but linked
+  or independent edits still apply only according to the selected/link state.
 - Resize the grid and verify current frame, labels, scale bars, and histogram UI
   do not jump unexpectedly.
 
@@ -193,6 +237,8 @@ bottom, right, or overlay without changing real-space interaction semantics.
 - Toggle FFT right layout and verify vertical height aligns with real-space
   panels and controls remain reachable.
 - Toggle FFT overlay and verify every visible panel receives one overlay.
+- Press Play with FFT visible and verify the overlay follows the current frame
+  at a bounded cadence rather than freezing on the pre-playback frame.
 - In every layout, verify each FFT tile or inset shows the current shared
   `N.N×` multiplier, including uncalibrated data and narrow/mobile layouts;
   `show_zoom_indicator=False` must hide the FFT badges.
@@ -254,10 +300,21 @@ sizes.
 - Export GIF and MP4 panel-only animations.
 - Verify expected frame count, multi-panel layout, live-style labels, scale bar,
   zoom readout, border/background, playback speed, and file size.
+- Include at least one uint16 source-stack case. The decoded GIF/MP4 frames
+  should match the widget-rendered frame size, panel count, black inter-panel
+  gap, inner/outer borders, panel labels, scale bars, and playback fps.
 - Verify quality/speed options are visible and have clear labels.
+- For standalone HTML with encoded uint8 data, verify GIF/MP4 remain available
+  but show a warning before export that the movie uses encoded display data and
+  that exact/live export is required for publication-quality fidelity.
 - Use labels and title spans containing symbols and inline math such as
   `\lambda=0.03 raw` and `$\\chi^2$/pixel`; verify the panel menu, stats rows,
   and animation labels render symbols/math and never show raw markup.
+- For PowerPoint or Slack sharing, attach the exported GIF/MP4 and verify the
+  receiving app recognizes the media. For PowerPoint, inspect the PPTX package
+  for embedded `ppt/media/*` assets rather than linked local files, open the
+  deck in native PowerPoint when Mac automation is available, and record whether
+  playback was actually verified or blocked by OS permissions.
 - Run `PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py` when
   judging whether a GIF is good enough for PowerPoint/email sharing.
 
@@ -276,8 +333,9 @@ sizes to match the Show2D export vocabulary.
   sizes.
 - Collapse controls for presentation-style viewing and verify Export remains
   reachable from the title chrome in live and standalone HTML.
-- In standalone HTML, verify GIF/MP4 choices remain visible but disabled with a
-  backend-required explanation until a browser-side animation encoder exists.
+- In standalone HTML, verify GIF works in-browser. Verify MP4 is enabled when
+  WebCodecs H.264 is supported, and otherwise remains visible but disabled with
+  a browser-support or live-backend explanation.
 - Verify cancellation/status text clears after the documented timeout.
 - Export HTML exact and quantized where supported.
 - [x] **S3-EX-2**: Open an exact standalone export with display-only denoise
@@ -369,6 +427,10 @@ panel/file workflows when the scientific workflow produces that many outputs.
   zoom anchor, labels, scale bars, and contrast state.
 - Hide and restore panels during playback and verify hidden panels do not keep
   unnecessary frame or FFT work active.
+- Sweep hover across visible panels while playback is paused and while it is
+  playing. Verify the active readout/stats are per-hovered-panel and that hover
+  alone does not change the selected panel, hidden-panel state, or playback
+  target.
 - Record whether playback, frame slider, histogram, and overlay interactions
   remain near the target FPS, or document the limiting case.
 
@@ -562,7 +624,7 @@ transport rule for comparable paged or stacked image review paths.
 **Data to use**: A real or real-derived multi-panel movie on the backend. The
 canonical stress case is a 3x3 grid of 2048 x 2048 float32 panels, where one
 native concatenated frame is 150,994,944 bytes. Use the actual lab deployment
-when possible: laptop browser on phil, Jupyter kernel and data on mjgoat, and
+when possible: laptop browser on Apple Silicon, Jupyter kernel and data on a remote GPU workstation, and
 an `ssh -L` tunnel. Synthetic data may be used only as a post-fix control when
 it preserves the same native spatial shape and per-frame payload.
 

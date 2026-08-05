@@ -1,7 +1,7 @@
-"""Temporary widget data adapters.
+"""Widget-owned viewer residency and tutorial-data helpers.
 
-Core dataset containers belong in ``quantem.core``. Modules here are compatibility
-homes for structures that have not moved to core yet.
+Scientific dataset types belong in ``quantem.core``. ``Dataset5dstem`` remains
+here because it implements Show4DSTEM paging and multi-device UI residency.
 """
 
 from quantem.widget.data.dataset5dstem import Dataset5dstem

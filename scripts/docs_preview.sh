@@ -9,7 +9,7 @@ Build and serve the local documentation HTML.
 
 Options:
   --no-build    Serve the existing docs/_build/html tree.
-  --port PORT   Port for python -m http.server. Default: 8767.
+  --port PORT   Port for the docs server. Default: 8767.
   --host HOST   Bind host. Default: 127.0.0.1.
 EOF
 }
@@ -40,6 +40,4 @@ if [[ ! -d docs/_build/html ]]; then
   exit 1
 fi
 
-echo "Serving docs at http://${host}:${port}/"
-cd docs/_build/html
-python -m http.server "$port" --bind "$host"
+python docs/serve.py --host "$host" --port "$port"

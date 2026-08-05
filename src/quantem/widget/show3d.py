@@ -53,6 +53,8 @@ from quantem.widget.show2d import (
     _normalize_panel_title_style,
     _normalize_rotation_list,
     _normalise_title_span_sequence,
+    _nonnegative_float,
+    _nonnegative_int,
     _reject_unknown_kwargs,
     _rotation_to_quarter_turns,
     _title_span_sequence_length,
@@ -829,6 +831,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Gap in CSS pixels between adjacent panels.  ``0`` = flush (panels share
         an edge - useful for tiled montages), ``20`` = roomy (clear separation
         for slides).  Single-panel widgets ignore this.
+    inter_panel_gap_px, inter_panel_gap_color : int, str, optional
+        Explicit replacement for ``panel_gap`` when the layer between panels
+        needs a chosen color. The gap is real layout space between panel slots,
+        not a stroke drawn inside a panel.
+    gallery_outer_border_px, gallery_outer_border_color : int, str, optional
+        Frame around the entire multi-panel gallery. This is separate from the
+        inter-panel gap and from per-panel strokes.
+    panel_inner_border_px, panel_inner_border_color : float, str, optional
+        Stroke drawn inside each panel slot over the image edge. Defaults to
+        ``0`` in Show3D to preserve the existing no-stroke canvas look.
     panel_title_font_size : int, default 11
         Font size in CSS pixels for the per-panel title drawn at the top of
         each multi-panel slot.  Bump to ``14–16`` for slide-projection clarity;
@@ -868,11 +880,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         any handle resizes the entire multi-panel canvas (linked).  Set
         ``False`` to declutter a screenshot or printed figure where the
         operator already has the layout they want.
-    show_zoom_indicator : bool, default True
+    show_zoom_indicator : bool, default False
         Draw the live ``1.0×``-style zoom readout at the bottom-left of every
-        real-space panel and every FFT tile or inset. Set ``False`` for clean
-        static layouts or when the scale bar alone is enough to communicate
-        scale.
+        real-space panel and every FFT tile or inset. The default keeps clean
+        static layouts where the scale bar alone communicates scale.
     show_scale_bar : bool, default True
         Draw the bottom-right scale bar. When ``pixel_size`` is provided the
         label uses physical units; otherwise it shows pixel units. Set
@@ -1013,6 +1024,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     denoise = traitlets.Unicode("none").tag(sync=True)
     denoise_sigma = traitlets.Float(4.0).tag(sync=True)
     denoise_bin = traitlets.Int(1).tag(sync=True)
+    denoise_modes = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    denoise_sigmas = traitlets.List(traitlets.Float()).tag(sync=True)
+    denoise_bins = traitlets.List(traitlets.Int()).tag(sync=True)
+    denoise_scope = traitlets.Enum(["all", "panel"], default_value="all").tag(sync=True)
     denoise_banner = traitlets.Unicode("").tag(sync=True)
     # The denoise controls row is hidden by default; auto-enabled when the
     # widget starts with an active denoise (house rule: knobs that explain a
@@ -1024,7 +1039,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Set True by the frontend when a real (non-software) WebGPU adapter is
     # available: denoise then runs in the browser (WGSL, live sigma scrub) and
     # Python ships RAW frames. False keeps the scipy path (e.g. SwiftShader).
-    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
+    # Default True: the browser owns display denoise. js/displayFilter.ts ships
+    # The browser has WGSL and CPU TypeScript filter paths that match NumPy, so
+    # every viewer can filter client-side and Python never needs the scipy
+    # round trip (which cost a full re-send of the frame per knob edit). The
+    # frontend downgrades this to False only when it finds a software adapter.
+    _webgpu_filter_ok = traitlets.Bool(True).tag(sync=True)
     frequency_filter = traitlets.Enum(
         ["none", "lowpass", "highpass", "bandpass"], default_value="none"
     ).tag(sync=True)
@@ -1032,6 +1052,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     frequency_filter_cutoff = traitlets.Float(0.15).tag(sync=True)
     frequency_filter_center = traitlets.Float(0.30).tag(sync=True)
     frequency_filter_width = traitlets.Float(0.12).tag(sync=True)
+    frequency_filter_modes = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    frequency_filter_cutoffs = traitlets.List(traitlets.Float()).tag(sync=True)
+    frequency_filter_centers = traitlets.List(traitlets.Float()).tag(sync=True)
+    frequency_filter_widths = traitlets.List(traitlets.Float()).tag(sync=True)
+    frequency_filter_scope = traitlets.Enum(["all", "panel"], default_value="all").tag(sync=True)
     frequency_filter_banner = traitlets.Unicode("").tag(sync=True)
     show_frequency_filter = traitlets.Bool(False).tag(sync=True)
     subpixel_align_enabled = traitlets.Bool(False).tag(sync=True)
@@ -1114,6 +1139,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Per-panel visibility. Hidden panels stay in state/export but are collapsed
     # from the canvas grid and skipped by panel-scoped frontend computations.
     hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    selected_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     # Real frame count per panel for stack comparison: stacks of different
     # lengths get auto-padded to the longest; this trait lets JS mark
@@ -1135,10 +1161,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     max_cols = traitlets.Int(4).tag(sync=True)
     # Per-widget customization for multi-panel display.
     show_resize_handles = traitlets.Bool(True).tag(sync=True)
-    show_zoom_indicator = traitlets.Bool(True).tag(sync=True)
+    show_zoom_indicator = traitlets.Bool(False).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
     panel_title_style = traitlets.Dict(default_value={}).tag(sync=True)
+    inter_panel_gap_px = traitlets.Int(0).tag(sync=True)
+    inter_panel_gap_color = traitlets.Unicode("").tag(sync=True)
+    gallery_outer_border_px = traitlets.Int(0).tag(sync=True)
+    gallery_outer_border_color = traitlets.Unicode("").tag(sync=True)
+    panel_inner_border_px = traitlets.Float(0.0).tag(sync=True)
+    panel_inner_border_color = traitlets.Unicode("#000000").tag(sync=True)
     panel_gap = traitlets.Int(0).tag(sync=True)
     # Hover-x hide feature: enables UI to drop frames from scrubber without
     # rebuilding the widget. hidden_indices is the live state; visible_indices
@@ -1662,6 +1694,24 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise traitlets.TraitError(
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
+        return clean
+
+    @traitlets.validate("selected_panels")
+    def _validate_selected_panels(self, proposal: dict) -> list[int]:
+        """Normalize selected panel indices while preserving display order."""
+        n_pan = int(self.n_panels)
+        clean: list[int] = []
+        seen: set[int] = set()
+        for value in proposal["value"]:
+            if isinstance(value, bool):
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < n_pan and idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
         return clean
 
     def _normalize_hidden_page_slots(
@@ -2388,24 +2438,32 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_max_px: int = 512,
         notebook_preview_frames: Sequence[int] | int | None = None,
         notebook_preview_ncols: int | None = None,
-        denoise: str = "none",
-        denoise_sigma: float = 4.0,
-        denoise_bin: int = 1,
+        denoise: str | Sequence[str] = "none",
+        denoise_sigma: float | Sequence[float] = 4.0,
+        denoise_bin: int | Sequence[int] = 1,
+        denoise_scope: str = "panel",
         display_filter: str | None = None,
         display_sigma: float | None = None,
         spatial_bin: int | None = None,
         show_denoise: bool = False,
-        frequency_filter: str = "none",
+        frequency_filter: str | Sequence[str] = "none",
         frequency_filter_enabled: bool | None = None,
-        frequency_filter_cutoff: float = 0.15,
-        frequency_filter_center: float = 0.30,
-        frequency_filter_width: float = 0.12,
+        frequency_filter_cutoff: float | Sequence[float] = 0.15,
+        frequency_filter_center: float | Sequence[float] = 0.30,
+        frequency_filter_width: float | Sequence[float] = 0.12,
+        frequency_filter_scope: str = "panel",
         show_frequency_filter: bool = False,
         subpixel_align: bool = False,
         subpixel_align_reference: int = 0,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
+        inter_panel_gap_px: int | None = None,
+        inter_panel_gap_color: str | None = None,
+        gallery_outer_border_px: int | None = None,
+        gallery_outer_border_color: str | None = None,
+        panel_inner_border_px: float | int | None = None,
+        panel_inner_border_color: str | None = None,
         panel_title_font_size: int | None = None,
         panel_title_style: Mapping[str, object] | None = None,
         show_panel_titles: bool | None = None,
@@ -2431,7 +2489,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "show_stats": False,
                 "show_panel_titles": True,
                 "show_resize_handles": True,
-                "show_zoom_indicator": True,
+                "show_zoom_indicator": False,
                 "show_scale_bar": True,
             },
             overrides={
@@ -2458,8 +2516,29 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         kwargs["show_title"] = show_title
         if max_cols is not None:
             kwargs["max_cols"] = int(max_cols)
-        if panel_gap is not None:
-            kwargs["panel_gap"] = int(panel_gap)
+        resolved_inter_panel_gap_px = _nonnegative_int(
+            0 if inter_panel_gap_px is None and panel_gap is None
+            else panel_gap if inter_panel_gap_px is None
+            else inter_panel_gap_px,
+            name="inter_panel_gap_px",
+        )
+        kwargs["inter_panel_gap_px"] = resolved_inter_panel_gap_px
+        kwargs["inter_panel_gap_color"] = "" if inter_panel_gap_color is None else str(inter_panel_gap_color)
+        kwargs["gallery_outer_border_px"] = (
+            0 if gallery_outer_border_px is None
+            else _nonnegative_int(gallery_outer_border_px, name="gallery_outer_border_px")
+        )
+        kwargs["gallery_outer_border_color"] = (
+            "" if gallery_outer_border_color is None else str(gallery_outer_border_color)
+        )
+        kwargs["panel_inner_border_px"] = (
+            0.0 if panel_inner_border_px is None
+            else _nonnegative_float(panel_inner_border_px, name="panel_inner_border_px")
+        )
+        kwargs["panel_inner_border_color"] = (
+            "#000000" if panel_inner_border_color is None else str(panel_inner_border_color)
+        )
+        kwargs["panel_gap"] = resolved_inter_panel_gap_px
         if panel_title_font_size is not None:
             kwargs["panel_title_font_size"] = int(panel_title_font_size)
         kwargs["show_panel_titles"] = show_panel_titles
@@ -2640,12 +2719,14 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             notebook_preview_frames=notebook_preview_frames,
                             notebook_preview_ncols=notebook_preview_ncols,
                             denoise=denoise, denoise_sigma=denoise_sigma,
-                            denoise_bin=denoise_bin, show_denoise=show_denoise,
+                            denoise_bin=denoise_bin, denoise_scope=denoise_scope,
+                            show_denoise=show_denoise,
                             frequency_filter=frequency_filter,
                             frequency_filter_enabled=frequency_filter_enabled,
                             frequency_filter_cutoff=frequency_filter_cutoff,
                             frequency_filter_center=frequency_filter_center,
                             frequency_filter_width=frequency_filter_width,
+                            frequency_filter_scope=frequency_filter_scope,
                             show_frequency_filter=show_frequency_filter,
                             subpixel_align=subpixel_align,
                             subpixel_align_reference=subpixel_align_reference,
@@ -2718,13 +2799,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    dedupe_identical_panels: bool, _t0: float,
                    notebook_preview_frames: Sequence[int] | int | None = None,
                    notebook_preview_ncols: int | None = None,
-                   denoise: str = "none", denoise_sigma: float = 4.0,
-                   denoise_bin: int = 1, show_denoise: bool = False,
-                   frequency_filter: str = "none",
+                   denoise: str | Sequence[str] = "none",
+                   denoise_sigma: float | Sequence[float] = 4.0,
+                   denoise_bin: int | Sequence[int] = 1,
+                   denoise_scope: str = "panel",
+                   show_denoise: bool = False,
+                   frequency_filter: str | Sequence[str] = "none",
                    frequency_filter_enabled: bool | None = None,
-                   frequency_filter_cutoff: float = 0.15,
-                   frequency_filter_center: float = 0.30,
-                   frequency_filter_width: float = 0.12,
+                   frequency_filter_cutoff: float | Sequence[float] = 0.15,
+                   frequency_filter_center: float | Sequence[float] = 0.30,
+                   frequency_filter_width: float | Sequence[float] = 0.12,
+                   frequency_filter_scope: str = "panel",
                    show_frequency_filter: bool = False,
                    subpixel_align: bool = False,
                    subpixel_align_reference: int = 0) -> None:
@@ -3144,7 +3229,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         orig_h = int(self._data.shape[1])
         orig_w = int(self._data.shape[2])
 
-        # NEVER BIN (CLAUDE.md rule). Display data is always source-pixel-exact.
+        # Display data is always source-pixel-exact unless explicitly requested.
         # Honor explicit display_bin=N>1 only if caller asks; "auto" stays 1.
         self._display_bin = 1
         if isinstance(display_bin, int) and display_bin > 1:
@@ -3345,14 +3430,42 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # constructor-selected filter shows from the first paint.
         self._display_filter_ready = False
         self._display_filter_cache = {}
+
+        def per_panel(value, kind: str, cast):
+            if isinstance(value, (list, tuple, np.ndarray)):
+                values = [cast(v) for v in value]
+                if len(values) != int(self.n_panels):
+                    raise ValueError(
+                        f"{kind} sequence length ({len(values)}) must equal the "
+                        f"panel count ({int(self.n_panels)})"
+                    )
+                return values, False
+            return [cast(value)] * int(self.n_panels), True
+
         # Compound spellings (bin2, bin2_anscombe, bin4_anscombe) are aliases
         # for (mode, bin); the traits always hold the canonical trio.
         from quantem.widget.utils.display_filter import resolve_denoise_mode
 
-        resolved_mode, resolved_bin = resolve_denoise_mode(str(denoise), int(denoise_bin))
-        self.denoise = resolved_mode
-        self.denoise_sigma = float(denoise_sigma)
-        self.denoise_bin = int(resolved_bin)
+        filters, filters_scalar = per_panel(denoise, "denoise", str)
+        sigmas, sigmas_scalar = per_panel(denoise_sigma, "denoise_sigma", float)
+        bins, bins_scalar = per_panel(denoise_bin, "denoise_bin", int)
+        resolved = [resolve_denoise_mode(mode, bin_value) for mode, bin_value in zip(filters, bins)]
+        self.denoise_modes = [mode for mode, _ in resolved]
+        self.denoise_sigmas = sigmas
+        self.denoise_bins = [bin_value for _, bin_value in resolved]
+        raw_denoise_scope = str(denoise_scope or "all").strip().lower()
+        if raw_denoise_scope not in {"all", "panel"}:
+            raise ValueError("denoise_scope must be 'all' or 'panel'")
+        denoise_scalar_knobs = filters_scalar and sigmas_scalar and bins_scalar
+        if raw_denoise_scope == "all" and not denoise_scalar_knobs:
+            raise ValueError(
+                "denoise_scope='all' broadcasts one setting to every panel, but "
+                "a per-panel denoise/denoise_sigma/denoise_bin sequence was also given."
+            )
+        self.denoise_scope = "all" if int(self.n_panels) <= 1 else raw_denoise_scope
+        self.denoise = self.denoise_modes[0]
+        self.denoise_sigma = float(self.denoise_sigmas[0])
+        self.denoise_bin = int(self.denoise_bins[0])
         self._display_filter_ready = True
         # Master switch starts ON iff built with an active denoise config.
         self.denoise_enabled = self._has_denoise_config()
@@ -3362,28 +3475,63 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if self.is_rgb
             else bool(show_denoise) or self._display_filter_active()
         )
-        normalized_frequency_filter = str(frequency_filter).strip().lower().replace("-", "")
-        if normalized_frequency_filter not in {"none", "lowpass", "highpass", "bandpass"}:
+        frequency_modes, frequency_modes_scalar = per_panel(frequency_filter, "frequency_filter", str)
+        frequency_cutoffs, frequency_cutoffs_scalar = per_panel(
+            frequency_filter_cutoff, "frequency_filter_cutoff", float
+        )
+        frequency_centers, frequency_centers_scalar = per_panel(
+            frequency_filter_center, "frequency_filter_center", float
+        )
+        frequency_widths, frequency_widths_scalar = per_panel(
+            frequency_filter_width, "frequency_filter_width", float
+        )
+        frequency_modes = [mode.strip().lower().replace("-", "") for mode in frequency_modes]
+        invalid_frequency = next(
+            (mode for mode in frequency_modes if mode not in {"none", "lowpass", "highpass", "bandpass"}),
+            None,
+        )
+        if invalid_frequency is not None:
             raise ValueError(
                 "frequency_filter must be 'none', 'lowpass', 'highpass', or "
-                f"'bandpass'; got {frequency_filter!r}"
+                f"'bandpass'; got {invalid_frequency!r}"
             )
-        for name, value in {
-            "frequency_filter_cutoff": frequency_filter_cutoff,
-            "frequency_filter_center": frequency_filter_center,
-            "frequency_filter_width": frequency_filter_width,
+        for name, values in {
+            "frequency_filter_cutoff": frequency_cutoffs,
+            "frequency_filter_center": frequency_centers,
+            "frequency_filter_width": frequency_widths,
         }.items():
-            if not 0.0 <= float(value) <= 1.0:
-                raise ValueError(f"{name} must be between 0 and 1 (Nyquist); got {value}")
-        self.frequency_filter = normalized_frequency_filter
+            invalid = next((value for value in values if not 0.0 <= float(value) <= 1.0), None)
+            if invalid is not None:
+                raise ValueError(f"{name} must be between 0 and 1 (Nyquist); got {invalid}")
+        raw_frequency_scope = str(frequency_filter_scope or "all").strip().lower()
+        if raw_frequency_scope not in {"all", "panel"}:
+            raise ValueError("frequency_filter_scope must be 'all' or 'panel'")
+        frequency_scalar_knobs = (
+            frequency_modes_scalar
+            and frequency_cutoffs_scalar
+            and frequency_centers_scalar
+            and frequency_widths_scalar
+        )
+        if raw_frequency_scope == "all" and not frequency_scalar_knobs:
+            raise ValueError(
+                "frequency_filter_scope='all' broadcasts one setting to every panel, but "
+                "a per-panel frequency_filter/frequency_filter_cutoff/frequency_filter_center/"
+                "frequency_filter_width sequence was also given."
+            )
+        self.frequency_filter_modes = frequency_modes
+        self.frequency_filter_cutoffs = frequency_cutoffs
+        self.frequency_filter_centers = frequency_centers
+        self.frequency_filter_widths = frequency_widths
+        self.frequency_filter_scope = "all" if int(self.n_panels) <= 1 else raw_frequency_scope
+        self.frequency_filter = frequency_modes[0]
         self.frequency_filter_enabled = (
-            normalized_frequency_filter != "none"
+            any(mode != "none" for mode in frequency_modes)
             if frequency_filter_enabled is None
             else bool(frequency_filter_enabled)
         )
-        self.frequency_filter_cutoff = float(frequency_filter_cutoff)
-        self.frequency_filter_center = float(frequency_filter_center)
-        self.frequency_filter_width = float(frequency_filter_width)
+        self.frequency_filter_cutoff = float(frequency_cutoffs[0])
+        self.frequency_filter_center = float(frequency_centers[0])
+        self.frequency_filter_width = float(frequency_widths[0])
         self.show_frequency_filter = False if self.is_rgb else bool(show_frequency_filter)
         self.subpixel_align_enabled = False if self.is_rgb else bool(subpixel_align)
         self.subpixel_align_reference = int(subpixel_align_reference)
@@ -3515,12 +3663,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmax = [self.vmax_per_panel[p] if p < len(self.vmax_per_panel) else None for p in panel_indices]
         elif self.vmax is not None:
             vmax = self.vmax
+        cmap = (
+            [self.panel_cmaps[p] if p < len(self.panel_cmaps) else self.cmap for p in panel_indices]
+            if self.panel_cmaps
+            else self.cmap
+        )
 
+        chrome = self._gallery_export_chrome()
         return Show2D(
             frames,
             labels=labels,
             title=title if title is not None else self.title,
-            cmap=list(self.panel_cmaps) if self.panel_cmaps else self.cmap,
+            cmap=cmap,
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -3542,9 +3696,31 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             display_bin=1,
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=int(self.panel_title_font_size or 11),
-            gallery_gap_px=max(0, int(self.panel_gap)),
+            inter_panel_gap_px=int(chrome["inter_panel_gap_px"]),
+            inter_panel_gap_color=str(chrome["inter_panel_gap_color"]),
+            gallery_outer_border_px=int(chrome["gallery_outer_border_px"]),
+            gallery_outer_border_color=str(chrome["gallery_outer_border_color"]),
+            panel_inner_border_px=float(chrome["panel_inner_border_px"]),
+            panel_inner_border_color=str(chrome["panel_inner_border_color"]),
             save_state=False,
         )
+
+    def _gallery_export_chrome(self) -> dict[str, int | float | str]:
+        """Return resolved gallery chrome for Show3D exports and previews."""
+        gap_px = max(0, int(getattr(self, "inter_panel_gap_px", self.panel_gap)))
+        gap_color = str(getattr(self, "inter_panel_gap_color", "") or "")
+        outer_px = max(0, int(getattr(self, "gallery_outer_border_px", 0)))
+        outer_color = str(getattr(self, "gallery_outer_border_color", "") or gap_color)
+        panel_border_px = max(0.0, float(getattr(self, "panel_inner_border_px", 0.0)))
+        panel_border_color = str(getattr(self, "panel_inner_border_color", "#000000") or "#000000")
+        return {
+            "inter_panel_gap_px": gap_px,
+            "inter_panel_gap_color": gap_color,
+            "gallery_outer_border_px": outer_px,
+            "gallery_outer_border_color": outer_color,
+            "panel_inner_border_px": panel_border_px,
+            "panel_inner_border_color": panel_border_color,
+        }
 
     def _on_handoff_request_change(self, change: dict) -> None:
         """Build a Python-side prepared view from a frontend toolbar request."""
@@ -3729,6 +3905,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_titles = []
         self.starred = [-1]
         self.hidden_panels = []
+        self.selected_panels = []
         self.panel_order = []
         self.panel_groups = []
         self.panel_annotations = []
@@ -3990,8 +4167,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "debug": self.debug,
             "show_controls": self.show_controls,
             "controls_collapsed": self.controls_collapsed,
+            "hideable": self.hideable,
+            "hidden_indices": list(self.hidden_indices),
             "max_cols": self.max_cols,
             "panel_gap": self.panel_gap,
+            "inter_panel_gap_px": int(self.inter_panel_gap_px),
+            "inter_panel_gap_color": str(self.inter_panel_gap_color),
+            "gallery_outer_border_px": int(self.gallery_outer_border_px),
+            "gallery_outer_border_color": str(self.gallery_outer_border_color),
+            "panel_inner_border_px": float(self.panel_inner_border_px),
+            "panel_inner_border_color": str(self.panel_inner_border_color),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "panel_title_style": dict(self.panel_title_style),
@@ -4029,6 +4214,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "bookmarked_frames": self.bookmarked_frames,
             "starred": list(self.starred),
             "hidden_panels": list(self.hidden_panels),
+            "selected_panels": list(self.selected_panels),
             "panel_order": list(self.panel_order),
             "n_pages": int(self.n_pages),
             "page_idx": int(self.page_idx),
@@ -4060,15 +4246,24 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "panel_annotations": list(self.panel_annotations),
             "panel_overlays": list(self.panel_overlays),
             "denoise": self.denoise,
+            "denoise_modes": list(self.denoise_modes),
             "show_denoise": self.show_denoise,
             "denoise_enabled": self.denoise_enabled,
             "denoise_sigma": self.denoise_sigma,
+            "denoise_sigmas": list(self.denoise_sigmas),
             "denoise_bin": self.denoise_bin,
+            "denoise_bins": list(self.denoise_bins),
+            "denoise_scope": self.denoise_scope,
             "frequency_filter": self.frequency_filter,
+            "frequency_filter_modes": list(self.frequency_filter_modes),
             "frequency_filter_enabled": self.frequency_filter_enabled,
             "frequency_filter_cutoff": self.frequency_filter_cutoff,
+            "frequency_filter_cutoffs": list(self.frequency_filter_cutoffs),
             "frequency_filter_center": self.frequency_filter_center,
+            "frequency_filter_centers": list(self.frequency_filter_centers),
             "frequency_filter_width": self.frequency_filter_width,
+            "frequency_filter_widths": list(self.frequency_filter_widths),
+            "frequency_filter_scope": self.frequency_filter_scope,
             "show_frequency_filter": self.show_frequency_filter,
             "subpixel_align_enabled": self.subpixel_align_enabled,
             "subpixel_align_reference": self.subpixel_align_reference,
@@ -4223,116 +4418,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
         return export_path
 
-    def export_sidecar(
-        self,
-        out_dir: str | pathlib.Path,
-        *,
-        title: str | None = None,
-        stack_filename: str = "offline_stack.u8",
-        html_filename: str = "index.html",
-        manifest_filename: str = "manifest.json",
-    ) -> pathlib.Path:
-        """Write a thin HTML viewer + on-disk offline stack (no single-file embed).
-
-        Layout::
-
-            out_dir/
-              index.html          # small: widget shell only
-              offline_stack.u8    # raw uint8 stack bytes (sidecar)
-              manifest.json       # shape / titles / paths
-
-        Serve ``out_dir`` over HTTP (not ``file://``) so the browser can
-        ``fetch`` the sidecar. Full spatial resolution is preserved
-        (``display_bin`` of the live widget is used; no export downsample).
-        """
-        import json
-
-        if self._data is None:
-            raise ValueError("Cannot export sidecar after free(); rebuild the widget first.")
-
-        out_path = pathlib.Path(out_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-        stack_name = str(stack_filename)
-        html_name = str(html_filename)
-        manifest_name = str(manifest_filename)
-        page_title = title or self.title or "Show3D"
-
-        # Clone with uint8 offline packing, no spatial downsample.
-        export_widget = self._clone_for_html_export(quantized=True, downsample=1)
-        try:
-            stack_bytes = bytes(export_widget._offline_stack or b"")
-            if not stack_bytes:
-                raise ValueError("Sidecar export produced an empty offline stack.")
-            stack_path = out_path / stack_name
-            stack_path.write_bytes(stack_bytes)
-
-            # Thin HTML: drop embedded stack, point the browser at the sidecar.
-            export_widget._offline_stack = b""
-            export_widget._offline_float_stack = b""
-            export_widget._offline_stack_url = stack_name
-            export_widget.offline = True
-            export_widget.export_enabled = False
-            # Folder uint8 packs keep raw display bytes plus per-panel source
-            # ranges. Preserve the scientist's contrast state in the HTML; the
-            # browser maps auto/manual/histogram ranges onto those bytes without
-            # rescanning full-resolution panels on each scrub.
-
-            html_path = out_path / html_name
-            from ipywidgets.embed import dependency_state, embed_minimal_html
-            from .export import ensure_mobile_viewport
-
-            state = dependency_state([export_widget], drop_defaults=False)
-            embed_minimal_html(
-                str(html_path),
-                views=[export_widget],
-                title=page_title,
-                drop_defaults=False,
-                state=state,
-            )
-            ensure_mobile_viewport(html_path)
-
-            manifest = {
-                "format": "quantem.show3d.sidecar.v1",
-                "title": page_title,
-                "html": html_name,
-                "offline_stack": stack_name,
-                "encoding": "uint8",
-                "display_bin": 1,
-                "downsample": 1,
-                "width": int(export_widget.width),
-                "height": int(export_widget.height),
-                "n_slices": int(export_widget.n_slices),
-                "n_panels": int(export_widget.n_panels),
-                "panel_width_px": int(export_widget.panel_width_px),
-                "panel_titles": list(export_widget.panel_titles or []),
-                "offline_min": float(export_widget._offline_min),
-                "offline_max": float(export_widget._offline_max),
-                "offline_mins": list(export_widget._offline_mins or []),
-                "offline_maxs": list(export_widget._offline_maxs or []),
-                "cmap": export_widget.cmap,
-                "panel_cmaps": list(export_widget.panel_cmaps or []),
-                "auto_contrast": bool(export_widget.auto_contrast),
-                "link_contrast": bool(export_widget.link_contrast),
-                "percentile_low": float(export_widget.percentile_low),
-                "percentile_high": float(export_widget.percentile_high),
-                "image_vmin_pct": float(export_widget.image_vmin_pct),
-                "image_vmax_pct": float(export_widget.image_vmax_pct),
-                "log_scale": bool(export_widget.log_scale),
-                "stack_bytes": int(stack_path.stat().st_size),
-                "html_bytes": int(html_path.stat().st_size),
-                "serve": "python scripts/serve_sidecar_range.py --dir . --port 8801 --bind 127.0.0.1",
-            }
-            (out_path / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
-            html_mb = html_path.stat().st_size / (1024 * 1024)
-            stack_mb = stack_path.stat().st_size / (1024 * 1024)
-            self.export_status = (
-                f"Exported sidecar {html_path.name} ({html_mb:.1f} MB) + "
-                f"{stack_name} ({stack_mb:.1f} MB)"
-            )
-            return html_path
-        finally:
-            export_widget.free()
-
     def _normalise_html_export_options(
         self,
         *,
@@ -4350,8 +4435,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             encoding = "uint8"
         if raw_mode != "single":
             raise ValueError(
-                "Show3D HTML export supports mode='single'. "
-                "For multi-GB viewers use export_sidecar() (thin HTML + offline_stack.u8)."
+                "Show3D HTML export supports only mode='single'. "
+                "Use encoding='uint8' and downsample=2, 4, or 8 for a smaller "
+                "portable report."
             )
         if downsample in (None, "", 0, "0"):
             downsample_factor = 1
@@ -4510,6 +4596,31 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 state["panel_title_style"] = _normalize_panel_title_style(state["panel_title_style"])
             except (TypeError, ValueError):
                 state.pop("panel_title_style")
+        if "inter_panel_gap_px" not in state and "panel_gap" in state:
+            state["inter_panel_gap_px"] = state["panel_gap"]
+        for key in ("inter_panel_gap_px", "gallery_outer_border_px", "panel_gap"):
+            if key in state:
+                try:
+                    state[key] = _nonnegative_int(state[key], name=key)
+                except ValueError:
+                    state.pop(key)
+        if "inter_panel_gap_px" in state:
+            state["panel_gap"] = state["inter_panel_gap_px"]
+        if "panel_inner_border_px" in state:
+            try:
+                state["panel_inner_border_px"] = _nonnegative_float(
+                    state["panel_inner_border_px"],
+                    name="panel_inner_border_px",
+                )
+            except ValueError:
+                state.pop("panel_inner_border_px")
+        for key in (
+            "inter_panel_gap_color",
+            "gallery_outer_border_color",
+            "panel_inner_border_color",
+        ):
+            if key in state and state[key] is not None:
+                state[key] = str(state[key])
         if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
             panel_cmaps = [str(value) for value in state["panel_cmaps"]]
             if panel_cmaps and len(panel_cmaps) != int(self.n_panels):
@@ -4583,6 +4694,22 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if len(clean) >= n_pan:
                 clean = clean[:-1]
             state["hidden_panels"] = clean
+        if "selected_panels" in state and isinstance(state["selected_panels"], list):
+            n_pan = int(self.n_panels)
+            selected: list[int] = []
+            seen: set[int] = set()
+            hidden = set(state.get("hidden_panels", self.hidden_panels) or [])
+            for value in state["selected_panels"]:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < n_pan and idx not in seen and idx not in hidden:
+                    selected.append(idx)
+                    seen.add(idx)
+            state["selected_panels"] = selected
         if "hidden_page_slots" in state and isinstance(state["hidden_page_slots"], list):
             state["hidden_page_slots"] = self._normalize_hidden_page_slots(
                 state["hidden_page_slots"],
@@ -5605,11 +5732,33 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         img.save(str(path), dpi=(dpi, dpi))
         return path
 
-    def _animation_frame_order(self, playback: str) -> list[int]:
+    def _animation_frame_order(
+        self,
+        playback: str,
+        *,
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+    ) -> list[int]:
         """Return visible frame indices in the requested animation order."""
         visible = list(self.visible_indices)
         if not visible:
             visible = list(range(int(self.n_slices)))
+        n_slices = int(self.n_slices)
+        start = 0 if frame_start is None else int(frame_start)
+        stop = n_slices if frame_stop is None else int(frame_stop)
+        start = max(0, min(n_slices, start))
+        stop = max(start, min(n_slices, stop))
+        every_n = max(1, int(every_n))
+        visible = [idx for idx in visible if start <= int(idx) < stop][::every_n]
+        if max_frames not in (None, 0, "", "0"):
+            max_count = max(1, int(max_frames))
+            if len(visible) > max_count:
+                keep = np.linspace(0, len(visible) - 1, max_count).round().astype(int)
+                visible = [visible[int(i)] for i in keep]
+        if not visible:
+            raise ValueError("animation export frame range does not include any visible frames")
         mode = str(playback).lower()
         if mode == "forward":
             return visible
@@ -5618,6 +5767,28 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return visible
             return visible + visible[-2:0:-1]
         raise ValueError("playback must be 'forward' or 'bounce'")
+
+    def _normalise_animation_downsample(self, downsample: int | None) -> int:
+        """Validate animation export downsample factors from Python or JS."""
+        if downsample in (None, "", 0, "0"):
+            return 1
+        if isinstance(downsample, bool):
+            raise ValueError("animation export downsample must be an integer factor, not bool")
+        factor = int(downsample)
+        if factor < 1:
+            raise ValueError(f"animation export downsample must be >= 1, got {downsample!r}")
+        if factor not in {1, 2, 4, 8}:
+            raise ValueError("animation export downsample must be one of 1, 2, 4, or 8")
+        return factor
+
+    def _normalise_animation_max_edge(self, max_edge_px: int | None) -> int | None:
+        """Validate optional animation export max-edge sizing."""
+        if max_edge_px in (None, "", 0, "0"):
+            return None
+        edge = int(max_edge_px)
+        if edge < 1:
+            raise ValueError("animation export max_edge_px must be >= 1")
+        return edge
 
     def _animation_panel_indices(self) -> list[int]:
         """Return visible panel indices for panel-only animation export."""
@@ -5643,21 +5814,69 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         playback: str,
         show_frame_labels: bool,
         background: str | tuple[int, int, int],
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+        downsample: int = 1,
+        max_edge_px: int | None = None,
+        show_panel_titles: bool | None = None,
+        show_scale_bar: bool | None = None,
+        show_zoom: bool | None = None,
     ) -> list[Any]:
-        """Render panel-only animation frames as RGB PIL images."""
+        """Render panel-only animation frames as RGB PIL images.
+
+        This renderer keeps explicit publication chrome from the live view:
+        panel titles, scale bars, zoom labels, inter-panel gaps, gallery outer
+        borders, and per-panel inner borders. Transient UI affordances such as
+        hover, focus, selection outlines, and resize handles are intentionally
+        omitted.
+        """
         from quantem.widget.render import gif as gif_utils
 
         if quality not in gif_utils.QUALITY_SCALE:
             raise ValueError(f"quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}.")
-        scale = gif_utils.QUALITY_SCALE[quality]
-        panel_gap = max(0, int(round(float(self.panel_gap) * scale)))
-        title_font_size = max(8, int(round(float(self.panel_title_font_size) * scale)))
-        pixel_size = float(self.pixel_size) if bool(self.scale_bar_visible) else 0.0
+        downsample = self._normalise_animation_downsample(downsample)
+        max_edge_px = self._normalise_animation_max_edge(max_edge_px)
+        source_w = max(1, int(self.panel_width_px or self.width))
+        source_h = max(1, int(self.height))
+        scale = gif_utils.animation_output_scale(
+            source_w,
+            source_h,
+            quality,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+        )
+        chrome = self._gallery_export_chrome()
+        panel_gap = max(0, int(round(float(chrome["inter_panel_gap_px"]) * scale)))
+        gap_background = (
+            str(chrome["inter_panel_gap_color"])
+            if str(chrome["inter_panel_gap_color"])
+            else background
+        )
+        outer_border = max(0, int(round(float(chrome["gallery_outer_border_px"]) * scale)))
+        outer_border_color = str(chrome["gallery_outer_border_color"]) or gap_background
+        panel_inner_border = max(0, int(round(float(chrome["panel_inner_border_px"]) * scale)))
+        panel_inner_border_color = str(chrome["panel_inner_border_color"]) or "black"
+        title_font_size = max(
+            gif_utils.MIN_TITLE_FONT_SIZE,
+            int(round(float(self.panel_title_font_size) * scale)),
+        )
+        include_scale_bar = bool(self.scale_bar_visible) if show_scale_bar is None else bool(show_scale_bar)
+        include_zoom = bool(self.show_zoom_indicator) if show_zoom is None else bool(show_zoom)
+        include_panel_titles = bool(self.show_panel_titles) if show_panel_titles is None else bool(show_panel_titles)
+        pixel_size = float(self.pixel_size) if include_scale_bar else 0.0
         unit = self.pixel_unit or "A"
         panel_indices = self._animation_panel_indices()
         panel_titles = [self._panel_title_for_index(panel) for panel in panel_indices]
         frames = []
-        for frame_idx in self._animation_frame_order(playback):
+        for frame_idx in self._animation_frame_order(
+            playback,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+        ):
             panel_images = []
             for panel in panel_indices:
                 data = self._get_display_panel_frame(panel, frame_idx)
@@ -5668,7 +5887,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         quality,
                         pixel_size,
                         unit,
-                        show_zoom_indicator=bool(self.show_zoom_indicator),
+                        show_zoom_indicator=include_zoom,
+                        downsample=downsample,
+                        max_edge_px=max_edge_px,
                     )
                 )
             frame_panel_titles = (
@@ -5681,11 +5902,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     panel_images,
                     panel_titles=frame_panel_titles,
                     frame_labels=None,
-                    show_panel_titles=bool(self.show_panel_titles),
+                    show_panel_titles=include_panel_titles,
                     title_font_size=title_font_size,
                     max_cols=int(self.max_cols),
                     panel_gap=panel_gap,
-                    background=background,
+                    background=gap_background,
+                    outer_border=outer_border,
+                    outer_border_color=outer_border_color,
+                    panel_inner_border=panel_inner_border,
+                    panel_inner_border_color=panel_inner_border_color,
                 )
             )
         return frames
@@ -5693,13 +5918,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def save_gif(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
                  show_frame_labels: bool = False,
-                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
+                 background: str | tuple[int, int, int] = "dark",
+                 frame_start: int | None = None,
+                 frame_stop: int | None = None,
+                 every_n: int = 1,
+                 max_frames: int | None = None,
+                 downsample: int = 1,
+                 max_edge_px: int | None = None,
+                 show_panel_titles: bool | None = None,
+                 show_scale_bar: bool | None = None,
+                 show_zoom: bool | None = None,
+                 slides_preset: bool = False,
+                 ppt_preset: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an animated GIF matching the live image view.
 
         Each frame is colorized with the current ``cmap`` and contrast
         (``vmin`` / ``vmax`` or percentile auto-contrast, ``log_scale`` honored),
-        carries per-panel scale bars when enabled, respects hidden panels and
-        panel titles, and excludes FFT/profiles/controls from the export.
+        carries per-panel scale bars when enabled, respects hidden panels,
+        panel titles, inter-panel gaps, gallery outer borders, and per-panel
+        inner borders, and excludes FFT/profiles/controls from the export.
 
         Parameters
         ----------
@@ -5718,6 +5955,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             When enabled and no labels were provided, draw ``"i/n"``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range. The
+            default exports every visible frame.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation file.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings for the
+            exported animation.
+        slides_preset : bool, default False
+            Convenience preset for slide decks. Unless explicitly
+            overridden, exports at most 40 frames with ``max_edge_px=512``.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5732,23 +5988,49 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
+        if slides_preset or ppt_preset:
+            if max_frames is None:
+                max_frames = 40
+            if max_edge_px is None and int(downsample or 1) == 1:
+                max_edge_px = 512
         frames = self._render_animation_frames(
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
             background=background,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+            show_panel_titles=show_panel_titles,
+            show_scale_bar=show_scale_bar,
+            show_zoom=show_zoom,
         )
         return movie.save_gif(frames, path, fps=fps)
 
     def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
                  crf: int = 18, show_frame_labels: bool = False,
-                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
+                 background: str | tuple[int, int, int] = "dark",
+                 frame_start: int | None = None,
+                 frame_stop: int | None = None,
+                 every_n: int = 1,
+                 max_frames: int | None = None,
+                 downsample: int = 1,
+                 max_edge_px: int | None = None,
+                 show_panel_titles: bool | None = None,
+                 show_scale_bar: bool | None = None,
+                 show_zoom: bool | None = None,
+                 slides_preset: bool = False,
+                 ppt_preset: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an H.264 MP4.
 
         The rendered content matches :meth:`save_gif`: image panels only, with
         current colormap/contrast, panel titles, frame labels, hidden panels,
-        and scale bars. FFT/profiles/controls are omitted.
+        scale bars, inter-panel gaps, gallery outer borders, and per-panel
+        inner borders. FFT/profiles/controls are omitted.
 
         Parameters
         ----------
@@ -5768,6 +6050,23 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             When enabled and no labels were provided, draw ``"i/n"``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation file.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings.
+        slides_preset : bool, default False
+            Convenience preset for slide decks. Unless explicitly
+            overridden, exports at most 40 frames with ``max_edge_px=512``.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5776,11 +6075,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
+        if slides_preset or ppt_preset:
+            if max_frames is None:
+                max_frames = 40
+            if max_edge_px is None and int(downsample or 1) == 1:
+                max_edge_px = 512
         frames = self._render_animation_frames(
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
             background=background,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+            show_panel_titles=show_panel_titles,
+            show_scale_bar=show_scale_bar,
+            show_zoom=show_zoom,
         )
         return movie.save_mp4(frames, path, fps=fps, crf=crf)
 
@@ -5795,6 +6108,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         playback: str = "forward",
         show_frame_labels: bool = False,
         background: str | tuple[int, int, int] = "dark",
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+        downsample: int = 1,
+        max_edge_px: int | None = None,
+        show_panel_titles: bool | None = None,
+        show_scale_bar: bool | None = None,
+        show_zoom: bool | None = None,
+        slides_preset: bool = False,
+        ppt_preset: bool = False,
     ) -> AnimationExportPreview:
         """Save GIF/MP4 animation exports and return a notebook preview.
 
@@ -5822,6 +6146,22 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             Draw per-panel dynamic frame labels from ``panel_frame_labels``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation files.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings.
+        slides_preset : bool, default False
+            Convenience preset for slide decks.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5845,6 +6185,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     playback=playback,
                     show_frame_labels=show_frame_labels,
                     background=background,
+                    frame_start=frame_start,
+                    frame_stop=frame_stop,
+                    every_n=every_n,
+                    max_frames=max_frames,
+                    downsample=downsample,
+                    max_edge_px=max_edge_px,
+                    show_panel_titles=show_panel_titles,
+                    show_scale_bar=show_scale_bar,
+                    show_zoom=show_zoom,
+                    slides_preset=slides_preset,
+                    ppt_preset=ppt_preset,
                 )
             elif mode == "mp4":
                 path = directory / f"{stem}.mp4"
@@ -5856,6 +6207,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     crf=self._mp4_crf_for_quality(quality),
                     show_frame_labels=show_frame_labels,
                     background=background,
+                    frame_start=frame_start,
+                    frame_stop=frame_stop,
+                    every_n=every_n,
+                    max_frames=max_frames,
+                    downsample=downsample,
+                    max_edge_px=max_edge_px,
+                    show_panel_titles=show_panel_titles,
+                    show_scale_bar=show_scale_bar,
+                    show_zoom=show_zoom,
+                    slides_preset=slides_preset,
+                    ppt_preset=ppt_preset,
                 )
             else:
                 raise ValueError("formats must contain only 'gif' and/or 'mp4'")
@@ -6164,25 +6526,41 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return
             if mode in {"gif", "mp4"}:
                 quality = self._normalise_animation_quality(payload.get("quality", "medium"))
+                animation_kwargs = self._animation_kwargs_from_payload(payload)
+                detail = self._animation_export_detail(
+                    playback=str(animation_kwargs.get("playback", "forward")),
+                    frame_start=animation_kwargs.get("frame_start"),
+                    frame_stop=animation_kwargs.get("frame_stop"),
+                    every_n=int(animation_kwargs.get("every_n", 1)),
+                    max_frames=animation_kwargs.get("max_frames"),
+                    downsample=int(animation_kwargs.get("downsample", 1)),
+                    max_edge_px=animation_kwargs.get("max_edge_px"),
+                    slides_preset=bool(animation_kwargs.get("slides_preset", False)),
+                )
                 filename = str(payload.get("filename") or self._default_animation_export_path(mode, quality).name)
                 request_id = str(payload.get("id") or "")
                 if payload.get("download"):
-                    self.export_status = f"Preparing {filename}..."
-                    media = self._animation_export_bytes(mode, quality=quality)
+                    self.export_status = f"Preparing {filename} ({detail})..."
+                    media = self._animation_export_bytes(mode, quality=quality, **animation_kwargs)
                     self.export_filename = filename
                     self.export_payload = media
                     self.export_payload_id = request_id
                     size_mb = len(media) / (1024 * 1024)
-                    self.export_status = f"Ready {filename} ({size_mb:.1f} MB)"
+                    self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {detail})"
                 else:
-                    self.export_status = f"Exporting {filename}..."
+                    self.export_status = f"Exporting {filename} ({detail})..."
                     path = self._default_animation_export_path(mode, quality)
                     if mode == "gif":
-                        self.save_gif(path, quality=quality)
+                        self.save_gif(path, quality=quality, **animation_kwargs)
                     else:
-                        self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
+                        self.save_mp4(
+                            path,
+                            quality=quality,
+                            crf=self._mp4_crf_for_quality(quality),
+                            **animation_kwargs,
+                        )
                     size_mb = path.stat().st_size / (1024 * 1024)
-                    self.export_status = f"Exported {path.name} ({size_mb:.1f} MB)"
+                    self.export_status = f"Exported {path.name} ({size_mb:.1f} MB, {detail})"
                 return
             quantized, downsample_factor = self._normalise_html_export_options(
                 mode=mode,
@@ -6249,12 +6627,87 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Map UI quality labels to H.264 compression quality."""
         return {"low": 24, "medium": 21, "high": 18}[self._normalise_animation_quality(quality)]
 
+    def _animation_kwargs_from_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalize toolbar animation export options."""
+
+        def optional_int(value: Any) -> int | None:
+            if value in (None, "", 0, "0"):
+                return None
+            return int(value)
+
+        def optional_bool(key: str) -> bool | None:
+            if key not in payload:
+                return None
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+
+        fps_value = payload.get("fps")
+        fps = None if fps_value in (None, "", 0, "0") else float(fps_value)
+        preset = str(payload.get("preset") or "").strip().lower()
+        return {
+            "fps": fps,
+            "playback": str(payload.get("playback") or "forward"),
+            "frame_start": optional_int(payload.get("frame_start")),
+            "frame_stop": optional_int(payload.get("frame_stop")),
+            "every_n": max(1, int(payload.get("every_n", 1) or 1)),
+            "max_frames": optional_int(payload.get("max_frames")),
+            "downsample": self._normalise_animation_downsample(payload.get("downsample", 1)),
+            "max_edge_px": self._normalise_animation_max_edge(payload.get("max_edge_px")),
+            "show_panel_titles": optional_bool("show_panel_titles"),
+            "show_scale_bar": optional_bool("show_scale_bar"),
+            "show_zoom": optional_bool("show_zoom"),
+            "slides_preset": (
+                bool(payload.get("slides_preset"))
+                or bool(payload.get("ppt_preset"))
+                or preset in {"slides", "ppt"}
+            ),
+        }
+
+    def _animation_export_detail(
+        self,
+        *,
+        playback: str,
+        frame_start: int | None,
+        frame_stop: int | None,
+        every_n: int,
+        max_frames: int | None,
+        downsample: int,
+        max_edge_px: int | None,
+        slides_preset: bool,
+    ) -> str:
+        """Build a concise, user-facing status label for animation exports."""
+        order = self._animation_frame_order(
+            playback,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+        )
+        parts = [f"{len(order)} frames"]
+        if frame_start is not None or frame_stop is not None:
+            start = 1 if frame_start is None else int(frame_start) + 1
+            stop = int(self.n_slices) if frame_stop is None else int(frame_stop)
+            parts.append(f"{start}-{stop}")
+        if int(every_n) > 1:
+            parts.append(f"every {int(every_n)}")
+        if max_frames not in (None, 0):
+            parts.append(f"max {int(max_frames)}")
+        if int(downsample) > 1:
+            parts.append(f"{int(downsample)}x downsample")
+        if max_edge_px is not None:
+            parts.append(f"max edge {int(max_edge_px)} px")
+        if slides_preset:
+            parts.append("Slides preset")
+        return ", ".join(parts)
+
     def _export_mode_label(self, quantized: bool, *, downsample: int = 1) -> str:
         if not quantized:
             return "full float32"
         if int(downsample) > 1:
-            return f"uint8, {int(downsample)}x binned"
-        return "uint8"
+            return f"encoded uint8, {int(downsample)}x downsample"
+        return "encoded uint8"
 
     def _write_html_export(
         self,
@@ -6297,15 +6750,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._write_html_export(path, quantized=quantized, downsample=downsample)
             return path.read_bytes()
 
-    def _animation_export_bytes(self, mode: str, *, quality: str = "medium") -> bytes:
+    def _animation_export_bytes(self, mode: str, *, quality: str = "medium", **kwargs: Any) -> bytes:
         """Build a GIF or MP4 animation export in a temp directory and return bytes."""
         quality = self._normalise_animation_quality(quality)
         with tempfile.TemporaryDirectory(prefix="show3d-animation-export-") as tmp:
             path = pathlib.Path(tmp) / self._default_animation_export_path(mode, quality).name
             if mode == "gif":
-                self.save_gif(path, quality=quality)
+                self.save_gif(path, quality=quality, **kwargs)
             elif mode == "mp4":
-                self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
+                self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality), **kwargs)
             else:
                 raise ValueError(f"unsupported animation export mode {mode!r}")
             return path.read_bytes()
@@ -6556,6 +7009,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             offline=quantized,
             max_cols=self.max_cols,
             panel_gap=self.panel_gap,
+            inter_panel_gap_px=int(self.inter_panel_gap_px),
+            inter_panel_gap_color=str(self.inter_panel_gap_color),
+            gallery_outer_border_px=int(self.gallery_outer_border_px),
+            gallery_outer_border_color=str(self.gallery_outer_border_color),
+            panel_inner_border_px=float(self.panel_inner_border_px),
+            panel_inner_border_color=str(self.panel_inner_border_color),
             panel_title_font_size=self.panel_title_font_size,
             panel_title_style=dict(self.panel_title_style),
             show_panel_titles=self.show_panel_titles,
@@ -7185,6 +7644,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         preview_ncols = int(self.notebook_preview_ncols)
         if preview_ncols <= 0:
             preview_ncols = int(self.max_cols) if int(self.max_cols) > 0 else len(frames)
+        chrome = self._gallery_export_chrome()
         preview = Show2D(
             frames,
             labels=labels,
@@ -7209,7 +7669,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             display_bin=1,
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=int(self.panel_title_font_size or 11),
-            gallery_gap_px=max(0, int(self.panel_gap)),
+            inter_panel_gap_px=int(chrome["inter_panel_gap_px"]),
+            inter_panel_gap_color=str(chrome["inter_panel_gap_color"]),
+            gallery_outer_border_px=int(chrome["gallery_outer_border_px"]),
+            gallery_outer_border_color=str(chrome["gallery_outer_border_color"]),
+            panel_inner_border_px=float(chrome["panel_inner_border_px"]),
+            panel_inner_border_color=str(chrome["panel_inner_border_color"]),
             save_state=False,
         )
         if (
@@ -7554,7 +8019,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         if bool(getattr(self, "is_rgb", False)):
             return False
-        return _normalize_mode(self.denoise) != "none" or int(self.denoise_bin) > 1
+        modes = [self.denoise, *list(getattr(self, "denoise_modes", []) or [])]
+        bins = [self.denoise_bin, *list(getattr(self, "denoise_bins", []) or [])]
+        return any(_normalize_mode(mode) != "none" for mode in modes) or any(int(bin_value) > 1 for bin_value in bins)
 
     def _display_filter_active(self) -> bool:
         """Denoise is actually applied: has a config AND the master switch is on.

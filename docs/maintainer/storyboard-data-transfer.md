@@ -2,8 +2,9 @@
 
 Data transfer prepares large microscopy sessions for fast loading by copying or
 splitting files across target folders and disks. It is intentionally not a
-viewer widget right now. The supported interfaces are the `quantem
-data-transfer` CLI and the Python utilities under `quantem.widget.io`.
+viewer widget right now. The supported interface is the set of Python
+utilities under `quantem.widget.io` (the old `quantem data-transfer` CLI
+subcommand was removed).
 
 Keep this workflow separate from ShowFolder, Show2D, Show3D, and Show4DSTEM.
 Those widgets inspect scientific data after it is already placed. Data transfer
@@ -15,8 +16,7 @@ only plans, verifies, copies, resumes, and records where files live.
 future ptychography or browsing and wants to split the session across fast NVMe
 disks before loading it into one or more NVIDIA GPUs.
 
-**Primary tools**: `quantem data-transfer plan`,
-`plan_data_transfer`, `write_data_transfer_manifest`.
+**Primary tools**: `plan_data_transfer`, `write_data_transfer_manifest`.
 
 **Acceptance checks**:
 
@@ -36,8 +36,7 @@ disks before loading it into one or more NVIDIA GPUs.
 **User story**: A user reviewed a plan and wants to copy files without corrupting
 existing targets or partially written outputs.
 
-**Primary tools**: `quantem data-transfer copy`,
-`copy_data_transfer`, `filter_data_transfer_plan`.
+**Primary tools**: `copy_data_transfer`, `filter_data_transfer_plan`.
 
 **Acceptance checks**:
 
@@ -57,8 +56,7 @@ existing targets or partially written outputs.
 hiccup, or disk quota problem. The user wants to resume without guessing which
 files are safe.
 
-**Primary tools**: `quantem data-transfer inspect`,
-`read_data_transfer_manifest`, `inspect_data_transfer`,
+**Primary tools**: `read_data_transfer_manifest`, `inspect_data_transfer`,
 `summarize_data_transfer`.
 
 **Acceptance checks**:
@@ -76,8 +74,7 @@ files are safe.
 session is being prepared. The user wants to append complete groups without
 changing existing target assignments.
 
-**Primary tools**: `quantem data-transfer update`,
-`update_data_transfer_plan`, then manifest write/inspect/copy.
+**Primary tools**: `update_data_transfer_plan`, then manifest write/inspect/copy.
 
 **Acceptance checks**:
 
@@ -94,8 +91,7 @@ changing existing target assignments.
 ShowFolder or load ready target masters with Show4DSTEM without remembering the
 exact target paths.
 
-**Primary tools**: `quantem data-transfer masters`,
-`quantem data-transfer show4dstem`, `target_masters`, `ShowFolder(target_folder)`,
+**Primary tools**: `target_masters`, `ShowFolder(target_folder)`,
 and `Show4DSTEM(load(...))`.
 
 **Acceptance checks**:
@@ -105,11 +101,11 @@ and `Show4DSTEM(load(...))`.
 - Show4DSTEM still relies on its own lazy paging and GPU memory controls.
 - Data-transfer code does not import or construct viewer widgets.
 - `target_masters(plan)` returns only complete target master groups by default.
-- `quantem data-transfer masters --all-masters` can print planned target paths
-  before copy completion for lab-log review.
-- `quantem data-transfer show4dstem --gpus 0,1 --dtype u8 --bin 1` writes a
-  notebook whose code explicitly uses `load(masters, devices=[0, 1], dtype="u8",
-  det_bin=1)` and `Show4DSTEM(...)`.
+- `target_masters(plan, existing_only=False, require_complete=False)` can list
+  planned target paths before copy completion for lab-log review.
+- The Show4DSTEM handoff notebook generated from a transfer plan explicitly
+  uses `load(masters, devices=[0, 1], dtype="u8", det_bin=1)` and
+  `Show4DSTEM(...)`.
 - The generated notebook reloads the manifest and prints warnings so saved
   outputs record whether the handoff was complete and multi-disk.
 
@@ -118,8 +114,7 @@ and `Show4DSTEM(load(...))`.
 **User story**: A user expects two GPUs to make browsing fast. They need the
 tooling to say when a transfer layout still feeds both GPUs from one disk.
 
-**Primary tools**: `data_transfer_load_warnings`, `quantem data-transfer inspect`,
-`quantem data-transfer show4dstem`.
+**Primary tools**: `data_transfer_load_warnings`.
 
 **Acceptance checks**:
 
@@ -143,6 +138,6 @@ PYTHONPATH=src pytest -q tests/test_cli.py::test_data_transfer_cli_plan_inspect_
 PYTHONPATH=src pytest -q tests/test_hdf5_disk_scheduling.py
 ```
 
-For real workstation signoff, run the CLI against private MJGOAT/NVIDIA data and
+For real workstation signoff, run the CLI against private NVIDIA workstation data and
 record source disks, target disks, bytes, elapsed copy time, and verification
 mode. Keep those raw files and generated benchmark artifacts out of Git.

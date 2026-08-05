@@ -1,9 +1,9 @@
 /// <reference types="@webgpu/types" />
 /**
  * WebGPU FFT — GPU-accelerated 2D FFT for real-time ROI analysis.
- * Ported from quantem.widget/js/webgpu-fft.ts
+ * Uses the generated quantem.gpu WebGPU device and FFT shader source.
  */
-import { getGPUDevice as engineGetGPUDevice, onGPULost } from "../engine/device";
+import { getGPUDevice as engineGetGPUDevice, onGPULost } from "../../../js/.generated/engine/device/webgpu";
 
 function nextPow2(n: number): number { return Math.pow(2, Math.ceil(Math.log2(n))); }
 type WebGPUFftOptions = {
@@ -16,7 +16,7 @@ async function waitWhileDeferred(shouldDefer?: () => boolean): Promise<void> {
   }
 }
 
-import { FFT_2D_SHADER } from "../engine/fft-shader";
+import { FFT_2D_SHADER } from "../../../js/.generated/engine/dpc/compute/webgpu/fft";
 
 export class WebGPUFFT {
   private device: GPUDevice;
@@ -182,7 +182,7 @@ let _gpuUnavailableReason = "WebGPU has not been checked yet.";
 onGPULost(() => { _gpuFFT = null; });
 // Module-scope warm-up promise. Shared across every component that needs FFT
 // so shader compile (50-500 ms) happens at most ONCE per app-load, not
-// per-component-mount. Per-CLAUDE.md: "GPU pipelines must be pre-warmed."
+// per-component-mount, keeping the GPU pipeline pre-warmed for interaction.
 let _warmed: Promise<void> | null = null;
 
 export function getGPUUnavailableReason(): string {

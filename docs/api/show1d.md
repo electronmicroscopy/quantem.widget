@@ -5,8 +5,6 @@ linked image snapshots. Use it for loss curves, Adam/optimizer diagnostics,
 joint-time ptychography comparisons, and image-derived profiles that need a
 visible 2D context.
 
-For a runnable notebook walkthrough, see the [Show1D tutorial](../tutorials/show1d).
-
 ## Viewer UI
 
 `Show1D` supports the shared `ui_mode`, `show_title`, `show_controls`,

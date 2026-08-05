@@ -6,6 +6,70 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add `ChooseLattice`, an interactive 2D selector for choosing an ordered
+  origin, a1, and a2 and exposing their `(row, col)` coordinates and derived
+  lattice vectors for downstream analysis.
+- Exported standalone HTML no longer dies on a first-time (cold cache) load.
+  requirejs's default 7 s per-module timeout could make the widget manager load
+  a second copy of the anywidget runtime while the CDN fetch was still in
+  flight; the model registered its binding in one copy, the view looked it up
+  in the other, and the page showed only "Failed to create view ... 
+  WidgetBinding not found". The export now pins one anywidget URL and disables
+  the requirejs timeout, so every export-capable widget survives an empty
+  browser cache. Verified on fresh Chrome profiles that previously reproduced
+  the blank page deterministically.
+- Show3D gained the same contrast percentile presets Show2D has: the More menu
+  now offers Manual / 0.5-99.5 / 1-99 / 2-98 / 3-97 / 5-95 / 10-90, picking one
+  pins the histogram window and drops Auto, and `contrast_preset="2-98"` works
+  from the constructor and round-trips through `state_dict`.
+
+- Show3DSlices oblique panel geometry is no longer tied to the Align control.
+  The GPU slice shader receives the cut's start/stop on every render, so the
+  Angle and Position sliders move the vertical cut whether or not slice
+  alignment is on. Previously, with Align off the shader received a degenerate
+  zero-length segment and every output column sampled the same corner voxel, so
+  the panel painted flat horizontal bands that ignored both sliders.
+- Show3DSlices oblique panel now repaints per drag frame, matching the slice
+  slider: the segment lives in comm-synced traits that React batches during a
+  drag, so the panel is direct-painted from the resident GPU volume instead of
+  waiting for the round-trip. Measured 8 of 8 mid-drag frames repainting where
+  3 of 8 did before.
+- Show3DSlices can estimate its global depth tilt in the browser. `Align` runs
+  the same registration the kernel does - median centering, Gaussian high pass,
+  Hann window, cross-correlation, upsampled-DFT subpixel refinement, linear fit
+  - entirely in WebGPU, so exported standalone HTML aligns a stack with no
+  Python attached and a live notebook skips a comm round-trip. The estimate is
+  GPU-resident: each slice uploads once and the spectra stay in device buffers,
+  so a 16 x 1688 x 1688 stack moves a few hundred KB back instead of about
+  1.2 GB. Fitted slopes match the kernel estimator to under 2e-3 px/slice on
+  real reconstructions, and the toolbar names the backend it used.
+- Show3DSlices `Planes` toggles now show and hide the matching 2D slice panel,
+  not just the plane inside the 3D volume view.
+- Show3DSlices Align toggle now repaints both slice panels when switched on or
+  off; the blit that copies each offscreen to its visible canvas had no
+  dependency on the alignment state, so the panels kept the previous shifts.
+- Show3DSlices reports the oblique plane center in fixed image pixels next to
+  Position. Position is measured along the plane normal, an axis that turns with
+  Angle, so its number moves under rotation even when the cut does not.
+
+- ShowPtycho on MPS now uses the phase/loss-only `quantem.gpu` SSB path for
+  interactive phase and loss updates instead of also accumulating the object
+  wave. On a private full 512x512 real-data Apple GPU timing gate this lowered
+  the prepared hot loop from about 229 ms to about 79 ms with only float32-level
+  loss differences.
+- Show4DSTEM WebGPU virtual-image/DPC mask construction now imports from the
+  synced `quantem.gpu.webgpu` engine source; DPC row/col buttons can now use
+  the browser WGSL backend even when no static DPC product maps were supplied.
+  Browser signoff covers exported sidecar HTML and live Jupyter interaction with
+  dataset flips, DPC row/col recompute, FFT toggles, PNG copy buttons, and
+  BF/CoM/DPC WGSL parity.
+- Show4DSTEM CUDA compare grids now reuse per-panel `quantem.gpu` compute
+  backends, so repeated BF/ADF/DF updates keep detector-index and dense
+  total-count caches instead of rebuilding them every refresh.
+- ShowPtycho WebGPU folders now open with no server at all: double-click `index.html`, click "Open data folder", pick the folder (named in the banner, picker starts in Downloads). `quantem showptycho <folder>` still serves and opens it automatically - two equal paths, both in the folder README.
+- Save inside the review persists to the folder: Save writes the phase JPEG plus the aberration state into `saves/` (and downloads the JPEG), so saved states reappear with Load / download / delete on any relaunch - double-click or CLI. The bundled range server accepts writes only under `saves/`.
+- SSB reconstruction in the browser is 5.6x faster at full bright field: slider drags use a Fourier-domain BF sum with a single inverse FFT (the same `angle(mean(object))` estimator as the Python reference, corr 0.997), reaching ~50 FPS on a real 512x512x192x192 dataset at all 13137 BF pixels on an Apple-silicon laptop. Release commits keep the exact per-BF path for the loss readout.
+- Resident G(q,k) stores the Hermitian half-plane by default (bit-exact, 2x less GPU memory, faster) with an opt-in snorm16 quantized mode (4x), a GPU-memory clamp on the BF count so big scans cannot crash small GPUs, and acceptance of rfft half-plane calibrations from the CUDA backend.
 - Fix ShowEDS spectrum line markers so major lines (Fe Ka, Cu Ka, Au La) keep markers across the full energy range.
 - Harden ShowDiffraction analysis: calibration assignment and exactness, ring/ellipse/texture fit guards, zone-axis variants, stack frame provenance, per-axis canvas overlays, and hostile-input handling.
 - Fix ShowDiffraction systematic absences for spinel, bixbyite, cuprite, rutile-type, and I41/amd phases: new structure-verified rules remove symmetry-forbidden lines (for example Fe3O4 200 and anatase 002) from predicted reflection lists.

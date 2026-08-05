@@ -744,7 +744,8 @@ class ShowFolderBrowser:
             fixed resident count; ``None`` = no eviction after a dataset is
             loaded.
         det_bin, dtype, scan_size
-            Forwarded to :func:`load` / :func:`discover_masters` — bin the
+            Forwarded to :func:`quantem.gpu.io.load` and
+            :func:`quantem.gpu.io.discover` — bin the
             detector, pick the browse dtype, and (optionally) keep only masters
             of a given ``scan_size`` in a mixed folder.
         """
@@ -795,9 +796,9 @@ class ShowFolderBrowser:
     def _apply_selected_show4dstem(self):
         """Build a lazy, paged multi-GPU Show4DSTEM over the folder's 4D masters."""
         import torch
-        from quantem.widget import Show4DSTEM, load
+        from quantem.gpu import io as gpu_io
+        from quantem.widget import Show4DSTEM
         from quantem.widget.data import Dataset5dstem
-        from quantem.widget.io import discover_masters, is_master_ready
 
         cfg = getattr(self, "_show4dstem_config", None) or {}
         gpus = cfg.get("gpus")
@@ -827,8 +828,10 @@ class ShowFolderBrowser:
         preload_all_if_fits = bool(cfg.get("preload_all_if_fits", True))
 
         scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
-        masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
-        ready_masters = [master for master in masters if is_master_ready(master)]
+        masters = gpu_io.discover(
+            str(self.folder), scan_shape=scan_shape, verbose=False
+        )
+        ready_masters = [master for master in masters if gpu_io.inspect(master).ready]
         self._release_selected_show4dstem_widget()
         page_devices = gpus if gpus is not None else None
 
@@ -838,7 +841,9 @@ class ShowFolderBrowser:
 
         def load_master(master, idx: int) -> torch.Tensor:
             try:
-                result = load(master, det_bin=det_bin, dtype=dtype, verbose=False)
+                result = gpu_io.load(
+                    master, det_bin=det_bin, dtype=dtype, verbose=False
+                )
             except (FileNotFoundError, ValueError, RuntimeError):
                 raise
             data = result.data
@@ -1844,7 +1849,7 @@ def inspect_master_file(path: str | Path) -> MasterQC:
         stem=stem,
         status="bad",
         reason="not inspected",
-        action="do not screen",
+        action="do not load",
         master_bytes=master.stat().st_size if master.exists() else 0,
     )
     if not master.exists():

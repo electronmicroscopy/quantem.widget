@@ -22,6 +22,7 @@ from quantem.widget.show4dstem import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showeds import ShowEDS
 from quantem.widget.showfolder import ShowFolder
+from quantem.widget.showptycho import _ShowPtychoWidget
 
 
 def _metadata() -> np.ndarray:
@@ -39,6 +40,280 @@ def _image_emd(path: Path) -> None:
         group = h5.create_group("Data/Image/uid")
         group.create_dataset("Data", data=np.arange(16 * 16, dtype=np.float32).reshape(16, 16))
         group.create_dataset("Metadata", data=_metadata())
+
+
+class _SmokePtychoAccel:
+    """Tiny MPS-shaped SSB accelerator for a real ShowPtycho frontend smoke."""
+
+    backend = "mps"
+
+    def __init__(self, n: int = 128) -> None:
+        self._frames = None
+        q = np.fft.fftfreq(n, d=0.5).astype(np.float32)
+        self._cache = {
+            "num_bf": 2,
+            "ny": n,
+            "nx": n,
+            "kx_bf": np.array([-0.08, 0.08], dtype=np.float32),
+            "ky_bf": np.array([0.08, -0.08], dtype=np.float32),
+            "qx_1d": q,
+            "qy_1d": q,
+            "aperture_k_1d": np.ones(2, dtype=np.float32),
+            "alpha_k2_1d": np.array([0.002, 0.002], dtype=np.float32),
+            "cos2phi_k_1d": np.array([1.0, -1.0], dtype=np.float32),
+            "sin2phi_k_1d": np.array([0.0, 0.0], dtype=np.float32),
+            "semiangle_rad": np.float32(0.03),
+            "ang_y_rad": np.float32(0.001),
+            "ang_x_rad": np.float32(0.001),
+        }
+        self.g_shape = (2, n, n)
+        self.gpts = (4, 4)
+        self.bf_center = (1.5, 1.5)
+        self.bf_inds_row = np.array([1, 2], dtype=np.int32)
+        self.bf_inds_col = np.array([2, 1], dtype=np.int32)
+        self.wavelength = np.float32(0.0197)
+        self.sampling = (np.float32(0.5), np.float32(0.5))
+        self._dc_value_host = np.complex64(1.0 + 0.0j)
+        self._phase_template = _ptycho_phase_template(n)
+        self._g_qk = np.ones((2, n, n), dtype=np.complex64)
+
+    @property
+    def scan_shape(self) -> tuple[int, int]:
+        return int(self._cache["ny"]), int(self._cache["nx"])
+
+    @property
+    def detector_shape(self) -> tuple[int, int]:
+        return self.gpts
+
+    @property
+    def num_bf(self) -> int:
+        return int(self._cache["num_bf"])
+
+    @staticmethod
+    def phase_to_numpy(phase) -> np.ndarray:
+        return np.asarray(phase, dtype=np.float32)
+
+    def browser_state(self):
+        from quantem.gpu.ssb.compute.protocol import SSBExportState
+        from quantem.gpu.ssb.bf_selector import BrightfieldDisk
+
+        selection = BrightfieldDisk(
+            rows=self.bf_inds_row,
+            cols=self.bf_inds_col,
+            center_row_col=self.bf_center,
+            radius_px=1.0,
+            detected_radius_px=1.0,
+            detector_shape=self.detector_shape,
+        )
+        return SSBExportState(
+            backend=self.backend,
+            scan_shape=self.scan_shape,
+            brightfield=selection,
+            kx_bf=self._cache["kx_bf"],
+            ky_bf=self._cache["ky_bf"],
+            qx_1d=self._cache["qx_1d"],
+            qy_1d=self._cache["qy_1d"],
+            aperture_k=self._cache["aperture_k_1d"],
+            alpha_k2=self._cache["alpha_k2_1d"],
+            cos2phi_k=self._cache["cos2phi_k_1d"],
+            sin2phi_k=self._cache["sin2phi_k_1d"],
+            wavelength_A=float(self.wavelength),
+            semiangle_rad=float(self._cache["semiangle_rad"]),
+            angular_sampling_rad=(
+                float(self._cache["ang_y_rad"]),
+                float(self._cache["ang_x_rad"]),
+            ),
+            sampling_A=tuple(float(value) for value in self.sampling),
+            dc_value=complex(self._dc_value_host),
+        )
+
+    def cache_rotation(self, rotation_rad: float) -> None:
+        self._rotation_rad = float(rotation_rad)
+
+    def preview_context(self, num_bf: int):
+        del num_bf
+        return None
+
+    def reconstruct_with_loss(self, c10: float, c12: float, phi12: float):
+        phase = self.reconstruct(c10, c12, phi12)
+        return phase, float(np.var(phase))
+
+    def reconstruct(self, c10: float, c12: float, phi12: float):
+        phase = self._phase_template.copy()
+        phase += np.float32(0.0005 * c10 + 0.0003 * c12)
+        phase += np.float32(0.03) * np.sin(
+            np.linspace(0, np.pi * 2, phase.shape[1], dtype=np.float32)
+            + np.float32(phi12)
+        )[None, :]
+        return phase.astype(np.float32, copy=False)
+
+    def reconstruct_full_with_loss(self, mags_m, angles_rad):
+        mags = np.asarray(mags_m, dtype=np.float32)
+        angles = np.asarray(angles_rad, dtype=np.float32)
+        if np.any(mags[2:] != 0):
+            raise NotImplementedError("smoke ptycho accelerator implements the 3-parameter path only")
+        return self.reconstruct_with_loss(float(mags[0]), float(mags[1]), float(angles[1]))
+
+    def reconstruct_full(self, mags_m, angles_rad):
+        mags = np.asarray(mags_m, dtype=np.float32)
+        angles = np.asarray(angles_rad, dtype=np.float32)
+        if np.any(mags[2:] != 0):
+            raise NotImplementedError("smoke ptycho accelerator implements the 3-parameter path only")
+        return self.reconstruct(float(mags[0]), float(mags[1]), float(angles[1]))
+
+
+class _SmokePtychoState:
+    def __init__(self, accel: _SmokePtychoAccel) -> None:
+        self.backend = accel.backend
+        self.aberrations = {"C10": 1.0, "C12": 2.0, "phi12": 0.1}
+        self.rotation_angle_deg = 0.0
+        self.trial_history = [
+            {"loss": 0.18, "params": {"C10_nm": 1.0, "C12_nm": 2.0, "phi12_deg": 5.0}},
+            {"loss": 0.22, "params": {"C10_nm": -8.0, "C12_nm": 6.0, "phi12_deg": 15.0}},
+        ]
+        self.best_loss = 0.18
+        self.voltage_kV = 300.0
+        self.semiangle_mrad = 30.0
+        self.scan_sampling_A = 0.5
+        self.angular_sampling = (1.0, 1.0)
+        self._accel = accel
+
+    @property
+    def _backend_protocol(self):
+        return self._accel
+
+    @property
+    def scan_shape(self) -> tuple[int, int]:
+        return self._accel.scan_shape
+
+    @property
+    def num_bf(self) -> int:
+        return self._accel.num_bf
+
+    def set_rotation(self, rotation_angle_deg: float) -> None:
+        self.rotation_angle_deg = float(rotation_angle_deg)
+        self._accel.cache_rotation(np.deg2rad(self.rotation_angle_deg))
+
+    def preview(
+        self,
+        aberrations: dict[str, float],
+        *,
+        compute_loss: bool = True,
+        higher_order_magnitudes=None,
+        higher_order_angles=None,
+    ):
+        if higher_order_magnitudes is not None:
+            if compute_loss:
+                phase, loss = self._accel.reconstruct_full_with_loss(
+                    higher_order_magnitudes,
+                    higher_order_angles,
+                )
+            else:
+                phase = self._accel.reconstruct_full(
+                    higher_order_magnitudes,
+                    higher_order_angles,
+                )
+                loss = None
+        elif compute_loss:
+            phase, loss = self._accel.reconstruct_with_loss(
+                aberrations["C10"],
+                aberrations["C12"],
+                aberrations["phi12"],
+            )
+        else:
+            phase = self._accel.reconstruct(
+                aberrations["C10"],
+                aberrations["C12"],
+                aberrations["phi12"],
+            )
+            loss = None
+        return np.asarray(phase, dtype=np.float32), loss
+
+    def preview_context(self, num_bf: int):
+        return self._accel.preview_context(num_bf)
+
+    def browser_state(self):
+        return self._accel.browser_state()
+
+
+class _ShowPtychoFolderSmoke:
+    def __init__(self, widget: _ShowPtychoWidget) -> None:
+        self.widget = widget
+
+    def export_html(
+        self,
+        path: str | Path | None = None,
+        *,
+        title: str | None = None,
+        **options: object,
+    ) -> Path:
+        target = Path(path or "showptycho-webgpu-folder.html")
+        out_dir = target.with_suffix("")
+        return self.widget.export(out_dir, title=title, **options) / "index.html"
+
+
+def _ptycho_phase_template(n: int) -> np.ndarray:
+    y, x = np.mgrid[:n, :n].astype(np.float32)
+    phase = np.full((n, n), -0.12, dtype=np.float32)
+    spacing = n / 7.5
+    sigma = max(1.2, spacing * 0.13)
+    for row in range(-1, 9):
+        for col in range(-1, 9):
+            cx = n * 0.08 + col * spacing + (row % 2) * spacing * 0.5
+            cy = n * 0.10 + row * spacing * 0.86
+            if -3 * sigma <= cx < n + 3 * sigma and -3 * sigma <= cy < n + 3 * sigma:
+                phase += np.float32(0.8) * np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * sigma**2))
+    phase -= float(phase.mean())
+    return phase.astype(np.float32, copy=False)
+
+
+def _showptycho_master(folder_root: Path, rng: np.random.Generator) -> Path:
+    try:
+        import hdf5plugin
+    except Exception as exc:  # pragma: no cover - environment problem
+        raise RuntimeError(
+            "ShowPtycho compressed-HDF5 smoke requires hdf5plugin so the "
+            "fixture uses real bitshuffle-LZ4 detector chunks."
+        ) from exc
+    frames = 128 * 128
+    data = np.zeros((frames, 4, 4), dtype=np.uint16)
+    data[:, 1, 2] = rng.integers(0, 16, size=frames, dtype=np.uint16)
+    data[:, 2, 1] = rng.integers(0, 16, size=frames, dtype=np.uint16)
+    data_file = folder_root / "showptycho_data_000001.h5"
+    master = folder_root / "showptycho_master.h5"
+    with h5py.File(data_file, "w") as handle:
+        group = handle.create_group("entry/data")
+        group.create_dataset(
+            "data",
+            data=data,
+            chunks=(1, 4, 4),
+            **hdf5plugin.Bitshuffle(cname="lz4"),
+        )
+    with h5py.File(master, "w") as handle:
+        group = handle.create_group("entry/data")
+        group["data_000001"] = h5py.ExternalLink(data_file.name, "/entry/data/data")
+    return master
+
+
+def _showptycho_smoke(folder_root: Path, rng: np.random.Generator) -> _ShowPtychoFolderSmoke:
+    accel = _SmokePtychoAccel(128)
+    ssb = _SmokePtychoState(accel)
+    widget = _ShowPtychoWidget(
+        accel=ssb,
+        rotation_rad=0.0,
+        auto_aberrations=ssb.aberrations,
+        auto_loss_val=ssb.best_loss,
+        c10_range=(-20.0, 20.0),
+        c12_range=(0.0, 20.0),
+        phi12_range=(-45.0, 45.0),
+        drag_bf=1.0,
+        ssb_ref=ssb,
+        pixel_size=0.5,
+        source_file=str(_showptycho_master(folder_root, rng)),
+        size=320,
+        fft_on=True,
+    )
+    return _ShowPtychoFolderSmoke(widget)
 
 
 def _mos2_lattice_stack(rng: np.random.Generator, frames: int, rows: int, cols: int) -> np.ndarray:
@@ -281,13 +556,20 @@ def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object],
                 title="Smoke Show4DSTEM Compare",
                 frame_dim_label="Dataset",
                 frame_labels=[f"scan-{idx}" for idx in range(14)],
-                view_mode="compare",
+                view_mode="multiple",
                 compare_cols=4,
                 compare_max_panels=14,
                 verbose=False,
             ),
             {"encoding": "uint8", "downsample": 1},
             "Smoke Show4DSTEM Compare",
+        ),
+        (
+            "showptycho",
+            "showptycho-webgpu-folder",
+            _showptycho_smoke(folder_root, rng),
+            {"decode_dtype": "uint8"},
+            "Smoke showptycho-webgpu-folder",
         ),
         (
             "showeds",
@@ -314,13 +596,20 @@ def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object],
     return cases
 
 
+def _relative_export_path(artifact_dir: Path, path: str | Path) -> str:
+    try:
+        return Path(path).resolve().relative_to(artifact_dir.resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
+
+
 def _write_browser_plan(artifact_dir: Path, report: dict[str, Any]) -> None:
     pages = [
         {
             "widget": item["widget"],
             "variant": item["variant"],
-            "file": Path(str(item["path"])).name,
-            "url_path": Path(str(item["path"])).name,
+            "file": _relative_export_path(artifact_dir, str(item["path"])),
+            "url_path": _relative_export_path(artifact_dir, str(item["path"])),
             "required_interactions": [
                 "open the page and confirm the widget renders",
                 "click or drag the primary image/canvas where available",
@@ -341,14 +630,17 @@ def _write_browser_plan(artifact_dir: Path, report: dict[str, Any]) -> None:
 
 def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     rows = "\n".join(
-        "<tr>"
-        f"<td>{html.escape(str(item['widget']))}</td>"
-        f"<td>{html.escape(str(item['variant']))}</td>"
-        f"<td>{html.escape(str(item['seconds']))}</td>"
-        f"<td>{html.escape(format(float(item['size_mb']), '.3f'))}</td>"
-        f"<td><a href='{html.escape(Path(str(item['path'])).name)}'>"
-        f"{html.escape(Path(str(item['path'])).name)}</a></td>"
-        "</tr>"
+        (
+            export_path := _relative_export_path(artifact_dir, str(item["path"])),
+            "<tr>"
+            f"<td>{html.escape(str(item['widget']))}</td>"
+            f"<td>{html.escape(str(item['variant']))}</td>"
+            f"<td>{html.escape(str(item['seconds']))}</td>"
+            f"<td>{html.escape(format(float(item['size_mb']), '.3f'))}</td>"
+            f"<td><a href='{html.escape(export_path)}'>"
+            f"{html.escape(export_path)}</a></td>"
+            "</tr>",
+        )[1]
         for item in report["exports"]
     )
     report_json = html.escape(json.dumps(report, indent=2))
@@ -376,6 +668,9 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
   <p><strong>Show2D</strong> and <strong>Show3D</strong> examples use a small
   synthetic MoS2-like HAADF lattice so CI stays lightweight while the visual
   checks still show microscopy-style atomic contrast and FFT peaks.</p>
+  <p><strong>ShowPtycho</strong> uses a tiny WebGPU folder export with a local
+  HDF5 source folder so the browser smoke opens the same sidecar shape used for
+  collaborator handoff.</p>
   <p>Total export size: <strong>{html.escape(f'{float(report["total_size_mb"]):.3f} MB')}</strong></p>
   <table>
     <thead><tr><th>Widget</th><th>Variant</th><th>Export seconds</th><th>Size MB</th><th>Standalone HTML</th></tr></thead>

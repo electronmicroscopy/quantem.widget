@@ -234,8 +234,8 @@ export function extractROI(
 }
 
 // Full pipeline: extract ROI -> Hann window -> FFT -> log magnitude.
-// WebGPU only — no silent CPU fallback. Per CLAUDE.md the WebGPU pipeline
-// must fail visibly so the operator sees a banner instead of a stalled
+// WebGPU only — no silent CPU fallback. The WebGPU pipeline must fail visibly
+// so the operator sees a banner instead of a stalled
 // drag while a 80 ms main-thread FFT runs per frame. Caller catches and
 // surfaces the error in the UI.
 import { getWebGPUFFT } from "./webgpu-fft";

@@ -25,8 +25,15 @@ _MOBILE_VIEWPORT_META = '<meta name="viewport" content="width=device-width, init
 _ANYWIDGET_REQUIREJS_CONFIG = """<script id="quantem-widget-anywidget-requirejs">
 if (window.require && window.require.config) {
   window.require.config({
+    // waitSeconds: requirejs defaults to 7s per module. A first-time viewer on a
+    // cold cache fetches several MB from the CDN; when the anywidget module
+    // misses that window, html-manager falls back to a SECOND copy of the
+    // module, the model's binding registers in one copy and the view looks it
+    // up in the other, and the widget dies with "WidgetBinding not found".
+    // 0 disables the timeout entirely - slow is recoverable, split-brain is not.
+    waitSeconds: 0,
     paths: {
-      anywidget: "https://cdn.jsdelivr.net/npm/anywidget@0.11.0/dist/index.min"
+      anywidget: "https://cdn.jsdelivr.net/npm/anywidget@~0.11.*/dist/index"
     }
   });
 }

@@ -42,10 +42,14 @@ https://doi.org/10.1039/d6dd00121a
 
 - [ ] The widget has a small, stable Python API with NumPy-style docs, helpful
   errors, and `(row, col)` coordinate wording where positions are shown.
+- [ ] Every new public widget or API is exported from `quantem.widget`, listed
+  in the README widget catalog and import example, linked from the API index
+  and documentation sidebar, and recorded under **Unreleased** in
+  `CHANGELOG.md`.
 - [ ] Documentation includes a minimal tutorial notebook under
-  [docs/tutorials](https://github.com/bobleesj/quantem.widget/tree/main/docs/tutorials)
+  [docs/tutorials](https://github.com/electronmicroscopy/quantem.widget/tree/main/docs/tutorials)
   and an API page under
-  [docs/api](https://github.com/bobleesj/quantem.widget/tree/main/docs/api)
+  [docs/api](https://github.com/electronmicroscopy/quantem.widget/tree/main/docs/api)
   when a public widget or loader is added.
 - [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
   imports; let the returned widget render naturally.
@@ -62,12 +66,12 @@ https://doi.org/10.1039/d6dd00121a
 
 - [ ] The frontend follows the local viewer patterns instead of inventing a new
   design system; compare against
-  [Show2D](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb),
-  [Show3D](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3d.ipynb),
-  [Show3DSlices](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb),
-  [Show4DSTEM](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb), and
-  [ShowEDS](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb). Follow the
-  [widget UI protocol](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/widget-ui-protocol.md).
+  [Show2D](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb),
+  [Show3D](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb),
+  [Show3DSlices](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb),
+  [Show4DSTEM](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb), and
+  [ShowEDS](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showeds.ipynb). Follow the
+  [widget UI protocol](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-ui-protocol.md).
 - [ ] Controls are compact and content-sized: use icon/text buttons for
   commands, switches for binary options, sliders for numeric values, menus for
   option sets, and avoid stretched empty control bars.
@@ -89,8 +93,13 @@ https://doi.org/10.1039/d6dd00121a
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+- [ ] Hover inspection is independent of selection. In Show2D, Show3D,
+  Show4DSTEM, and other multi-target widgets, hover at least two unselected
+  panels/regions and verify coordinates, value/readout, labels, detector/ROI
+  context, and stats follow the hovered target while edit controls remain
+  scoped to the explicitly selected target.
 - [ ] New or changed widget interactions have a matching storyboard story in
-  [docs/maintainer/storyboard-&lt;widget&gt;.md](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/storyboard.md)
+  [docs/maintainer/storyboard-&lt;widget&gt;.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/storyboard.md)
   (add stories for new behavior, update stale ones), and the storyboard
   drive-test was run for the affected widget with the driven story IDs
   reported.
@@ -102,10 +111,10 @@ https://doi.org/10.1039/d6dd00121a
 
 - [ ] Any draggable selector has live preview separate from committed widget
   state; use refs/CSS transforms or an equivalent fast path during drag. See
-  [performance notes](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
-- [ ] Use [Show4DSTEM](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb)
+  [performance notes](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
+- [ ] Use [Show4DSTEM](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb)
   detector dragging and
-  [ShowEDS](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb)
+  [ShowEDS](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showeds.ipynb)
   energy-band dragging as the real-time UX benchmark: aim for 60 FPS when
   feasible and keep live controls at 30 FPS or better.
 - [ ] Real-time interactions are browser-driven and verified by actually
@@ -115,19 +124,19 @@ https://doi.org/10.1039/d6dd00121a
   acquisitions into the same live viewer without rebuilding the notebook. Verify
   new masters appear in the Dataset slider, partial files are skipped until
   ready, and detector/scan interactions remain real time after append. See
-  [Show4DSTEM live scope folders](https://github.com/bobleesj/quantem.widget/blob/main/docs/api/show4dstem.md#live-scope-folders).
+  [Show4DSTEM live scope folders](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/api/show4dstem.md#live-scope-folders).
 - [ ] Performance reports separate load time, widget build time, first browser
   paint, and interaction FPS/latency. Include data shape, dtype, raw size,
   backend, and any crop/bin/downsample/quantization. Prefer `verbose=True`
   output that users and agents can copy; use `quantem.widget.profile_widget`
   for profiling notebooks when possible. See
-  [performance notes](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
+  [performance notes](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
 - [ ] For interaction-sensitive changes, run
   `scripts/widget_local_signoff.sh --quick --browser` for exported HTML/UI
   paths, fix issues immediately, rebuild, refresh, and redrive before claiming
   the widget is ready. See
-  [Automation](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/automation.md) and
-  [Agent signoff](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/widget-agent-signoff.md).
+  [Automation](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/automation.md) and
+  [Agent signoff](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-agent-signoff.md).
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;
   use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
   where the widget interaction requires live feedback.
@@ -160,7 +169,7 @@ https://doi.org/10.1039/d6dd00121a
 
 - [ ] The widget exposes `export_html(path=None, title=None, mode="single",
   encoding="full", downsample=None)` when it can be exported. Follow the
-  [HTML export protocol](https://github.com/bobleesj/quantem.widget/blob/main/docs/api/html-export.md).
+  [HTML export protocol](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/api/html-export.md).
 - [ ] If the widget has an in-widget **Export** button, it uses the standard
   export traits and reports filename, mode, encoding/downsample choice, and
   output size.
@@ -172,7 +181,7 @@ https://doi.org/10.1039/d6dd00121a
   state.
 - [ ] GitHub sharing is treated separately from live HTML: GitHub notebook
   previews should use static compressed widget pictures, never heavy live widget
-  state. See [GitHub preview](https://github.com/bobleesj/quantem.widget/blob/main/docs/github-preview.md).
+  state. See [GitHub preview](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/github-preview.md).
 
 </details>
 

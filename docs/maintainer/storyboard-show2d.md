@@ -42,6 +42,9 @@ figure layout.
 - Change columns through 1, 2, 3, 4, 6, 8, and 12.
 - Verify the menu does not offer impractical counts above 12.
 - Verify labels, scale bars, stats, histograms, and borders remain aligned.
+- Hover unselected panels after each reflow and verify the floating cursor
+  readout plus bottom stats strip follow the hovered panel without changing the
+  selected panel used by controls.
 - Verify the current zoom center and contrast do not jump during reflow.
 - Enable Reorder, drag panels into a non-source order, and verify
   `panel_order`, keyboard navigation, hidden-panel export, and `to_show3d()`
@@ -85,6 +88,9 @@ structure.
   after the view changes.
 - Verify cursor readout reports native ``(row, col)`` and labels value source
   as preview, detail, or native.
+- In a gallery, hover a non-selected preview/detail panel and verify the
+  readout and stats belong to the hovered panel while controls remain scoped to
+  the clicked/selected panel.
 
 ### S2D-05: Adjust Contrast On Noisy Data
 
@@ -317,6 +323,9 @@ ptychography workflow. Test at least 30 panels for routine signoff; use 45 and
   stay correct.
 - Pan, zoom, histogram-drag, and resize repeatedly; record the interaction FPS
   method and result.
+- Sweep the pointer across at least four visible panels without clicking.
+  Verify each panel reports its own hover coordinate/value and stats, including
+  after a previous panel remains selected for controls.
 - Verify zooming into one panel streams or displays the highest-resolution
   available tile for that panel, while the rest of the gallery remains
   responsive.
@@ -720,3 +729,65 @@ browser signoff.
   the full gallery; do not claim bounded Python/browser memory until an
   active-page transport, cache, and generation-safe prefetch path is separately
   implemented and verified.
+
+### S2D-22: Stress post-session 4k galleries
+
+**User story**: As a microscopist after a session, I often have 30-40
+independent 4096x4096 images to compare at once. I want Show2D to load them
+from a notebook, export an exact standalone HTML review, and remain smooth
+while I zoom, pan, hide, recolor, inspect FFTs, and export figure assets without
+silently reducing the source images.
+
+**Primary widgets**: Show2D for the main gallery; Show3D is covered by sibling
+stress stories when the same data become a time or slice stack.
+
+**Data to use**: real or real-derived microscope images. For local agent
+signoff, prefer a private ignored fixture discovered through
+`QUANTEM_WIDGET_STRESS_DATA` or the repository-local `.widget-stress-data`
+symlink. The fixture manifest must record shape, dtype, provenance, and whether
+panels are independent acquisitions or deterministic stress variants. Never
+commit the data, generated HTML, screenshots, or benchmark outputs.
+
+**Stress coverage map**:
+
+- Main Show2D many-panel stress: 30-40 native 4096x4096 images. Covers the
+  actual post-microscope review workflow: notebook construction, exact HTML
+  export, first paint, canvas redraw, controls, panel visibility, FFT, zoom,
+  pan, contrast, labels, scale bars, and figure-export state.
+- Show2D small-gallery exact stress: 4 native 4096x4096 images. Covers fast
+  agent iteration and catches accidental `display_bin="auto"` preview exports.
+  The exported widget state must report `height=4096`, `width=4096`, and
+  `_display_bin_factor=1`.
+- Show2D EMD-derived gallery stress: 20-30 same-shape EMD-derived image
+  outputs. Covers IO provenance, mixed session naming, and realistic drift or
+  reconstruction products. Keep this separate from native 4k gold fixtures when
+  the source images are 2048x2048.
+- Show3D folder stress: large frame stacks exported in folder mode. Covers
+  range loading, first paint, frame playback, FFT overlays, hidden panels,
+  panel gaps/borders, and browser memory without requiring a Python backend
+  after export.
+- Show3D exact single stress: smaller representative stacks in a single HTML
+  file. Covers exact reopen behavior, GIF/MP4 export state, PowerPoint-bound
+  animation assets, and parity with what the user saw in the widget.
+
+**Acceptance checks**:
+
+- Run the main test through a generated or hand-written notebook first. The
+  notebook must load the local fixture, construct the widget, and call
+  `export_html(...)`; do not skip straight to a prewritten HTML file when the
+  claim is notebook workflow readiness.
+- Open the standalone HTML export with no backend server. Verify the widget
+  state, not just the fitted canvas size: source shape, exported `height`,
+  exported `width`, `_display_bin_factor`, panel count, encoding, and file size.
+- Drive the exported HTML as a user: zoom, pan, change contrast, hide/restore a
+  panel, open FFT, inspect labels and scale bars, resize/reflow the window, and
+  capture screenshots for the tutorial report.
+- For the 4-image exact stress, `display_bin=1` is mandatory. For 30-40 image
+  stress, run both exact mode when hardware allows and `display_bin="auto"` when
+  evaluating preview/detail-stream behavior; report which path was used.
+- Treat a 512x512, 1024x1024, or automatically binned preview as a smoke test
+  only. It cannot satisfy the main post-session 4k gallery story.
+- The report must include a user-facing walkthrough, a PASS/FAIL table,
+  screenshots, notebook timing, export timing, first-paint timing, FPS/latency,
+  browser console errors, and direct links to the notebook, HTML export, and
+  profile metrics.

@@ -2,7 +2,9 @@
    right-hand in-page "Contents" sidebar, and let any still-wider output scroll
    horizontally instead of being clipped. */
 
-/* Remove the secondary (right) table-of-contents sidebar. */
+/* Remove the secondary (right) table-of-contents sidebar. Deliberate: the
+   pages showcase wide interactive widgets, so every horizontal pixel goes to
+   the article column. Do not reintroduce a page-toc rail. */
 .bd-sidebar-secondary,
 .bd-toc,
 div.bd-sidebar-secondary {
@@ -17,12 +19,50 @@ div.bd-sidebar-secondary {
   max-width: 100% !important;
 }
 
+/* Left navigation: fixed 16rem width on desktop — it must NOT scale
+   proportionally with the viewport (the theme's default is a percentage, so
+   big monitors waste pixels on nav that belong to widgets). The collapse
+   offset is overridden IN LOCKSTEP with the width: if they ever disagree,
+   the collapsed state drags the whole article off-screen (burned twice).
+   Mobile (<960px) keeps the theme's off-canvas drawer untouched. */
+@media (min-width: 960px) {
+  .bd-sidebar-primary {
+    width: 16rem;
+    max-width: 16rem;
+    flex: 0 0 16rem;
+  }
+  .bd-sidebar-primary.pst-sidebar-hidden {
+    margin-left: -16rem;
+  }
+}
+
 /* Never clip a widget; scroll it if it is wider than the column. */
 div.cell_output,
 .jp-RenderedHTMLCommon,
 .cell_output .output {
   overflow-x: auto;
   max-width: 100%;
+}
+
+/* Phones: below the theme's 960px breakpoint, long inline code literals and
+   API signatures must wrap instead of pushing the page wider than the screen
+   (Sphinx gives span.pre white-space: pre, which never wraps). Code BLOCKS
+   (div.highlight pre) keep their own horizontal scrollbar and are untouched. */
+@media (max-width: 959.98px) {
+  code.docutils.literal span.pre,
+  dt.sig span.pre {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  dt.sig {
+    white-space: normal;
+  }
+  /* The auto-generated general index is a fixed two-column table of long
+     entries; let it scroll on its own instead of widening the page. */
+  table.indextable {
+    display: block;
+    overflow-x: auto;
+  }
 }
 
 /* The ipywidgets embed manager wraps each widget in a light box (.widget-subarea).
@@ -34,13 +74,32 @@ html[data-theme="dark"] .jupyter-widgets-output-area {
   background: transparent !important;
 }
 
-/* Left navigation: narrow and sticky, so widgets get the rest of the width and
-   the nav stays put while scrolling a long page. */
-.bd-sidebar-primary {
-  position: sticky;
-  top: 0;
-  max-height: 100vh;
-  overflow-y: auto;
-  width: 16rem;
-  flex: 0 0 16rem;
+/* The ipywidgets embed manager wraps each widget in a light box (.widget-subarea).
+   In dark mode let the page theme show through so the area around the widget
+   matches; the widget itself already follows the page theme via theme.ts. */
+html[data-theme="dark"] .widget-subarea,
+html[data-theme="dark"] .jp-OutputArea-output,
+html[data-theme="dark"] .jupyter-widgets-output-area {
+  background: transparent !important;
+}
+
+/* Phones: below the theme's 960px breakpoint, long inline code literals and
+   API signatures must wrap instead of pushing the page wider than the screen
+   (Sphinx gives span.pre white-space: pre, which never wraps). Code BLOCKS
+   (div.highlight pre) keep their own horizontal scrollbar and are untouched. */
+@media (max-width: 959.98px) {
+  code.docutils.literal span.pre,
+  dt.sig span.pre {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  dt.sig {
+    white-space: normal;
+  }
+  /* The auto-generated general index is a fixed two-column table of long
+     entries; let it scroll on its own instead of widening the page. */
+  table.indextable {
+    display: block;
+    overflow-x: auto;
+  }
 }

@@ -32,6 +32,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Export button | `export_request`, `export_status` | Writes standalone HTML from live widgets; live Show3D can also request GIF/MP4 animation exports |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
+| Gallery gap and borders | `inter_panel_gap_px`, `inter_panel_gap_color`, `gallery_outer_border_px`, `gallery_outer_border_color`, `panel_inner_border_px`, `panel_inner_border_color` | Separately controls the layer between Show3D panels, the outside gallery frame, and each panel's own inner stroke for live display, HTML, and GIF/MP4 exports |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
 | Panel reorder (multi-panel) | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders panel display without changing source data, labels, stars, or hidden state |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
@@ -46,7 +47,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT toggle | `show_fft` | Shows the FFT view for the current frame or visible panel grid |
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
-| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readouts show/hide; the zoom setting covers every real-space panel and FFT tile/inset |
+| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles show/hide; zoom readouts are hidden by default and can be enabled for every real-space panel and FFT tile/inset |
 | FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
 | Denoise | `denoise_enabled`, `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | The master swaps raw/denoised frames without losing settings; Settings expands the Method/σ/bin editor; an active filter also reshapes FFT |
 | Filter | `frequency_filter_enabled`, `frequency_filter`, `frequency_filter_cutoff`, `frequency_filter_center`, `frequency_filter_width`, `show_frequency_filter` | View-only low/high/band-pass filtering with a draggable FFT ring; stored frames, statistics, and raw exports remain unchanged |
@@ -54,6 +55,30 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | More menu: Flip | `flip_horizontal`, `flip_vertical`, `flip_rows`, `flip_cols` | Display-only orientation checks for row/column or horizontal/vertical review |
 | More menu: Rotate | `image_rotation`, `rotation_scope`, `frame_rotations`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for the whole stack or the selected frame |
 | More menu: Compare | `compare_mode`, `compare_pair`, `blink_fps`, `diff_cmap`, `compare_background` | Blink, difference, or overlay two frames for point-defect and time-series change detection |
+
+## Multi-panel gallery chrome
+
+Use the same explicit names as Show2D when preparing Show3D panels for slides
+or publication:
+
+```python
+Show3D(
+    raw_stack,
+    denoised_stack,
+    max_cols=2,
+    inter_panel_gap_px=4,
+    inter_panel_gap_color="#000000",
+    gallery_outer_border_px=4,
+    gallery_outer_border_color="#000000",
+    panel_inner_border_px=1,
+    panel_inner_border_color="#000000",
+)
+```
+
+`inter_panel_gap_px` is real space between panel slots. `gallery_outer_border_px`
+is the frame around the whole Show3D gallery. `panel_inner_border_px` is drawn
+inside each panel over the image edge. The older `panel_gap` argument remains a
+compatibility alias for `inter_panel_gap_px`.
 
 ## Rich panel labels and math
 
@@ -192,9 +217,9 @@ w.export_html("lambda_movie.html", encoding="uint8")
 
 In a live Python-backed widget, the Export menu can write HTML and request
 GIF/MP4 animation exports through the Python backend. In standalone HTML, the
-page can download itself as HTML; GIF/MP4 entries remain visible but disabled
-with a backend-required explanation until browser-side animation encoding is
-implemented.
+page can download itself as HTML, export GIF in the browser, and export MP4 in
+browsers with WebCodecs H.264 support. If browser MP4 is unavailable, the MP4
+entry remains visible with a browser-support or live-backend explanation.
 
 The denoise family matches Show2D. See
 [Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
@@ -268,11 +293,10 @@ The first FFT for a frame or ROI may take a moment on large data. After that,
 Show3D reuses the cached FFT magnitude when you return to the same frame and
 when you redraw, zoom, pan, scrub, or show metric labels.
 
-Every visible FFT tile or overlay inset shows the shared live magnification as
-an `N.N×` badge, even for uncalibrated arrays. Wheel or pinch zoom updates it;
-double-click, double-tap, or Reset returns to `1.0×`. Pass
-`fft_overlay_zoom=2.0` to initialize any FFT layout at `2.0×`, and set
-`show_zoom_indicator=False` to hide both real-space and FFT zoom badges.
+When `show_zoom_indicator=True`, every visible FFT tile or overlay inset shows
+the shared live magnification as an `N.N×` badge, even for uncalibrated arrays.
+Wheel or pinch zoom updates it; double-click, double-tap, or Reset returns to
+`1.0×`. Pass `fft_overlay_zoom=2.0` to initialize any FFT layout at `2.0×`.
 
 ## Reuse ROI coordinates across a stack
 
@@ -554,55 +578,32 @@ For pages containing several panels, pass `panel_slot=` to
 specific numerical profile. The interactive kymograph intentionally remains a
 single-panel-page tool so its line and depth axes are unambiguous.
 
-## Full-resolution folder export (advanced)
+## Portable HTML export
 
-Use the folder export when a microscopist needs to scrub a large stack at the
-native detector/reconstruction size instead of opening a reduced one-file HTML.
-This writes a small `index.html` beside an `offline_stack.u8` data file and a
-`manifest.json`:
+Show3D writes one portable HTML file. Use `encoding="uint8"` for visual review
+and choose `downsample=1`, `2`, `4`, or `8` explicitly based on the required
+spatial detail:
 
 ```python
 from quantem.widget import Show3D
 
-w = Show3D(stack, title="800C 1.3Mx full-resolution review", debug=True)
-w.export_sidecar("/data/reports/800C_1.3Mx_fullres")
+w = Show3D(stack, title="800C 1.3Mx review", debug=True)
+w.export_html(
+    "/data/reports/800C_1.3Mx_review.html",
+    encoding="uint8",
+    downsample=1,
+)
 ```
 
-Serve the folder over Range-capable local HTTP; do not open the HTML with
-`file://` because the browser must fetch the data file:
-
-```bash
-# Use your project or lab helper that supports HTTP Range requests.
-python scripts/serve_sidecar_range.py \
-  --dir /data/reports/800C_1.3Mx_fullres \
-  --port 8803 --bind 127.0.0.1
-```
-
-Then open `http://127.0.0.1:8803/index.html`. The viewer shell should appear
-immediately. The browser then loads the full stack into memory, shows the load
-status banner, and swaps to the cached playback path when the stack is ready.
-Changing Color or the histogram range repaints the current microscope view
-immediately, marks the playback cache as updating, and rebuilds the remaining
-frames in the background. Scrubbing during that rebuild should still advance
-the current frame; once the banner clears, playback uses the cached full-stack
-path again.
-
-This workflow preserves the source spatial shape used to construct the widget.
-If you intentionally want a smaller browse artifact, make that explicit with a
-separate downsampled/single-file export rather than treating it as the
-full-resolution review copy. For the end-to-end browser checklist and example
-timing report, see the [advanced tutorial](../tutorials/advanced.md).
-
-When sharing this export, send or copy the whole folder. `index.html` is not a
-standalone result for this mode; it needs `offline_stack.u8` and `manifest.json`
-beside it. The colleague should serve the received folder with the same Range
-helper and open the local URL.
+For exact multi-gigabyte analysis, keep the live Jupyter widget connected to
+the source arrays. Show3D no longer creates companion sidecar folders. Existing
+legacy sidecar reports remain readable for compatibility.
 
 ## Animation exports
 
 Use HTML when collaborators should keep scrubbing, zooming, and changing
-contrast. Use GIF or MP4 when the result needs to drop into PowerPoint, email, or
-a static report:
+contrast. Use GIF when the result needs to drop into PowerPoint, email, or a
+static report. MP4 is available when a video file is specifically required:
 
 ```python
 w.save_gif("movie.gif", quality="medium", fps=6)
@@ -618,28 +619,43 @@ slide/email choice; high is sharper but larger. Pass `show_frame_labels=True`
 when panel titles should include the same live-style frame label and count that
 the widget canvas shows. GIF/MP4 exports keep the panel labels, scale bar, and
 zoom readout styling consistent with the static/offline widget image output.
-The widget **Export** menu keeps the common path simple: choose `GIF low`,
-`GIF medium`, `GIF high`, or the matching MP4 option. The size shown in that
-menu is estimated uncompressed RGB render work, so the final GIF/MP4 file is
-usually smaller but can vary with image texture and palette compression.
+The widget **Export** menu keeps the common path explicit: choose **GIF**,
+**Interactive HTML**, or secondary **MP4 video**, then set frame range,
+maximum frame count, fps, spatial size, and quality before exporting. The size
+shown in that menu is estimated render size before compression, so the final
+GIF/MP4 file can vary with image texture and palette/video compression.
 
 ```python
-w.save_gif("movie.gif", quality="medium", fps=6, show_frame_labels=True)
+w.save_gif("movie_slides.gif", quality="medium", fps=8, slides_preset=True)
 ```
 
 The GIF/MP4 path exports the full panel frames. Browser-only zoom and pan
 gestures are view state, so use HTML export when collaborators need to continue
 zooming, panning, or changing contrast interactively.
 
-Advanced animation choices stay in Python and the maintainer smoke report
-rather than crowding the widget toolbar. Use the Python API for frame labels,
-background color, bounce playback, and other presentation-specific choices:
+For publication or presentation movies, prefer exporting from the live widget
+or from an exact standalone HTML export. Standalone HTML files written with
+`encoding="uint8"` store encoded display data, not the original float32/uint16
+stack. The standalone GIF/MP4 export remains available for quick sharing, but
+the export panel warns that GIF adds another 256-color palette step and that
+exact/live export is the fidelity path for PowerPoint, Slack, or publication
+review.
+
+Use the Python API for frame labels, background color, bounce playback, and other
+presentation-specific choices. `frame_start` and `frame_stop` follow normal
+zero-based Python slice bounds, while `max_frames` evenly samples the selected
+range:
 
 ```python
 w.save_gif(
     "movie.gif",
     quality="medium",
     fps=6,
+    frame_start=0,
+    frame_stop=48,
+    every_n=2,
+    max_frames=20,
+    max_edge_px=768,
     playback="bounce",
     show_frame_labels=True,
     background="black",
@@ -647,7 +663,7 @@ w.save_gif(
 ```
 
 ```{note}
-`export_html(quantized=True)` writes the smaller single-file uint8 pack; the
+`export_html(encoding="uint8")` writes the smaller single-file uint8 pack; the
 default writes exact float32 into one HTML file. For multi-GB Show3D reviews,
 use the folder export above instead of forcing one huge HTML file. See the
 [widget export tutorial](../tutorials/widget_export).

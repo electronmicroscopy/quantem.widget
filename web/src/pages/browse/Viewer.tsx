@@ -1708,8 +1708,8 @@ export default function Viewer(props: Props) {
           // Paint EVERY response that is newer than what is currently
           // painted (not strict-equality vs the latest issued seq).
           // Strict `seq !== seqRef.current` drops every mid-drag frame
-          // and only the final-after-release ever paints — CLAUDE.md
-          // "paint latest, drop race-losers" rule. lastPaintedSeqRef is
+          // and only the final-after-release ever paints. Paint the latest
+          // completed response and drop race-losers. lastPaintedSeqRef is
           // shared across drag and non-drag branches so race-losers are
           // dropped uniformly.
           if (seq <= lastPaintedSeqRef.current) { releaseScanFlight(); return; }

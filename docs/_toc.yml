@@ -8,18 +8,30 @@ parts:
     chapters:
       - file: install
       - file: cli
+  # Show4DSTEM and ShowPtycho lead: they are the flagship workflows.
+  # tutorials/show1d is hidden for now (restore from git history when ready).
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
-      - file: tutorials/show1d
+      - file: tutorials/show4dstem
+      - file: tutorials/showptycho
       - file: tutorials/show2d
       - file: tutorials/show3d
       - file: tutorials/show3dslices
-      - file: tutorials/show4dstem
-      - file: tutorials/showeds
+      # tutorials/showeds hidden until the ShowEDS widget is updated.
       - file: tutorials/showdiffraction
+      - file: tutorials/choose_lattice
+        title: Choose Lattice
       - file: tutorials/io_gpu
         title: IO/GPU
+  - caption: Exporting
+    chapters:
+      - file: tutorials/show4dstem_export
+        title: Show4DSTEM export
+      - file: tutorials/showptycho_export
+      - file: tutorials/widget_export
+      - file: tutorials/movie_export
+        title: Saving GIF and MP4 movies
   # Advanced and Maintainers are each one expandable parent link (chevron) so
   # the sidebar stays short. These parts deliberately have NO caption: the
   # parent link is the label, and a caption would render a duplicate header
@@ -31,9 +43,6 @@ parts:
           - file: tutorials/show2d_advanced
             title: Advanced Show2D
           - file: tutorials/showfolder
-          - file: tutorials/widget_export
-          - file: tutorials/movie_export
-            title: Saving GIF and MP4 movies
           - file: tutorials/memory_management
             title: Memory management
           - file: tutorials/watch_folder
@@ -53,8 +62,10 @@ parts:
           - file: api/show3d
           - file: api/show3dslices
           - file: api/show4dstem
-          - file: api/showeds
+          - file: api/showptycho
+          # api/showeds hidden until the ShowEDS widget is updated.
           - file: api/showdiffraction
+          - file: api/choose-lattice
           - file: api/showfolder
           - file: api/html-export
           - file: api/io
@@ -67,6 +78,8 @@ parts:
       - file: maintainer/index
         title: Maintainer guide
         sections:
+          - file: maintainer/docs-design
+            title: Docs design rules
           - file: changelog
             title: Changelog
           - file: maintainer/widget-release
@@ -94,10 +107,11 @@ parts:
                 title: Show3DSlices
               - file: maintainer/storyboard-show4dstem
                 title: Show4DSTEM
-              - file: maintainer/storyboard-showeds
-                title: ShowEDS
+              # maintainer/storyboard-showeds hidden until ShowEDS is updated.
               - file: maintainer/storyboard-showfolder
                 title: ShowFolder
+              - file: maintainer/storyboard-choose-lattice
+                title: ChooseLattice
               - file: maintainer/storyboard-data-transfer
                 title: DataTransfer
           - file: maintainer/widget-performance

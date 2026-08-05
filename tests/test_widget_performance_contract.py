@@ -140,11 +140,24 @@ def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
     assert "const activePageStart = isPaged ? displayPageIdx" in show3d
 
 
+def test_show3d_paged_side_panels_align_with_image_canvas():
+    """C1: paged right-side FFT/kymograph panels keep canvas tops aligned."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "!fftLayoutBottom && controlsVisible && isPaged" in show3d
+    assert "minHeight: 28" in show3d
+    assert "borderBottom: `1px solid ${themeColors.border}`" in show3d
+    assert "controlsVisible && isPaged" in show3d
+
+
 def test_show3d_histogram_drag_repaints_single_file_exports():
     """C1: normal exported Show3D histograms react while the user drags."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    stress = (ROOT / "scripts" / "widget_show3d_stress.py").read_text(encoding="utf-8")
 
     assert show3d.count("commitOnChange={!sidecarMode}") == 2
+    assert "freezeCurrentPanelContrastAsManual(panel, { min, max })" in show3d
+    assert "keep the visible Auto windows as the editable manual baseline" in show3d
     assert (
         "if (sidecarMode) window.setTimeout(commitPanelRange, 0);\n"
         "                              else commitPanelRange();"
@@ -153,6 +166,88 @@ def test_show3d_histogram_drag_repaints_single_file_exports():
         "if (sidecarMode) window.setTimeout(commitSharedRange, 0);\n"
         "                      else commitSharedRange();"
     ) in show3d
+    assert '"histogram_contrast": histogram_contrast' in stress
+    assert "manual independent histogram drag reset other panels to full range" in stress
+
+
+def test_show3d_arrow_keys_are_stress_tested_for_frame_navigation():
+    """C1: keyboard frame navigation remains a real browser stress gate."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    stress = (ROOT / "scripts" / "widget_show3d_stress.py").read_text(encoding="utf-8")
+
+    assert 'const FRAME_NAVIGATION_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);' in show3d
+    assert "shouldIgnoreWidgetShortcut(e.target, e.key)" in show3d
+    assert "rootRef.current?.focus({ preventScroll: true });" in show3d
+    assert "target.closest(WIDGET_TEXT_OR_VALUE_CONTROL_SELECTOR)" in show3d
+    assert "def _drive_keyboard_scrub(page, *, fps_ms: int)" in stress
+    assert 'page.keyboard.press("ArrowRight")' in stress
+    assert '"keyboard_scrub": keyboard_scrub' in stress
+    assert "ArrowRight did not change the rendered frame" in stress
+
+
+def test_show2d_folder_uint8_export_uses_per_panel_frame_files():
+    """C1: large exact 4k folder exports avoid one giant browser allocation."""
+    show2d_py = (ROOT / "src" / "quantem" / "widget" / "show2d.py").read_text(encoding="utf-8")
+    show2d_js = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    profile = (ROOT / "scripts" / "widget_external_html_profile.py").read_text(encoding="utf-8")
+
+    assert "frame_bytes_urls = traitlets.List" in show2d_py
+    assert 'name = f"frame_{image_index:06d}.bin"' in show2d_py
+    assert '"frame_bytes_files": frame_file_names' in show2d_py
+    assert 'useModelState<string[]>("frame_bytes_urls")' in show2d_js
+    assert "setFetchedFrameBytePanels(loaded.slice())" in show2d_js
+    assert "data-show2d-main-canvas={i}" in show2d_js
+    assert "data-show2d-selected-panel={selectedIdx}" in show2d_js
+    assert "onMouseDownCapture={handleRootMouseDownCapture}" in show2d_js
+    assert "const uint8FolderPreviewMode = !!uint8FolderFrameBytes ||" in show2d_js
+    assert "previousSource.frameSourceKey !== frameSourceKey" in show2d_js
+    assert "def _show2d_main_canvas_screenshots" in profile
+    assert "visible Show2D main canvases were blank/flat" in profile
+    assert "def _run_show2d_keyboard_step" in profile
+    assert "show2d_keyboard_shortcuts ArrowRight did not change the selected panel" in profile
+
+
+def test_show2d_show3d_offline_export_bakes_current_view_state():
+    """C1: standalone HTML Export reopens with the scientist's tuned view."""
+    format_ts = (ROOT / "js" / "format.ts").read_text(encoding="utf-8")
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "quantem-current-widget-view-state" in format_ts
+    assert "standaloneHtmlWithCurrentWidgetState" in format_ts
+    assert "standaloneWidgetStaticHtmlFromDocument" in format_ts
+    assert "application/vnd.jupyter.widget-state+json" in format_ts
+    assert "application/vnd.jupyter.widget-view+json" in format_ts
+    assert "updateEmbeddedWidgetStateScript" in format_ts
+    assert "applyStandaloneWidgetViewState" in format_ts
+    assert "stripCurrentWidgetViewState(html)" in format_ts
+    assert "JSON.stringify(value)" in format_ts
+    assert "replace(/</g" in format_ts
+
+    assert "SHOW2D_STANDALONE_VIEW_STATE_KEYS" in show2d
+    assert "SHOW3D_STANDALONE_VIEW_STATE_KEYS" in show3d
+    for source in (show2d, show3d):
+        assert "React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);" in source
+        assert "standaloneHtmlWithCurrentWidgetState(" in source
+        assert "standaloneWidgetStaticHtmlFromDocument()" in source
+    for key in ("hidden_panels", "hidden_page_slots", "contrast_preset"):
+        assert f'"{key}"' in show2d
+        assert f'"{key}"' in show3d
+    assert '"selected_idx"' in show2d
+    assert '"slice_idx"' in show3d
+
+
+def test_show2d_svg_preview_reuses_export_payload_and_snaps_pixels():
+    """C1: publication preview displays the same SVG that Export saves."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "type Show2DSvgPreview = Show2DSvgExport" in show2d
+    assert "const buildSvgExport = React.useCallback" in show2d
+    assert "const built = svgPreview && svgPreview.scale === exportScale" in show2d
+    assert 'data-show2d-svg-preview-image="true"' in show2d
+    assert "snapSvgPreviewToDevicePixels" in show2d
+    assert "Math.ceil(layoutTop * dpr) / dpr - layoutTop" in show2d
+    assert "marginTop: svgPreviewSnap.y" in show2d
 
 
 def test_show2d_local_stack_fft_cache_and_playback_contract():
@@ -177,6 +272,13 @@ def test_show2d_local_stack_fft_cache_and_playback_contract():
     assert "makeGalleryFftCacheKey" in local_stack
     assert "GALLERY_FFT_CACHE_MAX_BYTES" in local_stack
     assert "protectedKeys" in local_stack
+    # C2: many pages of large panels must fit one overview FFT per panel in
+    # the bounded LRU, so revisiting the first page does not recompute it.
+    assert "PAGED_GALLERY_FFT_OVERVIEW_MAX_DIM = 1024" in show2d
+    assert "const overviewMaxDim = isPaged" in show2d
+    # C3: the page player is a visual sweep, not a slow slide show.
+    assert "PAGE_PLAY_FPS_OPTIONS = [1, 2, 4, 8, 12]" in show2d
+    assert "useState<number>(8)" in show2d
 
 
 def test_show2d_hidden_panels_skip_hot_render_paths():
@@ -189,7 +291,16 @@ def test_show2d_hidden_panels_skip_hot_render_paths():
     assert "const indices = visibleImageIndices.filter(i => i >= 0 && i < capturedNImages);" in show2d
     assert "const signature = visibleImageIndices.map((i) => {" in show2d
     assert "for (const i of visibleImageIndices) {\n        const win = currentDetailWindow(i);" in show2d
-    assert "for (const i of visibleImageIndices) {\n      const canvas = canvasRefs.current[i];" in show2d
+    # C2: a large gallery only repaints the panels near the browser viewport
+    # during zoom; offscreen panels keep their cached display until scrolled in.
+    assert "const [viewportPanelIndices, setViewportPanelIndices]" in show2d
+    assert 'rootMargin: "0px"' in show2d
+    assert "const viewportPaintImageIndices" in show2d
+    assert "const paintIndices = (" in show2d
+    assert ") ? [activePanel] : viewportPaintImageIndices;" in show2d
+    assert "for (const i of paintIndices) {\n      const canvas = canvasRefs.current[i];" in show2d
+    assert "const beginViewInteraction" in show2d
+    assert "beginViewInteraction(idx);" in show2d
     assert "if (hiddenPanelSet.has(panel)) return null;" in show2d
     assert "hiddenPanels && hiddenPanels.includes(panel)" not in show2d
 
@@ -203,11 +314,31 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert "event.shiftKey" in show2d
     assert "event.metaKey || event.ctrlKey" in show2d
     assert "setPanelsHidden(selectedVisiblePanels, true)" in show2d
+    assert 'case "h":' in show2d
+    assert 'case "H":' in show2d
+    assert "shouldIgnoreWidgetShortcut(e.target)" in show2d
+    assert 'useModelState<number[]>("selected_panels")' in show3d
+    assert "handlePanelSelectionMouseDown" in show3d
+    assert "event.shiftKey" in show3d
+    assert "event.metaKey || event.ctrlKey" in show3d
+    assert "setPanelsHidden(selectedVisiblePanels, true)" in show3d
+    assert 'case "h":' in show3d
+    assert 'case "H":' in show3d
+    assert "hasPanelChoices && selectedVisiblePanels.length > 0" in show3d
+    assert "data-show3d-panel-selection={panel}" in show3d
     assert "for (const panel of batchPanels) next[panel] = value;" in show2d
     assert 'data-show2d-marker-style="around"' in show2d
     assert 'data-show3d-marker-style={markerAround ? "around" : "left"}' in show3d
     assert 'useModelState<PanelTitleStyle>("panel_title_style")' in show2d
     assert 'useModelState<PanelTitleStyle>("panel_title_style")' in show3d
+    assert 'useModelState<number>("inter_panel_gap_px")' in show2d
+    assert 'useModelState<string>("inter_panel_gap_color")' in show2d
+    assert 'useModelState<number>("gallery_outer_border_px")' in show2d
+    assert 'useModelState<string>("gallery_outer_border_color")' in show2d
+    assert 'useModelState<number>("panel_inner_border_px")' in show2d
+    assert 'useModelState<string>("panel_inner_border_color")' in show2d
+    assert "galleryGapColorResolved" in show2d
+    assert "panelInnerBorderColor" in show2d
     assert 'useModelState<MarkerMap>("row_markers")' in show2d
     assert 'useModelState<MarkerMap>("row_markers")' in show3d
     assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show2d
@@ -282,8 +413,52 @@ def test_show_panel_chrome_uses_rich_labels_and_collapsed_export():
     assert "{panelTitleContent(panel)}" in show3d
     assert "{panelTitleContent(statsIdx)}" in show2d
     assert "{panelTitleContent(st.panel)}" in show3d
-    assert "showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml" in show3d
-    assert "GIF and MP4 export require the live Python backend" in show3d
+    assert "(exportEnabled || canDownloadCurrentHtml || canExportStandaloneGif || canExportStandaloneMp4)" in show3d
+    assert "WebCodecs H.264 support for standalone MP4 export" in show3d
+    assert "browser WebCodecs H.264 when available" in show3d
+
+
+def test_show3d_standalone_export_labels_exact_vs_uint8_sources():
+    """C1: standalone Show3D export UI must distinguish exact and encoded sources."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert 'const standaloneHtmlMode = hasOfflineFloatStack ? "exact" : "quantized";' in show3d
+    assert "Source: exact float32 embedded data." in show3d
+    assert "Source: encoded uint8 standalone data. For best movie fidelity" in show3d
+    assert "export/open HTML exact float32 from the live widget" in show3d
+    assert "standaloneAnimationUsesEncodedUint8" in show3d
+    assert "data-show3d-encoded-source-animation-warning" in show3d
+    assert "GIF adds a 256-color palette step" in show3d
+    assert 'encoding="full"' in show3d
+    assert "Exact float32 is not embedded in this standalone page" in show3d
+
+
+def test_show3d_mp4_export_defaults_are_publication_quality():
+    """C1: MP4 exports default to full-quality review videos, not fast previews."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "const DEFAULT_ANIMATION_EXPORT_FPS = 8;" in show3d
+    assert "const MIN_ANIMATION_TITLE_FONT_PX = 12;" in show3d
+    assert "const MIN_ANIMATION_SCALE_FONT_PX = 12;" in show3d
+    assert "const MIN_ANIMATION_SCALE_BAR_THICKNESS_PX = 5;" in show3d
+    assert "const MIN_ANIMATION_OVERLAY_MARGIN_PX = 12;" in show3d
+    assert "const [exportFps, setExportFps] = React.useState(DEFAULT_ANIMATION_EXPORT_FPS);" in show3d
+    assert "const exportDurationSeconds = exportFrameIndices.length / exportFpsValue;" in show3d
+    assert "frames · ${exportDurationSeconds.toFixed(1)} s at ${exportFpsValue} fps" in show3d
+    assert "const animationPanelWidth = sharedPanelSource" in show3d
+    assert "animationOutputScale(width, height, quality, downsample, maxEdgePx, visiblePanels, maxCols, panelGap)" in show3d
+    assert "activePanels.length,\n      cols,\n      panelGapPx" in show3d
+    assert "const applyMp4ExportDefaults = React.useCallback" in show3d
+    assert 'setExportPanelMode("mp4");' in show3d
+    assert 'setExportQuality("high");' in show3d
+    assert "setExportMaxFrames(0);" in show3d
+    assert "setExportFps(DEFAULT_ANIMATION_EXPORT_FPS);" in show3d
+    assert 'setExportSpatialPreset("edge1024");' in show3d
+    assert "Math.max(MIN_ANIMATION_TITLE_FONT_PX" in show3d
+    assert "const targetBarPx = Math.min(60, panelOutW * 0.25);" in show3d
+    assert "Math.max(MIN_ANIMATION_SCALE_BAR_THICKNESS_PX" in show3d
+    assert "Try Size = Max edge 1024 px or 2x downsample." in show3d
+    assert "onClick={applyMp4ExportDefaults}" in show3d
 
 
 def test_show2d_fft_gallery_quality_labels_stay_readable():
@@ -341,7 +516,124 @@ def test_show3d_frontend_playback_budget_is_sixty_fps():
 
     assert "const MAX_PLAYBACK_FPS = 60;" in show3d
     assert "effectiveFps >= 60" in show3d
+
+
+def test_show3d_many_panel_zoom_uses_correct_transform_path():
+    """C1: many-panel Show3D zoom must avoid known-bad direct GPU sampling."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    colormaps = (ROOT / "js" / "colormaps.ts").read_text(encoding="utf-8")
+
+    assert "const renderGpuPackedPanelTransformSlice" in show3d
+    assert "renderGpuPackedPanelTransformSlice(idx, false)" in show3d
+    assert 'dbg.lastInteractionRenderPath = "webgpu-packed-panel-transform";' in show3d
+    assert '"webgpu-grid-packed-panels-transform-direct-fragment"' in show3d
+    assert 'mode !== "transformBurst"' in show3d
+    assert '|| mode === "transformBurst"' in show3d
+    assert "dbg.runTransformBurst = runTransformBurst;" in show3d
+    assert "dbg.transformBurstResult = result;" in show3d
+    assert "drawP95Ms" in show3d
+    assert "MAX_INTERACTIVE_GRID_CANVAS_EDGE = 4096" in show3d
+    assert "MAX_INTERACTIVE_GRID_CANVAS_PIXELS = 8_388_608" in show3d
+    assert "const gridCanvasCap = isMultiPanelSource" in show3d
+    assert "const [rootLayoutWidth, setRootLayoutWidth] = React.useState(0);" in show3d
+    assert "const responsiveCols = rootLayoutWidth > 0" in show3d
+    assert "return Math.max(1, Math.min(requestedCols, responsiveCols));" in show3d
+    assert "dbg.layoutCols = _colsLocal;" in show3d
+    assert "sourcePanelIndices?: number[]" in colormaps
+    assert "opts.sourcePanelIndices?.[panel]" in colormaps
+    assert "const hasActiveTransform = (opts.transforms || []).some" in colormaps
+    assert "if (!hasActiveTransform && this.renderPackedPanelTransformComputeToCanvas" in colormaps
+    assert "smooth_sample: u32" in colormaps
+    assert "params.smooth_sample == 1u" in colormaps
+    assert "origin_x: f32" in colormaps
+    assert "origin_y: f32" in colormaps
+    assert "let local_x = in.pos.x - params.origin_x;" in colormaps
+    assert "let local_y = in.pos.y - params.origin_y;" in colormaps
+    assert "params.flags.w == 1u" in colormaps
+    assert "pu[11] = usesExplicitSourcePanels ? 1 : 0;" in colormaps
+    assert "pf[6] = col * (panelW + gap);" in colormaps
+    assert "pf[7] = row * (panelH + gap);" in colormaps
+    assert "return vec4f(0.0, 0.0, 0.0, 1.0);" in colormaps
+    assert "rgba[out_idx] = 0xFF000000u;" in colormaps
+    assert "smooth?: boolean" in colormaps
+    assert "function shouldSmoothDirectSample" in colormaps
+    assert "projectedW >= Math.max(1, sourceWidth) * 0.75" in colormaps
+    assert "pu[11] = shouldSmoothDirectSample(opts.smooth" in colormaps
+    assert "smooth: c.smooth" in show3d
+    assert "function samplePackedU8Viewport(" in show3d
+    assert "const sample = samplePackedU8Viewport(" in show3d
+    assert show3d.count("const sample = samplePackedU8Viewport(") == 2
+    assert "ctx.imageSmoothingEnabled = smooth;" in show3d
+    assert "if (!hasActivePanelTransform && hasPackedFrame && packedFrame)" in show3d
+    assert '"webgpu-grid-separate-panels-packed-transform-fragment"' in show3d
+    assert '"webgpu-grid-separate-panels-panel-slots-direct-fragment"' in show3d
+    assert 'return drawCanvasTransformFallback("canvas-panel-transform");' in show3d
+    assert "gpuDisplayVisibleRef.current = false;" in show3d
+    assert "gpuRenderSerialRef.current++;" in show3d
+    assert "const confirmOfflineStaticCanvasPresent" in show3d
+    assert 'dbg.lastInitialStaticPresent = `${reason}:${phase}`;' in show3d
+    assert 'confirmOfflineStaticCanvasPresent("offline-static");' in show3d
+    assert "lastDrawMainPreservedGpu" in show3d
+    assert '"active-view-transform"' in show3d
+    assert "sidecarViewTransformActive() &&" in show3d
     assert "Restores 60 fps on the GPU-cached multi-panel path" in show3d
+
+
+def test_show3d_offline_viewport_honors_smooth_toggle():
+    """C1: a smooth offline zoom interpolates within, never across, panel strips."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "function samplePackedU8Viewport(" in show3d
+    assert "const x1 = Math.min(maxX, x0 + 1);" in show3d
+    assert "if (!smooth) return values[y0 * width + x0];" in show3d
+    assert show3d.count("const sample = samplePackedU8Viewport(") == 2
+    assert "ctx.imageSmoothingEnabled = smooth;" in show3d
+    # C2: toggling Smooth invalidates the rendered composite rather than
+    # briefly applying the new zoom sampler to a cache made with old pixels.
+    assert 'smooth,' in show3d[show3d.index("const sidecarDisplayStyleKey"):show3d.index("const sidecarDisplayStyleKey") + 700]
+    assert show3d.count("sidecarCompositeStyleKeyRef.current === sidecarDisplayStyleKey") == 2
+    assert 'sidecarCompositeStyleKeyRef.current = "";' in show3d
+
+
+def test_show3d_offline_zoom_keeps_retained_canvas_visible():
+    """C1: standalone zoom never reveals a cleared WebGPU presentation frame."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert 'if (offline) return drawCanvasTransformFallback("canvas-packed-transform");' in show3d
+
+
+def test_browser_smoke_guards_zoom_canvas_continuity():
+    """C1: browser smoke fails when a zoom briefly exposes a cleared canvas."""
+    smoke = (ROOT / "scripts" / "widget_browser_smoke.py").read_text(encoding="utf-8")
+
+    assert "def _start_zoom_continuity_probe" in smoke
+    assert "def _exercise_zoom_continuity" in smoke
+    assert "zoom changed the visible canvas composition" in smoke
+    assert "zoom exposed a blank or flat canvas frame" in smoke
+    assert 'if widget in {"show2d", "show3d", "showptycho"}:' in smoke
+
+
+def test_show3d_stress_runner_covers_portable_and_legacy_exports():
+    """C1: stress current single-file HTML and retain legacy-folder coverage."""
+    script = (ROOT / "scripts" / "widget_show3d_stress.py").read_text(encoding="utf-8")
+    docs = (ROOT / "docs" / "maintainer" / "performance-ui-testing.md").read_text(encoding="utf-8")
+
+    assert "--html" in script
+    assert "--sidecar-dir" in script
+    assert "--make-sidecar-from-html" not in script
+    assert "--independent-contrast" in script
+    assert '_set_labeled_switch_with_retry(page, "Contrast", False)' in script
+    assert "attempts: int = 20" in script
+    assert "RangeRequestHandler" in script
+    assert "offline_stack.u8" in script
+    assert "_offline_float_stack" in script
+    assert "first_paint_ms" in script
+    assert "layoutRequestedMaxCols" in script
+    assert "lastInteractionRenderPath" in script
+    assert "canvas became blank after zoom/pan stress" in script
+    assert "sidecar target did not request offline_stack.u8" in script
+    assert "scripts/widget_show3d_stress.py" in docs
+    assert "single-file HTML and legacy folder sidecar paths" in docs
 
 
 def test_show3d_filtered_playback_waits_for_cached_display_frames():
@@ -359,12 +651,18 @@ def test_show3d_filtered_playback_waits_for_cached_display_frames():
     )
     assert "warmPlaybackDisplayFrame(next + warmDirection, next, frame)" in show3d
     assert (
-        "}) || browserFilterOnRef.current || frequencyFilterIsActive || !!subpixelAlignEnabled"
+        "}) || browserFilterOnRef.current || frequencyFilterIsActive;"
         in show3d
     )
     assert (
         "if (frequencyFilterPendingRef.current.has(key)) "
         "return allowRawOnMiss ? frame : null;"
+    ) in show3d
+    assert "browserFilterReadyForIndex" in show3d
+    assert "low-pass(raw)" in show3d
+    assert (
+        "if (frequencyFilterIsActive && browserFilterKnobsOn "
+        "&& !browserFilterReadyForIndex(idx))"
     ) in show3d
     assert "Do not clamp this live DOM update to loop handles" in show3d
     assert "users see \"1/18\" while the canvas was already showing a later frame" in show3d
@@ -496,6 +794,18 @@ def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
     assert 'fftLayoutBottom && (nPanels || 1) > 1' not in show3d
 
 
+def test_show3d_right_fft_layout_tracks_wrapped_toolbar_height_contract():
+    """C1: side FFT canvas should stay aligned when the main toolbar wraps."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "const toolControlsRef = React.useRef<HTMLDivElement>(null)" in show3d
+    assert "const [toolControlsHeight, setToolControlsHeight] = React.useState(28)" in show3d
+    assert "new ResizeObserver(measure)" in show3d
+    assert 'ref={toolControlsRef} data-show3d-tool-controls="true"' in show3d
+    assert 'data-show3d-fft-tool-spacer="true"' in show3d
+    assert "height: !fftLayoutBottom && controlsVisible ? toolControlsHeight : \"auto\"" in show3d
+
+
 def test_show2d_and_show3d_fft_zoom_labels_cover_every_interactive_fft():
     """FFT views expose their live multiplier in every supported layout."""
     figure = (ROOT / "js" / "figure.ts").read_text(encoding="utf-8")
@@ -511,7 +821,7 @@ def test_show2d_and_show3d_fft_zoom_labels_cover_every_interactive_fft():
     assert "formatZoomLabel(fftZoom)" in show2d
     assert 'data-show3d-fft-zoom-indicator={panel}' in show3d
     assert show3d.count('data-show3d-fft-zoom-indicator={panel}') == 2
-    assert "showZoomIndicator !== false && panelChromeVisible" in show3d
+    assert "showZoomIndicator === true && panelChromeVisible" in show3d
     assert "onTouchStart={handleFftInsetTouchStart}" in show3d
     assert "scheduleFftViewState({ zoom: newZoom" in show3d
     assert "`${fftZoom.toFixed(1)}×`" not in show3d
@@ -539,6 +849,20 @@ def test_show3d_offline_gpu_playback_owns_canvas_contract():
     assert show3d.count("if (offlineGpuPlaybackOwnsCanvas) return;") >= 2
 
 
+def test_show3d_sidecar_playback_prefers_ready_gpu_frames():
+    """C1: a cached multi-panel folder movie avoids CPU compositing."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    draw_sidecar = show3d.split("const drawSidecarBitmapFrame", 1)[1].split(
+        "const previousSidecarPagePaintStartRef", 1
+    )[0]
+
+    gpu_path = "if (sidecarGpuReadyRef.current && renderSidecarGpuFrame(drawIdx, reason))"
+    composite_path = "const composite = sidecarCompositeReadyRef.current"
+    assert gpu_path in draw_sidecar
+    assert composite_path in draw_sidecar
+    assert draw_sidecar.index(gpu_path) < draw_sidecar.index(composite_path)
+
+
 def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     """C1: zoomed sidecar inspection must not present stale viewport cache."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
@@ -549,7 +873,11 @@ def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     assert "sidecarDisplayCacheDirtyRef.current = true;" in show3d
     assert "sidecar-u8-viewport-transform" in show3d
     assert "sidecar-u8-viewport-live" in show3d
-    assert "if (separatePanelFrames && !sidecarMode && (offline || imageRotation % 4 !== 0)) return false;" in show3d
+    assert "if (separatePanelFrames && !sidecarMode && imageRotation % 4 !== 0) return false;" in show3d
+    assert "const packedPanelSource = !separatePanelFrames;" in show3d
+    assert "if (separatePanelFrames) {" in show3d
+    assert 'dbg.lastInteractionRenderPath = "webgpu-panel-transform";' in show3d
+    assert "offline-panel-gpu-upload" in show3d
     assert '"layout-transform"' in show3d
     assert '"compare-blink"' in show3d
     assert '"visibility-sidecar"' in show3d
@@ -568,23 +896,45 @@ def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     assert "debug.sidecarDisplayStyleDirty = true;" in show3d
 
 
-def test_show3d_sidecar_export_preserves_display_contrast_contract():
-    """C1: folder export should preserve microscope contrast state."""
-    show3d = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(encoding="utf-8")
-    export_body = show3d.split("    def export_sidecar(", 1)[1].split(
-        "    def _compress_html_if_requested", 1
+def test_show3d_embedded_packed_zoom_reuses_frame_cache_contract():
+    """C1: zooming a packed multi-panel export must not rebuild its whole movie."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    style_key = show3d.split("const sidecarDisplayStyleKey", 1)[1].split(
+        "const syncPlaybackPanelTransform", 1
+    )[0]
+    transform_sync = show3d.split("const syncPlaybackPanelTransform", 1)[1].split(
+        "const clampPanelViewForDraw", 1
     )[0]
 
-    assert "export_widget.auto_contrast = False" not in export_body
-    assert "export_widget.vmin = 0.0" not in export_body
-    assert "\"auto_contrast\": bool(export_widget.auto_contrast)" in export_body
-    assert "\"offline_mins\": list(export_widget._offline_mins or [])" in export_body
-    assert "serve_sidecar_range.py --dir ." in export_body
-    assert "python3 -m http.server" not in export_body
+    # C1: ordinary pan/zoom does not change a packed cache key; orientation
+    # transforms retain the exact legacy per-pixel viewport path.
+    assert "const packedViewportTransformRequiresRebuild" in show3d
+    assert "packedViewportTransformRequiresRebuild ? Number(state.zoom" in style_key
+    assert "packedViewportTransformRequiresRebuild ? Number(state.panX" in style_key
+    assert "packedViewportTransformRequiresRebuild ? Number(state.panY" in style_key
+    # C2: a packed cache invalidates on a viewport transform only when that
+    # transform changes source-pixel orientation semantics.
+    assert "sidecarMode ||" in transform_sync
+    assert "packedViewportTransformRequiresRebuild" in transform_sync
+    # C3: packed exports draw the cached frame through the current panel view.
+    assert "paintEmbeddedPackedCompositeTransform" in show3d
+    assert "embedded-packed-composite-transform" in show3d
+
+
+def test_show3d_sidecar_creation_is_removed_but_legacy_reader_remains():
+    """C1: new exports stay portable while old folder reports still open."""
+    show3d = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(encoding="utf-8")
+    frontend = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "def export_sidecar(" not in show3d
+    assert "export_sidecar()" not in show3d
+    assert "_offline_stack_url" in show3d
+    assert "const sidecarMode = Boolean(" in frontend
+    assert "Failed to load sidecar stack" in frontend
 
 
 def test_show3d_folder_review_range_server_is_shipped():
-    """C1: collaborators can serve folder exports without private lab scripts."""
+    """C1: collaborators can still serve existing folder exports."""
     server = (ROOT / "scripts" / "serve_sidecar_range.py").read_text(encoding="utf-8")
 
     assert "Accept-Ranges" in server
@@ -605,6 +955,8 @@ def test_show3d_playback_row_bookmarks_current_frame_contract():
     assert "const toggleCurrentFrameBookmark" in show3d
     assert "aria-pressed={currentFrameBookmarked}" in show3d
     assert 'currentFrameBookmarked ? "Unstar" : "Star"' in show3d
+    assert 'thumb.getAttribute("data-index") !== "1"' in show3d
+    assert show3d.count("onPointerDownCapture={handleLoopSliderPointerDownCapture}") == 2
 
 
 def test_show3d_offline_packed_panel_playback_uses_per_panel_contrast_contract():
@@ -635,6 +987,34 @@ def test_show3d_fft_cache_ignores_frame_delivery_counter():
     assert "`seq=${frameSeq || 0}`" not in show3d
     assert "fftCacheInvalidations" in show3d
     assert "fftCacheHits" in show3d
+
+
+def test_show3d_fft_overlay_updates_during_playback_contract():
+    """C1: Show3D playback recomputes FFT from the displayed frame."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    show3d_fft_compute = show3d.split(
+        "// Compute FFT magnitude (expensive", 1
+    )[1].split("// Clear FFT measurement", 1)[0]
+
+    assert "FFT_PLAYBACK_UPDATE_INTERVAL_MS" in show3d
+    assert "const playbackFft = Boolean(playing)" in show3d_fft_compute
+    assert "fftPlaybackComputeInFlightRef" in show3d_fft_compute
+    assert "playbackFft ? playbackIdxRef.current" in show3d_fft_compute
+    assert "if (!data && offline) data = getOfflineFrame(fftFrameIdx)" in show3d_fft_compute
+    assert "if (!playbackFft) cancelled = true" in show3d_fft_compute
+    assert "dbg.lastFftFrame = fftFrameIdx" in show3d_fft_compute
+    assert "dbg.lastFftPlayback = playbackFft" in show3d_fft_compute
+    assert "During playback keep the last FFT visible" not in show3d_fft_compute
+
+
+def test_show3d_fft_overlay_top_corners_clear_panel_titles_contract():
+    """C1: dragged top FFT overlays should not collide with panel title chrome."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "function fftOverlayTopInsetPad" in show3d
+    assert "showPanelTitles === false || panelCount <= 1" in show3d
+    assert show3d.count("const topInsetPad = fftOverlayTopInsetPad(") == 2
+    assert "panelTop + topInsetPad" in show3d
 
 
 def test_show2d_show3d_foreground_canvas_repaint_uses_cached_fft_contract():

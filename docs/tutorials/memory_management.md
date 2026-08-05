@@ -58,7 +58,8 @@ JupyterLab from a laptop. The workstation holds the data and runs the GPU work;
 the laptop is the frontend.
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
 data = load("scan_master.h5")  # CUDA is selected automatically when available
 Show4DSTEM(data)
@@ -76,7 +77,8 @@ Good first choices:
 Check the GPU before and after a large load with `quantem.widget.io.memory()`:
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 from quantem.widget.io import memory
 
 memory()  # check VRAM before loading
@@ -114,7 +116,8 @@ Then import and load normally:
 
 ```python
 import torch
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
 print(torch.cuda.get_device_name(0))
 
@@ -198,7 +201,8 @@ print(f"free {free / 1e9:.1f} GB / total {total / 1e9:.1f} GB")
 Keep a handle to the viewer if you plan to release memory later:
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
 data = load("scan_001_master.h5")
 viewer = Show4DSTEM(data)
@@ -312,7 +316,8 @@ preview = np.asarray(stack[::8], dtype=np.float32)  # explicit preview reduction
 On a MacBook, the same API works:
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
 data = load("scan_master.h5")
 Show4DSTEM(data)

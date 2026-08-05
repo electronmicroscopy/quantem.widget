@@ -62,6 +62,21 @@ def test_show3d_refuses_to_hide_every_panel() -> None:
         widget.hide_panel("SSB", "Mean DP")
 
 
+def test_show3d_exposes_a_hover_hide_action_for_each_panel() -> None:
+    frontend = pathlib.Path("js/show3d/index.tsx").read_text()
+
+    # The transient top-left action mirrors the top-right best-frame star.
+    # It is always shipped, follows the hovered panel, and retains the durable
+    # Panels menu as the recovery path for hidden panels.
+    assert 'className="show3d-panel-hide-button"' in frontend
+    assert "const hideVisible = cursorInfo?.panelIdx === i;" in frontend
+    assert "setPanelHidden(i, true);" in frontend
+    assert 'pointerEvents: hideVisible ? "auto" : "none"' in frontend
+    assert '`Hide ${panelLabel(i)}`' in frontend
+    assert 'aria-label="Choose visible panels"' in frontend
+    assert "setHiddenPanels([]);" in frontend
+
+
 def test_show3d_statistics_are_opt_in() -> None:
     widget = Show3D(np.zeros((3, 4, 5), dtype=np.float32), show_controls=False)
 
@@ -106,6 +121,7 @@ def test_show3d_set_image_replaces_stack_and_triggers_new_frame_transfer() -> No
     assert widget.slice_idx == 1
     assert widget.playing is False
     assert widget.hidden_panels == []
+    assert widget.selected_panels == []
     assert widget.panel_order == []
     assert widget.panel_titles == []
     assert widget.starred == [-1]
@@ -145,7 +161,65 @@ def test_show3d_controls_collapsed_roundtrips_state_and_html(tmp_path: pathlib.P
     assert "controls_collapsed" in html
 
 
+def test_show3d_paged_frontend_preserves_view_transform() -> None:
+    frontend = pathlib.Path("js/show3d/index.tsx").read_text()
+
+    # C1: page switching should repaint the newly active page while keeping the
+    # scientist's zoom/pan inspection view, not reset it to the full image.
+    assert "const resetPagedViewTransform" not in frontend
+    assert "const preparePagedPageChange" in frontend
+    assert "resetPagedViewTransform()" not in frontend
+    page_change_helper = frontend.split("const preparePagedPageChange", 1)[1].split(
+        "const previousActivePageStartRef",
+        1,
+    )[0]
+    assert "setGpuDisplayVisible(false)" not in page_change_helper
+    assert "zoom: 1" not in page_change_helper
+    assert "panX: 0" not in page_change_helper
+    assert "panY: 0" not in page_change_helper
+
+    sidecar_viewport_helper = frontend.split(
+        "const paintSidecarU8ViewportToContext",
+        1,
+    )[1].split("const drawSidecarBitmapFrame", 1)[0]
+    assert "ctx.getImageData(0, 0, targetW, targetH)" in sidecar_viewport_helper
+    assert "if (rgba[p + 3] !== 0) continue;" in sidecar_viewport_helper
+    assert 'const bg = themeColors.bg || interPanelGapColor || "#fff";' in sidecar_viewport_helper
+    assert "const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);" in sidecar_viewport_helper
+    assert "effectivePanX" in sidecar_viewport_helper
+
+    manual_commit_helper = frontend.split("const commitSlice = (idx: number) => {", 1)[1].split(
+        "const handleLoopSliderMouseDown",
+        1,
+    )[0]
+    assert 'drawSidecarBitmapFrame(next, false, "scrub-commit")' in manual_commit_helper
+    assert 'drawSidecarBitmapFrame(next, false, "scrub-commit-confirm")' in manual_commit_helper
+
+    sidecar_draw_helper = frontend.split(
+        "const drawSidecarBitmapFrame",
+        1,
+    )[1].split("const previousSidecarPagePaintStartRef", 1)[0]
+    assert "getSidecarPaintScratchContext(canvasW, canvasH)" in sidecar_draw_helper
+    assert "paintSidecarU8ViewportToContext(paintCtx, drawIdx, canvasW, canvasH)" in sidecar_draw_helper
+    assert "ctx.clearRect(0, 0, canvasW, canvasH)" not in sidecar_draw_helper
+
+    transform_render_helper = frontend.split(
+        "const scheduleTransformRender = (): boolean => {",
+        1,
+    )[1].split("React.useEffect(() => () => {", 1)[0]
+    assert 'drawSidecarBitmapFrame(\n        playing ? playbackIdxRef.current : liveSliceIdx,\n        false,\n        "transform-immediate",' in transform_render_helper
+
+    wheel_zoom_helper = frontend.split(
+        "const applyCanvasWheelZoom =",
+        1,
+    )[1].split("canvasWheelHandlerRef.current", 1)[0]
+    assert "setGpuDisplayVisible(false)" not in wheel_zoom_helper
+
+
 def test_show3d_ui_mode_presets_and_overrides() -> None:
+    interactive = Show3D(*_panels()[:2], verbose=False)
+    assert interactive.show_zoom_indicator is False
+
     presentation = Show3D(*_panels()[:2], ui_mode="presentation", verbose=False)
     assert presentation.show_title is True
     assert presentation.show_controls is True
@@ -262,15 +336,20 @@ def test_show3d_hidden_panels_roundtrip_in_state_and_html(tmp_path: pathlib.Path
 
     state = widget.state_dict()
     assert state["hidden_panels"] == [1]
+    widget.selected_panels = [0, 0, 1, 99]
+    state = widget.state_dict()
+    assert state["selected_panels"] == [0, 1]
 
     restored = Show3D(*_panels()[:2], panel_titles=["SSB", "Mean DP"], show_controls=False)
     restored.load_state_dict(state)
     assert restored.hidden_panels == [1]
+    assert restored.selected_panels == [0]
     assert restored.visible_panels == [0]
 
     out = widget.export_html(tmp_path / "show3d_hidden_panel.html", encoding="full")
     html = out.read_text()
     assert "hidden_panels" in html
+    assert "selected_panels" in html
     assert "Mean DP" in html
 
 
@@ -280,6 +359,7 @@ def test_show3d_panel_order_controls_visible_order_and_handoff() -> None:
         panel_titles=["SSB", "Mean DP", "Probe"],
         panel_order=["Probe", "SSB", "Mean DP"],
         hidden_panels=["Mean DP"],
+        cmap=["magma", "viridis", "inferno"],
         show_controls=False,
     )
 
@@ -293,6 +373,7 @@ def test_show3d_panel_order_controls_visible_order_and_handoff() -> None:
 
     out = widget.to_show2d(frame=1)
     assert out.labels == ["Probe 2/3", "SSB 2/3"]
+    assert out.panel_cmaps == ["inferno", "magma"]
     np.testing.assert_allclose(out._data[0], _panels()[2][1])
     np.testing.assert_allclose(out._data[1], _panels()[0][1])
 

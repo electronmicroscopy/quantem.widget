@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Local-only real-data ``quantem.widget.load`` benchmark matrix.
+"""Local-only real-data ``quantem.gpu.io.load`` benchmark matrix.
 
-This is the widget-side version of the QuantEM.live loader matrix. It is not a
-normal CI test: it expects private ``*_master.h5`` files on the workstation and
-writes report artifacts outside the repo by default.
+This widget-workflow signoff measures the canonical ``quantem.gpu.io`` loader.
+It is not a normal CI test: it expects private ``*_master.h5`` files on the
+workstation and writes report artifacts outside the repo by default.
 """
 
 from __future__ import annotations
@@ -22,45 +22,10 @@ from typing import Any
 GiB = 1 << 30
 
 
-def _widget_hdf5_module() -> Any:
-    """Import the HDF5 loader without requiring the full widget package."""
-    import importlib
-    import importlib.util
-    import types
-
-    try:
-        return importlib.import_module("quantem.widget.io.hdf5")
-    except Exception:
-        root = Path(__file__).resolve().parents[1]
-        src = root / "src" / "quantem"
-        for name in list(sys.modules):
-            if name == "quantem.widget" or name.startswith("quantem.widget."):
-                sys.modules.pop(name, None)
-        quantem = sys.modules.get("quantem") or types.ModuleType("quantem")
-        quantem.__path__ = [str(src)]  # type: ignore[attr-defined]
-        sys.modules["quantem"] = quantem
-        widget = types.ModuleType("quantem.widget")
-        widget.__path__ = [str(src / "widget")]  # type: ignore[attr-defined]
-        sys.modules["quantem.widget"] = widget
-        io_pkg = types.ModuleType("quantem.widget.io")
-        io_pkg.__path__ = [str(src / "widget" / "io")]  # type: ignore[attr-defined]
-        sys.modules["quantem.widget.io"] = io_pkg
-        spec = importlib.util.spec_from_file_location(
-            "quantem.widget.io.hdf5",
-            src / "widget" / "io" / "hdf5.py",
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError("Could not import quantem.widget.io.hdf5")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["quantem.widget.io.hdf5"] = module
-        spec.loader.exec_module(module)
-        return module
-
-
 def _default_glob() -> str:
     return os.environ.get(
         "QUANTEM_WIDGET_BENCH_MASTERS_GLOB",
-        "/home/owner/data/dasol/20260415_BTOSTO/*_master.h5",
+        os.environ.get("QUANTEM_BENCH_MASTER_GLOB", "data/**/*_master.h5"),
     )
 
 
@@ -171,7 +136,8 @@ def _hash_payload(payload: Any) -> int:
 
 
 def _timed_load(case: dict[str, Any], *, skip_parity: bool) -> tuple[float, Any, int | None]:
-    load = _widget_hdf5_module().load
+    from quantem.gpu.io import load
+
     kwargs: dict[str, Any] = {"det_bin": int(case["det_bin"]), "verbose": False}
     dtype = str(case.get("dtype") or "")
     if dtype == "u8":
@@ -250,7 +216,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _format_table(rows: list[tuple[str, dict[str, Any] | None]], args: argparse.Namespace) -> str:
     lines = [
-        "# quantem.widget load() benchmark matrix",
+        "# quantem.gpu.io.load benchmark matrix",
         "",
         f"Generated {time.strftime('%Y-%m-%d %H:%M:%S')}. Real private data; artifacts stay local.",
         f"Cold = backing chunk files advised out of page cache. Warm = min of {args.warm_runs} hot run(s).",
