@@ -29,9 +29,9 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 | `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar, display-side denoise, view-only low/high/band-pass frequency filters |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
+| `ShowDiffraction` | 2D diffraction pattern or 3D stack | spot/ring d-spacings, center refinement, calibration, phase indexing |
 | `Show4DSTEM` | 4D-STEM array, or 5D stack | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC, dataset slider + compare grid, offline WebGPU export |
 | `ShowPtycho` | 4D-STEM master / SSB result | interactive SSB phase review: C10/C12/phi12/rotation sliders re-reconstruct in ~5-18 ms on-GPU; kernel-less WebGPU folder export for laptops |
-| `ShowDiffraction` | 2D pattern or 3D stack | d-spacing, g-vector, and angle measurement on Bragg spots and rings |
 | `ChooseLattice` | 2D image | ordered origin, a1, and a2 point selection for lattice-vector measurements |
 | `ShowEDS` | EDS/EELS spectrum image | linked element map, spectrum, energy band, real-space ROI, and automatic element identification |
 | `ShowFolder` | microscopy session folder | fast thumbnail browser, grouping, and file selection |
@@ -47,6 +47,7 @@ ChooseLattice(np.random.rand(512, 512))
 Show1D(np.random.rand(100), x_label="frame", y_label="defocus", y_unit="nm")
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
+ShowDiffraction(np.random.rand(512, 512))
 ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
 ShowFolder("/data/session")
 ```
@@ -95,6 +96,7 @@ quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable 
 quantem showptycho scan_master.h5            # raw 4D-STEM master  -> user-owned review project
 quantem showptycho ./ptycho-export/          # existing project    -> WebGPU browser review
 quantem showfolder ./session/                # microscopy folder   -> ShowFolder notebook/HTML
+quantem showdiffraction pattern.npy          # diffraction         -> analyzed ShowDiffraction HTML
 quantem html tutorial.ipynb                  # a notebook          -> standalone offline HTML
 ```
 
@@ -106,6 +108,7 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
 | `quantem showptycho <master(s) / folder>` | one or more `*_master.h5`, or an existing project | one index with direct ShowPtycho and Show4DSTEM browser viewers |
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
+| `quantem showdiffraction <pattern>` | a diffraction pattern, or `--demo` | analyzed ShowDiffraction HTML: rings and fits; with `--phase`, calibration and hkl |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
 | `quantem github <notebook.ipynb>` | a notebook copy for GitHub | strips widget state, embeds compressed pictures for GitHub's preview |
 

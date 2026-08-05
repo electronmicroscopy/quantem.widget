@@ -44,6 +44,9 @@ _GOLD_4DSTEM_NAME = "gold-128-bin8"
 _GOLD_4DSTEM_SOURCE_SIZE = "full"
 _SHOWFOLDER_GOLD_VIEWER = "showfolder"
 _SHOWFOLDER_GOLD_NAME = "gold-haadf-session"
+_FE3O4_SAED_VIEWER = "showdiffraction"
+_FE3O4_SAED_NAME = "fe3o4-saed"
+_FE3O4_PACKAGED_PATH = Path(__file__).parent / "fe3o4_saed_512.npy"
 
 
 @dataclass(frozen=True)
@@ -344,6 +347,69 @@ def showfolder_gold(
         print(f"Tutorial ShowFolder folder: {folder}")
         print(f"Files: {len(files)} EMD")
     return folder
+
+
+def showdiffraction_fe3o4(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+    allow_fallback: bool = True,
+) -> np.ndarray:
+    """Load the real Fe3O4 nanoparticle SAED pattern used by the ShowDiffraction tutorial.
+
+    The pattern is downloaded from
+    ``widget-tutorials/showdiffraction/fe3o4-saed`` and falls back to a packaged
+    copy when the download is unavailable. It is uncalibrated by design; the
+    tutorial calibrates it against the Fe3O4 phase.
+
+    Parameters
+    ----------
+    size
+        Tutorial payload size. Valid values are ``"small"``, ``"medium"``,
+        ``"large"``, and ``"full"``. The public upload provides the ``"small"``
+        payload.
+    cache_dir
+        Optional Hugging Face cache directory.
+    revision
+        Optional Hugging Face dataset revision.
+    force_download
+        If ``True``, ask Hugging Face Hub to refresh the cached files.
+    verbose
+        If ``True``, print a short dataset summary.
+    allow_fallback
+        If ``True``, use the packaged pattern when the download is unavailable.
+
+    Returns
+    -------
+    np.ndarray
+        512 by 512 float32 diffraction pattern.
+    """
+
+    size = _normalise_tutorial_size(size)
+    try:
+        folder = _download_widget_tutorial_folder(
+            _FE3O4_SAED_VIEWER,
+            _FE3O4_SAED_NAME,
+            size=size,
+            cache_dir=cache_dir,
+            revision=revision,
+            force_download=force_download,
+        )
+        source = folder / "data.npy"
+        if not source.is_file():
+            raise FileNotFoundError(f"tutorial pattern is missing: {source}")
+    except Exception:
+        if not allow_fallback or not _FE3O4_PACKAGED_PATH.is_file():
+            raise
+        source = _FE3O4_PACKAGED_PATH
+    pattern = np.asarray(np.load(source), dtype=np.float32)
+    if verbose:
+        print(f"Fe3O4 SAED tutorial pattern: {source}")
+        print(f"Pattern: {pattern.shape[0]} x {pattern.shape[1]} {pattern.dtype}")
+    return pattern
 
 
 def _gold_haadf_2d_from_folder(folder: Path, *, stride: int, verbose: bool = True) -> Dataset2d:

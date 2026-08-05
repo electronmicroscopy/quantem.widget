@@ -5,6 +5,7 @@
 """
 import json
 import pathlib
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -1115,3 +1116,104 @@ def test_out_path_explicit_file(tmp_path):
     dest = tmp_path / "custom" / "viewer.html"
     assert cli.main(["show", str(p), "--no-open", "--out", str(dest)]) == 0
     assert dest.exists()
+
+
+# ---------------------------------------------------------------------------
+def _ring_pattern(size=256, radii=(60.0, 90.0)):
+    center = (size - 1) / 2
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    r = np.hypot(rows - center, cols - center)
+    pattern = 300.0 * np.exp(-(r**2) / (2 * 8.0**2)) + 20.0 * np.exp(-r / 40.0)
+    for radius in radii:
+        pattern += 30.0 * np.exp(-((r - radius) ** 2) / (2 * 2.5**2))
+    return pattern.astype(np.float32)
+
+
+def test_showdiffraction_writes_html(tmp_path, monkeypatch):
+    # a 2D pattern, a 3D stack, and the --demo path all export
+    p = tmp_path / "pattern.npy"
+    np.save(p, _ring_pattern())
+    dest = tmp_path / "out"
+    assert cli.main(["showdiffraction", str(p), "--no-open", "--out", str(dest) + "/"]) == 0
+    out = dest / "pattern_showdiffraction.html"
+    assert out.exists() and out.stat().st_size > 50_000
+
+    stack = tmp_path / "stack.npy"
+    np.save(stack, np.stack([_ring_pattern(), _ring_pattern(radii=(50.0, 80.0))]))
+    argv = ["showdiffraction", str(stack), "--no-auto", "--no-open", "--out", str(dest) + "/"]
+    assert cli.main(argv) == 0
+    assert (dest / "stack_showdiffraction.html").exists()
+
+    monkeypatch.setattr(
+        "quantem.widget.data.tutorials.showdiffraction_fe3o4",
+        lambda **kwargs: _ring_pattern(),
+    )
+    assert cli.main(["showdiffraction", "--demo", "--no-open", "--out", str(dest) + "/"]) == 0
+    demo = dest / "fe3o4_saed_showdiffraction.html"
+    assert demo.exists() and demo.stat().st_size > 50_000
+
+
+def test_showdiffraction_phase_modes(tmp_path, capsys):
+    # --phase calibrates and indexes, an explicit --k-pixel-size survives it,
+    # and --no-auto still preselects the phase
+    from quantem.widget.crystal import library_phase
+
+    au = library_phase("Au")
+    size = 512
+    center = (size - 1) / 2
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    r = np.hypot(rows - center, cols - center)
+    pattern = 300.0 * np.exp(-(r**2) / (2 * 8.0**2)) + 20.0 * np.exp(-r / 40.0)
+    for refl in au.reflections(d_min=1.2):
+        pattern += 30.0 * np.exp(-((r - 1.0 / (refl["d"] * 0.004)) ** 2) / (2 * 2.5**2))
+    p = tmp_path / "au.npy"
+    np.save(p, pattern.astype(np.float32))
+    dest = tmp_path / "out"
+
+    argv = ["showdiffraction", str(p), "--phase", "Au", "--max-rings", "4",
+            "--no-open", "--out", str(dest) + "/"]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert re.search(r"0\.00(39|40|41) 1/Å", out)
+    assert re.search(r"Au \(fcc\): \d/4 matched", out)
+    assert (dest / "au_showdiffraction.html").exists()
+
+    argv = ["showdiffraction", str(p), "--phase", "Au", "--k-pixel-size", "0.005",
+            "--no-open", "--out", str(dest) + "/"]
+    assert cli.main(argv) == 0
+    assert "0.0050 1/Å" in capsys.readouterr().out
+
+    ring = tmp_path / "pattern.npy"
+    np.save(ring, _ring_pattern())
+    argv = ["showdiffraction", str(ring), "--no-auto", "--phase", "Fe3O4",
+            "--no-open", "--out", str(dest) + "/"]
+    assert cli.main(argv) == 0
+    assert "Fe3O4" in (dest / "pattern_showdiffraction.html").read_text(encoding="utf-8")
+
+
+def test_showdiffraction_bad_inputs_error_cleanly(tmp_path, capsys):
+    assert cli.main(["showdiffraction"]) == 1
+    assert "--demo" in capsys.readouterr().err
+
+    p = tmp_path / "pattern.npy"
+    np.save(p, _ring_pattern())
+    assert cli.main(["showdiffraction", str(p), "--demo", "--no-open"]) == 1
+    assert "not both" in capsys.readouterr().err
+
+    assert cli.main(["showdiffraction", str(p), "--phase", "Nope", "--no-open"]) == 1
+    assert "unknown library phase" in capsys.readouterr().err
+
+    notes = tmp_path / "notes.txt"
+    notes.write_text("hi")
+    assert cli.main(["showdiffraction", str(notes), "--no-open"]) == 1
+    assert "unsupported file type" in capsys.readouterr().err
+
+    assert cli.main(["showdiffraction", str(tmp_path), "--no-open"]) == 1
+    assert "not a file" in capsys.readouterr().err
+
+    empty = tmp_path / "empty.npy"
+    empty.write_bytes(b"")
+    assert cli.main(["showdiffraction", str(empty), "--no-open"]) == 1
+    assert "could not read" in capsys.readouterr().err

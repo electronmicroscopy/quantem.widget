@@ -578,49 +578,26 @@ For pages containing several panels, pass `panel_slot=` to
 specific numerical profile. The interactive kymograph intentionally remains a
 single-panel-page tool so its line and depth axes are unambiguous.
 
-## Full-resolution folder export (advanced)
+## Portable HTML export
 
-Use the folder export when a microscopist needs to scrub a large stack at the
-native detector/reconstruction size instead of opening a reduced one-file HTML.
-This writes a small `index.html` beside an `offline_stack.u8` data file and a
-`manifest.json`:
+Show3D writes one portable HTML file. Use `encoding="uint8"` for visual review
+and choose `downsample=1`, `2`, `4`, or `8` explicitly based on the required
+spatial detail:
 
 ```python
 from quantem.widget import Show3D
 
-w = Show3D(stack, title="800C 1.3Mx full-resolution review", debug=True)
-w.export_sidecar("/data/reports/800C_1.3Mx_fullres")
+w = Show3D(stack, title="800C 1.3Mx review", debug=True)
+w.export_html(
+    "/data/reports/800C_1.3Mx_review.html",
+    encoding="uint8",
+    downsample=1,
+)
 ```
 
-Serve the folder over Range-capable local HTTP; do not open the HTML with
-`file://` because the browser must fetch the data file:
-
-```bash
-# Use your project or lab helper that supports HTTP Range requests.
-python scripts/serve_sidecar_range.py \
-  --dir /data/reports/800C_1.3Mx_fullres \
-  --port 8803 --bind 127.0.0.1
-```
-
-Then open `http://127.0.0.1:8803/index.html`. The viewer shell should appear
-immediately. The browser then loads the full stack into memory, shows the load
-status banner, and swaps to the cached playback path when the stack is ready.
-Changing Color or the histogram range repaints the current microscope view
-immediately, marks the playback cache as updating, and rebuilds the remaining
-frames in the background. Scrubbing during that rebuild should still advance
-the current frame; once the banner clears, playback uses the cached full-stack
-path again.
-
-This workflow preserves the source spatial shape used to construct the widget.
-If you intentionally want a smaller browse artifact, make that explicit with a
-separate downsampled/single-file export rather than treating it as the
-full-resolution review copy. For the end-to-end browser checklist and example
-timing report, see the [advanced tutorial](../tutorials/advanced.md).
-
-When sharing this export, send or copy the whole folder. `index.html` is not a
-standalone result for this mode; it needs `offline_stack.u8` and `manifest.json`
-beside it. The colleague should serve the received folder with the same Range
-helper and open the local URL.
+For exact multi-gigabyte analysis, keep the live Jupyter widget connected to
+the source arrays. Show3D no longer creates companion sidecar folders. Existing
+legacy sidecar reports remain readable for compatibility.
 
 ## Animation exports
 
