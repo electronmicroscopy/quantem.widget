@@ -1,5 +1,6 @@
 import json
 import math
+from collections import namedtuple
 
 import numpy as np
 import pytest
@@ -8,7 +9,8 @@ import torch
 from quantem.widget import ShowDiffraction
 from quantem.widget.crystal import Phase
 from quantem.widget.diffraction import build_measurement_records, measurement_metadata
-from quantem.widget.io import LoadResult
+
+LoadResult = namedtuple("LoadResult", ("data", "metadata"))
 
 
 def _disk_dp(size=64, center=(32, 30), radius=6):

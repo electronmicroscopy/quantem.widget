@@ -15,6 +15,657 @@ around a real question from the microscope room:
   acquisitions appear in it.
 - **Comparing reconstructions** - panels with independent frame stacks for
   regularization sweeps, convergence checks, and slice-count comparisons.
+- **Advanced Show2D** - configure dense comparison galleries with rich math
+  titles, local annotations, geometric overlays, inset plots, panel identity
+  frames, publication SVG typography, pixel-perfect gutters, presentation mode,
+  and export-ready state.
+- **Full-resolution Show3D folder viewers** - keep the microscope/reconstruction
+  pixels at native shape while the browser loads a nearby data file instead of
+  one giant HTML blob.
+- **ShowPtycho WebGPU folder viewers** - share ptychography aberration review
+  with a small HTML viewer and a BF-indexed `G(k)` payload; use full BF for
+  final claims and fewer BF pixels for fast exploration.
+- **Rich math labels and annotations** - use λ, χ², colored spans, and local
+  region labels in Show2D/Show3D panels without exposing raw TeX markup.
+- **Geometric panel overlays** - add reproducible circles, rectangles, and
+  squares to specific regions in Show2D/Show3D panels for demos, reports, and
+  figure preparation.
+- **Show2D inset plots** - put a small calibration curve inside each image
+  panel, so a denoise or reconstruction sweep carries the metric that explains
+  why the scientist should trust that panel.
+
+(large-show3d-reviews)=
+
+## Large Show3D reviews
+
+Show3D exports one portable HTML file. Choose the display payload explicitly:
+
+| Review need | Recommended path | What it means |
+| --- | --- | --- |
+| Email or attach one browseable artifact | `export_html(..., encoding="uint8", downsample=2)` | Compact review copy with explicit spatial reduction. |
+| Preserve the current display shape | `export_html(..., encoding="uint8", downsample=1)` | One portable HTML using display-scaled uint8 data. |
+| Recompute, stream fresh frames, or inspect exact backend arrays | live Jupyter widget | Python owns the arrays and the browser remains interactive. |
+
+```python
+from quantem.widget import Show3D
+
+w = Show3D(
+    raw_stack,
+    tikhonov_stack,
+    tv2_stack,
+    panel_titles=["raw", "Tikhonov", "TV2"],
+    title="800C 1.3Mx denoise review",
+    display_bin=1,
+    link_contrast=False,
+    debug=True,
+)
+w.export_html(
+    "/data/reports/800C_1.3Mx_review.html",
+    encoding="uint8",
+    downsample=1,
+)
+```
+
+Large exact float32 files can exceed browser limits. Prefer uint8 for visual review,
+use an explicit `downsample` when needed, and keep exact multi-gigabyte analysis in
+the live widget rather than creating a companion sidecar folder.
+
+## Label local regions inside panels
+
+Use whole-panel `labels` / `panel_titles` for panel identity, `marker_colors`
+or group frames for visual identity, and `panel_annotations` for local notes
+inside a panel. Annotations are useful for ROI names, dose/status badges,
+χ² labels, residual warnings, and callouts that should stay attached to the
+image when the widget is saved or exported.
+
+Each annotation is JSON-safe and survives notebook state plus
+`export_html(...)`. The default style is a readable badge over scientific
+images. Built-in variants are `badge`, `pill`, `plain`, `outline`, and
+`callout`.
+
+### Show2D: multiple labels on one panel
+
+`panel_annotations` can be a dictionary keyed by panel index or panel label.
+Each value can be one annotation or a list of annotations.
+
+```python
+import numpy as np
+
+from quantem.widget import Show2D
+
+rng = np.random.default_rng(12)
+yy, xx = np.mgrid[-1:1:192j, -1:1:192j]
+base = np.exp(-((xx * 1.3) ** 2 + (yy * 0.9) ** 2) * 3)
+images = np.stack(
+    [
+        base + 0.15 * np.sin(3 * np.pi * xx),
+        base + 0.12 * np.cos(4 * np.pi * yy),
+        base - 0.35,
+    ]
+).astype("float32")
+
+Show2D(
+    images,
+    labels=["raw", "filtered", "residual"],
+    ncols=3,
+    marker_colors=["#60a5fa", "#34d399", "#f87171"],
+    marker_style="around",
+    panel_annotations={
+        "raw": [
+            {"text": "input", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [
+                    {"text": "ROI "},
+                    {"text": "A", "color": "#60a5fa"},
+                ],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+                "bg": "rgba(0,0,0,0.58)",
+                "border_color": "#60a5fa",
+            },
+            {
+                "text": "same region",
+                "box": [0.18, 0.43, 0.30, 0.12],
+                "variant": "outline",
+                "border_color": "#facc15",
+            },
+        ],
+        "filtered": {
+            "text": "point label",
+            "x": 0.68,
+            "y": 0.32,
+            "anchor": "center",
+            "bg": "rgba(255,255,255,0.55)",
+            "fg": "#111827",
+        },
+        "residual": {
+            "text": "check residual",
+            "position": "bottom-center",
+            "variant": "plain",
+            "font_size": 13,
+        },
+    },
+)
+```
+
+### Show2D: single-panel shorthand
+
+For a single image, pass a list directly. Every item labels the only panel, so
+you do not need to write `panel=0`.
+
+```python
+Show2D(
+    images[0],
+    panel_annotations=[
+        {"text": "single panel", "position": "top-left", "variant": "pill"},
+        {
+            "text": "no panel= needed",
+            "position": "bottom-right",
+            "variant": "outline",
+            "border_color": "#facc15",
+        },
+    ],
+)
+```
+
+### Show3D: target panels by title
+
+For multi-panel Show3D, a flat list is often easiest. Include `panel=` on each
+annotation and target either a panel index or a `panel_titles` value.
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw stack", "denoised stack", "residual stack"],
+    marker_style="around",
+    panel_annotations=[
+        {"panel": "raw stack", "text": "input", "position": "top-left"},
+        {
+            "panel": "raw stack",
+            "text": "same panel",
+            "position": "bottom-left",
+            "variant": "outline",
+            "border_color": "#facc15",
+        },
+        {
+            "panel": "residual stack",
+            "spans": [
+                {"text": "χ² "},
+                {"text": "high", "color": "#f87171"},
+            ],
+            "x": 0.5,
+            "y": 0.18,
+            "anchor": "top-center",
+        },
+        {
+            "panel": "residual stack",
+            "text": "region box",
+            "box": [0.56, 0.48, 0.32, 0.16],
+            "variant": "callout",
+            "bg": "rgba(0,0,0,0.65)",
+        },
+    ],
+)
+```
+
+### Placement and style reference
+
+Use corner placement for badges, normalized points for callouts tied to a
+feature, and normalized boxes when the label should occupy a local region.
+
+```python
+{"text": "corner", "position": "top-left"}
+{"text": "point", "x": 0.62, "y": 0.35, "anchor": "center"}
+{"text": "region", "box": [0.20, 0.25, 0.30, 0.18]}
+```
+
+Common style keys are `bg`, `fg`, `border_color`, `border_width`,
+`font_size`, `font_weight`, `pad_x`, `pad_y`, `radius`, `opacity`, `align`,
+`max_width`, and `class_name`. `class_name` is useful when exported HTML needs
+project-specific CSS or when a browser test needs a stable selector.
+
+(geometric-panel-overlays)=
+
+## Add geometric overlays to panel regions
+
+Use `panel_overlays` when a circle, rectangle, or square is part of the
+scientific figure specification rather than a hand-drawn ROI. These overlays
+are reproducible from Python, saved in widget state, and rendered in exported
+HTML. They are useful for marking a defect, a crop window, a region reused
+across raw/denoised/residual panels, or a fixed visual guide in a demo.
+
+The default coordinate system is data pixels with QuantEM's user-facing
+`(row, col)` convention:
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, denoised, residual],
+    labels=["raw", "denoised", "residual"],
+    marker_style="around",
+    marker_colors=["#60a5fa", "#34d399", "#f87171"],
+    panel_overlays={
+        "raw": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#60a5fa",
+                "stroke_width": 3,
+                "line_style": "dashed",
+            },
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+                "dash": [6, 2, 1, 2],
+                "z_order": 1,
+            },
+        ],
+        "denoised": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#34d399",
+                "stroke_width": 3,
+                "line_style": "dotted",
+            },
+            {
+                "shape": "square",
+                "center": (96, 88),
+                "size": 42,
+                "stroke": "#facc15",
+                "stroke_opacity": 0.85,
+                "line_style": "dashdot",
+            },
+        ],
+        "residual": {
+            "shape": "rect",
+            "xywh": (58, 48, 88, 78),
+            "stroke": "#f87171",
+            "stroke_width": 2,
+        },
+    },
+)
+```
+
+The same API works on multi-panel Show3D, where the shapes stay attached to the
+panel while the user scrubs or plays the stack:
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": {"shape": "circle", "center": (96, 88), "radius": 14},
+        "denoised": [
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+            }
+        ],
+    },
+)
+```
+
+For a guide that should appear on every panel, use `overlays=[...]` instead of
+`panel_overlays`. For overlays generated in a loop, a flat list can target
+panels with `panel=0` or `panel="raw"`:
+
+```python
+shared_defect_circle = {
+    "shape": "circle",
+    "center": (0.52, 0.46),
+    "radius": 0.07,
+    "coords": "relative",
+    "stroke": "#60a5fa",
+    "stroke_width": 2,
+}
+
+Show2D([raw, denoised], labels=["raw", "denoised"], overlays=[shared_defect_circle])
+
+Show2D(
+    [raw, denoised],
+    labels=["raw", "denoised"],
+    panel_overlays=[
+        {"panel": "raw", "shape": "circle", "center": (96, 88), "radius": 14},
+        {"panel": "denoised", "shape": "rect", "box": (48, 58, 126, 146)},
+    ],
+)
+```
+
+Use `coords="relative"` only when normalized 0-1 panel geometry is more stable
+than pixel geometry, for example when comparing panels with different shapes.
+Style keys include `stroke`, `stroke_width`, `line_style`, `dash`,
+`stroke_opacity`, `fill`, `fill_opacity`, `opacity`, and `z_order`.
+`line_style` accepts `solid`, `dashed`, `dotted`, or `dashdot`; use
+`dash=[on, off, ...]` for a custom canvas dash pattern. A provided `fill` is
+visible by default; set `fill_opacity=0` for stroke-only shapes.
+
+When overlays are present, open `More -> Overlay Edit` in the live widget or
+exported HTML. Click a circle or rectangle to select it, drag inside to move it,
+drag an edge to resize it, press Delete to remove the selected overlay, and
+choose `Reset Overlays` to restore the constructor state. Use ROI tools when
+the geometry should feed statistics, FFT crops, or Python readback.
+
+(rich-math-labels-and-presentation-exports)=
+
+## Rich math labels and presentation exports
+
+Scientific comparison panels often need symbols rather than prose: `λ` for a
+regularization sweep, `χ²/pixel` for a residual score, or colored fragments in
+one title. Plain Unicode symbols work directly in panel titles and annotations:
+
+```python
+Show2D(images, labels=["λ=0.01", "χ² / pixel"])
+```
+
+For notebook code that should read like math, use inline TeX between `$...$`
+or a structured `math` span. The widget renders common Greek symbols and
+simple superscripts/subscripts without loading MathJax or KaTeX.
+
+```python
+Show2D(
+    images,
+    labels=[
+        r"$\lambda=0.01$ raw",
+        r"$\chi^2$/pixel residual",
+    ],
+    panel_annotations={
+        0: {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+        1: {
+            "spans": [
+                {"math": r"\chi^2"},
+                {"text": "/pixel"},
+            ],
+            "position": "top-right",
+            "variant": "outline",
+        },
+    },
+)
+
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.01"}, {"text": " object"}],
+        r"$\chi^2$/pixel",
+    ],
+)
+```
+
+For richer title chrome, pass `panel_title_spans`. Each span can contain
+`text`, `math`, and optional `color`. The same rendered title is used in the
+panel image, the `Panels` menu, the stats row, saved notebook state, and
+standalone HTML:
+
+```python
+rich_titles = [
+    [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+    [{"text": "denoised", "color": "#34d399"}],
+    [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+]
+
+Show2D(
+    [raw, denoised, residual],
+    panel_title_spans=rich_titles,
+    ncols=3,
+    show_stats=True,
+)
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=rich_titles,
+    show_stats=True,
+)
+```
+
+Use `panel_annotations` when the label belongs to a region inside a panel rather
+than to the whole panel. A panel can have several annotations, and each one can
+also use `math` or `spans`:
+
+```python
+Show2D(
+    [raw, residual],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    marker_style="around",
+    marker_colors=["#60a5fa", "#f87171"],
+    panel_annotations={
+        0: [
+            {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [
+                    {"text": "ROI "},
+                    {"text": "A", "color": "#60a5fa"},
+                ],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+            },
+        ],
+        1: {
+            "spans": [{"math": r"\chi^2"}, {"text": " high", "color": "#f87171"}],
+            "position": "top-right",
+            "variant": "outline",
+        },
+    },
+)
+```
+
+Presentation mode keeps this same rich label rendering but starts with the
+controls collapsed, which is useful for shared notebooks and exported HTML:
+
+```python
+w = Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    ui_mode="presentation",
+)
+w.export_html("regularization_review.html", encoding="uint8")
+```
+
+The collapsed view still shows `Controls` and `Export` in the title chrome.
+In live Jupyter, Show3D's Export menu can write HTML and request GIF/MP4
+animation exports through Python. In standalone HTML, the page can download
+itself as HTML, export GIF in the browser, and export MP4 when the browser
+provides WebCodecs H.264 support. If browser MP4 is unavailable, reopen the
+live Python widget for MP4 export.
+
+For PowerPoint, Slack, or publication review, export movies from the live
+widget or from exact HTML when possible. A standalone HTML file made with
+`encoding="uint8"` is still useful for compact review, but GIF/MP4 from that
+file uses the encoded display data and GIF then applies a 256-color palette.
+The export panel warns about this path and points users back to
+`encoding="full"` when fidelity matters.
+
+This math support is intentionally compact: use it for labels such as
+`λ`, `χ²`, `σ`, `μ`, `Δ`, subscripts, superscripts, and short units. For a
+full equation, keep the equation in Markdown/LaTeX near the widget and use a
+short annotation inside the panel.
+
+Prefer Python raw strings for TeX-style labels so the notebook source stays
+readable. If a label comes from JSON, a widget state file, or another exporter
+with doubled backslashes, the frontend normalizes those sequences before
+rendering so `\\lambda` displays as `λ`, not `\λ`.
+
+```python
+math_labels = [
+    r"$\lambda=0.03$ raw",
+    r"$\chi^2$/pixel residual",
+]
+
+Show2D(images[:2], labels=math_labels)
+Show3D(raw_stack, residual_stack, panel_titles=math_labels)
+```
+
+## Add inset plots to Show2D panels
+
+A common review moment is not only "which image looks best?", but "which image
+matches the calibration curve?" For example, during denoising calibration a
+scientist may compare several Show2D panels while also tracking an ACF score,
+residual ratio, dose curve, or other small diagnostic trace. `inset_plots` lets
+each image panel carry that trace directly inside the panel, without creating a
+separate Matplotlib figure cell that drifts away from the image.
+
+The example below keeps the widget call readable. Each dictionary describes one
+inset plot. When a list is supplied, the first plot is drawn on the first panel,
+the second on the second panel, and so on. A single dictionary can also be
+broadcast to every panel when the same curve should appear everywhere.
+
+```python
+import numpy as np
+
+from quantem.widget import Show2D
+
+rng = np.random.default_rng(4)
+yy, xx = np.mgrid[:192, :192].astype("float32")
+base = (
+    1.0
+    + 0.7 * np.cos(2 * np.pi * xx / 12)
+    + 0.7 * np.cos(2 * np.pi * yy / 12)
+)
+
+images = []
+insets = []
+labels = []
+for i, sigma in enumerate([0, 2, 4, 6]):
+    noisy = base + rng.normal(0, 0.18, base.shape)
+    # In a real notebook this would be the denoised reconstruction for sigma.
+    preview = noisy if sigma == 0 else 0.75 * base + 0.25 * noisy
+    images.append(preview.astype("float32"))
+    labels.append(f"σ={sigma} preview")
+
+    radius = np.linspace(0.1, 1.0, 16)
+    acf = np.exp(-radius * (0.9 + 0.08 * sigma))
+    insets.append(
+        {
+            "x": radius,
+            "y": acf,
+            "point": min(i * 4 + 2, len(radius) - 1),
+            "xlabel": "R",
+            "ylabel": "ACF",
+            "legend": f"σ={sigma}",
+            "position": "bottom-right",
+            "margin": 0.04,
+            "size": 0.34,
+            "height": 0.24,
+            "line_width": 2.2,
+            "point_color": "#ffcc00",
+            "background_alpha": 0.72,
+            "show_ticks": True,
+            "tick_font_size": 10,
+            "label_font_size": 11,
+            "legend_font_size": 11,
+        }
+    )
+
+Show2D(
+    images,
+    labels=labels,
+    ncols=2,
+    cmap="inferno",
+    inset_plots=insets,
+    scale_bar_position="bottom-left",
+    show_zoom_indicator=False,
+)
+```
+
+When `inset_plots` is initialized, Show2D adds an `Inset Chart` switch under
+`More`. Use it to hide or restore the charts without changing the data. The
+charts can also be dragged directly inside the panel: while dragging, the chart
+follows the pointer; when released, it snaps to the nearest corner and stores
+that corner plus a margin in widget state.
+
+### Position, sizing, and publication style
+
+Use `position` when the plot belongs in a corner and `margin` when it needs a
+little breathing room from the image edge. `size` is the inset width as a
+fraction of the panel width, and `height` is the height as a fraction of the
+panel height. These fractional controls make the same notebook behave naturally
+when the panel is resized, exported to HTML, or saved as a notebook preview.
+
+For figure-like layouts, use `box` for exact placement:
+
+```python
+inset_plots=[
+    {
+        "x": ratio,
+        "y": acf,
+        "xlabel": "R ratio",
+        "ylabel": "ACF",
+        "legend": "chosen σ",
+        "box": [0.60, 0.58, 0.34, 0.26],  # x, y, width, height in panel units
+        "background": "#000000",
+        "background_alpha": 0.35,
+        "border_width": 0,
+        "text_color": "#ffffff",
+        "tick_color": "#ffffff",
+        "line_width": 3,
+    }
+]
+```
+
+If the inset competes with the scale bar, move the scale bar instead of hiding
+the science:
+
+```python
+Show2D(
+    image,
+    inset_plots=calibration_plot,
+    scale_bar_position="bottom-left",
+    show_zoom_indicator=False,
+)
+```
+
+### Hover readout and saved outputs
+
+In the browser, hovering over the inset reports the nearest plotted coordinate
+using the axis labels, for example `R 0.47 · ACF 0.48`. This is meant for the
+human review loop: a scientist can point at the diagnostic curve and read the
+exact value without leaving the image panel.
+
+The inset specification is part of the Show2D widget state. It is included in
+notebook state, static PNG fallback previews, and `export_html(...)`, so a saved
+notebook or standalone HTML report keeps the same image-plus-diagnostic view
+that the scientist inspected interactively.
+
+```python
+viewer = Show2D(
+    images,
+    labels=labels,
+    inset_plots=insets,
+    scale_bar_position="bottom-left",
+    show_zoom_indicator=False,
+)
+
+viewer.save_image("denoise_calibration_panel.png")
+viewer.export_html("denoise_calibration_panel.html")
+```
+
+For the complete parameter reference, see the [Show2D API page](../api/show2d.md).
 
 ```{tableofcontents}
 ```

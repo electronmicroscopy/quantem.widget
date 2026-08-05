@@ -100,13 +100,16 @@ movie writer after rendering the current widget view.
 from quantem.widget import Show3D
 
 w = Show3D(stack, fps=12)
-w.save_mp4("show3d-view.mp4")
-w.save_gif("show3d-view.gif")
+w.save_gif("show3d-slides.gif", quality="medium", fps=8, slides_preset=True)
+w.save_mp4("show3d-view.mp4", quality="high", fps=12, max_frames=40)
 ```
 
 Use the package-level `movie.save_mp4(...)` API when you want array-first
 control over panels, labels, and backend selection. Use the widget methods when
-you want the saved movie to match the current widget-rendered view.
+you want the saved movie to match the current widget-rendered view. For a slide
+GIF, start with `slides_preset=True` or use the widget **Export** menu's **GIF**
+panel; it caps the export to a slide-friendly frame count and panel size without
+changing the source stack.
 
 ## Performance Reference
 

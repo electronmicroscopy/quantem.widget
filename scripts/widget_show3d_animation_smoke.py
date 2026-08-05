@@ -16,6 +16,7 @@ import math
 import re
 import tempfile
 import time
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from quantem.widget import Show3D
 from quantem.widget.render import gif as gif_utils
 
 
-DEFAULT_CAITLYN_DIR = Path.home() / "data" / "caitlyn" / "20260221_show3d"
+DEFAULT_TIMESERIES_DIR = Path(os.environ.get("QUANTEM_SMOKE_TIMESERIES_DIR", str(Path.home() / "data" / "reference_timeseries")))
 
 
 def _crop_center(image: np.ndarray, size: int) -> np.ndarray:
@@ -53,7 +54,7 @@ def _load_image(path: Path) -> np.ndarray:
         return np.asarray(image)
 
 
-def _load_caitlyn_stack(data_root: Path, *, crop_size: int) -> tuple[np.ndarray, list[str], dict[str, Any]]:
+def _load_timeseries_stack(data_root: Path, *, crop_size: int) -> tuple[np.ndarray, list[str], dict[str, Any]]:
     paths = sorted(
         path
         for path in data_root.glob("*")
@@ -69,7 +70,7 @@ def _load_caitlyn_stack(data_root: Path, *, crop_size: int) -> tuple[np.ndarray,
         match = re.search(r"Raw(\d+)", path.stem)
         labels.append(f"Raw {match.group(1)}" if match else path.stem[-12:])
     return np.stack(frames, axis=0), labels, {
-        "kind": "local Caitlyn Show3D PNG/TIFF time series",
+        "kind": "local reference Show3D PNG/TIFF time series",
         "root": str(data_root),
         "paths": [str(path) for path in paths],
     }
@@ -137,12 +138,12 @@ def _multi_panel_stacks(stack: np.ndarray) -> tuple[list[np.ndarray], list[str]]
 
 def _load_stack(args: argparse.Namespace) -> tuple[np.ndarray, list[str], dict[str, Any]]:
     source = args.source
-    if source in {"auto", "caitlyn"}:
-        root = args.data_root or DEFAULT_CAITLYN_DIR
+    if source in {"auto", "timeseries"}:
+        root = args.data_root or DEFAULT_TIMESERIES_DIR
         try:
-            return _load_caitlyn_stack(root.expanduser(), crop_size=args.crop_size)
+            return _load_timeseries_stack(root.expanduser(), crop_size=args.crop_size)
         except Exception:
-            if source == "caitlyn":
+            if source == "timeseries":
                 raise
     if source in {"auto", "tutorial"}:
         try:
@@ -380,7 +381,7 @@ def _write_html(artifact_dir: Path, report: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-dir", type=Path, default=None)
-    parser.add_argument("--source", choices=["auto", "caitlyn", "tutorial", "synthetic"], default="auto")
+    parser.add_argument("--source", choices=["auto", "timeseries", "tutorial", "synthetic"], default="auto")
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--crop-size", type=int, default=384)
     parser.add_argument("--frames", type=int, default=12, help="Frame count for tutorial/synthetic fallback data.")
@@ -486,7 +487,7 @@ def main() -> int:
 
     exports: list[dict[str, Any]] = []
     for quality in args.qualities:
-        path = artifact_dir / f"show3d-caitlyn-timeseries-{quality}.gif"
+        path = artifact_dir / f"show3d-timeseries-{quality}.gif"
         start = time.perf_counter()
         written = widget.save_gif(
             path,

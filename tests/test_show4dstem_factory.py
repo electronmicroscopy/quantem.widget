@@ -1,20 +1,103 @@
 from __future__ import annotations
 
-from collections import namedtuple
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from quantem.gpu.io.load import LoadResult
 
 import quantem.widget.show4dstem_factory as factory
 
 
-LoadResult = namedtuple("LoadResult", ["data", "metadata"])
+def _offset_bf_disk_data(
+    *,
+    scan_shape: tuple[int, int] = (3, 4),
+    detector_shape: tuple[int, int] = (32, 32),
+    center: tuple[float, float] = (11.0, 18.0),
+    radius: float = 5.0,
+) -> np.ndarray:
+    rows, cols = np.indices(detector_shape)
+    disk = ((rows - center[0]) ** 2 + (cols - center[1]) ** 2) <= radius**2
+    dp = np.where(disk, 100, 1).astype(np.uint16)
+    return np.broadcast_to(dp, (*scan_shape, *detector_shape)).copy()
+
+
+def _preset_region_data(
+    *,
+    n_frames: int | None = None,
+    scan_shape: tuple[int, int] = (4, 5),
+    detector_shape: tuple[int, int] = (16, 16),
+    center: tuple[float, float] = (8.0, 8.0),
+    bf_radius: float = 3.0,
+) -> np.ndarray:
+    """Return 4D/5D data with distinct BF/ABF/ADF detector sums."""
+    scan_rows, scan_cols = scan_shape
+    det_rows, det_cols = detector_shape
+    det_y, det_x = np.indices(detector_shape)
+    radius = np.sqrt((det_y - center[0]) ** 2 + (det_x - center[1]) ** 2)
+    scale = np.arange(1, scan_rows * scan_cols + 1, dtype=np.uint16).reshape(
+        scan_shape
+    )
+    frame = np.zeros((*scan_shape, *detector_shape), dtype=np.uint16)
+    frame[..., radius <= bf_radius * 0.5] = scale[..., None] * 2
+    frame[..., (radius >= bf_radius * 0.5) & (radius <= bf_radius)] = (
+        scale[..., None] * 11
+    )
+    frame[..., (radius >= bf_radius) & (radius <= bf_radius * 2.0)] = (
+        scale[..., None] * 23
+    )
+    frame[..., (radius >= bf_radius * 2.0) & (radius <= bf_radius * 4.0)] = (
+        scale[..., None] * 37
+    )
+    if n_frames is None:
+        return frame
+    return np.stack([frame + idx for idx in range(n_frames)], axis=0)
 
 
 def test_public_show4dstem_import_uses_factory() -> None:
     from quantem.widget import Show4DSTEM
 
     assert Show4DSTEM is factory.Show4DSTEM
+
+
+def test_master_file_contract_rejects_not_ready_inspection(monkeypatch) -> None:
+    report = SimpleNamespace(
+        ready=False,
+        reason="external detector data are still being written",
+        action="Wait for acquisition to finish and try again.",
+        scan_shape=(2, 3),
+        detector_shape=(8, 8),
+        actual_frames=5,
+        dtype="uint16",
+    )
+    monkeypatch.setattr("quantem.gpu.io.inspect", lambda _path: report)
+
+    with pytest.raises(ValueError) as error:
+        factory._master_file_contract("sample_master.h5")
+
+    message = str(error.value)
+    assert report.reason in message
+    assert report.action in message
+
+
+def test_master_file_contract_rejects_missing_required_field(monkeypatch) -> None:
+    report = SimpleNamespace(
+        ready=True,
+        reason="master is ready",
+        action="Recreate the master with complete detector metadata.",
+        scan_shape=(2, 3),
+        detector_shape=(8, 8),
+        actual_frames=6,
+        dtype=None,
+    )
+    monkeypatch.setattr("quantem.gpu.io.inspect", lambda _path: report)
+
+    with pytest.raises(ValueError) as error:
+        factory._master_file_contract("sample_master.h5")
+
+    message = str(error.value)
+    assert "dtype" in message
+    assert report.action in message
 
 
 def test_show4dstem_routes_chunked_payload_to_mps_builder(monkeypatch) -> None:
@@ -83,6 +166,21 @@ def test_show4dstem_keeps_cuda_gpu_frame_proxy_on_base_viewer(monkeypatch) -> No
     assert factory.show4dstem_backend_kind(payload) == "base"
 
 
+def test_show4dstem_base_route_does_not_import_mps_implementation(monkeypatch) -> None:
+    """C1: base payload, expect no MPS implementation import."""
+    payload = SimpleNamespace(ndim=4)
+
+    def _fake_base(data, **kwargs):
+        return {"kind": "base", "data": data, "kwargs": kwargs}
+
+    monkeypatch.setattr(factory, "_Show4DSTEMBase", _fake_base)
+
+    result = factory.Show4DSTEM(payload, verbose=False)
+
+    assert result == {"kind": "base", "data": payload, "kwargs": {"verbose": False}}
+    assert factory.show4dstem_backend_kind(payload) == "base"
+
+
 def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
     payload = SimpleNamespace(ndim=5)
     load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
@@ -94,33 +192,10 @@ def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
 
     result = factory.Show4DSTEM(load_result, verbose=False)
 
-    assert result["data"] is load_result
+    assert result["data"] is payload
     assert result["kwargs"]["frame_dim_label"] == "Dataset"
     assert result["kwargs"]["frame_labels"] == ["first.h5", "second.h5"]
     assert result["kwargs"]["verbose"] is False
-
-
-def test_show4dstem_uses_lazy_macbook_handle_directly(monkeypatch) -> None:
-    from quantem.widget.multidataset_mps import LazyMacbookDatasets
-
-    lazy = LazyMacbookDatasets(
-        masters=["first_master.h5"],
-        det_bin=4,
-        names=["first"],
-        multi=object(),
-        decode=lambda path: object(),
-        verbose=False,
-    )
-
-    def _fake_build_viewer(**kwargs):
-        return {"kind": "lazy-mps", "kwargs": kwargs}
-
-    monkeypatch.setattr(lazy, "build_viewer", _fake_build_viewer)
-
-    result = factory.Show4DSTEM(lazy, ui_mode="report")
-
-    assert result == {"kind": "lazy-mps", "kwargs": {"ui_mode": "report"}}
-    assert factory.show4dstem_backend_kind(lazy) == "mps"
 
 
 def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
@@ -142,6 +217,43 @@ def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
         assert widget.det_rows == 4
         assert widget.det_cols == 4
         assert widget.show_controls is False
+    finally:
+        widget.close()
+
+
+def test_show4dstem_auto_detects_bf_disk_when_calibration_is_omitted() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = _offset_bf_disk_data()
+    widget = Show4DSTEM(data, precompute_virtual_images=False, verbose=False)
+
+    try:
+        assert widget.center_row == 11.0
+        assert widget.center_col == 18.0
+        assert abs(widget.bf_radius - 5.08) < 0.1
+        assert widget.roi_center_row == widget.center_row
+        assert widget.roi_center_col == widget.center_col
+        assert widget.roi_radius == widget.bf_radius
+    finally:
+        widget.close()
+
+
+def test_show4dstem_explicit_bf_calibration_is_not_auto_overwritten() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = _offset_bf_disk_data()
+    widget = Show4DSTEM(
+        data,
+        center=(16, 16),
+        bf_radius=4,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.center_row == 16.0
+        assert widget.center_col == 16.0
+        assert widget.bf_radius == 4.0
     finally:
         widget.close()
 
@@ -290,6 +402,112 @@ def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
         state = widget.get_state(drop_defaults=False)
         assert state["offline"] is True
         assert state["_offline_stack"] == widget._offline_stack
+    finally:
+        widget.close()
+
+
+def test_show4dstem_one_frame_multiple_mode_keeps_single_virtual_image_live() -> None:
+    """C1: one 4D dataset with multiple selected, expect single VI drag updates."""
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(3 * 4 * 8 * 8, dtype=np.uint16).reshape(3, 4, 8, 8)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        center=(4, 4),
+        bf_radius=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.view_mode == "multiple"
+        assert widget.n_frames == 1
+        assert widget.compare_panel_count == 0
+        assert widget.compare_virtual_image_bytes == b""
+
+        before = widget.virtual_image_bytes
+        widget.roi_center = [2, 2]
+
+        assert widget.virtual_image_bytes != before
+        assert widget.compare_panel_count == 0
+        assert widget.compare_virtual_image_bytes == b""
+    finally:
+        widget.close()
+
+
+def test_show4dstem_one_frame_multiple_mode_preset_clicks_update_single_vi() -> None:
+    """C1: BF/ABF/ADF clicks update the visible VI in one-frame multiple mode."""
+    from quantem.widget import Show4DSTEM
+
+    data = _preset_region_data()
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        center=(8, 8),
+        bf_radius=3,
+        precompute_virtual_images=True,
+        verbose=False,
+    )
+
+    try:
+        assert widget.n_frames == 1
+        assert widget.compare_panel_count == 0
+        assert widget.compare_virtual_image_bytes == b""
+
+        payloads: dict[str, bytes] = {}
+        for preset in ("adf", "bf", "abf", "haadf"):
+            before = widget.virtual_image_bytes
+            widget._preset_request = preset
+            assert widget._preset_request == ""
+            assert widget.vi_source == "roi"
+            assert len(widget.virtual_image_bytes) == 4 * 5 * 4
+            assert widget.compare_panel_count == 0
+            assert widget.compare_virtual_image_bytes == b""
+            if payloads:
+                assert widget.virtual_image_bytes != before
+            payloads[preset] = widget.virtual_image_bytes
+
+        assert len(set(payloads.values())) == len(payloads)
+        assert widget.roi_mode == "annular"
+        assert widget.roi_radius_inner == 6
+        assert widget.roi_radius == 12
+    finally:
+        widget.close()
+
+
+def test_show4dstem_multiple_mode_preset_clicks_update_compare_grid() -> None:
+    """C2: BF/ABF/ADF clicks update the visible compare-grid virtual images."""
+    from quantem.widget import Show4DSTEM
+
+    data = _preset_region_data(n_frames=3)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        center=(8, 8),
+        bf_radius=3,
+        compare_max_panels=3,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.n_frames == 3
+        assert widget.compare_panel_count == 3
+
+        payloads: dict[str, bytes] = {}
+        for preset in ("bf", "abf", "adf", "haadf"):
+            before = widget.compare_virtual_image_bytes
+            widget._preset_request = preset
+            assert widget._preset_request == ""
+            assert widget.vi_source == "roi"
+            assert widget.compare_panel_count == 3
+            assert len(widget.compare_virtual_image_bytes) == 3 * 4 * 5 * 4
+            if payloads:
+                assert widget.compare_virtual_image_bytes != before
+            payloads[preset] = widget.compare_virtual_image_bytes
+
+        assert len(set(payloads.values())) == len(payloads)
     finally:
         widget.close()
 
@@ -522,23 +740,20 @@ def test_show4dstem_frame_virtual_image_uses_sparse_detector_mask(monkeypatch) -
         widget.close()
 
 
-def test_torch_backend_sparse_masked_sum_matches_dense_reference() -> None:
+def test_detector_session_masked_sum_matches_dense_reference() -> None:
     import torch
 
-    from quantem.widget.kernels.compute.backends import compute_backend
+    from quantem.gpu.detector import prepare
 
     data = torch.arange(4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
     data = data.reshape(4, 4, 16, 16)
     yy, xx = np.ogrid[:16, :16]
     mask = ((yy - 8) ** 2 + (xx - 8) ** 2 <= 3**2).astype(np.float32)
-    backend = compute_backend(data)
+    session = prepare(data)
 
-    sparse = backend._sparse_masked_sum(mask)
-    vi = backend.masked_sum(mask)
+    vi = session.masked_sum(mask)
     expected = (data.float() * torch.as_tensor(mask)).sum(dim=(2, 3)).numpy()
 
-    assert sparse is not None
-    np.testing.assert_allclose(sparse, expected)
     np.testing.assert_allclose(vi, expected)
 
 
@@ -609,19 +824,13 @@ def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
         widget.close()
 
 
-def test_show4dstem_view_mode_legacy_aliases() -> None:
+def test_show4dstem_rejects_noncanonical_view_modes() -> None:
     from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
-
-    compare_alias = Show4DSTEM(data, view_mode="compare", verbose=False)
-    temporal_alias = Show4DSTEM(data, view_mode="temporal", verbose=False)
-    try:
-        assert compare_alias.view_mode == "multiple"
-        assert temporal_alias.view_mode == "single"
-    finally:
-        compare_alias.close()
-        temporal_alias.close()
+    for view_mode in ("compare", "temporal"):
+        with pytest.raises(ValueError, match="view_mode"):
+            Show4DSTEM(data, view_mode=view_mode, verbose=False)
 
 
 def test_show4dstem_compare_grid_validates_api() -> None:

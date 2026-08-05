@@ -71,10 +71,15 @@ if len(wheels) != 1:
     raise SystemExit(f"expected one wheel, found {wheels}")
 wheel = wheels[0]
 required = {
+    "quantem/widget/static/chooselattice.js",
+    "quantem/widget/static/show1d.js",
     "quantem/widget/static/show2d.js",
     "quantem/widget/static/show3d.js",
     "quantem/widget/static/show3dslices.js",
     "quantem/widget/static/show4dstem.js",
+    "quantem/widget/static/showdiffraction.js",
+    "quantem/widget/static/showeds.js",
+    "quantem/widget/static/showptycho.js",
     "quantem/widget/static/browser/index.html",
 }
 with zipfile.ZipFile(wheel) as zf:
@@ -87,4 +92,3 @@ PY
 fi
 
 echo "ALL LOCAL RELEASE GATES PASS"
-

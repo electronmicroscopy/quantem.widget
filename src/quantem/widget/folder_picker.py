@@ -9,7 +9,7 @@ selected folder so you immediately see what you're about to work with.
 Example
 -------
 >>> from quantem.widget import pick_folder
->>> picker = pick_folder("browse_256", default="/home/owner/data/")
+>>> picker = pick_folder("browse_256", default="data/")
 >>> picker            # displays the widget: chooser on top, master list below
 >>> DATA_DIR = picker.value   # returns the cached path immediately; after a
                               # new click it returns the freshly selected path

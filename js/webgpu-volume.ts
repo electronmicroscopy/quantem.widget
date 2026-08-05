@@ -26,6 +26,8 @@ export interface VolumeRenderParams {
   obliqueStartY?: number;
   obliqueEndX?: number;   // oblique segment end, in pixel coordinates
   obliqueEndY?: number;
+  rowShiftPxPerSlice?: number; // display-only alignment through z
+  colShiftPxPerSlice?: number;
   vmin: number;  // 0..1 normalized (maps to texture's [0,1] range)
   vmax: number;  // 0..1 normalized
 }
@@ -197,6 +199,9 @@ struct Uniforms {
   obliqueEndY: f32,
   obliqueDirX: f32,
   obliqueDirY: f32,
+  rowShift: f32,
+  colShift: f32,
+  _pad2: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -293,6 +298,23 @@ fn applyWindow(value: f32) -> f32 {
   return clamp((value - u.vmin) / denom, 0.0, 1.0);
 }
 
+fn alignedTexCoord(texCoord: vec3<f32>) -> vec3<f32> {
+  let dims = textureDimensions(volume);
+  let nz = max(1u, dims.z);
+  let ny = max(1u, dims.y);
+  let nx = max(1u, dims.x);
+  let zIndex = texCoord.z * f32(nz) - 0.5;
+  let center = (f32(nz) - 1.0) * 0.5;
+  let dz = zIndex - center;
+  let x = clamp(texCoord.x - dz * u.colShift / f32(nx), 0.0, 1.0);
+  let y = clamp(texCoord.y - dz * u.rowShift / f32(ny), 0.0, 1.0);
+  return vec3<f32>(x, y, texCoord.z);
+}
+
+fn sampleVolume(texCoord: vec3<f32>) -> f32 {
+  return textureSampleLevel(volume, volumeSampler, alignedTexCoord(texCoord), 0.0).r;
+}
+
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   // Reconstruct ray from clip space — OpenGL convention z in [-1, 1]
@@ -346,7 +368,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     if (showXY && tSliceXY > 0.0 && abs(t - tSliceXY) < stepSize * 0.6) {
       let slicePos = rayOrigin + tSliceXY * rayDir;
       let sliceTex = worldToTex(slicePos, bmin, bmax);
-      var sliceValXY = textureSampleLevel(volume, volumeSampler, sliceTex, 0.0).r;
+      var sliceValXY = sampleVolume(sliceTex);
       sliceValXY = applyWindow(sliceValXY);
       var sliceCol = textureSampleLevel(colormap, colormapSampler, vec2<f32>(clamp(sliceValXY * u.brightness, 0.0, 1.0), 0.5), 0.0).rgb;
       sliceCol = mix(sliceCol, vec3<f32>(0.3, 0.5, 1.0), 0.25);
@@ -358,7 +380,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     if (showOblique && tSliceOblique > 0.0 && abs(t - tSliceOblique) < stepSize * 0.6) {
       let slicePos = rayOrigin + tSliceOblique * rayDir;
       let sliceTex = worldToTex(slicePos, bmin, bmax);
-      var sliceValOblique = textureSampleLevel(volume, volumeSampler, sliceTex, 0.0).r;
+      var sliceValOblique = sampleVolume(sliceTex);
       sliceValOblique = applyWindow(sliceValOblique);
       var sliceCol = textureSampleLevel(colormap, colormapSampler, vec2<f32>(clamp(sliceValOblique * u.brightness, 0.0, 1.0), 0.5), 0.0).rgb;
       sliceCol = mix(sliceCol, vec3<f32>(0.3, 1.0, 0.4), 0.25);
@@ -368,7 +390,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     }
 
     // Sample volume — remap from [vmin, vmax] to [0, 1]
-    var intensity = textureSampleLevel(volume, volumeSampler, texCoord, 0.0).r;
+    var intensity = sampleVolume(texCoord);
     intensity = applyWindow(intensity);
     intensity = clamp(intensity * u.brightness, 0.0, 1.0);
 
@@ -418,9 +440,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 // 164     obliqueEndY        f32                 4
 // 168     obliqueDirX        f32                 4
 // 172     obliqueDirY        f32                 4
-// total: 176 bytes (must be multiple of 16)
+// 176     rowShift           f32                 4
+// 180     colShift           f32                 4
+// 184     _pad2              vec2<f32>           8
+// total: 192 bytes (must be multiple of 16)
 
-const UNIFORM_BUFFER_SIZE = 176;
+const UNIFORM_BUFFER_SIZE = 192;
 
 // ============================================================================
 // VolumeRenderer class
@@ -773,6 +798,10 @@ export class VolumeRenderer {
     f32[41] = endY;
     f32[42] = dirX;
     f32[43] = dirY;
+    f32[44] = Number.isFinite(params.rowShiftPxPerSlice ?? 0) ? (params.rowShiftPxPerSlice ?? 0) : 0;
+    f32[45] = Number.isFinite(params.colShiftPxPerSlice ?? 0) ? (params.colShiftPxPerSlice ?? 0) : 0;
+    f32[46] = 0;
+    f32[47] = 0;
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

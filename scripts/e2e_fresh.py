@@ -4,15 +4,15 @@ Run inside a CLEAN conda env that has ONLY `pip install quantem_widget-*.whl` (n
 editable source on the path). Proves a brand-new user can install the wheel and run
 the documented API on real 4D-STEM data:
 
-    from quantem.widget import load, Show4DSTEM
-    Show4DSTEM(load(master, det_bin=4))            # single
-    Show4DSTEM(load([m0, m1, m2], det_bin=4))      # many
+    from quantem.gpu.io import load
+    from quantem.widget import Show4DSTEM
+    Show4DSTEM(load(master, det_bin=4).data)            # single
+    Show4DSTEM(load([m0, m1, m2], det_bin=4).data)      # many
 
 Pass the data dir as argv[1] (default data path (set WIDGET_E2E_DATA)). Prints ALL PASS on success;
 any failure raises and exits non-zero.
 """
 import glob
-import os
 import os
 import sys
 
@@ -26,9 +26,10 @@ def main():
     print(f"quantem.widget {w.__version__} from {src}")
     assert "site-packages" in src, f"not a clean install: {src}"
 
-    from quantem.widget import load, Show4DSTEM
-    from quantem.widget.io import detect_backend
-    backend = detect_backend()
+    from quantem.gpu.io import load
+    from quantem.gpu.device import detect
+    from quantem.widget import Show4DSTEM
+    backend = detect()
     print(f"backend: {backend}")
     # A CUDA box must NEVER decode on CPU. If an NVIDIA GPU is present, the chosen
     # backend has to be cuda (cupy installed) — a cpu pick here is a broken install.
@@ -43,13 +44,13 @@ def main():
     print(f"{len(masters)} masters")
 
     # single
-    v1 = Show4DSTEM(load(masters[0], det_bin=4, verbose=False), verbose=False)
+    v1 = Show4DSTEM(load(masters[0], det_bin=4, verbose=False).data, verbose=False)
     print(f"single: {type(v1).__name__} scan={v1._scan_shape} det={v1._det_shape}")
     assert v1._scan_shape[0] > 0 and v1._det_shape[0] > 0
 
     # multi (>=2 datasets)
     sub = masters[:3]
-    v2 = Show4DSTEM(load(sub, det_bin=4, verbose=False), verbose=False)
+    v2 = Show4DSTEM(load(sub, det_bin=4, verbose=False).data, verbose=False)
     print(f"multi: {type(v2).__name__} n_frames={v2.n_frames} frame_dim={v2.frame_dim_label}")
     assert v2.n_frames >= 1
 

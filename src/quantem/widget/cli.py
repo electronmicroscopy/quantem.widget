@@ -3,30 +3,160 @@ masters becomes a rendered, standalone HTML viewer in one command, no notebook.
 
     quantem show ./frames/                # PNG/TIFF folder -> Show3D scrub HTML
     quantem show scan.png                 # single image    -> Show2D HTML
-    quantem show ./masters/ --bin 8       # *_master.h5     -> offline WebGPU Show4DSTEM
+    quantem show4dstem ./masters/ --backend webgpu --html --bin 1
+                                            # *_master.h5 -> HDF5-backed WebGPU folder
+    quantem showptycho scan_master.h5     # raw 4D-STEM    -> ShowPtycho WebGPU folder
+    quantem showptycho ./masters/         # master folder  -> ShowPtycho project
     quantem showdiffraction pattern.npy   # diffraction     -> analyzed ShowDiffraction HTML
     quantem html tutorial.ipynb           # run a notebook  -> standalone shareable HTML
 
 The CLI only orchestrates existing pieces: ``io.read_image`` / ``read_image_stack``
-for images, ``io.discover_masters`` + ``io.load(det_bin=...)`` for 4D-STEM, the
-``Show2D`` / ``Show3D`` / ``Show4DSTEM`` widgets, and each widget's ``export_html``.
-4D-STEM is packed offline so the browser does all compute on WebGPU, which is what
-lets a laptop browse data that never fit full resolution (bin the detector first).
+for images, ``quantem.gpu.io.discover`` + ``quantem.gpu.io.load(det_bin=...)``
+for 4D-STEM and
+ptychography review, the ``Show2D`` / ``Show3D`` / ``Show4DSTEM`` / ``ShowPtycho``
+widgets, and each widget's export helpers. Show4DSTEM WebGPU HTML keeps the
+compressed HDF5 family on disk and lets Chrome range-fetch/decompress H5 chunks
+instead of preprocessing every frame before the viewer opens.
 """
 import argparse
+import email.utils
 import http.server
 import json
+import mimetypes
 import os
 import pathlib
+import posixpath
+import re
+import shutil
 import socketserver
 import sys
 import threading
+import urllib.parse
 import webbrowser
+
+from quantem.widget.showptycho_collection import (
+    is_showptycho_collection as _is_showptycho_collection,
+    showptycho_collection_folder as _showptycho_collection_folder,
+    write_showptycho_collection as _write_showptycho_collection,
+)
 
 # Single image -> Show2D, a folder of frames -> Show3D, a folder of differently
 # sized images -> a Show2D gallery. These are the formats read_image understands.
 IMAGE_EXTS = {".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp", ".dm3", ".dm4", ".emd", ".npy"}
 MASTER_PATTERN = "*_master.h5"
+SHOWPTYCHO_MASTER_PATTERNS = ("*_master.h5", "*_master_wrapper.h5")
+SHOWPTYCHO_FOLDER_FORMAT = "quantem.showptycho.webgpu.folder"
+DEFAULT_PTYCHO_SEMIANGLE_MRAD = 30.0
+DEFAULT_PTYCHO_SCAN_SAMPLING_A = 0.5
+DEFAULT_PTYCHO_VOLTAGE_KV = 300.0
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
+_RANGE_FALLBACK_CHUNK_BYTES = 16 * 1024 * 1024
+
+
+def _package_source_state(
+    *,
+    version: str,
+    module_file: str,
+) -> dict[str, str | bool | None]:
+    """Return reproducible package identity without recording local paths."""
+
+    import subprocess
+
+    source = pathlib.Path(module_file).resolve()
+    repository = next(
+        (parent for parent in source.parents if (parent / ".git").exists()),
+        None,
+    )
+    if repository is None:
+        return {"version": version, "commit": None, "dirty": None}
+
+    commit_result = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    status_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    commit = (
+        commit_result.stdout.strip()
+        if commit_result.returncode == 0
+        else None
+    )
+    dirty = (
+        bool(status_result.stdout.strip())
+        if status_result.returncode == 0
+        else None
+    )
+    return {"version": version, "commit": commit, "dirty": dirty}
+
+
+def _showptycho_software_provenance() -> dict[str, dict[str, str | bool | None]]:
+    """Return the core, compute, and UI versions that produced an SSB fit."""
+
+    import quantem
+    import quantem.gpu
+    import quantem.widget
+
+    return {
+        "quantem": _package_source_state(
+            version=quantem.__version__,
+            module_file=quantem.__file__,
+        ),
+        "quantem.gpu": _package_source_state(
+            version=quantem.gpu.__version__,
+            module_file=quantem.gpu.__file__,
+        ),
+        "quantem.widget": _package_source_state(
+            version=quantem.widget.__version__,
+            module_file=quantem.widget.__file__,
+        ),
+    }
+
+
+def _anonymize_showptycho_payload(value):
+    """Remove local acquisition identity while preserving scientific provenance."""
+
+    source_keys = {"source_file", "source_path", "master_path", "source_stem"}
+    if isinstance(value, dict):
+        return {
+            key: (
+                "redacted_local_source"
+                if key in source_keys and item is not None
+                else _anonymize_showptycho_payload(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_anonymize_showptycho_payload(item) for item in value]
+    return value
+
+
+def _showptycho_reused_fit_payload(
+    fit_record: pathlib.Path,
+    *,
+    anonymize: bool,
+) -> dict[str, object]:
+    """Return a reused fit record with current export provenance."""
+
+    payload = json.loads(fit_record.read_text(encoding="utf-8"))
+    if anonymize:
+        payload = _anonymize_showptycho_payload(payload)
+    payload["export_software"] = _showptycho_software_provenance()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -40,24 +170,29 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     # `show` auto-detects; show2d/show3d/show4dstem force the widget so the command
     # reads exactly like the widget it opens. All share the same options + engine.
-    forced = {"show": "auto", "show2d": "2d", "show3d": "3d", "show4dstem": "4dstem"}
+    forced = {
+        "show": "auto",
+        "show2d": "2d",
+        "show3d": "3d",
+        "show4dstem": "4dstem",
+        "showptycho": "showptycho",
+    }
     helps = {
         "show": "Auto-detect PATH(s) and render the matching viewer.",
         "show2d": "Render an image (or a folder of images) as Show2D.",
         "show3d": "Render a folder of frames as a Show3D scrub.",
         "show4dstem": "Render 4D-STEM master(s) as Show4DSTEM (live notebook, or --html).",
+        "showptycho": "Open or build a ShowPtycho project from 4D-STEM masters.",
     }
-    for name in forced:
+    for name in ("show", "show2d", "show3d", "show4dstem"):
         _add_show_args(sub.add_parser(name, help=helps[name]))
+    _add_showptycho_args(
+        sub.add_parser("showptycho", help=helps["showptycho"])
+    )
     # `html` is a different shape (one .ipynb in, one HTML out), so it gets its own
     # parser rather than the shared show* options.
     _add_html_args(sub.add_parser(
         "html", help="Execute a notebook and export it to a standalone, offline shareable HTML."))
-    # `jupyter` starts JupyterLab here on the GPU box and prints a URL to paste into the
-    # laptop browser - kernel + GPU here, UI in your browser. You bring your own tunnel
-    # (SSH -L / VS Code) the same way quantem.live does.
-    _add_jupyter_args(sub.add_parser(
-        "jupyter", help="Start JupyterLab on this GPU box and print a URL to open from your laptop."))
     # `github` shrinks a widget notebook to a form GitHub can display: drop the heavy offline
     # widget-state, keep the auto-snapshot widget render (re-encoded JPEG) + print outputs.
     _add_github_args(sub.add_parser(
@@ -67,22 +202,16 @@ def main(argv: list[str] | None = None) -> int:
     _add_showdiffraction_args(sub.add_parser(
         "showdiffraction",
         help="Analyze a diffraction pattern with ShowDiffraction: auto rings, phase, standalone HTML."))
-    _add_data_transfer_args(sub.add_parser(
-        "data-transfer", help="Plan, inspect, and copy microscopy data layouts across folders/disks."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
             return _render_html(args)
-        if args.command == "jupyter":
-            return _launch_jupyter(args)
         if args.command == "github":
             return _prepare_github(args)
         if args.command == "showfolder":
             return _showfolder(args)
         if args.command == "showdiffraction":
             return _showdiffraction(args)
-        if args.command == "data-transfer":
-            return _data_transfer(args)
         if args.command not in forced:
             parser.print_help()
             return 0
@@ -121,251 +250,9 @@ def _add_showfolder_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-open", action="store_true", help="Write outputs but do not launch/open them.")
 
 
-def _add_data_transfer_args(parser: argparse.ArgumentParser) -> None:
-    """Attach options for the ``data-transfer`` subcommand."""
-    parser.add_argument("action", choices=("plan", "inspect", "copy", "update", "masters", "show4dstem"),
-                        help=(
-                            "Plan a transfer, inspect/update a manifest, copy from a manifest, "
-                            "print ready target masters, or write a Show4DSTEM handoff notebook."
-                        ))
-    parser.add_argument("source", nargs="?", help="Source folder or master path(s) for the plan action.")
-    parser.add_argument("targets", nargs="*", help="Target folder(s) for the plan action.")
-    parser.add_argument("--manifest", default=None,
-                        help="Manifest path. Plan writes it; inspect/copy read it.")
-    parser.add_argument("--pattern", default=MASTER_PATTERN, help="Master glob for planning.")
-    parser.add_argument("--strategy", default="balance-by-size",
-                        choices=("balance-by-size", "round-robin"),
-                        help="Target assignment strategy.")
-    parser.add_argument("--require-ready", action="store_true",
-                        help="Skip masters that do not pass readiness checks.")
-    parser.add_argument("--hash", dest="hash_algorithm", default=None,
-                        choices=("none", "sha256"),
-                        help="Include optional source hashes in the manifest.")
-    parser.add_argument("--verify", default="size",
-                        choices=("size", "none", "hash", "sha256"),
-                        help="Verification mode for inspect/copy.")
-    parser.add_argument("--execute", action="store_true",
-                        help="Actually copy files. Without this, copy is a dry-run.")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Overwrite existing targets after verification failure.")
-    parser.add_argument("--show-masters", action="store_true",
-                        help="Also print ready target master paths during inspect/update/copy.")
-    parser.add_argument("--all-masters", action="store_true",
-                        help="masters: print planned target masters even when targets are incomplete.")
-    parser.add_argument("--gpus", default=None,
-                        help="show4dstem: comma-separated CUDA GPU ids, e.g. 0 or 0,1.")
-    parser.add_argument("--page-budget", default="auto",
-                        help="show4dstem: resident dataset cache, e.g. auto, 1, 2, or none (default auto).")
-    parser.add_argument("--dtype", default="u8", choices=("auto", "u8", "uint8", "u16", "uint16", "float32"),
-                        help="show4dstem browse dtype (default u8 for fast visual screening).")
-    parser.add_argument("--bin", type=int, default=1, dest="det_bin",
-                        help="show4dstem detector binning factor (default 1: no detector binning).")
-    parser.add_argument("--out", default=None,
-                        help="show4dstem notebook output directory (default: ~/Downloads).")
-    parser.add_argument("--no-open", action="store_true",
-                        help="show4dstem: write the notebook but do not launch Jupyter.")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-
-
-def _data_transfer(args: argparse.Namespace) -> int:
-    """Run data-transfer plan/inspect/copy commands."""
-    from dataclasses import asdict
-    from quantem.widget.io import (
-        copy_data_transfer,
-        data_transfer_load_warnings,
-        inspect_data_transfer,
-        plan_data_transfer,
-        read_data_transfer_manifest,
-        summarize_data_transfer,
-        target_masters,
-        update_data_transfer_plan,
-        write_data_transfer_manifest,
-    )
-
-    if args.action == "plan":
-        if not args.source or not args.targets:
-            raise ValueError("data-transfer plan requires SOURCE and at least one TARGET.")
-        plan = plan_data_transfer(
-            pathlib.Path(args.source).expanduser(),
-            [pathlib.Path(target).expanduser() for target in args.targets],
-            pattern=args.pattern,
-            strategy=args.strategy,
-            require_ready=args.require_ready,
-            hash_algorithm=args.hash_algorithm,
-        )
-        manifest = pathlib.Path(args.manifest).expanduser() if args.manifest else (
-            pathlib.Path.cwd() / f"{plan.logical_name}_data_transfer.json"
-        )
-        write_data_transfer_manifest(plan, manifest)
-        states = inspect_data_transfer(plan, verify=args.verify)
-        summary = summarize_data_transfer(states)
-        if args.json:
-            print(json.dumps({"manifest": str(manifest), "plan": plan.to_dict(), "summary": asdict(summary)}, indent=2))
-        else:
-            print(f"manifest: {manifest}")
-            _print_data_transfer_plan(plan)
-            _print_data_transfer_summary(summary)
-            _print_data_transfer_warnings(data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify))
-        return 0
-
-    if not args.manifest:
-        raise ValueError(f"data-transfer {args.action} requires --manifest.")
-    plan = read_data_transfer_manifest(args.manifest)
-    manifest = pathlib.Path(args.manifest).expanduser()
-    if args.action == "inspect":
-        states = inspect_data_transfer(plan, verify=args.verify)
-        summary = summarize_data_transfer(states)
-        masters = target_masters(plan, verify=args.verify)
-        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
-        if args.json:
-            print(json.dumps({
-                "summary": asdict(summary),
-                "states": [asdict(state) for state in states],
-                "masters": [str(master) for master in masters],
-                "warnings": warnings,
-            }, indent=2))
-        else:
-            _print_data_transfer_plan(plan)
-            _print_data_transfer_summary(summary)
-            _print_data_transfer_states(states)
-            if args.show_masters:
-                _print_data_transfer_masters(masters)
-            _print_data_transfer_warnings(warnings)
-        return 0
-    if args.action == "copy":
-        results = copy_data_transfer(
-            plan,
-            dry_run=not args.execute,
-            verify=args.verify,
-            overwrite=args.overwrite,
-        )
-        states = inspect_data_transfer(plan, verify=args.verify)
-        summary = summarize_data_transfer(states)
-        masters = target_masters(plan, verify=args.verify)
-        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
-        if args.json:
-            print(json.dumps({
-                "executed": bool(args.execute),
-                "results": [asdict(result) for result in results],
-                "summary": asdict(summary),
-                "masters": [str(master) for master in masters],
-                "warnings": warnings,
-            }, indent=2))
-        else:
-            print("copy executed" if args.execute else "copy dry-run")
-            _print_data_transfer_results(results)
-            _print_data_transfer_summary(summary)
-            if args.show_masters:
-                _print_data_transfer_masters(masters)
-            _print_data_transfer_warnings(warnings)
-        return 0
-    if args.action == "update":
-        updated = update_data_transfer_plan(
-            plan,
-            source=pathlib.Path(args.source).expanduser() if args.source else None,
-            pattern=args.pattern,
-            require_ready=args.require_ready,
-            hash_algorithm=args.hash_algorithm,
-        )
-        write_data_transfer_manifest(updated, manifest)
-        states = inspect_data_transfer(updated, verify=args.verify)
-        summary = summarize_data_transfer(states)
-        masters = target_masters(updated, verify=args.verify)
-        warnings = data_transfer_load_warnings(updated, devices=args.gpus, verify=args.verify)
-        if args.json:
-            print(json.dumps({
-                "manifest": str(manifest),
-                "plan": updated.to_dict(),
-                "summary": asdict(summary),
-                "masters": [str(master) for master in masters],
-                "warnings": warnings,
-            }, indent=2))
-        else:
-            print(f"updated manifest: {manifest}")
-            _print_data_transfer_plan(updated)
-            _print_data_transfer_summary(summary)
-            if args.show_masters:
-                _print_data_transfer_masters(masters)
-            _print_data_transfer_warnings(warnings)
-        return 0
-    if args.action == "masters":
-        masters = target_masters(
-            plan,
-            existing_only=not args.all_masters,
-            require_complete=not args.all_masters,
-            verify=args.verify,
-        )
-        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
-        if args.json:
-            print(json.dumps({
-                "masters": [str(master) for master in masters],
-                "ready_only": not args.all_masters,
-                "warnings": warnings,
-            }, indent=2))
-        else:
-            _print_data_transfer_masters(masters, ready_only=not args.all_masters)
-            _print_data_transfer_warnings(warnings)
-        return 0
-    if args.action == "show4dstem":
-        masters = target_masters(plan, verify=args.verify)
-        if not masters:
-            raise ValueError("no complete target masters are ready; run data-transfer copy --execute first.")
-        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
-        _print_data_transfer_warnings(warnings)
-        notebook = _render_data_transfer_show4dstem_notebook(manifest, plan.logical_name, masters, args)
-        _launch_notebook(notebook, no_open=args.no_open)
-        return 0
-    raise ValueError(f"unknown data-transfer action: {args.action}")
-
-
-def _print_data_transfer_plan(plan) -> None:
-    print(
-        f"plan: {plan.logical_name}  groups={len(plan.entries)}  "
-        f"files={sum(len(entry.files) for entry in plan.entries)}  "
-        f"bytes={_fmt_bytes(plan.total_bytes)}"
-    )
-    for target, size in plan.totals_by_target.items():
-        print(f"  target {target}: {_fmt_bytes(size)}")
-    if plan.skipped:
-        print(f"  skipped not-ready groups: {len(plan.skipped)}")
-
-
-def _print_data_transfer_summary(summary) -> None:
-    counts = ", ".join(f"{key}={value}" for key, value in sorted(summary.status_counts.items()))
-    print(
-        f"state: {counts or 'no files'}  "
-        f"complete={_fmt_bytes(summary.complete_bytes)} / {_fmt_bytes(summary.total_bytes)}  "
-        f"problems={summary.problem_files}"
-    )
-
-
-def _print_data_transfer_states(states) -> None:
-    for state in states[:80]:
-        print(f"  {state.status:14s} {_fmt_bytes(state.size_bytes):>9s} {state.target}")
-    if len(states) > 80:
-        print(f"  ... {len(states) - 80} more files")
-
-
-def _print_data_transfer_masters(masters, *, ready_only: bool = True) -> None:
-    label = "ready masters" if ready_only else "planned masters"
-    print(f"{label}: {len(masters)}")
-    for master in masters:
-        print(f"  {master}")
-
-
-def _print_data_transfer_warnings(warnings) -> None:
-    for warning in warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-
-
-def _print_data_transfer_results(results) -> None:
-    for result in results[:80]:
-        print(f"  {result.status:8s} {_fmt_bytes(result.size_bytes):>9s} {result.target}")
-    if len(results) > 80:
-        print(f"  ... {len(results) - 80} more files")
-
-
 def _fmt_bytes(value: int) -> str:
+    """Format a byte count for concise CLI status output."""
+
     size = float(value)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(size) < 1000 or unit == "TB":
@@ -664,10 +551,17 @@ def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
     os.environ.setdefault("DISPLAY", ":1")
     from playwright.sync_api import sync_playwright
     shots: list[bytes] = []
+    launch_kwargs = {}
+    for candidate in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        executable = shutil.which(candidate)
+        if executable:
+            launch_kwargs["executable_path"] = executable
+            print(f"  browser executable: {executable}")
+            break
     with sync_playwright() as play:
         browser = play.chromium.launch(headless=False, args=[
             "--enable-unsafe-webgpu", "--use-angle=vulkan", "--enable-features=Vulkan",
-            "--ignore-gpu-blocklist", "--disable-gpu-sandbox", "--no-sandbox"])
+            "--ignore-gpu-blocklist", "--disable-gpu-sandbox", "--no-sandbox"], **launch_kwargs)
         page = browser.new_page(viewport={"width": 1300, "height": 2400}, device_scale_factor=2)
         page.goto(html.as_uri(), wait_until="load", timeout=90000)
         page.wait_for_timeout(13000)  # anywidget mount + WebGPU paint
@@ -720,7 +614,7 @@ def _prepare_github(args: argparse.Namespace) -> int:
                     if c["cell_type"] == "code" and any(w in "".join(c["source"]) for w in _WIDGET_CELL)]
     capture_cells = [
         c for c in widget_cells
-        if _cell_has_widget_view_output(c) or not _cell_has_image_output(c)
+        if not _cell_has_image_output(c)
     ]
     if capture_cells:
         try:
@@ -757,208 +651,46 @@ def _prepare_github(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-def _add_jupyter_args(parser: argparse.ArgumentParser) -> None:
-    """Attach options for the ``jupyter`` subcommand."""
-    parser.add_argument("path", nargs="?", default=None,
-                        help="Notebook or directory to open (relative to where you run this, or "
-                             "absolute). A .ipynb opens directly.")
-    parser.add_argument("--env", default="live-env",
-                        help="Conda/mamba env to activate before launching JupyterLab "
-                             "(default: live-env). Pass --env '' to skip activation.")
+def _add_viewer_path_args(
+    parser: argparse.ArgumentParser,
+    *,
+    path_help: str | None = None,
+    out_help: str = "Output file or directory.",
+    include_serve: bool = True,
+) -> None:
+    """Attach path, output, and launch options shared by viewer commands."""
+
+    parser.add_argument("path", nargs="+",
+                        help=path_help or (
+                            "An image, a folder of images, a 4D-STEM master, "
+                            "a folder of masters, or several master files."
+                        ))
+    parser.add_argument("--out", default=None, help=out_help)
+    parser.add_argument("--no-open", action="store_true", help="Write the file(s) but do not launch anything.")
+    if include_serve:
+        parser.add_argument("--serve", action="store_true",
+                            help="Open via a local HTTP server even for self-contained files (tunnelable URL).")
     parser.add_argument("--port", type=int, default=None,
-                        help="Port to serve on (default: auto-pick a free port).")
-    parser.add_argument("--no-open", action="store_true",
-                        help="Start JupyterLab but do not open a browser (the box is usually "
-                             "headless - copy the printed URL into your laptop browser).")
-
-
-def _free_port() -> int:
-    """Pick a free local TCP port by binding to port 0 and reading back what the OS chose.
-    Runs on the same box JupyterLab will, so the port is guaranteed free for the server."""
-    import socket
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-def _config_path() -> pathlib.Path:
-    """Where the per-user jupyter config lives. Honors XDG_CONFIG_HOME, else ~/.config."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = pathlib.Path(base) if base else pathlib.Path.home() / ".config"
-    return root / "quantem" / "jupyter.json"
-
-
-def _ssh_target() -> str:
-    """The `user@host` a laptop uses to SSH into this box, for the copy-paste tunnel line.
-
-    Saved once in the per-user config so the printed `ssh -L` command is ready to paste
-    with no placeholder to edit. On first interactive launch we auto-detect `whoami@fqdn`,
-    show it, and let the user accept (Enter) or correct it, then persist it. Later launches
-    read it silently. Non-interactive launches (no TTY) fall back to the auto-detected guess
-    without prompting or saving, so a headless run still prints a usable command."""
-    import getpass
-    import json
-    import socket
-    cfg = _config_path()
-    if cfg.exists():
-        try:
-            saved = json.loads(cfg.read_text()).get("ssh_target")
-            if saved:
-                return saved
-        except (OSError, ValueError):
-            pass
-    default = f"{getpass.getuser()}@{socket.getfqdn()}"
-    if not sys.stdin.isatty():
-        return default
-    answer = input(f"SSH target your laptop uses to reach this box [{default}]: ").strip()
-    target = answer or default
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(json.dumps({"ssh_target": target}, indent=2))
-    print(f"  saved to {cfg} (edit it anytime to change)")
-    return target
-
-
-def _strip_json_line_comments(text: str) -> str:
-    """Remove the line comments JupyterLab may put in .jupyterlab-settings files."""
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
-
-
-def _jupyterlab_user_settings_dir() -> pathlib.Path:
-    """Return the JupyterLab user-settings dir for this process.
-
-    JupyterLab stores per-plugin settings under
-    ``<jupyter-config>/lab/user-settings`` unless ``JUPYTERLAB_SETTINGS_DIR`` is
-    set.  We write the widgets-manager setting there before launching Lab so a
-    normal notebook save also saves widget state.
-    """
-    override = os.environ.get("JUPYTERLAB_SETTINGS_DIR")
-    if override:
-        return pathlib.Path(override)
-    config = os.environ.get("JUPYTER_CONFIG_DIR")
-    root = pathlib.Path(config) if config else pathlib.Path.home() / ".jupyter"
-    return root / "lab" / "user-settings"
-
-
-def _enable_jupyterlab_widget_state_save() -> pathlib.Path:
-    """Enable JupyterLab's automatic widget-state save setting.
-
-    Without this setting, Cmd+S saves code/output but may omit ``metadata.widgets``.
-    Then reopening a notebook later has no frontend model state to hydrate.  The
-    fixed Lab manager can restore saved widgets, but only if the state is saved.
-    """
-    path = (
-        _jupyterlab_user_settings_dir()
-        / "@jupyter-widgets"
-        / "jupyterlab-manager"
-        / "plugin.jupyterlab-settings"
-    )
-    settings: dict[str, object] = {}
-    if path.exists():
-        raw = path.read_text()
-        try:
-            settings = json.loads(_strip_json_line_comments(raw) or "{}")
-        except ValueError:
-            backup = path.with_suffix(path.suffix + ".bak")
-            backup.write_text(raw)
-            settings = {}
-    settings["saveState"] = True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
-    return path
-
-
-def _launch_jupyter(args: argparse.Namespace) -> int:
-    """Start JupyterLab here on the GPU box and print a URL to paste into the laptop
-    browser - kernel + GPU run here, UI in your browser. anywidget rides the Jupyter Comm
-    channel, so one server serves every quantem widget (Show2D/3D/4DSTEM, SSB, any
-    tutorial) with no per-widget setup. You bring your own laptop->box hop (SSH ``-L`` or
-    VS Code Remote-SSH), same as quantem.live; this command does no SSH or tunnel work.
-
-    Runs under a login shell so conda init is sourced, in the foreground so JupyterLab
-    lives as long as the command does (Ctrl-C stops it)."""
-    import secrets
-    import shlex
-    import subprocess
-    import threading
-    import webbrowser
-    settings_path = _enable_jupyterlab_widget_state_save()
-    port = args.port or _free_port()
-    token = secrets.token_hex(16)
-    # --log-level=WARN silences the ~20 INFO log lines that otherwise scroll the
-    # paste-line banner off-screen. Errors + warnings still surface.
-    launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} --log-level=WARN "
-              f"--IdentityProvider.token={token} --ServerApp.token={token}")
-    if args.env:
-        # `conda` is usually NOT on a non-interactive login shell's PATH, so a bare
-        # `conda activate` fails. Source conda.sh from the common install locations
-        # first, then activate. Covers miniforge/miniconda/anaconda/mambaforge.
-        src = ("for c in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge; do "
-               "[ -f \"$c/etc/profile.d/conda.sh\" ] && . \"$c/etc/profile.d/conda.sh\" && break; done")
-        launch = f"{src} && conda activate {shlex.quote(args.env)} && {launch}"
-    if args.path and not args.path.endswith(".ipynb"):
-        launch = f"cd {shlex.quote(args.path)} && {launch}"
-    sub = ""
-    if args.path and args.path.endswith(".ipynb"):
-        sub = "/tree/" + args.path.lstrip("/")
-    url = f"http://localhost:{port}/lab{sub}?token={token}"
-    # Resolve (and on first run, save) the SSH target BEFORE printing, so its one-time
-    # prompt doesn't interrupt the URL block.
-    target = _ssh_target()
-    # Three short one-liners — one launcher per OS, no URL repetition. macOS
-    # uses `open`, Linux uses `xdg-open`, Windows (PowerShell / Git Bash / cmd)
-    # uses `start ""` (PowerShell alias for Start-Process; Git Bash forwards to
-    # Windows start; the empty-title arg works in all three Windows shells).
-    tunnel = f"ssh -fN -L {port}:127.0.0.1:{port} {target}"
-    line_mac = f'{tunnel} && open "{url}"'
-    line_lnx = f'{tunnel} && xdg-open "{url}"'
-    line_win = f'{tunnel} ; start "" "{url}"'
-    YL = "\033[1;33m"      # bold yellow — frame
-    CY = "\033[1;96m"      # bold bright cyan — the paste command
-    GN = "\033[1;32m"      # bold green — status
-    DM = "\033[2;37m"      # dim white — alternates
-    AR = "\033[1;31m"      # bold red — arrows
-    LB = "\033[1;35m"      # bold magenta — OS labels
-    RST = "\033[0m"
-    bar = "═" * 72
-    arrow = "↓ ↓ ↓"
-    print()
-    print(f"{YL}╔{bar}╗{RST}")
-    print(f"{YL}║{RST}    {AR}{arrow}{RST}  {YL}COPY-PASTE ONE LINE INTO YOUR LAPTOP TERMINAL{RST}  {AR}{arrow}{RST}        {YL}║{RST}")
-    print(f"{YL}╚{bar}╝{RST}")
-    print()
-    print(f"  {LB}macOS:{RST}    {CY}{line_mac}{RST}")
-    print(f"  {LB}Linux:{RST}    {CY}{line_lnx}{RST}")
-    print(f"  {LB}Windows:{RST}  {CY}{line_win}{RST}")
-    print()
-    print(f"  {GN}✓ JupyterLab running on this box, port {port}. Ctrl-C here to stop.{RST}")
-    print(f"  {GN}✓ Widget state auto-save enabled for Cmd+S.{RST} {DM}({settings_path}){RST}")
-    print(f"  {DM}(URL alone): {url}{RST}")
-    print(f"  {DM}(tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}{RST}")
-    print(f"  {DM}(no SSH key yet? https://github.com/ophusgroup/dev#appendix-c-ssh-for-github-and-gpu-servers){RST}")
-    print()
-    # Flush now: the foreground server below never returns, so block-buffered stdout
-    # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
-    sys.stdout.flush()
-    if not args.no_open:
-        # If a browser is reachable (rare on a headless box), open it after the server
-        # has had a moment to come up. The foreground process below keeps it alive.
-        threading.Timer(3.0, lambda: webbrowser.open(url)).start()
-    return subprocess.run(["bash", "-lc", launch]).returncode
+                        help="Folder exports: port for the local HTTP server (default: auto-pick).")
+    parser.add_argument("--bind", default="127.0.0.1",
+                        help="Folder exports: bind address for the local HTTP server (default: 127.0.0.1).")
+    parser.add_argument("--title", default=None, help="Viewer page title.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose progress.")
 
 
 def _add_show_args(parser: argparse.ArgumentParser) -> None:
-    """Attach the shared options to a show* subparser (one source of truth)."""
-    parser.add_argument("path", nargs="+",
-                        help="An image, a folder of images, a 4D-STEM master, a folder of masters, "
-                             "or several master files (-> one 5D multi-tilt viewer).")
-    parser.add_argument("--bin", type=int, default=8, dest="det_bin",
-                        help="Detector binning factor for 4D-STEM (default 8). Keeps a laptop-sized stack.")
+    """Attach image and 4D-STEM options to a ``show*`` parser."""
+
+    _add_viewer_path_args(parser)
+    parser.add_argument("--bin", type=int, default=None, dest="det_bin",
+                        help=(
+                            "Detector binning factor. Show4DSTEM and ShowPtycho "
+                            "default to 1, meaning full detector sampling."
+                        ))
+    parser.add_argument("--count", type=int, default=None,
+                        help="Show4DSTEM: require and load this many compatible masters from the input.")
     parser.add_argument("--combined", action="store_true",
                         help="Many 4D masters -> one 5D HTML viewer (with --html; needs a local serve).")
-    parser.add_argument("--out", default=None,
-                        help="Output path (single) or directory (batch). Default: ~/Downloads.")
     parser.add_argument("--quantized", action="store_true",
                         help="Image widgets: uint8 pack (smaller file).")
     parser.add_argument("--html", action="store_true",
@@ -967,19 +699,94 @@ def _add_show_args(parser: argparse.ArgumentParser) -> None:
                         help="Folder: write a live ShowFolder-watched notebook that appends new files.")
     parser.add_argument("--watch-interval", type=float, default=2.0,
                         help="Polling interval in seconds for --watch live folders (default 2).")
-    parser.add_argument("--gpus", default=None,
-                        help="4D-STEM --watch: comma-separated CUDA GPU ids, e.g. 0 or 0,1. Default preserves loader device.")
+    parser.add_argument("--gpus", "--devices", dest="gpus", default=None,
+                        help="4D-STEM CUDA devices, e.g. 0 or 0,1. Default preserves loader device.")
     parser.add_argument("--page-budget", default="auto",
                         help="4D-STEM --watch: resident dataset cache, e.g. auto, 1, 2, or none (default auto).")
-    parser.add_argument("--dtype", default="u8", choices=("u8", "u16", "float32"),
-                        help="4D-STEM --watch browse dtype (default u8).")
+    parser.add_argument("--dtype", default="u8", choices=("u8", "uint8", "u16", "uint16", "float32"),
+                        help="4D-STEM browse dtype (default u8).")
     parser.add_argument("--scan-size", type=int, default=None,
                         help="4D-STEM --watch: only include masters with this square scan size.")
-    parser.add_argument("--no-open", action="store_true", help="Write the file(s) but do not launch anything.")
-    parser.add_argument("--serve", action="store_true",
-                        help="Open via a local HTTP server even for self-contained files (tunnelable URL).")
-    parser.add_argument("--title", default=None, help="Viewer page title.")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose progress.")
+    parser.add_argument("--backend", default="auto",
+                        choices=("auto", "cuda", "mps", "webgpu"),
+                        help="Show4DSTEM backend. Use webgpu with --html.")
+
+
+def _add_showptycho_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the focused ShowPtycho project options."""
+
+    _add_viewer_path_args(
+        parser,
+        path_help=(
+            "One or more *_master.h5 files, a folder containing masters, "
+            "or an existing ShowPtycho project."
+        ),
+        out_help=(
+            "Project directory. Default: ~/QuantEM/showptycho/<acquisition>."
+        ),
+        include_serve=False,
+    )
+    parser.set_defaults(det_bin=1)
+    parser.add_argument("--dtype", default="u8", choices=("u8", "uint8", "u16", "uint16", "float32"),
+                        help="ShowPtycho and Show4DSTEM browse dtype (default u8).")
+    parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Write under SOURCE/quantem/showptycho instead of the user-owned default.",
+    )
+    parser.add_argument(
+        "--anonymize",
+        action="store_true",
+        help=(
+            "ShowPtycho: redact the local acquisition name/path from saved "
+            "calibration and optimization provenance."
+        ),
+    )
+    parser.add_argument("--backend", default="auto", choices=("auto", "cuda", "mps"),
+                        help="ShowPtycho master generation: HDF5 load backend (default auto).")
+    parser.add_argument("--calibration", default="auto",
+                        help=(
+                            "ShowPtycho master generation: calibration JSON, "
+                            "'auto' to search nearby QuantEM results, or 'none'."
+                        ))
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=200,
+        help=(
+            "ShowPtycho master generation: run this many exact GPU Optuna "
+            "trials through quantem.gpu.SSB before export (default 200). "
+            "Set 0 only to reuse a resolved calibration without fitting."
+        ),
+    )
+    parser.add_argument(
+        "--refinement",
+        default="nelder-mead",
+        choices=("nelder-mead", "none"),
+        help=(
+            "Refinement after --trials: Nelder-Mead or none "
+            "(default nelder-mead)."
+        ),
+    )
+    parser.add_argument("--semiangle", "--semiangle-mrad", dest="semiangle_mrad",
+                        type=float, default=None,
+                        help="ShowPtycho master generation: probe semi-angle in mrad.")
+    parser.add_argument("--scan-sampling", "--scan-sampling-A", dest="scan_sampling_A",
+                        type=float, default=None,
+                        help="ShowPtycho master generation: scan pixel size in Angstrom.")
+    parser.add_argument("--det-sampling", "--det-sampling-mrad-px", dest="det_sampling_mrad_px",
+                        type=float, default=None,
+                        help="ShowPtycho master generation: detector angular sampling in mrad/pixel.")
+    parser.add_argument("--voltage-kv", dest="voltage_kv", type=float, default=None,
+                        help="ShowPtycho master generation: accelerating voltage in kV.")
+    parser.add_argument("--drag-bf", type=float, default=1.0,
+                        help="ShowPtycho browser BF fraction/count: 1.0 is full BF, 0.3 is 30%%, values greater than 1 are explicit BF-pixel counts (default 1.0).")
+    parser.add_argument("--size", type=int, default=800,
+                        help="ShowPtycho initial panel size in pixels (default 800).")
+    parser.add_argument("--fft", action="store_true",
+                        help="ShowPtycho opens with the FFT panel visible.")
+    parser.add_argument("--force", action="store_true",
+                        help="ShowPtycho master generation: rebuild an existing output folder.")
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +802,20 @@ def _show(args: argparse.Namespace) -> int:
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise FileNotFoundError("path does not exist: " + ", ".join(missing))
+    if args.widget == "showptycho" and len(paths) > 1:
+        masters = []
+        for path in paths:
+            if not path.is_file() or not _is_showptycho_master_name(path.name):
+                raise ValueError(
+                    "quantem showptycho accepts master HDF5 files or one folder "
+                    "containing master HDF5 files."
+                )
+            masters.append(path)
+        folder = _render_showptycho_collection(masters, args)
+        _serve_showptycho_folder(
+            folder, bind=args.bind, port=args.port, no_open=args.no_open
+        )
+        return 0
     # Several explicit paths: a list of masters -> one 5D viewer (multi-tilt), or a
     # set of image files -> a gallery. A single path falls through to _detect.
     if len(paths) > 1:
@@ -1004,26 +825,52 @@ def _show(args: argparse.Namespace) -> int:
             out = _render_gallery(paths, "gallery", args)
             _open_html(out, serve=args.serve, no_open=args.no_open)
             return 0
-        masters = [str(p) for p in paths]
-        return _do_4dstem(masters, f"{len(masters)}_datasets", args)
+        masters = _select_show4dstem_masters([str(p) for p in paths], args)
+        return _do_4dstem(masters, f"{len(masters)}_datasets", args, source_path=None)
     path = paths[0]
     kind = _detect(path, args.widget)
+    if kind == "showptycho-master":
+        folder = _render_showptycho_collection([path], args)
+        _serve_showptycho_folder(
+            folder, bind=args.bind, port=args.port, no_open=args.no_open
+        )
+        return 0
+    if kind == "showptycho-masters":
+        folder = _render_showptycho_collection(
+            _showptycho_master_candidates(path), args, source_dir=path
+        )
+        _serve_showptycho_folder(
+            folder, bind=args.bind, port=args.port, no_open=args.no_open
+        )
+        return 0
+    if kind == "showptycho-collection":
+        folder = _showptycho_collection_folder(path)
+        _serve_showptycho_folder(folder, bind=args.bind, port=args.port, no_open=args.no_open)
+        return 0
+    if kind == "showptycho":
+        folder = _showptycho_folder(path)
+        _serve_showptycho_folder(folder, bind=args.bind, port=args.port, no_open=args.no_open)
+        return 0
     if kind == "4dstem":
         if args.watch:
             if args.html:
                 raise ValueError("--watch writes a live notebook; omit --html.")
             if not path.is_dir():
                 raise ValueError("--watch requires a folder path containing *_master.h5 files.")
-        from quantem.widget.io import discover_masters
-        masters = [str(path)] if path.is_file() else discover_masters(str(path), verbose=args.verbose)
+        from quantem.gpu.io import discover
+
+        masters = [str(path)] if path.is_file() else discover(
+            str(path), verbose=args.verbose
+        )
         if not masters:
             raise ValueError(f"no *_master.h5 found in {path}")
+        masters = _select_show4dstem_masters(masters, args)
         label = pathlib.Path(masters[0]).stem.replace("_master", "") if path.is_file() else path.name
         if args.watch:
             notebook = _render_4dstem_watch_notebook(path, label, args)
             _launch_notebook(notebook, no_open=args.no_open)
             return 0
-        return _do_4dstem(masters, label, args)
+        return _do_4dstem(masters, label, args, source_path=path)
     if args.watch:
         if args.html:
             raise ValueError("--watch writes a live notebook; omit --html.")
@@ -1038,28 +885,86 @@ def _show(args: argparse.Namespace) -> int:
     return 0
 
 
-def _do_4dstem(masters: list[str], label: str, args: argparse.Namespace) -> int:
+def _do_4dstem(
+    masters: list[str],
+    label: str,
+    args: argparse.Namespace,
+    *,
+    source_path: pathlib.Path | None = None,
+) -> int:
     """Dispatch 4D-STEM master(s) to either a live notebook (default) or an offline
     HTML (``--html``), then launch/open it. One master loads alone; many load stacked
     into a 5D viewer with a dataset slider (the multi-tilt case)."""
+    args.det_bin = _effective_det_bin(args, default=1)
+    backend = _normalise_show4dstem_backend(args.backend)
     if args.html:
+        if backend == "webgpu":
+            output = _render_4dstem_webgpu_h5(masters, label, args)
+            _open_show4dstem_command(output.parent / "Show4DSTEM.command", no_open=args.no_open)
+            return 0
         outputs = _render_4dstem(masters, label, args)
         _open_html(outputs[0], serve=args.serve or args.combined, no_open=args.no_open)
         if len(outputs) > 1:
             print(f"wrote {len(outputs)} HTML files to {outputs[0].parent}")
         return 0
-    notebook = _render_4dstem_notebook(masters, label, args)
+    if backend == "webgpu":
+        raise ValueError("Show4DSTEM --backend webgpu writes browser HTML; add --html.")
+    notebook = _render_4dstem_notebook(masters, label, args, source_path=source_path)
     _launch_notebook(notebook, no_open=args.no_open)
     return 0
 
 
+def _select_show4dstem_masters(masters: list[str], args: argparse.Namespace) -> list[str]:
+    """Apply Show4DSTEM ``--count`` as an exact compatible-master request."""
+
+    count = getattr(args, "count", None)
+    if count is None:
+        return list(masters)
+    count = int(count)
+    if count < 1:
+        raise ValueError(f"--count must be a positive integer, got {count}")
+    if len(masters) < count:
+        raise ValueError(
+            f"--count {count} requested but only {len(masters)} master(s) were found."
+        )
+    return list(masters[:count])
+
+
+def _normalise_show4dstem_backend(value: str | None) -> str | None:
+    """Return the Show4DSTEM backend token used by generated notebooks/exports."""
+
+    token = str(value or "auto").strip().lower()
+    if token in {"", "auto"}:
+        return None
+    if token == "webgpu":
+        return "webgpu"
+    if token in {"cuda", "mps"}:
+        return token
+    raise ValueError(f"unsupported Show4DSTEM backend {value!r}")
+
+
 def _detect(path: pathlib.Path, forced: str) -> str:
-    """Return the content kind: 'image' (single file), 'images' (folder), or '4dstem'.
+    """Return the content kind: image, images, 4dstem, showptycho, or ptycho master.
 
     A single file is always 'image' unless it is a master or 4D is forced (a lone
     file can't be a 3D scrub). For a folder: the command's forced widget wins, else a
     ``*_master.h5`` makes it 4D and image files make it 'images'. The stack-vs-gallery
     split for 'images' is decided later from the forced widget."""
+    if forced == "showptycho":
+        if _is_showptycho_collection(path):
+            return "showptycho-collection"
+        if _is_showptycho_folder_export(path):
+            return "showptycho"
+        if path.is_file() and _is_showptycho_master_name(path.name):
+            return "showptycho-master"
+        if path.is_dir() and _showptycho_master_candidates(path):
+            return "showptycho-masters"
+        _showptycho_folder(path)
+        return "showptycho"
+    if _is_showptycho_folder_export(path):
+        return "showptycho"
+    if _is_showptycho_collection(path):
+        return "showptycho-collection"
     if path.is_file():
         if forced == "4dstem" or path.name.endswith("_master.h5"):
             return "4dstem"
@@ -1076,6 +981,759 @@ def _detect(path: pathlib.Path, forced: str) -> str:
     if any(p.suffix.lower() in IMAGE_EXTS for p in path.iterdir()):
         return "images"
     raise ValueError(f"no images or *_master.h5 found in {path}")
+
+
+def _effective_det_bin(args: argparse.Namespace, *, default: int) -> int:
+    """Return a positive detector bin, using the command-specific default."""
+
+    raw = args.det_bin
+    value = default if raw is None else raw
+    try:
+        det_bin = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"--bin must be a positive integer, got {value!r}") from exc
+    if det_bin < 1:
+        raise ValueError(f"--bin must be a positive integer, got {det_bin}")
+    return det_bin
+
+
+def _showptycho_decode_dtype(args: argparse.Namespace) -> str:
+    """Return the explicit browser decode dtype for ShowPtycho source HDF5."""
+
+    raw = str(args.dtype).lower()
+    if raw in {"u8", "uint8"}:
+        return "uint8"
+    if raw in {"u16", "uint16"}:
+        return "uint16"
+    if raw == "float32":
+        return "float32"
+    raise ValueError(f"ShowPtycho --dtype must be u8, u16, or float32; got {raw!r}")
+
+
+
+
+def _is_showptycho_master_name(name: str) -> bool:
+    """Return whether ``name`` is a supported ShowPtycho source master."""
+
+    return name.endswith("_master.h5") or name.endswith("_master_wrapper.h5")
+
+
+def _showptycho_master_candidates(path: pathlib.Path) -> list[pathlib.Path]:
+    """Find supported ShowPtycho source masters in a folder."""
+
+    masters: set[pathlib.Path] = set()
+    for pattern in SHOWPTYCHO_MASTER_PATTERNS:
+        masters.update(path.glob(pattern))
+    return sorted(masters)
+
+
+def _showptycho_folder(path: pathlib.Path) -> pathlib.Path:
+    """Return the folder for a ShowPtycho WebGPU export, or raise with next steps."""
+    folder = path.parent if path.is_file() and path.name == "index.html" else path
+    if not folder.is_dir():
+        raise FileNotFoundError(f"not a ShowPtycho folder export: {path}")
+    index = folder / "index.html"
+    manifest = _showptycho_manifest_path(folder)
+    if not index.is_file():
+        raise ValueError(f"ShowPtycho folder export is missing index.html: {folder}")
+    if manifest is None:
+        raise ValueError(
+            f"ShowPtycho folder export is missing snapshots/manifest.json: {folder}"
+        )
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"ShowPtycho manifest is not valid JSON: {manifest}") from exc
+    format_name = str(payload.get("format", ""))
+    if not format_name.startswith(SHOWPTYCHO_FOLDER_FORMAT):
+        raise ValueError(
+            "not a ShowPtycho WebGPU folder export; expected manifest format "
+            f"{SHOWPTYCHO_FOLDER_FORMAT!r}, got {format_name!r}"
+        )
+    return folder
+
+
+def _is_showptycho_folder_export(path: pathlib.Path) -> bool:
+    """Best-effort detector used by ``quantem show`` before normal image/4D routing."""
+    folder = path.parent if path.is_file() and path.name == "index.html" else path
+    manifest = _showptycho_manifest_path(folder)
+    if manifest is None:
+        return False
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return str(payload.get("format", "")).startswith(SHOWPTYCHO_FOLDER_FORMAT)
+
+
+def _showptycho_manifest_path(folder: pathlib.Path) -> pathlib.Path | None:
+    """Return the canonical ShowPtycho snapshot manifest, when present."""
+
+    candidate = folder / "snapshots" / "manifest.json"
+    return candidate if candidate.is_file() else None
+
+
+def _showptycho_source_stem(master: pathlib.Path) -> str:
+    """Return the microscope source stem without the Arina ``_master`` suffix."""
+
+    stem = master.stem
+    if stem.endswith("_master_wrapper"):
+        return stem[:-len("_master_wrapper")]
+    return stem[:-len("_master")] if stem.endswith("_master") else stem
+
+
+def _default_showptycho_root() -> pathlib.Path:
+    """Return the user-owned root for ShowPtycho projects."""
+
+    return pathlib.Path.home() / "QuantEM" / "showptycho"
+
+
+def _showptycho_target(path: pathlib.Path) -> pathlib.Path:
+    """Validate and normalize one explicit ShowPtycho output directory."""
+
+    target = path.expanduser().resolve()
+    if target.suffix.lower() in {".html", ".htm", ".ipynb"}:
+        raise ValueError(
+            "ShowPtycho writes a project folder; pass --out as a directory."
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _showptycho_collection_output_dir(
+    masters: list[pathlib.Path],
+    args: argparse.Namespace,
+    source_dir: pathlib.Path | None,
+) -> pathlib.Path:
+    """Resolve one catalog root without copying the acquisition masters."""
+
+    if args.out and args.in_place:
+        raise ValueError("choose either --out or --in-place, not both")
+    if args.out:
+        return _showptycho_target(pathlib.Path(args.out))
+
+    parents = {master.parent for master in masters}
+    if source_dir is not None:
+        project_name = source_dir.name
+    elif len(masters) == 1:
+        project_name = _showptycho_source_stem(masters[0])
+    elif len(parents) == 1:
+        project_name = next(iter(parents)).name
+    else:
+        project_name = "showptycho-collection"
+
+    if args.in_place:
+        if len(parents) != 1:
+            raise ValueError(
+                "--in-place requires all master files to share one source folder"
+            )
+        return _showptycho_target(
+            next(iter(parents)) / "quantem" / "showptycho"
+        )
+    return _showptycho_target(_default_showptycho_root() / project_name)
+
+
+def _write_show4dstem_viewer(
+    master: pathlib.Path,
+    folder: pathlib.Path,
+    *,
+    label: str,
+    target_stem: str | None = None,
+) -> pathlib.Path:
+    """Write a direct browser Show4DSTEM viewer linked to the raw HDF5 family."""
+
+    calibration_path = folder / "snapshots" / "cal.json"
+    if not calibration_path.is_file():
+        raise ValueError(
+            f"ShowPtycho export is missing its calibration: {calibration_path}"
+        )
+    calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    scan_shape = (
+        calibration.get("scan_region", {}).get("shape")
+        or calibration.get("phase_shape")
+    )
+    detector_shape = calibration.get("detector_shape")
+    if not (
+        isinstance(scan_shape, list)
+        and len(scan_shape) == 2
+        and isinstance(detector_shape, list)
+        and len(detector_shape) == 2
+    ):
+        raise ValueError(
+            f"ShowPtycho calibration is missing scan or detector shape: {calibration_path}"
+        )
+
+    from quantem.widget.show4dstem_webgpu_export import (
+        export_show4dstem_hdf5_viewer,
+    )
+
+    return export_show4dstem_hdf5_viewer(
+        master,
+        folder / "show4dstem",
+        scan_shape=(int(scan_shape[0]), int(scan_shape[1])),
+        detector_shape=(int(detector_shape[0]), int(detector_shape[1])),
+        title=f"{label} Show4DSTEM",
+        target_stem=target_stem,
+    )
+
+
+def _render_showptycho_collection(
+    masters: list[pathlib.Path],
+    args: argparse.Namespace,
+    *,
+    source_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Build one project catalog and one isolated result folder per master."""
+
+    if not masters:
+        raise ValueError("no ShowPtycho master HDF5 files were found")
+    root = _showptycho_collection_output_dir(masters, args, source_dir)
+    datasets: list[dict[str, object]] = []
+    used_names: set[str] = set()
+    for index, master in enumerate(masters, start=1):
+        stem = _showptycho_source_stem(master)
+        base_name = f"dataset-{index:03d}" if args.anonymize else stem
+        name = base_name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+        used_names.add(name)
+        result = _render_showptycho_master(master, args, out_dir=root / name)
+        raw_viewer = _write_show4dstem_viewer(
+            master,
+            result,
+            label=(f"Dataset {index:03d}" if args.anonymize else stem),
+            target_stem=(f"dataset-{index:03d}" if args.anonymize else None),
+        )
+        fit_path = result / "ssb_fit.json"
+        fit = (
+            json.loads(fit_path.read_text(encoding="utf-8"))
+            if fit_path.is_file()
+            else {}
+        )
+        entry: dict[str, object] = {
+            "label": f"Dataset {index:03d}" if args.anonymize else stem,
+            "viewer": f"{name}/index.html",
+            "show4dstem": str(raw_viewer.relative_to(root)),
+            "calibration": f"{name}/snapshots/cal.json",
+            "fit": f"{name}/ssb_fit.json" if fit_path.is_file() else None,
+            "backend": fit.get("backend"),
+            "num_bf": fit.get("num_bf"),
+            "loss": fit.get("loss"),
+        }
+        if not args.anonymize:
+            entry["source"] = master.name
+        datasets.append(entry)
+    if args.anonymize:
+        title = "ShowPtycho collection"
+    elif args.title:
+        title = args.title
+    elif len(masters) == 1:
+        title = f"{_showptycho_source_stem(masters[0])} ShowPtycho"
+    elif source_dir is not None:
+        title = f"{source_dir.name} ShowPtycho"
+    else:
+        title = "ShowPtycho collection"
+    _write_showptycho_collection(root, datasets, title=title)
+    return root
+
+
+def _showptycho_calibration_search_paths(master: pathlib.Path) -> list[pathlib.Path]:
+    """Nearby calibration files created by the QuantEM ptychography workflow."""
+
+    stem = _showptycho_source_stem(master)
+    root = master.parent
+    return [
+        root / "quantem" / "showptycho" / stem / "calibration.json",
+    ]
+
+
+def _showptycho_master_calib_paths(master: pathlib.Path) -> list[pathlib.Path]:
+    """Nearby run metadata files that can fill microscope geometry."""
+
+    stem = _showptycho_source_stem(master)
+    root = master.parent
+    return [
+        root / "quantem" / "showptycho" / stem / "master_calib.json",
+        root / "quantem" / "showptycho" / stem / "_runspec.json",
+    ]
+
+
+def _mapping_matches_showptycho_source(
+    payload: dict,
+    *,
+    master: pathlib.Path,
+) -> bool:
+    """Return whether a calibration object belongs to ``master``."""
+
+    stem = _showptycho_source_stem(master)
+    candidates = {
+        str(payload.get("source_stem", "")),
+        str(payload.get("label", "")),
+    }
+    source_file = payload.get("source_file") or payload.get("master_path")
+    if source_file:
+        candidates.add(_showptycho_source_stem(pathlib.Path(str(source_file))))
+    return stem in candidates or master.stem in candidates
+
+
+def _calibration_from_showptycho_mapping(payload: dict):
+    """Convert a calibration mapping to ``PtychoCalibration``."""
+
+    from quantem.widget.showptycho import PtychoCalibration
+
+    aberrations = {
+        str(k): float(v) for k, v in (payload.get("aberrations") or {}).items()
+    }
+    if "C10" not in aberrations and "C10_nm" in payload:
+        aberrations["C10"] = float(payload["C10_nm"])
+    if "C12" not in aberrations and "C12_nm" in payload:
+        aberrations["C12"] = float(payload["C12_nm"])
+    if "phi12" not in aberrations and "phi12_rad" in payload:
+        aberrations["phi12"] = float(payload["phi12_rad"])
+    if "phi12" not in aberrations and "phi12_deg" in payload:
+        import math
+
+        aberrations["phi12"] = math.radians(float(payload["phi12_deg"]))
+    if "rotation_angle_deg" not in payload:
+        raise ValueError("calibration is missing rotation_angle_deg")
+    return PtychoCalibration(
+        rotation_angle_deg=float(payload["rotation_angle_deg"]),
+        aberrations=aberrations,
+        higher_order={
+            str(k): float(v) for k, v in (payload.get("higher_order") or {}).items()
+        },
+        flip_phase=bool(payload.get("flip_phase", False)),
+        voltage_kV=payload.get("voltage_kV") or payload.get("voltage_kv"),
+        semiangle_mrad=payload.get("semiangle_mrad") or payload.get("semiangle"),
+        scan_sampling_A=(
+            payload.get("scan_sampling_A")
+            or payload.get("scan_sampling")
+            or payload.get("scan_sampling_A_per_px")
+        ),
+        det_sampling_mrad_px=(
+            payload.get("det_sampling_mrad_px")
+            or payload.get("det_sampling_mrad_per_px")
+        ),
+        loss=payload.get("loss"),
+        source_file=payload.get("source_file"),
+        source_stem=payload.get("source_stem"),
+        label=payload.get("label"),
+        notes=str(payload.get("notes", "")),
+    )
+
+
+def _load_showptycho_calibration(path: pathlib.Path, *, master: pathlib.Path):
+    """Load a single calibration, choosing the matching entry from a list file."""
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("calibrations"), list):
+        payload = payload["calibrations"]
+    if isinstance(payload, list):
+        matches = [
+            item for item in payload
+            if isinstance(item, dict)
+            and "rotation_angle_deg" in item
+            and _mapping_matches_showptycho_source(item, master=master)
+        ]
+        if not matches:
+            raise ValueError(f"no calibration in {path} matches {_showptycho_source_stem(master)}")
+
+        def score(item: dict) -> float:
+            loss = item.get("loss")
+            try:
+                return float(loss)
+            except (TypeError, ValueError):
+                return float("inf")
+
+        payload = min(matches, key=score)
+    if not isinstance(payload, dict):
+        raise ValueError(f"calibration must be a JSON object or list: {path}")
+    return _calibration_from_showptycho_mapping(payload)
+
+
+def _resolve_showptycho_calibration(master: pathlib.Path, args: argparse.Namespace):
+    """Resolve an explicit, automatic, or disabled ShowPtycho calibration."""
+
+    raw = str(args.calibration).strip()
+    if raw.lower() in {"none", "off", "false", "0"}:
+        return None, None
+    if raw.lower() != "auto":
+        path = pathlib.Path(raw).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"ShowPtycho calibration file not found: {path}")
+        return _load_showptycho_calibration(path, master=master), path
+    for path in _showptycho_calibration_search_paths(master):
+        if not path.is_file():
+            continue
+        try:
+            return _load_showptycho_calibration(path, master=master), path
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+    return None, None
+
+
+def _read_showptycho_master_calib(master: pathlib.Path) -> dict:
+    """Read optional ptychography run metadata next to a master."""
+
+    for path in _showptycho_master_calib_paths(master):
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _first_number(mapping: dict, *keys: str) -> float | None:
+    """Return the first finite numeric value found under ``keys``."""
+
+    for key in keys:
+        value = mapping.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number == number:
+            return number
+    return None
+
+
+def _positive_cli_number(value: object, option: str) -> float | None:
+    """Return a positive finite CLI number, or raise for an invalid explicit value."""
+
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{option} must be a positive finite number, got {value!r}") from exc
+    if not (number == number and number > 0):
+        raise ValueError(f"{option} must be a positive finite number, got {value!r}")
+    return number
+
+
+def _positive_optional_number(value: object) -> float | None:
+    """Return ``value`` when it is positive and finite, otherwise ``None``."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number > 0 else None
+
+
+def _first_positive_number(mapping: dict, *keys: str) -> float | None:
+    """Return the first positive finite numeric value found under ``keys``."""
+
+    number = _first_number(mapping, *keys)
+    return number if number is not None and number > 0 else None
+
+
+def _showptycho_default_warning(label: str, value: float, unit: str, option: str) -> str:
+    """Format one visible quick-start geometry default warning."""
+
+    return (
+        f"using default ptychography {label} {value:g} {unit}; pass {option} "
+        "or a calibration JSON for microscope-specific geometry"
+    )
+
+
+def _resolve_showptycho_geometry(
+    args: argparse.Namespace,
+    calibration,
+    meta: dict,
+) -> tuple[float, float, float, float | None, list[str]]:
+    """Resolve ShowPtycho geometry from CLI args, calibration, metadata, or defaults."""
+
+    semiangle = (
+        _positive_cli_number(args.semiangle_mrad, "--semiangle")
+        or _positive_optional_number(
+            calibration.semiangle_mrad if calibration is not None else None
+        )
+        or _first_positive_number(meta, "semiangle_mrad", "semiangle")
+    )
+    scan_sampling = (
+        _positive_cli_number(args.scan_sampling_A, "--scan-sampling")
+        or _positive_optional_number(
+            calibration.scan_sampling_A if calibration is not None else None
+        )
+        or _first_positive_number(
+            meta, "scan_sampling_A", "scan_sampling", "scan_sampling_A_per_px"
+        )
+    )
+    voltage = (
+        _positive_cli_number(args.voltage_kv, "--voltage-kv")
+        or _positive_optional_number(
+            calibration.voltage_kV if calibration is not None else None
+        )
+        or _first_positive_number(meta, "voltage_kV", "voltage_kv", "voltage")
+    )
+    det_sampling = (
+        _positive_cli_number(args.det_sampling_mrad_px, "--det-sampling")
+        or _positive_optional_number(
+            calibration.det_sampling_mrad_px if calibration is not None else None
+        )
+        or _first_positive_number(
+            meta, "det_sampling_mrad_per_px", "det_sampling_mrad_px"
+        )
+    )
+
+    warnings: list[str] = []
+    if semiangle is None:
+        semiangle = DEFAULT_PTYCHO_SEMIANGLE_MRAD
+        warnings.append(_showptycho_default_warning(
+            "semiangle", semiangle, "mrad", "--semiangle",
+        ))
+    if scan_sampling is None:
+        scan_sampling = DEFAULT_PTYCHO_SCAN_SAMPLING_A
+        warnings.append(_showptycho_default_warning(
+            "scan sampling", scan_sampling, "A", "--scan-sampling",
+        ))
+    if voltage is None:
+        voltage = DEFAULT_PTYCHO_VOLTAGE_KV
+        warnings.append(_showptycho_default_warning(
+            "voltage", voltage, "kV", "--voltage-kv",
+        ))
+    return semiangle, scan_sampling, voltage, det_sampling, warnings
+
+
+def _render_showptycho_master(
+    master: pathlib.Path,
+    args: argparse.Namespace,
+    *,
+    out_dir: pathlib.Path,
+) -> pathlib.Path:
+    """Build a ShowPtycho WebGPU folder from one raw ``*_master.h5`` file."""
+
+    master = master.expanduser().resolve()
+    out_dir = _showptycho_target(out_dir)
+    if _is_showptycho_folder_export(out_dir) and not args.force:
+        print(f"ShowPtycho folder already exists: {out_dir}")
+        print("  using existing folder; pass --force to rebuild")
+        return out_dir
+
+    det_bin = _effective_det_bin(args, default=1)
+    if det_bin != 1:
+        raise ValueError(
+            "ShowPtycho SSB requires native detector data; use --bin 1."
+        )
+    calibration, calibration_path = _resolve_showptycho_calibration(master, args)
+    meta = _read_showptycho_master_calib(master)
+    semiangle, scan_sampling, voltage, det_sampling, geometry_warnings = (
+        _resolve_showptycho_geometry(args, calibration, meta)
+    )
+
+    from quantem.widget import ShowPtycho
+
+    print(f"{master.name}: *_master.h5 -> ShowPtycho WebGPU folder")
+    print(f"  output: {out_dir}")
+    print(f"  detector bin: {det_bin} ({'native' if det_bin == 1 else 'downsampled'})")
+    if calibration_path is not None:
+        print(f"  calibration: {calibration_path}")
+    else:
+        print("  calibration: none; using resolved geometry and zero aberration start")
+    print(
+        f"  geometry: semiangle={semiangle:g} mrad, "
+        f"scan_sampling={scan_sampling:g} A, voltage={voltage:g} kV"
+    )
+    if det_sampling is not None:
+        print(f"  detector sampling: {det_sampling:g} mrad/pixel")
+    for warning in geometry_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    aberrations = dict(calibration.aberrations) if calibration is not None else None
+    rotation = (
+        float(calibration.rotation_angle_deg)
+        if calibration is not None else 0.0
+    )
+    fit = None
+    written_evidence_path = None
+    bf_source_write_seconds = None
+    trials = int(args.trials)
+    if trials < 0:
+        raise ValueError("--trials must be zero or a positive integer")
+
+    from quantem.gpu import SSB
+
+    workflow = SSB.open(
+        str(master),
+        backend=args.backend,
+        dtype=_showptycho_decode_dtype(args),
+        voltage_kV=float(voltage),
+        semiangle_mrad=float(semiangle),
+        scan_sampling_A=float(scan_sampling),
+        det_sampling=float(det_sampling) if det_sampling is not None else None,
+        aberrations=aberrations,
+        rotation_angle_deg=rotation,
+        bf_intensity_threshold=0.0,
+        bf_radius=None,
+        calibration=(
+            str(calibration_path) if calibration_path is not None else None
+        ),
+        verbose=args.verbose,
+    )
+    print(
+        f"  SSB source: {workflow.source_kind} "
+        f"({workflow.source_storage_path})"
+    )
+    source_kind = workflow.source_kind
+    source_path = workflow.source_storage_path
+    source_dtype = workflow.source_dtype
+    source_bytes = workflow.source_bytes
+    source_load_seconds = workflow.source_load_seconds
+    widget_input = workflow
+    evidence_stem = out_dir.parent / f".{out_dir.name}_{os.getpid()}_bf_columns"
+    written_evidence = workflow.export_brightfield(evidence_stem)
+    if written_evidence is not None:
+        written_evidence_path = pathlib.Path(written_evidence[0])
+        bf_source_write_seconds = float(written_evidence[1])
+        print(
+            "  exact BF source prepared in "
+            f"{bf_source_write_seconds:.2f}s ({written_evidence_path})"
+        )
+
+    if trials:
+        from quantem.widget.showptycho import PtychoCalibration
+
+        refine = None if args.refinement == "none" else str(args.refinement)
+        print(
+            f"  SSB fit: {trials} full-BF trials, "
+            f"refine={refine or 'none'}, backend={workflow.backend.upper()}"
+        )
+        fit = workflow.fit(
+            trials=trials,
+            refinement=refine,
+            verbose=args.verbose,
+        )
+        fit_det_sampling = (
+            float(det_sampling)
+            if det_sampling is not None
+            else 2.0 * float(semiangle) / float(fit.detected_bf_radius)
+        )
+        aberrations = dict(fit.aberrations)
+        rotation = float(fit.rotation_angle_deg)
+        calibration = PtychoCalibration(
+            rotation_angle_deg=fit.rotation_angle_deg,
+            aberrations=aberrations,
+            higher_order=(
+                dict(calibration.higher_order)
+                if calibration is not None else {}
+            ),
+            flip_phase=(
+                bool(calibration.flip_phase)
+                if calibration is not None else False
+            ),
+            voltage_kV=float(voltage),
+            semiangle_mrad=float(semiangle),
+            scan_sampling_A=float(scan_sampling),
+            det_sampling_mrad_px=fit_det_sampling,
+            loss=float(fit.loss) if fit.loss is not None else None,
+            source_file=(
+                "redacted_local_source" if args.anonymize else str(master)
+            ),
+            notes=(
+                f"Exact {fit.backend.upper()} SSB fit: {trials} Optuna "
+                f"trials followed by {refine or 'no refinement'}."
+            ),
+        )
+        from dataclasses import asdict
+
+        from quantem.widget.showptycho import (
+            _atomic_write_json,
+            save_ptycho_calibration,
+        )
+
+        save_ptycho_calibration(calibration, out_dir / "calibration.json")
+        software = _showptycho_software_provenance()
+        fit_payload = {
+            "schema_version": 1,
+            "software": software,
+            "export_software": software,
+            "backend": fit.backend,
+            "source_kind": source_kind,
+            "source_path": str(source_path),
+            "source_dtype": source_dtype,
+            "source_bytes": source_bytes,
+            "source_load_seconds": source_load_seconds,
+            "bf_source_write_seconds": bf_source_write_seconds,
+            "objective": "full_bf_phase_variance",
+            "n_trials": fit.n_trials,
+            "refine_method": fit.refine_method,
+            "num_bf": fit.num_bf,
+            "loss": fit.loss,
+            "elapsed_seconds": fit.elapsed,
+            "timings": dict(fit.timings),
+            "refine_nfev": fit.refine_nfev,
+            "aberrations": fit.aberrations,
+            "bf_center": list(fit.bf_center),
+            "bf_radius": fit.bf_radius,
+            "calibration": asdict(calibration),
+            "trials": list(fit.optuna_trials or ()),
+        }
+        if args.anonymize:
+            fit_payload = _anonymize_showptycho_payload(fit_payload)
+        _atomic_write_json(out_dir / "ssb_fit.json", fit_payload)
+        print(f"  optimized calibration: {out_dir / 'calibration.json'}")
+        print(f"  optimization record: {out_dir / 'ssb_fit.json'}")
+    widget = ShowPtycho(
+        widget_input,
+        backend=args.backend,
+        semiangle_mrad=float(semiangle),
+        scan_sampling_A=float(scan_sampling),
+        det_sampling=float(det_sampling) if det_sampling is not None else None,
+        voltage_kV=float(voltage),
+        bf_intensity_threshold=0.0,
+        bf_radius=None,
+        aberrations=aberrations,
+        rotation_angle_deg=rotation,
+        calibration=calibration,
+        source_file=str(master),
+        drag_bf=float(args.drag_bf),
+        size=int(args.size),
+        fft_on=bool(args.fft),
+    )
+    try:
+        exported = widget.export(
+            out_dir,
+            title=(
+                args.title
+                or (
+                    "ShowPtycho"
+                    if args.anonymize
+                    else f"{_showptycho_source_stem(master)} ShowPtycho"
+                )
+            ),
+            overwrite=True,
+            decode_dtype=_showptycho_decode_dtype(args),
+        )
+    finally:
+        if written_evidence_path is not None:
+            written_evidence_path.unlink(missing_ok=True)
+    if fit is None and calibration_path is not None:
+        fit_record_candidates = [
+            calibration_path.parent / "ssb_fit.json",
+            calibration_path.parent.parent / "ssb_fit.json",
+        ]
+        fit_record = next(
+            (path for path in fit_record_candidates if path.is_file()),
+            None,
+        )
+        if fit_record is not None and fit_record.resolve() != (exported / "ssb_fit.json").resolve():
+            from quantem.widget.showptycho import _atomic_write_json
+
+            _atomic_write_json(
+                exported / "ssb_fit.json",
+                _showptycho_reused_fit_payload(
+                    fit_record,
+                    anonymize=bool(args.anonymize),
+                ),
+            )
+            print(f"  optimization record: {exported / 'ssb_fit.json'}")
+    return exported
 
 
 # ---------------------------------------------------------------------------
@@ -1123,22 +1781,95 @@ def _load_2d(path: pathlib.Path):
     return _read_frame(path)
 
 
-def _render_4dstem_notebook(masters: list[str], label: str, args: argparse.Namespace) -> pathlib.Path:
+def _render_4dstem_notebook(
+    masters: list[str],
+    label: str,
+    args: argparse.Namespace,
+    *,
+    source_path: pathlib.Path | None = None,
+) -> pathlib.Path:
     """Write a live Jupyter notebook that loads the 4D-STEM master(s) and opens a
     kernel-backed ``Show4DSTEM`` (full real-time WebGPU, no baked HTML). One master
     loads on its own; many load stacked into a 5D viewer with a dataset slider (the
     multi-tilt case). The notebook is the editable, real-use surface; ``--html`` is
     the share artifact."""
     import json
-    print(f"{len(masters)} master(s), bin {args.det_bin} -> Show4DSTEM (live notebook)")
-    arg = repr(masters[0]) if len(masters) == 1 else repr(masters)
-    source = (
-        "from quantem.widget import load, Show4DSTEM\n"
-        f"Show4DSTEM(load({arg}, det_bin={args.det_bin}))"
+    backend = _normalise_show4dstem_backend(args.backend)
+    devices = _python_gpus(args.gpus)
+    page_budget = _python_page_budget(args.page_budget)
+    backend_label = backend or "auto"
+    print(
+        f"{len(masters)} master(s), backend {backend_label}, bin {args.det_bin}, "
+        f"dtype {args.dtype}, devices {devices} -> Show4DSTEM (live notebook)"
     )
+    if source_path is not None and source_path.is_dir():
+        gpus_arg = "None" if backend == "mps" else devices
+        backend_arg = "None" if backend is None else repr(backend)
+        source = (
+            "from quantem.widget import Show4DSTEM\n"
+            "\n"
+            f"folder = {str(source_path)!r}\n"
+            f"backend = {backend_arg}\n"
+            f"gpus = {gpus_arg}\n"
+            "print('folder:', folder)\n"
+            "print('backend:', backend or 'auto')\n"
+            "print('gpus:', gpus)\n"
+            "viewer = Show4DSTEM.from_folder(\n"
+            "    folder,\n"
+            f"    backend={backend_arg},\n"
+            f"    max_masters={len(masters)},\n"
+            f"    min_masters={len(masters)},\n"
+            f"    det_bin={int(args.det_bin)},\n"
+            f"    dtype={args.dtype!r},\n"
+            "    gpus=gpus,\n"
+            f"    page_budget={page_budget},\n"
+            "    watch=False,\n"
+            "    verbose=True,\n"
+            ")\n"
+            "viewer\n"
+        )
+    else:
+        arg = repr(masters[0]) if len(masters) == 1 else repr(masters)
+        backend_line = "" if backend is None else f"    backend={backend!r},\n"
+        devices_line = (
+            f"    devices={devices},\n    series_type='generic',\n"
+            if backend == "cuda" and devices != "None"
+            else ""
+        )
+        page_device = devices if backend == "cuda" and devices != "None" else "None"
+        source = (
+            "from quantem.gpu.io import load\n"
+            "from quantem.widget import Show4DSTEM\n"
+            "\n"
+            f"masters = {arg}\n"
+            "data = load(\n"
+            "    masters,\n"
+            f"    det_bin={int(args.det_bin)},\n"
+            f"    dtype={args.dtype!r},\n"
+            "    apply_mask=True,\n"
+            f"{backend_line}"
+            f"{devices_line}"
+            "    verbose=True,\n"
+            ")\n"
+            "Show4DSTEM(\n"
+            "    data,\n"
+            f"    page_budget={page_budget},\n"
+            f"    page_device={page_device},\n"
+            "    verbose=True,\n"
+            ")\n"
+        )
     nb = {
         "cells": [
-            {"cell_type": "markdown", "id": "title", "metadata": {}, "source": [f"# {label}\n", f"\n{len(masters)} master(s), detector bin {args.det_bin}."]},
+            {
+                "cell_type": "markdown",
+                "id": "title",
+                "metadata": {},
+                "source": [
+                    f"# {label}\n",
+                    f"\n{len(masters)} master(s), backend `{backend_label}`, "
+                    f"detector bin {args.det_bin}, dtype `{args.dtype}`.",
+                ],
+            },
             {"cell_type": "code", "id": "viewer", "execution_count": None, "metadata": {}, "outputs": [], "source": source.splitlines(keepends=True)},
         ],
         "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}},
@@ -1174,81 +1905,6 @@ def _python_gpus(value: str | None) -> str:
     if not ids:
         return "None"
     return repr(ids)
-
-
-def _render_data_transfer_show4dstem_notebook(
-    manifest: pathlib.Path,
-    label: str,
-    masters,
-    args: argparse.Namespace,
-) -> pathlib.Path:
-    """Write a live Show4DSTEM notebook from ready target masters in a manifest."""
-    import json
-
-    devices = _python_gpus(args.gpus)
-    page_budget = _python_page_budget(args.page_budget)
-    print(
-        f"{len(masters)} transferred target master(s), bin {args.det_bin}, dtype {args.dtype}, "
-        f"devices {devices} -> Show4DSTEM (live notebook)"
-    )
-    source = (
-        "from pathlib import Path\n"
-        "from quantem.widget import Show4DSTEM, load\n"
-        "from quantem.widget.io import data_transfer_load_warnings, read_data_transfer_manifest, target_masters\n"
-        "\n"
-        f"manifest = Path({str(manifest)!r})\n"
-        "plan = read_data_transfer_manifest(manifest)\n"
-        "masters = [str(path) for path in target_masters(plan)]\n"
-        f"devices = {devices}\n"
-        "warnings = data_transfer_load_warnings(plan, devices=devices)\n"
-        "for warning in warnings:\n"
-        "    print(f\"warning: {warning}\")\n"
-        "print(f\"ready masters: {len(masters)}\")\n"
-        "print(\"devices:\", devices)\n"
-        "print(\"dtype:\", " + repr(args.dtype) + ", \"det_bin:\", " + str(int(args.det_bin)) + ")\n"
-        "data = load(\n"
-        "    masters,\n"
-        f"    det_bin={int(args.det_bin)},\n"
-        f"    dtype={args.dtype!r},\n"
-        "    devices=devices,\n"
-        "    verbose=True,\n"
-        ")\n"
-        "Show4DSTEM(\n"
-        "    data,\n"
-        f"    page_budget={page_budget},\n"
-        "    page_device=devices,\n"
-        "    verbose=True,\n"
-        ")\n"
-    )
-    nb = {
-        "cells": [
-            {
-                "cell_type": "markdown",
-                "id": "title",
-                "metadata": {},
-                "source": [
-                    f"# {label} transferred Show4DSTEM\n",
-                    f"\nManifest: `{manifest}`\n",
-                    f"\nReady target masters: {len(masters)}. Detector bin {args.det_bin}; "
-                    f"dtype `{args.dtype}`; devices `{devices}`; page budget `{args.page_budget}`.",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "id": "transferred-viewer",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": source.splitlines(keepends=True),
-            },
-        ],
-        "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}},
-        "nbformat": 4,
-        "nbformat_minor": 5,
-    }
-    out = _out_dir(args.out) / f"{label}_transferred_show4dstem.ipynb"
-    out.write_text(json.dumps(nb, indent=1))
-    return out
 
 
 def _render_4dstem_watch_notebook(folder: pathlib.Path, label: str, args: argparse.Namespace) -> pathlib.Path:
@@ -1379,19 +2035,195 @@ def _launch_notebook(notebook: pathlib.Path, *, no_open: bool) -> None:
     import shutil
     import subprocess
     headless = sys.platform != "darwin" and not os.environ.get("DISPLAY")
-    if no_open or headless or shutil.which("jupyter") is None:
+    if no_open or headless:
         print(f"wrote {notebook}")
         if headless:
             print(f"  open it from your Mac:  mj jupyter cuda-env quantem   (then open {notebook.name})")
-        elif shutil.which("jupyter") is None:
-            print("  jupyter not found; install it or open the notebook in your editor")
+        return
+    jupyter = shutil.which("jupyter")
+    if jupyter is None:
+        probe = subprocess.run(
+            [sys.executable, "-m", "jupyter", "lab", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        command = [sys.executable, "-m", "jupyter", "lab", str(notebook)] if probe.returncode == 0 else None
+    else:
+        command = [jupyter, "lab", str(notebook)]
+    if command is None:
+        print(f"wrote {notebook}")
+        print("  jupyter not found in this Python; install it or open the notebook in your editor")
         return
     print(f"launching jupyter lab on {notebook}")
-    subprocess.Popen(["jupyter", "lab", str(notebook)],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _master_to_binned_numpy(master: str, det_bin: int):
+def _open_show4dstem_command(command: pathlib.Path, *, no_open: bool) -> None:
+    """Open a generated Show4DSTEM folder launcher when a desktop is available."""
+
+    if no_open:
+        print(f"wrote {command}")
+        return
+    headless = sys.platform != "darwin" and not os.environ.get("DISPLAY")
+    if headless or not command.is_file():
+        print(f"wrote {command}")
+        return
+    import subprocess
+
+    if sys.platform == "darwin":
+        subprocess.Popen(
+            ["open", str(command)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        webbrowser.open(command.as_uri())
+    print(f"opened {command}")
+
+
+def _render_4dstem_webgpu_h5(
+    masters: list[str],
+    label: str,
+    args: argparse.Namespace,
+) -> pathlib.Path:
+    """Render Show4DSTEM WebGPU HTML over linked H5 data."""
+
+    import numpy as np
+    from quantem.widget import Show4DSTEM
+    from quantem.widget.show4dstem_factory import _master_file_contract
+    from quantem.widget.show4dstem_webgpu_export import (
+        bundle_master_urls,
+        export_show4dstem_webgpu_bundle,
+    )
+
+    if int(args.det_bin) != 1:
+        raise ValueError(
+            "Show4DSTEM --backend webgpu uses linked HDF5 files with browser "
+            "range reads; keep --bin 1."
+        )
+    contracts = [_master_file_contract(master) for master in masters]
+    first = contracts[0]
+    scan_shape = first.get("scan_shape")
+    detector_shape = first.get("detector_shape")
+    n_frames = first.get("n_frames")
+    if scan_shape is None or detector_shape is None or n_frames is None:
+        raise ValueError("could not infer scan/detector shape from the first master")
+    expected = {
+        "scan_shape": tuple(int(value) for value in scan_shape),
+        "detector_shape": tuple(int(value) for value in detector_shape),
+        "n_frames": int(n_frames),
+    }
+    for master, contract in zip(masters[1:], contracts[1:], strict=True):
+        observed = {
+            "scan_shape": tuple(int(value) for value in contract.get("scan_shape") or ()),
+            "detector_shape": tuple(int(value) for value in contract.get("detector_shape") or ()),
+            "n_frames": int(contract.get("n_frames") or 0),
+        }
+        if observed != expected:
+            raise ValueError(
+                f"incompatible Show4DSTEM master {pathlib.Path(master).name!r}: "
+                f"{observed}; expected {expected}"
+            )
+
+    out_dir = _out_dir(args.out) / f"{label}_show4dstem_webgpu"
+    replaced = _prepare_show4dstem_webgpu_output_dir(out_dir)
+    if replaced:
+        print(f"replaced existing Show4DSTEM WebGPU export: {out_dir}")
+    labels = [f"tilt_{idx:02d}" for idx in range(len(masters))]
+    for master, tilt_label in zip(masters, labels, strict=True):
+        _link_show4dstem_h5_family(out_dir, pathlib.Path(master), tilt_label)
+
+    widget = Show4DSTEM(
+        np.zeros((1, 1, 1, 1), dtype=np.uint8),
+        h5_urls=bundle_master_urls(out_dir),
+        backend="webgpu",
+        scan_shape=expected["scan_shape"],
+        detector_shape=expected["detector_shape"],
+        frame_dim_label="Dataset",
+        frame_labels=labels,
+        view_mode="multiple" if len(masters) > 1 else "single",
+        compare_max_panels=max(1, len(masters)),
+        compare_group_mode="all",
+        title=args.title or label,
+        verbose=bool(args.verbose),
+        show_controls=True,
+    )
+    decode_dtype = "uint8" if str(args.dtype).lower() in {"u8", "uint8"} else "uint16"
+    export_show4dstem_webgpu_bundle(
+        widget,
+        out_dir,
+        title=args.title or label,
+        h5_decode_dtype=decode_dtype,
+    )
+    out = out_dir / "index.html"
+    print(
+        f"{len(masters)} master(s), backend webgpu, bin 1, dtype {args.dtype} "
+        f"-> {out_dir / 'Show4DSTEM.command'}"
+    )
+    return out
+
+
+def _prepare_show4dstem_webgpu_output_dir(out_dir: pathlib.Path) -> bool:
+    """Create a fresh generated Show4DSTEM WebGPU export directory.
+
+    The CLI owns ``*_show4dstem_webgpu`` directories. Reusing one is unsafe:
+    stale ``index.html`` files, lazy metadata, or generated shards can make a
+    launcher open yesterday's viewer while appearing to run today's command.
+    """
+
+    if not out_dir.name.endswith("_show4dstem_webgpu"):
+        raise ValueError(
+            "internal error: refusing to replace a non-Show4DSTEM WebGPU "
+            f"output directory: {out_dir}"
+        )
+    existed = out_dir.exists() or out_dir.is_symlink()
+    if out_dir.is_symlink() or out_dir.is_file():
+        out_dir.unlink()
+    elif out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=False)
+    return existed
+
+
+def _link_show4dstem_h5_family(out_dir: pathlib.Path, master: pathlib.Path, label: str) -> str:
+    """Symlink a master and same-prefix data chunks under an anonymous label."""
+
+    source_master = master.expanduser().resolve()
+    source_prefix = source_master.name[: -len("_master.h5")]
+    master_link = out_dir / f"{label}_master.h5"
+    _replace_symlink(master_link, source_master)
+    for data_file in sorted(source_master.parent.glob(f"{source_prefix}_data_*.h5")):
+        data_link = out_dir / data_file.name.replace(source_prefix, label, 1)
+        _replace_symlink(data_link, data_file.resolve())
+    return master_link.name
+
+
+def _replace_symlink(link: pathlib.Path, target: pathlib.Path) -> None:
+    """Replace only symlink artifacts; never overwrite a real data file."""
+
+    if link.exists() or link.is_symlink():
+        if not link.is_symlink():
+            raise ValueError(f"refusing to replace non-symlink artifact file: {link}")
+        link.unlink()
+    link.symlink_to(target)
+
+
+def _show4dstem_export_dtype(args: argparse.Namespace) -> str:
+    """Return the Show4DSTEM HTML export dtype requested by the CLI."""
+
+    raw = str(getattr(args, "dtype", "u8") or "u8").strip().lower()
+    if raw in {"u8", "uint8"}:
+        return "uint8"
+    if raw in {"u16", "uint16"}:
+        return "uint16"
+    raise ValueError(
+        "Show4DSTEM --html export supports --dtype u8/uint8 or u16/uint16. "
+        "Use a live notebook for float32 analysis."
+    )
+
+
+def _master_to_binned_numpy(master: str, det_bin: int, dtype: str = "u8"):
     """Load one master with detector binning and return a mean-binned 4D numpy array
     ``(scan_row, scan_col, det_row, det_col)``. Binning happens at LOAD time (so the
     full 19 GB stack never materializes - fits a laptop), and since the loader
@@ -1400,8 +2232,8 @@ def _master_to_binned_numpy(master: str, det_bin: int):
     ChunkedFrames, materialized via its chunks) / CPU."""
     import numpy as np
     import torch
-    from quantem.widget import load
-    result = load(master, det_bin=det_bin)
+    from quantem.gpu.io import load
+    result = load(master, det_bin=det_bin, dtype=dtype)
     data = result.data if hasattr(result, "data") else result
     meta = getattr(result, "metadata", {}) or {}
     if hasattr(data, "chunks"):
@@ -1424,28 +2256,29 @@ def _master_to_binned_numpy(master: str, det_bin: int):
 def _render_4dstem(masters: list[str], label: str, args: argparse.Namespace) -> list[pathlib.Path]:
     """Render 4D-STEM master(s) as offline WebGPU Show4DSTEM HTML.
 
-    Each master is loaded with detector binning (``--bin``, default 8) so the stack
-    fits a laptop and packs inline as a self-contained file. ``--combined`` instead
+    Each master is loaded with the requested detector binning (``--bin``, default
+    1 for full detector sampling). ``--combined`` instead
     stacks every master into one 5D viewer (a bslz4 companion folder + a local
-    serve, since file:// cannot fetch the companion)."""
+    serve, or open through the file-grant browser path)."""
     import numpy as np
     from quantem.widget import Show4DSTEM
     out_dir = _out_dir(args.out)
+    export_dtype = _show4dstem_export_dtype(args)
     if args.combined and len(masters) > 1:
         # Stack the masters into one 5D numpy array and pass THAT to the viewer. A
         # 5D array routes to the universal Show4DSTEM (which has the offline
         # multi-volume WebGPU frame-flip), not the MacBook live-Metal viewer (whose
         # offline export can't switch volumes kernel-lessly).
-        volumes = [_master_to_binned_numpy(m, args.det_bin) for m in masters]
+        volumes = [_master_to_binned_numpy(m, args.det_bin, args.dtype) for m in masters]
         stack = np.stack(volumes, axis=0)
         data_url = out_dir / "widget-data"
         widget = Show4DSTEM(
-            stack, backend="web", offline_codec="bslz4", data_url=str(data_url),
+            stack, backend="webgpu", offline_codec="bslz4", data_url=str(data_url),
             frame_dim_label="Dataset",
             frame_labels=[pathlib.Path(m).stem.replace("_master", "") for m in masters],
         )
         out = out_dir / f"{label}_combined.html"
-        widget.export_html(str(out), title=args.title)
+        widget.export_html(str(out), title=args.title, dtype=export_dtype)
         return [out]
     outputs = []
     iterator = masters
@@ -1461,10 +2294,10 @@ def _render_4dstem(masters: list[str], label: str, args: argparse.Namespace) -> 
             # Mean-bin at load (memory-safe: the full 19 GB stack never materializes)
             # so uint8 never clips the bright field. Data is already binned, so the
             # export does no further binning.
-            arr = _master_to_binned_numpy(master, args.det_bin)
-            widget = Show4DSTEM(arr, backend="web")
+            arr = _master_to_binned_numpy(master, args.det_bin, args.dtype)
+            widget = Show4DSTEM(arr, backend="webgpu")
             out = out_dir / f"{stem}.html"
-            widget.export_html(str(out), title=args.title or stem)
+            widget.export_html(str(out), title=args.title or stem, dtype=export_dtype)
             outputs.append(out)
         except (RuntimeError, ValueError, OSError, MemoryError) as err:
             print(f"quantem: skipped {stem}: {err}", file=sys.stderr)
@@ -1504,6 +2337,279 @@ def _default_out_dir() -> pathlib.Path:
     return downloads if downloads.is_dir() else pathlib.Path.cwd()
 
 
+class _RangeRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Static file handler with single byte-range support for folder exports."""
+
+    root: pathlib.Path
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib API name.
+        if os.environ.get("QUANTEM_CLI_HTTP_LOG"):
+            super().log_message(format, *args)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self._send_common_headers()
+        self.end_headers()
+
+    def do_HEAD(self) -> None:
+        self._serve(send_body=False)
+
+    def do_GET(self) -> None:
+        self._serve(send_body=True)
+
+    def do_PUT(self) -> None:
+        path = self._resolve_snapshot_write_path(allow_json=True)
+        if path is None:
+            self.send_error(403, "writes are restricted to snapshots")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.send_error(400, "invalid content length")
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.rfile.read(max(0, length)))
+        self.send_response(204)
+        self._send_common_headers()
+        self.end_headers()
+
+    def do_DELETE(self) -> None:
+        path = self._resolve_snapshot_write_path(allow_json=False)
+        if path is None:
+            self.send_error(403, "deletes are restricted to snapshot images")
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        self.send_response(204)
+        self._send_common_headers()
+        self.end_headers()
+
+    def _serve(self, *, send_body: bool) -> None:
+        path = self._resolve_path()
+        if path is None:
+            self.send_error(404, "file not found")
+            return
+        if path.is_dir():
+            path = path / "index.html"
+        if not path.is_file():
+            self.send_error(404, "file not found")
+            return
+
+        size = path.stat().st_size
+        start, end, partial = 0, size - 1, False
+        range_header = self.headers.get("Range")
+        if range_header:
+            parsed = _parse_http_range(range_header, size)
+            if parsed is None:
+                self.send_response(416)
+                self._send_common_headers()
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            start, end = parsed
+            partial = True
+
+        content_length = max(0, end - start + 1)
+        self.send_response(206 if partial else 200)
+        self._send_common_headers()
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Last-Modified", email.utils.formatdate(path.stat().st_mtime, usegmt=True))
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        if not send_body:
+            return
+        with path.open("rb") as handle:
+            self._send_file_body(handle, start=start, length=content_length)
+
+    def _send_common_headers(self) -> None:
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, PUT, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "Range, Content-Type")
+
+    def _send_file_body(self, handle, *, start: int, length: int) -> None:
+        """Send a file range with zero-copy when the local socket supports it."""
+        if length <= 0:
+            return
+        if not os.environ.get("QUANTEM_DISABLE_HTTP_SENDFILE") and hasattr(self.connection, "sendfile"):
+            try:
+                self.connection.sendfile(handle, offset=start, count=length)
+                return
+            except BrokenPipeError:
+                return
+            except (OSError, ValueError):
+                pass
+        handle.seek(start)
+        remaining = length
+        chunk_bytes = _range_fallback_chunk_bytes()
+        while remaining > 0:
+            chunk = handle.read(min(chunk_bytes, remaining))
+            if not chunk:
+                break
+            try:
+                self.wfile.write(chunk)
+            except BrokenPipeError:
+                break
+            remaining -= len(chunk)
+
+    def _resolve_path(self) -> pathlib.Path | None:
+        parsed = urllib.parse.urlsplit(self.path)
+        raw_path = urllib.parse.unquote(parsed.path)
+        norm = posixpath.normpath(raw_path)
+        rel = pathlib.Path(norm.lstrip("/"))
+        root = self.root.resolve()
+        candidate = root / rel
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _resolve_snapshot_write_path(self, *, allow_json: bool) -> pathlib.Path | None:
+        parsed = urllib.parse.urlsplit(self.path)
+        raw_path = urllib.parse.unquote(parsed.path)
+        norm = posixpath.normpath(raw_path)
+        rel_text = norm.lstrip("/")
+        parts = pathlib.PurePosixPath(rel_text).parts
+        if len(parts) == 2 and parts[0] == "snapshots":
+            pass
+        elif len(parts) == 3 and parts[1] == "snapshots":
+            pass
+        else:
+            return None
+        name = parts[-1]
+        if allow_json and name == "snapshots.json":
+            pass
+        elif (
+            name.startswith("snapshot_")
+            and (name.endswith(".jpg") or name.endswith(".jpeg"))
+        ):
+            pass
+        else:
+            return None
+        root = self.root.resolve()
+        candidate = root.joinpath(*parts).resolve()
+        try:
+            candidate.parent.relative_to(root)
+        except ValueError:
+            return None
+        if candidate.parent.name != "snapshots":
+            return None
+        return candidate
+
+
+def _range_fallback_chunk_bytes() -> int:
+    """Return the fallback HTTP chunk size for large local folder exports."""
+    raw = os.environ.get("QUANTEM_HTTP_RANGE_CHUNK_MB", "")
+    if raw:
+        try:
+            mb = int(raw)
+        except ValueError:
+            mb = 16
+        return max(1, mb) * 1024 * 1024
+    return _RANGE_FALLBACK_CHUNK_BYTES
+
+
+def _parse_http_range(value: str, size: int) -> tuple[int, int] | None:
+    """Parse a single HTTP byte range header."""
+    match = _RANGE_RE.fullmatch(value.strip())
+    if not match or size < 0:
+        return None
+    start_text, end_text = match.groups()
+    if start_text == "" and end_text == "":
+        return None
+    if start_text == "":
+        suffix = int(end_text)
+        if suffix <= 0:
+            return None
+        start = max(0, size - suffix)
+        end = size - 1
+    else:
+        start = int(start_text)
+        end = int(end_text) if end_text else size - 1
+    if start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
+
+
+def _showptycho_manifest(folder: pathlib.Path) -> dict:
+    """Read a ShowPtycho folder manifest after validation."""
+    manifest = _showptycho_manifest_path(folder)
+    if manifest is None:
+        raise ValueError(f"ShowPtycho folder export is missing snapshots/manifest.json: {folder}")
+    return json.loads(manifest.read_text(encoding="utf-8"))
+
+
+def _host_for_url(bind: str) -> str:
+    return "127.0.0.1" if bind in {"", "0.0.0.0", "::"} else bind
+
+
+def _serve_showptycho_folder(
+    folder: pathlib.Path,
+    *,
+    bind: str,
+    port: int | None,
+    no_open: bool,
+) -> None:
+    """Serve a ShowPtycho WebGPU folder export and open it for the user."""
+    if _is_showptycho_collection(folder):
+        folder = _showptycho_collection_folder(folder)
+        collection = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        print(f"ShowPtycho collection: {folder}")
+        print(f"  datasets: {len(collection.get('datasets', []))}")
+    else:
+        folder = _showptycho_folder(folder)
+        manifest = _showptycho_manifest(folder)
+        source = manifest.get("source", {})
+        print(f"ShowPtycho folder: {folder}")
+        if source.get("kind") == "hdf5":
+            data_files = source.get("data_files") or []
+            link_mode = ", ".join(source.get("link_mode") or []) or "linked"
+            preferred = source.get("preferred_browser_source") or "compressed_hdf5"
+            bf_columns = source.get("bf_columns") or {}
+            print(
+                "  source: compressed HDF5 "
+                f"{source.get('master', 'source master')} + {len(data_files)} data file(s) "
+                f"({link_mode}); no persistent BF-G cache"
+            )
+            print(f"  browser source: {preferred}")
+            if preferred == "bf_columns" and bf_columns:
+                print(
+                    "  BF columns: "
+                    f"{bf_columns.get('num_bf', '?')} BF x {bf_columns.get('plane', '?')} scan, "
+                    f"{_fmt_bytes(int(bf_columns.get('bytes', 0) or 0))}"
+                )
+        else:
+            raise ValueError(
+                "ShowPtycho folder manifest has no compressed HDF5 detector source."
+            )
+    if no_open:
+        print("  ready: run without --no-open to serve and open this folder.")
+        return
+
+    handler = type("QuantemShowPtychoRangeHandler", (_RangeRequestHandler,), {"root": folder})
+    server = http.server.ThreadingHTTPServer((bind, port or 0), handler)
+    actual_port = server.server_address[1]
+    url = f"http://{_host_for_url(bind)}:{actual_port}/index.html"
+    print(f"  open: {url}")
+    print("  serving folder export; press Ctrl-C to stop")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    headless = sys.platform != "darwin" and not os.environ.get("DISPLAY")
+    if not headless:
+        webbrowser.open(url)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        server.shutdown()
+    finally:
+        server.server_close()
+
+
 def _open_html(path: pathlib.Path, *, serve: bool, no_open: bool) -> None:
     """Open the HTML for the user: a self-contained file via ``file://``, or behind
     a local HTTP server when serving (required for bslz4 companions, and the only
@@ -1514,7 +2620,14 @@ def _open_html(path: pathlib.Path, *, serve: bool, no_open: bool) -> None:
         return
     if serve:
         directory = str(path.parent)
-        handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=directory, **k)
+
+        def handler(*args, **kwargs):
+            return http.server.SimpleHTTPRequestHandler(
+                *args,
+                directory=directory,
+                **kwargs,
+            )
+
         httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
         port = httpd.server_address[1]
         threading.Thread(target=httpd.serve_forever, daemon=True).start()

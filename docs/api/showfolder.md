@@ -27,15 +27,15 @@ w.cache_info
 ```
 
 Use `cache="folder"` when you want a project-local cache under
-`.quantem/showfolder-cache`, `cache_dir="/fast/ssd/cache"` for a shared SSD
+`.quantem/showfolder-cache`, `cache_dir="showfolder-cache"` for a shared cache
 cache, `rebuild_cache=True` to force regeneration, or `cache=False` for a
 read-only/no-cache browser.
 
 For large folders, warm the cache before opening the browser UI:
 
 ```python
-prebuild_showfolder_cache("/data/session", thumb=256, cache_dir="/fast/ssd/cache")
-w = ShowFolder("/data/session", thumb=256, cache_dir="/fast/ssd/cache")
+prebuild_showfolder_cache("session", thumb=256, cache_dir="showfolder-cache")
+w = ShowFolder("session", thumb=256, cache_dir="showfolder-cache")
 ```
 
 For folders that are still being written, start the watcher. It polls for new,
@@ -44,7 +44,7 @@ the displayed browser in place; and shows a small status line such as
 `2 cached · 1 read · 1 new`.
 
 ```python
-w = ShowFolder("/data/live-session", thumb=256, cache_dir="/fast/ssd/cache")
+w = ShowFolder("live-session", thumb=256, cache_dir="showfolder-cache")
 w.watch(interval=2.0)
 ```
 

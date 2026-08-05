@@ -18,6 +18,10 @@ import numpy as np
 # Resolution multiplier per quality tier. GIF is a 256-colour palette format
 # regardless, so quality here means spatial resolution (and therefore file size).
 QUALITY_SCALE = {"high": 1.0, "medium": 0.6, "low": 0.35}
+MIN_TITLE_FONT_SIZE = 12
+MIN_SCALE_FONT_SIZE = 12
+MIN_SCALE_BAR_THICKNESS = 5
+MIN_OVERLAY_MARGIN = 12
 BACKGROUND_COLORS = {
     "dark": (12, 12, 12),
     "black": (0, 0, 0),
@@ -85,27 +89,25 @@ def _draw_scalebar(
 ):
     """Burn the Show3D canvas scale bar and optional zoom readout into a frame.
 
-    The geometry mirrors the widget canvas overlay: a 60 px target bar capped at
-    25% of the panel width, 5 px bar thickness, 16 px text, 12 px margin, and a
-    1 px drop shadow. The zoom readout is bottom-left; the scale bar is
-    bottom-right.
+    The geometry mirrors the widget canvas overlay, with publication-readable
+    minimums: a 60 px target bar capped at 25% of the panel width, at least a
+    5 px bar thickness, at least 12 px text, and at least 12 px margin.  The
+    zoom readout is bottom-left when enabled; the scale bar is bottom-right.
     """
     from PIL import ImageDraw, ImageFont
     if pixel_size <= 0:
         return img
     width, height = img.size
     target_bar_px = min(60.0, width * 0.25)
-    bar_thickness = 5
-    font_size = 16
-    margin = 12
+    bar_thickness = MIN_SCALE_BAR_THICKNESS
+    font_size = max(MIN_SCALE_FONT_SIZE, 16)
+    margin = MIN_OVERLAY_MARGIN
     effective_zoom = max(1e-6, float(zoom))
     nice_phys = _round_to_nice_value((target_bar_px / effective_zoom) * pixel_size)
     bar_px = (nice_phys / pixel_size) * effective_zoom
     bar_y = height - margin
     bar_x = width - bar_px - margin
     draw = ImageDraw.Draw(img)
-    # 1px drop shadow (figure.ts uses shadowOffset 1,1): black underlay then white.
-    draw.rectangle([bar_x + 1, bar_y + 1, bar_x + bar_px + 1, bar_y + bar_thickness + 1], fill=(0, 0, 0))
     draw.rectangle([bar_x, bar_y, bar_x + bar_px, bar_y + bar_thickness], fill=(255, 255, 255))
     label = _format_scale_label(nice_phys, unit)
     try:
@@ -127,6 +129,25 @@ def colorize(normalized_uint8: np.ndarray, cmap_name: str):
     return Image.fromarray(rgb, mode="RGB")
 
 
+def animation_output_scale(
+    width: int,
+    height: int,
+    quality: str,
+    *,
+    downsample: int = 1,
+    max_edge_px: int | None = None,
+) -> float:
+    """Return the explicit display scale for an exported animation frame."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    downsample = max(1, int(downsample))
+    scale = min(1.0, float(QUALITY_SCALE.get(quality, 1.0)) / float(downsample))
+    if max_edge_px is not None:
+        max_edge_px = max(1, int(max_edge_px))
+        scale = min(scale, max_edge_px / float(max(width, height)))
+    return max(scale, 1.0 / float(max(width, height)))
+
+
 def finalize_frame(
     img,
     quality: str,
@@ -135,13 +156,24 @@ def finalize_frame(
     *,
     show_zoom_indicator: bool = False,
     zoom: float = 1.0,
+    downsample: int = 1,
+    max_edge_px: int | None = None,
 ):
-    """Downscale by the quality factor, then draw the scale bar at output res."""
-    scale = QUALITY_SCALE.get(quality, 1.0)
+    """Downscale explicitly, then draw the scale bar at output resolution."""
+    scale = animation_output_scale(
+        img.size[0],
+        img.size[1],
+        quality,
+        downsample=downsample,
+        max_edge_px=max_edge_px,
+    )
     if scale < 1.0:
         from PIL import Image
         width, height = img.size
-        img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+        img = img.resize(
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            Image.LANCZOS,
+        )
     # Each output pixel spans pixel_size / scale of sample after the downscale.
     return _draw_scalebar(
         img,
@@ -188,7 +220,7 @@ def _draw_panel_title(img, text: str, font_size: int) -> None:
         return
     from PIL import ImageDraw
     width, _height = img.size
-    font = _font(max(8, int(font_size)), bold=True)
+    font = _font(max(MIN_TITLE_FONT_SIZE, int(font_size)), bold=True)
     draw = ImageDraw.Draw(img)
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
@@ -208,11 +240,15 @@ def compose_panel_grid(
     max_cols: int = 4,
     panel_gap: int = 10,
     background: str | tuple[int, int, int] = "dark",
+    outer_border: int = 0,
+    outer_border_color: str | tuple[int, int, int] | None = None,
+    panel_inner_border: int = 0,
+    panel_inner_border_color: str | tuple[int, int, int] = "black",
 ):
     """Compose per-panel PIL images into the widget-style panel grid."""
     if not images:
         raise ValueError("compose_panel_grid requires at least one image")
-    from PIL import Image
+    from PIL import Image, ImageDraw
     n_panels = len(images)
     cols = n_panels if max_cols <= 0 else min(max(1, int(max_cols)), n_panels)
     rows = int(math.ceil(n_panels / cols))
@@ -221,11 +257,30 @@ def compose_panel_grid(
     cell_w = max(widths)
     cell_h = max(heights)
     gap = max(0, int(panel_gap))
+    outer = max(0, int(outer_border))
+    inner = max(0, int(panel_inner_border))
+    bg_rgb = normalize_background(background)
+    outer_rgb = normalize_background(outer_border_color) if outer_border_color is not None else bg_rgb
     canvas = Image.new(
         "RGB",
-        (cols * cell_w + gap * (cols - 1), rows * cell_h + gap * (rows - 1)),
-        normalize_background(background),
+        (
+            cols * cell_w + gap * (cols - 1) + 2 * outer,
+            rows * cell_h + gap * (rows - 1) + 2 * outer,
+        ),
+        outer_rgb,
     )
+    if gap > 0 and bg_rgb != outer_rgb:
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle(
+            [
+                outer,
+                outer,
+                canvas.size[0] - outer,
+                canvas.size[1] - outer,
+            ],
+            fill=bg_rgb,
+            outline=None,
+        )
     for i, src in enumerate(images):
         panel = src.convert("RGB").copy()
         if show_panel_titles:
@@ -236,9 +291,22 @@ def compose_panel_grid(
                 title_parts.append(str(frame_labels[i]))
             _draw_panel_title(panel, " · ".join(title_parts), title_font_size)
         row, col = divmod(i, cols)
-        x = col * (cell_w + gap) + (cell_w - panel.size[0]) // 2
-        y = row * (cell_h + gap) + (cell_h - panel.size[1]) // 2
+        x = outer + col * (cell_w + gap) + (cell_w - panel.size[0]) // 2
+        y = outer + row * (cell_h + gap) + (cell_h - panel.size[1]) // 2
         canvas.paste(panel, (x, y))
+        if inner > 0:
+            draw = ImageDraw.Draw(canvas)
+            color = normalize_background(panel_inner_border_color)
+            for offset in range(inner):
+                draw.rectangle(
+                    [
+                        x + offset,
+                        y + offset,
+                        x + panel.size[0] - 1 - offset,
+                        y + panel.size[1] - 1 - offset,
+                    ],
+                    outline=color,
+                )
     return canvas
 
 

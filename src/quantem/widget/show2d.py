@@ -6,14 +6,19 @@ items may be local frame stacks; unlike Show3D, Show2D does not impose one
 shared frame axis across the whole gallery.
 """
 
+import base64
+import html
+import io as _io
 import json
 import math
 import pathlib
+import re
 import tempfile
+import textwrap
 import warnings
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Iterable, Self, Sequence
+from typing import Any, Iterable, Mapping, Self, Sequence
 
 import anywidget
 import ipywidgets
@@ -71,6 +76,939 @@ _DENOISE_STATE_ALIASES = {
 }
 
 _DEFAULT_FOLDER_PAGE_SIZE = 20
+_PANEL_TITLE_STYLE_KEYS = {
+    "bg",
+    "fg",
+    "border_color",
+    "border_width",
+    "pad_x",
+    "pad_y",
+    "max_width",
+    "radius",
+    "font_weight",
+    "font_family",
+    "align",
+    "opacity",
+    "outline_color",
+    "outline_width",
+    "x",
+    "y",
+    "anchor",
+    "offset",
+}
+
+_SCALE_BAR_STYLE_KEYS = {
+    "offset",
+    "label_gap",
+    "font_family",
+    "font_size",
+    "font_weight",
+    "color",
+    "outline_color",
+    "outline_width",
+    "bar_height",
+    "bar_width",
+    "shadow_color",
+}
+
+
+def _nonnegative_int(value: object, *, name: str) -> int:
+    """Return a nonnegative integer for pixel-width options."""
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative integer, got {value!r}") from exc
+    if result < 0:
+        raise ValueError(f"{name} must be >= 0, got {result}")
+    return result
+
+
+def _nonnegative_float(value: object, *, name: str) -> float:
+    """Return a nonnegative float for stroke-width options."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative number, got {value!r}") from exc
+    if not np.isfinite(result) or result < 0:
+        raise ValueError(f"{name} must be a finite value >= 0, got {value!r}")
+    return result
+
+
+def _normalize_panel_title_style(style: Mapping[str, object] | None) -> dict[str, object]:
+    """Normalize JSON-safe panel-title chrome options."""
+    if style is None:
+        return {}
+    if not isinstance(style, Mapping):
+        raise TypeError(f"panel_title_style must be a mapping, got {type(style).__name__}")
+    out: dict[str, object] = {}
+    for key, value in style.items():
+        key_text = str(key)
+        if key_text not in _PANEL_TITLE_STYLE_KEYS:
+            raise ValueError(
+                "panel_title_style keys must be one of "
+                f"{sorted(_PANEL_TITLE_STYLE_KEYS)}, got {key_text!r}"
+            )
+        if value is None:
+            continue
+        if key_text in {"border_width", "pad_x", "pad_y", "radius", "opacity", "outline_width", "x", "y"}:
+            out[key_text] = float(value)
+        elif key_text == "offset":
+            vals = np.asarray(value, dtype=np.float64).ravel()
+            if vals.size != 2 or not np.isfinite(vals).all():
+                raise ValueError("panel_title_style offset must contain two finite values")
+            out[key_text] = [float(vals[0]), float(vals[1])]
+        elif key_text == "font_weight":
+            out[key_text] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+        else:
+            out[key_text] = str(value)
+    return out
+
+
+def _normalize_scale_bar_style(style: Mapping[str, object] | None) -> dict[str, object]:
+    """Normalize JSON-safe scale-bar style options."""
+    if style is None:
+        return {}
+    if not isinstance(style, Mapping):
+        raise TypeError(f"scale_bar_style must be a mapping, got {type(style).__name__}")
+    out: dict[str, object] = {}
+    for key, value in style.items():
+        key_text = str(key)
+        if key_text not in _SCALE_BAR_STYLE_KEYS:
+            raise ValueError(
+                "scale_bar_style keys must be one of "
+                f"{sorted(_SCALE_BAR_STYLE_KEYS)}, got {key_text!r}"
+            )
+        if value is None:
+            continue
+        if key_text == "offset":
+            vals = np.asarray(value, dtype=np.float64).ravel()
+            if vals.size != 2 or not np.isfinite(vals).all():
+                raise ValueError("scale_bar_style offset must contain two finite values")
+            out[key_text] = [float(vals[0]), float(vals[1])]
+        elif key_text in {"label_gap", "font_size", "outline_width", "bar_height", "bar_width"}:
+            number = float(value)
+            if not np.isfinite(number):
+                raise ValueError(f"scale_bar_style {key_text} must be finite, got {value!r}")
+            if key_text in {"font_size", "bar_height", "bar_width"} and number <= 0:
+                raise ValueError(f"scale_bar_style {key_text} must be > 0, got {value!r}")
+            if key_text == "outline_width" and number < 0:
+                raise ValueError(f"scale_bar_style outline_width must be >= 0, got {value!r}")
+            out[key_text] = number
+        elif key_text == "font_weight":
+            out[key_text] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+        else:
+            out[key_text] = str(value)
+    return out
+
+
+def _normalize_marker_mapping(markers: Mapping[object, object] | None, *, name: str) -> dict[str, str]:
+    """Normalize row/column marker dictionaries to JSON-safe string keys."""
+    if markers is None:
+        return {}
+    if not isinstance(markers, Mapping):
+        raise TypeError(f"{name} must be a mapping from nonnegative index to color")
+    out: dict[str, str] = {}
+    for key, value in markers.items():
+        if value is None or value == "":
+            continue
+        if isinstance(key, bool):
+            raise ValueError(f"{name} index must be a nonnegative integer, got {key!r}")
+        try:
+            idx = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} index must be a nonnegative integer, got {key!r}") from exc
+        if idx < 0:
+            raise ValueError(f"{name} index must be >= 0, got {idx}")
+        out[str(idx)] = str(value)
+    return out
+
+
+def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | None]:
+    """Return plain fallback text plus optional safe colored text spans.
+
+    Panel-title spans are structured dictionaries, not HTML. The plain text
+    fallback keeps existing string-based state, panel lookup, exports, and old
+    notebooks unchanged while the synced span payload lets the frontend color
+    status words such as ``low`` / ``cal`` / ``over``.
+    """
+    if value is None:
+        return "", None
+    if isinstance(value, str):
+        return value, None
+    if isinstance(value, Mapping):
+        if value.get("math") not in (None, ""):
+            text = str(value.get("math"))
+            span: dict[str, str] = {"math": text}
+        else:
+            text = "" if value.get("text") is None else str(value.get("text"))
+            span = {"text": text}
+        color = value.get("color")
+        if color not in (None, ""):
+            span["color"] = str(color)
+        return text, [span]
+    if isinstance(value, (list, tuple)):
+        spans: list[dict[str, str]] = []
+        plain_parts: list[str] = []
+        for idx, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                raise TypeError(
+                    "rich panel title spans must be dictionaries like "
+                    f"{{'text': 'low', 'color': '#60a5fa'}}, got {type(item).__name__} "
+                    f"at span {idx}"
+                )
+            if item.get("math") not in (None, ""):
+                text = str(item.get("math"))
+                span = {"math": text}
+            else:
+                text = "" if item.get("text") is None else str(item.get("text"))
+                span = {"text": text}
+            color = item.get("color")
+            if color not in (None, ""):
+                span["color"] = str(color)
+            spans.append(span)
+            plain_parts.append(text)
+        return "".join(plain_parts), spans
+    return str(value), None
+
+
+def _normalise_title_span_sequence(
+    values: Sequence[object] | Mapping[str, object] | None,
+) -> tuple[list[str] | None, list[list[dict[str, str]]]]:
+    """Normalize a per-panel title sequence into plain labels plus spans."""
+    if values is None:
+        return None, []
+    if isinstance(values, Mapping):
+        values = [values]
+    elif (
+        isinstance(values, (list, tuple))
+        and values
+        and all(isinstance(item, Mapping) for item in values)
+    ):
+        values = [values]
+    plain: list[str] = []
+    rich: list[list[dict[str, str]]] = []
+    has_rich = False
+    for value in values:
+        text, spans = _normalise_title_spans(value)
+        plain.append(text)
+        rich.append(spans or [])
+        has_rich = has_rich or bool(spans)
+    return plain, rich if has_rich else []
+
+
+def _title_span_sequence_length(values: Sequence[object] | Mapping[str, object] | None) -> int:
+    """Return the number of panel titles represented by a rich-title input."""
+    if values is None:
+        return 0
+    if isinstance(values, Mapping):
+        return 1
+    if (
+        isinstance(values, (list, tuple))
+        and values
+        and all(isinstance(item, Mapping) for item in values)
+    ):
+        return 1
+    return len(values)
+
+
+def _expand_title_spans_for_flattened_labels(
+    spans: list[list[dict[str, str]]],
+    *,
+    original_len: int,
+    n_panels: int,
+    n_pages: int,
+    panels_per_page: int,
+) -> list[list[dict[str, str]]]:
+    """Broadcast rich title spans across paged panel layouts."""
+    if not spans:
+        return []
+    if len(spans) == n_panels:
+        return spans
+    if n_pages > 1 and panels_per_page > 0:
+        if original_len == panels_per_page and len(spans) == panels_per_page:
+            return [list(span) for _ in range(n_pages) for span in spans]
+        if original_len == n_panels and len(spans) == n_panels:
+            return spans
+    return spans
+
+
+def _rotation_to_quarter_turns(value: int | float) -> int:
+    """Normalize a display rotation in degrees or quarter-turn units.
+
+    Public APIs accept scientist-readable degrees (0, 90, 180, 270). For
+    backwards compatibility with existing internal state, small integer values
+    0..3 are also accepted as quarter turns.
+    """
+    angle = float(value)
+    if angle in (0, 1, 2, 3):
+        return int(angle) % 4
+    if not np.isfinite(angle) or abs(angle / 90 - round(angle / 90)) > 1e-9:
+        raise ValueError(
+            f"rotation must be 0, 90, 180, 270, or a quarter-turn 0..3; got {value!r}"
+        )
+    return int(round(angle / 90)) % 4
+
+
+def _normalize_rotation_list(
+    *,
+    n_items: int,
+    rotation: int | float = 0,
+    rotations: Sequence[int | float] | None = None,
+) -> list[int]:
+    """Return one normalized quarter-turn per item."""
+    if rotations is None:
+        return [_rotation_to_quarter_turns(rotation)] * int(n_items)
+    values = [_rotation_to_quarter_turns(value) for value in rotations]
+    if len(values) != int(n_items):
+        raise ValueError(
+            f"rotations length ({len(values)}) must match the number of items ({int(n_items)})"
+        )
+    return values
+
+
+def _normalize_inset_plot_specs(
+    inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None,
+    *,
+    n_items: int,
+) -> list[dict[str, Any]]:
+    """Return JSON-safe per-panel inset plot specifications.
+
+    The public API intentionally mirrors the smallest useful slice of a
+    matplotlib line plot: ``x``, ``y``, optional ``point``, optional
+    ``xlim``/``ylim``, and simple style/placement keys.  Arrays are converted
+    to plain lists so the same trait survives notebook state and HTML export.
+    """
+    if inset_plots is None:
+        return []
+    if isinstance(inset_plots, dict):
+        raw_specs: list[dict[str, Any] | None] = [inset_plots]
+    else:
+        raw_specs = list(inset_plots)
+    if len(raw_specs) == 1 and n_items > 1:
+        raw_specs = raw_specs * n_items
+    if len(raw_specs) != int(n_items):
+        raise ValueError(
+            f"inset_plots length ({len(raw_specs)}) must be 1 or match the "
+            f"number of Show2D panels ({int(n_items)})"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for panel, spec in enumerate(raw_specs):
+        if spec is None:
+            normalized.append({})
+            continue
+        if not isinstance(spec, dict):
+            raise TypeError(f"inset_plots[{panel}] must be a dict or None")
+        x_raw = spec.get("x")
+        y_raw = spec.get("y")
+        if y_raw is None and "points" in spec:
+            points = np.asarray(spec["points"], dtype=np.float64)
+            if points.ndim != 2 or points.shape[1] != 2:
+                raise ValueError(
+                    f"inset_plots[{panel}]['points'] must have shape (N, 2)"
+                )
+            x = points[:, 0]
+            y = points[:, 1]
+        else:
+            if y_raw is None:
+                raise ValueError(f"inset_plots[{panel}] must include 'y' or 'points'")
+            y = np.asarray(y_raw, dtype=np.float64).ravel()
+            x = (
+                np.arange(y.size, dtype=np.float64)
+                if x_raw is None
+                else np.asarray(x_raw, dtype=np.float64).ravel()
+            )
+        if x.size != y.size or x.size < 2:
+            raise ValueError(
+                f"inset_plots[{panel}] x/y must have the same length >= 2; "
+                f"got {x.size} and {y.size}"
+            )
+        if not np.isfinite(x).all() or not np.isfinite(y).all():
+            raise ValueError(f"inset_plots[{panel}] contains NaN or inf")
+        out: dict[str, Any] = {
+            "x": [float(v) for v in x],
+            "y": [float(v) for v in y],
+        }
+        for key in (
+            "title",
+            "legend",
+            "legend_position",
+            "annotation",
+            "annotation_position",
+            "xlabel",
+            "ylabel",
+            "color",
+            "point_color",
+            "border_color",
+            "text_color",
+            "tick_color",
+            "position",
+            "background",
+        ):
+            if key in spec and spec[key] is not None:
+                out[key] = str(spec[key])
+        for key in ("size", "height", "line_width", "border_width", "background_alpha", "tick_font_size", "label_font_size", "legend_font_size"):
+            if key in spec and spec[key] is not None:
+                out[key] = float(spec[key])
+        for key in ("show_ticks", "show_panel_index"):
+            if key in spec and spec[key] is not None:
+                out[key] = bool(spec[key])
+        for key in ("xlim", "ylim", "point"):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size != 2 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain two finite values")
+                out[key] = [float(vals[0]), float(vals[1])]
+        for key in ("box",):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size != 4 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain four finite values")
+                left, top, width, height = (float(v) for v in vals)
+                out[key] = [
+                    max(0.0, min(1.0, left)),
+                    max(0.0, min(1.0, top)),
+                    max(0.05, min(1.0, width)),
+                    max(0.05, min(1.0, height)),
+                ]
+        for key in ("xticks", "yticks"):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size < 1 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain finite values")
+                out[key] = [float(v) for v in vals]
+        if "margin" in spec and spec["margin"] is not None:
+            vals = np.asarray(spec["margin"], dtype=np.float64).ravel()
+            if vals.size == 1:
+                vals = np.repeat(vals, 2)
+            if vals.size != 2 or not np.isfinite(vals).all():
+                raise ValueError(
+                    f"inset_plots[{panel}]['margin'] must be one number or two finite values"
+                )
+            out["margin"] = [max(0.0, float(vals[0])), max(0.0, float(vals[1]))]
+        normalized.append(out)
+    return normalized
+
+
+_ANNOTATION_STYLE_KEYS = {
+    "text",
+    "math",
+    "label",
+    "title",
+    "spans",
+    "panel",
+    "position",
+    "anchor",
+    "x",
+    "y",
+    "box",
+    "region",
+    "variant",
+    "class_name",
+    "class",
+    "bg",
+    "fg",
+    "color",
+    "border_color",
+    "border_width",
+    "font_size",
+    "font_weight",
+    "font_family",
+    "pad_x",
+    "pad_y",
+    "radius",
+    "opacity",
+    "align",
+    "max_width",
+    "offset",
+    "outline_color",
+    "outline_width",
+}
+_ANNOTATION_POSITIONS = {
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+}
+_ANNOTATION_VARIANTS = {"badge", "pill", "plain", "outline", "callout"}
+_ANNOTATION_ANCHORS = {
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+}
+
+
+def _is_annotation_spec(value: object) -> bool:
+    """Return True when a mapping looks like one annotation spec."""
+    return isinstance(value, Mapping) and any(str(key) in _ANNOTATION_STYLE_KEYS for key in value)
+
+
+def _panel_annotation_index(panel: object, *, labels: Sequence[str] | None, n_items: int) -> int:
+    """Resolve a panel annotation target from integer index or panel label."""
+    if isinstance(panel, bool):
+        raise ValueError(f"panel annotation panel must be an index or label, got {panel!r}")
+    if isinstance(panel, str) and labels is not None and panel in labels:
+        return list(labels).index(panel)
+    try:
+        idx = int(panel)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"panel annotation panel must be an index or label, got {panel!r}") from exc
+    if idx < 0 or idx >= int(n_items):
+        raise ValueError(f"panel annotation panel index {idx} is outside 0..{int(n_items) - 1}")
+    return idx
+
+
+def _normalize_panel_indices(
+    panels: Sequence[object] | object | None,
+    *,
+    labels: Sequence[str] | None,
+    n_items: int,
+    name: str,
+) -> list[int]:
+    """Resolve optional panel index/label selectors to unique panel indices."""
+    if panels is None:
+        return []
+    if isinstance(panels, (str, bytes)) or not isinstance(panels, Sequence):
+        raw_values = [panels]
+    else:
+        raw_values = list(panels)
+    out: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_values:
+        idx = _panel_annotation_index(raw, labels=labels, n_items=n_items)
+        if idx not in seen:
+            out.append(idx)
+            seen.add(idx)
+    return out
+
+
+def _normalize_panel_annotation_spec(spec: object, *, panel: int) -> dict[str, Any] | None:
+    """Normalize one panel annotation into JSON-safe display state."""
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        spec = {"text": spec}
+    if not isinstance(spec, Mapping):
+        raise TypeError(
+            f"panel_annotations[{panel}] entries must be strings or mappings, got {type(spec).__name__}"
+        )
+    unknown = sorted(str(key) for key in spec if str(key) not in _ANNOTATION_STYLE_KEYS)
+    if unknown:
+        raise ValueError(
+            "panel_annotations entries only accept keys "
+            f"{sorted(_ANNOTATION_STYLE_KEYS)}, got {unknown[0]!r}"
+        )
+    raw_text = spec.get("text", spec.get("label", spec.get("title", "")))
+    raw_math = spec.get("math")
+    spans_raw = spec.get("spans")
+    if spans_raw is not None:
+        text, spans = _normalise_title_spans(spans_raw)
+    elif raw_math not in (None, ""):
+        text = str(raw_math)
+        spans = [{"math": text}]
+    else:
+        text, spans = _normalise_title_spans(raw_text)
+    out: dict[str, Any] = {"text": text}
+    if raw_math not in (None, ""):
+        out["math"] = str(raw_math)
+    if spans:
+        out["spans"] = spans
+    for key in (
+        "position",
+        "anchor",
+        "variant",
+        "class_name",
+        "bg",
+        "fg",
+        "color",
+        "border_color",
+        "font_weight",
+        "font_family",
+        "align",
+        "max_width",
+        "outline_color",
+    ):
+        source_key = "class" if key == "class_name" and "class_name" not in spec else key
+        if source_key in spec and spec[source_key] not in (None, ""):
+            out[key] = str(spec[source_key])
+    position = str(out.get("position", "top-left"))
+    if position not in _ANNOTATION_POSITIONS:
+        raise ValueError(f"panel annotation position must be one of {sorted(_ANNOTATION_POSITIONS)}, got {position!r}")
+    out["position"] = position
+    if "anchor" in out and out["anchor"] not in _ANNOTATION_ANCHORS:
+        raise ValueError(f"panel annotation anchor must be one of {sorted(_ANNOTATION_ANCHORS)}, got {out['anchor']!r}")
+    if "variant" in out and out["variant"] not in _ANNOTATION_VARIANTS:
+        raise ValueError(f"panel annotation variant must be one of {sorted(_ANNOTATION_VARIANTS)}, got {out['variant']!r}")
+    else:
+        out.setdefault("variant", "badge")
+    for key in ("x", "y", "border_width", "font_size", "pad_x", "pad_y", "radius", "opacity", "outline_width"):
+        if key in spec and spec[key] is not None:
+            value = float(spec[key])
+            if not np.isfinite(value):
+                raise ValueError(f"panel annotation {key} must be finite, got {value!r}")
+            if key in {"x", "y", "opacity"}:
+                value = max(0.0, min(1.0, value))
+            out[key] = value
+    box_raw = spec.get("box", spec.get("region"))
+    if box_raw is not None:
+        vals = np.asarray(box_raw, dtype=np.float64).ravel()
+        if vals.size != 4 or not np.isfinite(vals).all():
+            raise ValueError("panel annotation box/region must contain four finite values")
+        left, top, width, height = (float(v) for v in vals)
+        out["box"] = [
+            max(0.0, min(1.0, left)),
+            max(0.0, min(1.0, top)),
+            max(0.01, min(1.0, width)),
+            max(0.01, min(1.0, height)),
+        ]
+    if "offset" in spec and spec["offset"] is not None:
+        vals = np.asarray(spec["offset"], dtype=np.float64).ravel()
+        if vals.size != 2 or not np.isfinite(vals).all():
+            raise ValueError("panel annotation offset must contain two finite values")
+        out["offset"] = [float(vals[0]), float(vals[1])]
+    return out
+
+
+def _normalize_panel_annotations(
+    panel_annotations: Sequence[object] | Mapping[object, object] | object | None,
+    *,
+    n_items: int,
+    labels: Sequence[str] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Normalize per-panel annotation labels.
+
+    Accepted forms are:
+    - one annotation mapping/string, broadcast to all panels;
+    - a per-panel sequence whose entries are an annotation, list of annotations,
+      or ``None``;
+    - a flat sequence of mappings that include ``panel=...``;
+    - a mapping from panel index/label to one annotation or a list of them.
+    """
+    if panel_annotations is None:
+        return []
+    grouped: list[list[dict[str, Any]]] = [[] for _ in range(int(n_items))]
+
+    def add(panel: int, value: object) -> None:
+        values = value if isinstance(value, (list, tuple)) and not _is_annotation_spec(value) else [value]
+        for item in values:
+            normalized = _normalize_panel_annotation_spec(item, panel=panel)
+            if normalized is not None and normalized.get("text", ""):
+                grouped[panel].append(normalized)
+
+    if isinstance(panel_annotations, Mapping) and not _is_annotation_spec(panel_annotations):
+        for raw_panel, value in panel_annotations.items():
+            add(_panel_annotation_index(raw_panel, labels=labels, n_items=n_items), value)
+        return grouped
+    if isinstance(panel_annotations, (str, Mapping)):
+        for panel in range(int(n_items)):
+            add(panel, panel_annotations)
+        return grouped
+
+    raw = list(panel_annotations)  # type: ignore[arg-type]
+    if not raw:
+        return []
+    flat_with_panel = any(isinstance(item, Mapping) and "panel" in item for item in raw)
+    if int(n_items) == 1 and not flat_with_panel:
+        for item in raw:
+            add(0, item)
+        return grouped
+    per_panel = len(raw) == int(n_items) and not flat_with_panel
+    if per_panel:
+        for panel, value in enumerate(raw):
+            add(panel, value)
+        return grouped
+    for item in raw:
+        if not isinstance(item, Mapping) or "panel" not in item:
+            raise ValueError(
+                "panel_annotations as a flat list must include panel=... on every entry, "
+                "or pass a per-panel list/dict"
+            )
+        add(_panel_annotation_index(item["panel"], labels=labels, n_items=n_items), item)
+    return grouped
+
+
+_OVERLAY_SHAPES = {"circle", "rect", "rectangle", "square"}
+_OVERLAY_COORDS = {"data", "relative"}
+_OVERLAY_STYLE_KEYS = {
+    "shape",
+    "type",
+    "kind",
+    "coords",
+    "coordinate_system",
+    "panel",
+    "center",
+    "radius",
+    "r",
+    "size",
+    "row",
+    "col",
+    "x",
+    "y",
+    "row0",
+    "col0",
+    "row1",
+    "col1",
+    "xyxy",
+    "xywh",
+    "box",
+    "region",
+    "stroke",
+    "stroke_color",
+    "border_color",
+    "color",
+    "stroke_width",
+    "border_width",
+    "line_width",
+    "line_style",
+    "stroke_style",
+    "dash",
+    "line_dash",
+    "fill",
+    "fill_color",
+    "opacity",
+    "alpha",
+    "fill_opacity",
+    "stroke_opacity",
+    "z_order",
+    "order",
+    "class_name",
+}
+
+
+def _is_overlay_spec(value: object) -> bool:
+    """Return True when a mapping looks like one geometric overlay spec."""
+    return isinstance(value, Mapping) and any(str(key) in _OVERLAY_STYLE_KEYS for key in value)
+
+
+def _panel_overlay_index(panel: object, *, labels: Sequence[str] | None, n_items: int) -> int:
+    """Resolve an overlay target from integer index or panel label."""
+    if isinstance(panel, bool):
+        raise ValueError(f"panel overlay panel must be an index or label, got {panel!r}")
+    if isinstance(panel, str) and labels is not None and panel in labels:
+        return list(labels).index(panel)
+    try:
+        idx = int(panel)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"panel overlay panel must be an index or label, got {panel!r}") from exc
+    if idx < 0 or idx >= int(n_items):
+        raise ValueError(f"panel overlay panel index {idx} is outside 0..{int(n_items) - 1}")
+    return idx
+
+
+def _finite_float(value: object, *, name: str) -> float:
+    """Return one finite float with a useful user-facing error."""
+    out = float(value)
+    if not np.isfinite(out):
+        raise ValueError(f"panel overlay {name} must be finite, got {value!r}")
+    return out
+
+
+def _finite_float_array(value: object, *, name: str, count: int) -> list[float]:
+    """Return a fixed-length finite float list."""
+    vals = np.asarray(value, dtype=np.float64).ravel()
+    if vals.size != count or not np.isfinite(vals).all():
+        raise ValueError(f"panel overlay {name} must contain {count} finite values")
+    return [float(v) for v in vals]
+
+
+def _finite_float_sequence(value: object, *, name: str) -> list[float]:
+    """Return a non-empty finite float list for custom dash patterns."""
+    vals = np.asarray(value, dtype=np.float64).ravel()
+    if vals.size == 0 or not np.isfinite(vals).all():
+        raise ValueError(f"panel overlay {name} must contain finite values")
+    out = [float(v) for v in vals]
+    if any(v < 0 for v in out):
+        raise ValueError(f"panel overlay {name} values must be >= 0")
+    if all(v == 0 for v in out):
+        raise ValueError(f"panel overlay {name} must contain at least one positive value")
+    return out
+
+
+def _normalize_panel_overlay_spec(spec: object, *, panel: int) -> dict[str, Any] | None:
+    """Normalize one circle/rect overlay into JSON-safe display state."""
+    if spec is None:
+        return None
+    if not isinstance(spec, Mapping):
+        raise TypeError(f"panel_overlays[{panel}] entries must be mappings, got {type(spec).__name__}")
+    unknown = sorted(str(key) for key in spec if str(key) not in _OVERLAY_STYLE_KEYS)
+    if unknown:
+        raise ValueError(
+            "panel_overlays entries only accept keys "
+            f"{sorted(_OVERLAY_STYLE_KEYS)}, got {unknown[0]!r}"
+        )
+    shape = str(spec.get("shape", spec.get("type", spec.get("kind", "circle")))).lower()
+    if shape not in _OVERLAY_SHAPES:
+        raise ValueError(f"panel overlay shape must be one of {sorted(_OVERLAY_SHAPES)}, got {shape!r}")
+    if shape == "rectangle":
+        shape = "rect"
+    coords = str(spec.get("coords", spec.get("coordinate_system", "data"))).lower()
+    if coords not in _OVERLAY_COORDS:
+        raise ValueError(f"panel overlay coords must be one of {sorted(_OVERLAY_COORDS)}, got {coords!r}")
+
+    out: dict[str, Any] = {"shape": shape, "coords": coords}
+    if shape == "circle":
+        if "center" in spec and spec["center"] is not None:
+            row, col = _finite_float_array(spec["center"], name="center", count=2)
+        elif all(key in spec for key in ("row", "col")):
+            row = _finite_float(spec["row"], name="row")
+            col = _finite_float(spec["col"], name="col")
+        elif all(key in spec for key in ("y", "x")):
+            row = _finite_float(spec["y"], name="y")
+            col = _finite_float(spec["x"], name="x")
+        else:
+            raise ValueError("circle overlays require center=(row, col) or row=... and col=...")
+        radius = _finite_float(spec.get("radius", spec.get("r")), name="radius")
+        if radius <= 0:
+            raise ValueError(f"circle overlay radius must be > 0, got {radius}")
+        out.update({"row": row, "col": col, "radius": radius})
+    else:
+        if "box" in spec or "region" in spec:
+            row0, col0, row1, col1 = _finite_float_array(spec.get("box", spec.get("region")), name="box", count=4)
+        elif "xyxy" in spec:
+            col0, row0, col1, row1 = _finite_float_array(spec["xyxy"], name="xyxy", count=4)
+        elif "xywh" in spec:
+            col0, row0, width, height = _finite_float_array(spec["xywh"], name="xywh", count=4)
+            row1 = row0 + height
+            col1 = col0 + width
+        elif all(key in spec for key in ("row0", "col0", "row1", "col1")):
+            row0 = _finite_float(spec["row0"], name="row0")
+            col0 = _finite_float(spec["col0"], name="col0")
+            row1 = _finite_float(spec["row1"], name="row1")
+            col1 = _finite_float(spec["col1"], name="col1")
+        elif shape == "square" and "center" in spec and "size" in spec:
+            row, col = _finite_float_array(spec["center"], name="center", count=2)
+            half = _finite_float(spec["size"], name="size") / 2.0
+            row0, col0, row1, col1 = row - half, col - half, row + half, col + half
+        else:
+            raise ValueError("rect/square overlays require box=(row0, col0, row1, col1), xyxy=..., or xywh=...")
+        if row1 < row0:
+            row0, row1 = row1, row0
+        if col1 < col0:
+            col0, col1 = col1, col0
+        if row1 == row0 or col1 == col0:
+            raise ValueError("rect/square overlays must have non-zero width and height")
+        out.update({"row0": row0, "col0": col0, "row1": row1, "col1": col1})
+
+    stroke = spec.get("stroke", spec.get("stroke_color", spec.get("border_color", spec.get("color", "#00e5ff"))))
+    fill = spec.get("fill", spec.get("fill_color", None))
+    out["stroke"] = str(stroke)
+    has_fill = fill not in (None, "", "none", "None")
+    if has_fill:
+        out["fill"] = str(fill)
+    out["stroke_width"] = _finite_float(
+        spec.get("stroke_width", spec.get("border_width", spec.get("line_width", 2.0))),
+        name="stroke_width",
+    )
+    if out["stroke_width"] < 0:
+        raise ValueError(f"panel overlay stroke_width must be >= 0, got {out['stroke_width']}")
+    line_style = str(spec.get("line_style", spec.get("stroke_style", "solid"))).lower().replace("_", "-")
+    line_style_aliases = {
+        "solid": "solid",
+        "none": "solid",
+        "dash": "dashed",
+        "dashed": "dashed",
+        "dot": "dotted",
+        "dotted": "dotted",
+        "dash-dot": "dashdot",
+        "dashdot": "dashdot",
+        "dash-dot-dot": "dashdot",
+    }
+    if line_style not in line_style_aliases:
+        raise ValueError(
+            "panel overlay line_style must be one of "
+            "['solid', 'dashed', 'dotted', 'dashdot'] or use dash=[...]"
+        )
+    out["line_style"] = line_style_aliases[line_style]
+    if "dash" in spec or "line_dash" in spec:
+        out["dash"] = _finite_float_sequence(spec.get("dash", spec.get("line_dash")), name="dash")
+    opacity = max(0.0, min(1.0, _finite_float(spec.get("opacity", spec.get("alpha", 1.0)), name="opacity")))
+    out["opacity"] = opacity
+    default_fill_opacity = 1.0 if has_fill else 0.0
+    out["fill_opacity"] = max(
+        0.0,
+        min(1.0, _finite_float(spec.get("fill_opacity", default_fill_opacity), name="fill_opacity")),
+    )
+    out["stroke_opacity"] = max(0.0, min(1.0, _finite_float(spec.get("stroke_opacity", 1.0), name="stroke_opacity")))
+    out["z_order"] = _finite_float(spec.get("z_order", spec.get("order", 0.0)), name="z_order")
+    if "class_name" in spec and spec["class_name"] not in (None, ""):
+        out["class_name"] = str(spec["class_name"])
+    return out
+
+
+def _normalize_panel_overlays(
+    panel_overlays: Sequence[object] | Mapping[object, object] | object | None,
+    *,
+    n_items: int,
+    labels: Sequence[str] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Normalize per-panel circle/rect overlays.
+
+    Accepted forms mirror ``panel_annotations``:
+    one overlay mapping broadcasts to all panels; a mapping keyed by panel
+    index/label targets specific panels; a per-panel list aligns with panels;
+    and a flat list of mappings with ``panel=...`` can target arbitrary panels.
+    """
+    if panel_overlays is None:
+        return []
+    grouped: list[list[dict[str, Any]]] = [[] for _ in range(int(n_items))]
+
+    def add(panel: int, value: object) -> None:
+        values = value if isinstance(value, (list, tuple)) and not _is_overlay_spec(value) else [value]
+        for item in values:
+            normalized = _normalize_panel_overlay_spec(item, panel=panel)
+            if normalized is not None:
+                grouped[panel].append(normalized)
+
+    if isinstance(panel_overlays, Mapping) and not _is_overlay_spec(panel_overlays):
+        for raw_panel, value in panel_overlays.items():
+            add(_panel_overlay_index(raw_panel, labels=labels, n_items=n_items), value)
+        return grouped
+    if isinstance(panel_overlays, Mapping):
+        if "panel" in panel_overlays:
+            add(_panel_overlay_index(panel_overlays["panel"], labels=labels, n_items=n_items), panel_overlays)
+        else:
+            for panel in range(int(n_items)):
+                add(panel, panel_overlays)
+        return grouped
+
+    raw = list(panel_overlays)  # type: ignore[arg-type]
+    if not raw:
+        return []
+    flat_with_panel = any(isinstance(item, Mapping) and "panel" in item for item in raw)
+    flat_overlay_specs = all(_is_overlay_spec(item) for item in raw)
+    if flat_overlay_specs and not flat_with_panel:
+        for panel in range(int(n_items)):
+            for item in raw:
+                add(panel, item)
+        return grouped
+    if int(n_items) == 1 and not flat_with_panel:
+        for item in raw:
+            add(0, item)
+        return grouped
+    per_panel = len(raw) == int(n_items) and not flat_with_panel
+    if per_panel:
+        for panel, value in enumerate(raw):
+            add(panel, value)
+        return grouped
+    for item in raw:
+        if not isinstance(item, Mapping) or "panel" not in item:
+            raise ValueError(
+                "panel_overlays as a flat list must include panel=... on every entry, "
+                "or pass a per-panel list/dict"
+            )
+        add(_panel_overlay_index(item["panel"], labels=labels, n_items=n_items), item)
+    return grouped
 
 
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
@@ -338,6 +1276,7 @@ def _format_scale_label(value: float, unit: str) -> str:
 
 # Rec. 709 luma weights: the standard perceptual grayscale reduction of RGB.
 _RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+_IDENTITY_PALETTE = ("#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a")
 
 
 def _is_rgb_item(item: np.ndarray) -> bool:
@@ -566,6 +1505,22 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         supported when RGB panels are present.
     labels : list of str, optional
         Labels for each image in gallery mode.
+    panel_overlays : mapping or sequence, optional
+        Reproducible per-panel geometric overlays. Each overlay is a mapping
+        with ``shape`` equal to ``"circle"``, ``"rect"``/``"rectangle"``, or
+        ``"square"``. Circle geometry uses ``center=(row, col)`` plus
+        ``radius``; rectangles use ``box=(row0, col0, row1, col1)``,
+        ``xyxy=(col0, row0, col1, row1)``, or ``xywh=(col, row, width,
+        height)``; squares may use ``center`` plus ``size``. A dictionary
+        keyed by panel index or label targets specific panels. Coordinates are
+        data pixels by default; pass ``coords="relative"`` for normalized
+        0-1 panel coordinates. Style keys include ``stroke``,
+        ``stroke_width``, ``line_style``, ``dash``, ``stroke_opacity``,
+        ``fill``, ``fill_opacity``, ``opacity``, and ``z_order``.
+    overlays : mapping or sequence, optional
+        Convenience alias for shared geometric overlays. A single overlay or a
+        flat list without ``panel=`` is broadcast to every panel. Use either
+        ``overlays`` or ``panel_overlays``, not both.
     title : str, optional
         Title to display above the image(s).
     cmap : str or sequence of str, default "inferno"
@@ -707,8 +1662,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         HAADF -> ``"gaussian"`` sigma 1-2 or ``"none"``; anything
         quantitative -> ``"none"``. The compound spellings ``"bin2"``,
         ``"bin2_anscombe"`` and ``"bin4_anscombe"`` stay accepted as aliases
-        that fold into (mode, bin); ``"tv"``/``"denova*"`` remain available
-        from Python (not in the UI menu). A scalar applies to every panel; a
+        that fold into (mode, bin); ``"tv"`` remains available from Python
+        (not in the UI menu). A scalar applies to every panel; a
         sequence (one entry per panel) gives each panel its own method, e.g.
         ``["none", "anscombe"]`` for a raw vs denoised A/B gallery. Pure view
         transform: the stored array, the stats row, and every export of raw
@@ -977,8 +1932,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # stacks; see BROWSER_DISPLAY_FILTER_MODES) and the WGSL compute port in
     # js/displayFilter.ts filters client-side, so the sigma slider scrubs live
     # with no kernel round trip and kernel-less HTML exports keep working
-    # knobs. tv/denova* panels always stay on this Python path.
-    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
+    # knobs. tv panels always stay on this Python path.
+    # Default True: the browser owns display denoise. js/displayFilter.ts ships
+    # The browser has WGSL and CPU TypeScript filter paths that match NumPy, so
+    # every viewer filters client-side and Python never needs the scipy round
+    # trip, which re-sent the whole frame over comm on every knob edit. The
+    # frontend downgrades this to False only on a software (SwiftShader) adapter.
+    _webgpu_filter_ok = traitlets.Bool(True).tag(sync=True)
     # Chemistry-on-structure view: HAADF-modulated blend of an element map on
     # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
     # construction with underlay=True on exactly two grayscale inputs.
@@ -1000,6 +1960,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    frame_bytes_url = traitlets.Unicode("").tag(sync=True)
+    frame_bytes_urls = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     # Optional per-panel frame stacks. Static panels keep count=1 and are not
     # duplicated in panel_stack_bytes; offsets are -1 for those panels.
     panel_frame_counts = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
@@ -1007,6 +1969,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_playback_fps = traitlets.Float(10.0).tag(sync=True)
     panel_stack_offsets = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_stack_bytes = traitlets.Bytes(b"").tag(sync=True)
+    panel_stack_bytes_url = traitlets.Unicode("").tag(sync=True)
     _panel_stack_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     _panel_stack_maxs = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     # Offline mode: stack quantized to uint8 against global (min, max). 4x
@@ -1052,6 +2015,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         **ipywidgets.widget_serialization,
     )
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
     # Per-panel RGB flag. True panels carry display-ready (H, W, 3) pixels that
     # bypass the colormap/contrast pipeline in JS; False panels are grayscale.
     is_rgb = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
@@ -1061,11 +2025,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
+    panel_title_style = traitlets.Dict(default_value={}).tag(sync=True)
+    inter_panel_gap_px = traitlets.Int(0).tag(sync=True)
+    inter_panel_gap_color = traitlets.Unicode("").tag(sync=True)
+    gallery_outer_border_px = traitlets.Int(0).tag(sync=True)
+    gallery_outer_border_color = traitlets.Unicode("").tag(sync=True)
+    panel_inner_border_px = traitlets.Float(1.0).tag(sync=True)
+    panel_inner_border_color = traitlets.Unicode("#d0d0d0").tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
+    gallery_gap_color = traitlets.Unicode("").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     panel_cmaps = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    panel_cmaps_memory = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
 
     # =========================================================================
@@ -1073,10 +2046,23 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     log_scale = traitlets.Bool(False).tag(sync=True)
     auto_contrast = traitlets.Bool(False).tag(sync=True)
+    contrast_preset = traitlets.Unicode("custom").tag(sync=True)
+    histogram_advanced = traitlets.Bool(False).tag(sync=True)
+    show_histogram_advanced = traitlets.Bool(False).tag(sync=True)
     vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
     vmax = traitlets.Float(None, allow_none=True).tag(sync=True)
     vmins = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
     vmaxs = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
+    identity_colors = traitlets.List(trait=traitlets.Unicode(), default_value=[]).tag(sync=True)
+    marker_colors = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    marker_style = traitlets.Enum(["left", "around"], default_value="left").tag(sync=True)
+    row_markers = traitlets.Dict(default_value={}).tag(sync=True)
+    col_markers = traitlets.Dict(default_value={}).tag(sync=True)
+    selected_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    inset_plots = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    show_inset_plots = traitlets.Bool(True).tag(sync=True)
+    panel_annotations = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
+    panel_overlays = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -1085,9 +2071,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     pixel_sizes = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     pixel_unit = traitlets.Unicode("pixels").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
+    scale_bar_position = traitlets.Unicode("bottom-right").tag(sync=True)
+    scale_bar_panels = traitlets.List(trait=traitlets.Int(), default_value=[]).tag(sync=True)
+    scale_bar_length = traitlets.Float(None, allow_none=True).tag(sync=True)
+    scale_bar_label = traitlets.Unicode("").tag(sync=True)
+    scale_bar_style = traitlets.Dict(default_value={}).tag(sync=True)
+    show_zoom_indicator = traitlets.Bool(False).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
     smooth = traitlets.Bool(False).tag(sync=True)
     initial_zoom = traitlets.Float(1.0).tag(sync=True)
+    flip_rows = traitlets.Bool(False).tag(sync=True)
+    flip_cols = traitlets.Bool(False).tag(sync=True)
     zoom_row = traitlets.Float(None, allow_none=True).tag(sync=True)
     zoom_col = traitlets.Float(None, allow_none=True).tag(sync=True)
     # Live viewport (row0, row1, col0, col1) in image pixel coordinates.
@@ -1161,6 +2155,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Per-Image Rotation
     # =========================================================================
     image_rotations = traitlets.List(traitlets.Int(), []).tag(sync=True)
+    rotation_scope = traitlets.Enum(["all", "panel"], default_value="all").tag(sync=True)
+    image_flips_horizontal = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
+    image_flips_vertical = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
 
     @classmethod
     def from_gif(
@@ -1322,7 +2319,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def __init__(
         self,
         data: np.ndarray | list[np.ndarray],
-        labels: list[str | None] = None,
+        labels: list[str | Sequence[Mapping[str, object]] | None] = None,
+        panel_title_spans: Sequence[Sequence[Mapping[str, object]] | Mapping[str, object] | str | None] | None = None,
         page_labels: Sequence[str | None] | None = None,
         title: str = "",
         ui_mode: UiMode = "interactive",
@@ -1332,6 +2330,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         units: str | list[str] | None = None,
         scale_bar_visible: bool | None = None,
         show_scale_bar: bool | None = None,
+        scale_bar_position: str = "bottom-right",
+        scale_bar_panels: Sequence[int | str] | int | str | None = None,
+        scale_bar_length: float | None = None,
+        scale_bar_label: str | None = None,
+        scale_bar_style: Mapping[str, object] | None = None,
+        show_zoom_indicator: bool = False,
         show_fft: bool = False,
         fft_window: bool = True,
         fft_metrics: bool = True,
@@ -1342,9 +2346,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         verbose: bool = True,
         log_scale: bool = False,
         auto_contrast: bool = False,
+        contrast_preset: str = "custom",
+        histogram_advanced: bool = False,
         offline: bool = False,
         vmin: float | list | None = None,
         vmax: float | list | None = None,
+        identity_colors: Sequence[str] | None = None,
+        marker_colors: Sequence[str] | None = None,
+        marker_style: str = "left",
+        row_markers: Mapping[object, object] | None = None,
+        col_markers: Mapping[object, object] | None = None,
+        inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None = None,
+        show_inset_plots: bool = True,
+        panel_annotations: Sequence[object] | Mapping[object, object] | object | None = None,
+        overlays: Sequence[object] | Mapping[object, object] | object | None = None,
+        panel_overlays: Sequence[object] | Mapping[object, object] | object | None = None,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
         panel_playback_fps: float = 10.0,
@@ -1352,6 +2368,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_width_px: int = 0,
         smooth: bool = False,
         zoom: float = 1.0,
+        rotation: int | float = 0,
+        rotations: Sequence[int | float] | None = None,
+        rotation_scope: str = "all",
+        flip_rows: bool = False,
+        flip_cols: bool = False,
         zoom_row: float | None = None,
         zoom_col: float | None = None,
         center: tuple | list | None = None,
@@ -1360,6 +2381,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         link_contrast: bool = True,
         diff_mode: bool = False,
         overlay: bool | str = False,
+        show_histogram_advanced: bool | None = None,
+        image_flips_horizontal: Sequence[bool] | None = None,
+        image_flips_vertical: Sequence[bool] | None = None,
         view_box: tuple | list | None = None,
         pad_ratio: float | Sequence[float] = 0.0,
         pad_fill_mode: str | Sequence[str] = "min",
@@ -1370,7 +2394,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_order: Sequence[int | str] | None = None,
         show_panel_titles: bool | None = None,
         panel_title_font_size: int = 11,
-        gallery_gap_px: int = 0,
+        panel_title_style: Mapping[str, object] | None = None,
+        inter_panel_gap_px: int | None = None,
+        inter_panel_gap_color: str | None = None,
+        gallery_outer_border_px: int | None = None,
+        gallery_outer_border_color: str | None = None,
+        panel_inner_border_px: float | int | None = None,
+        panel_inner_border_color: str | None = None,
+        gallery_gap_px: int | None = None,
+        gallery_gap_color: str | None = None,
         state=None,
         save_state: bool = False,
         notebook_preview_format: str | None = "jpeg",
@@ -1402,6 +2434,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     ):
         import time as _time
         _t0 = _time.perf_counter()
+        skip_initial_frame_pack = bool(kwargs.pop("_skip_initial_frame_pack", False))
+        skip_initial_stats = bool(kwargs.pop("_skip_initial_stats", False))
+        preserve_input_dtype_for_export = bool(kwargs.pop("_preserve_input_dtype_for_export", False))
         requested_panel_cmaps = (
             [_cmap_name(item) for item in cmap]
             if _is_cmap_sequence(cmap)
@@ -1476,10 +2511,27 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             )
             if not denoise_scope_supplied:
                 denoise_scope = "all" if filter_per_panel else "panel"
+        plain_labels, title_spans_from_labels = _normalise_title_span_sequence(labels)
+        explicit_plain_labels, explicit_title_spans = _normalise_title_span_sequence(panel_title_spans)
+        if plain_labels is None and explicit_plain_labels is not None:
+            plain_labels = explicit_plain_labels
+        raw_title_span_len = (
+            _title_span_sequence_length(panel_title_spans)
+            if panel_title_spans is not None
+            else (len(plain_labels or []) if title_spans_from_labels else 0)
+        )
         data, labels, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show2d_pages(
             data,
-            labels=labels,
+            labels=plain_labels,
             page_labels=page_labels,
+        )
+        raw_title_spans = explicit_title_spans or title_spans_from_labels
+        resolved_panel_title_spans = _expand_title_spans_for_flattened_labels(
+            raw_title_spans,
+            original_len=raw_title_span_len,
+            n_panels=len(labels or []),
+            n_pages=n_pages,
+            panels_per_page=panels_per_page,
         )
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
@@ -1489,15 +2541,56 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ncols = int(ncols)
         if ncols < 1:
             raise ValueError(f"ncols must be >= 1, got {ncols}")
-        gallery_gap_px = int(gallery_gap_px)
-        if gallery_gap_px < 0:
-            raise ValueError(f"gallery_gap_px must be >= 0, got {gallery_gap_px}")
+        legacy_gap_used = gallery_gap_px is not None or gallery_gap_color is not None
+        resolved_inter_panel_gap_px = _nonnegative_int(
+            0 if inter_panel_gap_px is None and gallery_gap_px is None
+            else gallery_gap_px if inter_panel_gap_px is None
+            else inter_panel_gap_px,
+            name="inter_panel_gap_px",
+        )
+        resolved_inter_panel_gap_color = (
+            "" if (gallery_gap_color if inter_panel_gap_color is None else inter_panel_gap_color) is None
+            else str(gallery_gap_color if inter_panel_gap_color is None else inter_panel_gap_color)
+        )
+        if gallery_outer_border_px is None:
+            resolved_gallery_outer_border_px = (
+                resolved_inter_panel_gap_px
+                if legacy_gap_used and resolved_inter_panel_gap_px > 0 and resolved_inter_panel_gap_color
+                else 0
+            )
+        else:
+            resolved_gallery_outer_border_px = _nonnegative_int(
+                gallery_outer_border_px,
+                name="gallery_outer_border_px",
+            )
+        resolved_gallery_outer_border_color = (
+            resolved_inter_panel_gap_color
+            if gallery_outer_border_color is None
+            else str(gallery_outer_border_color)
+        )
+        resolved_panel_inner_border_px = (
+            1.0
+            if panel_inner_border_px is None
+            else _nonnegative_float(panel_inner_border_px, name="panel_inner_border_px")
+        )
+        resolved_panel_inner_border_color = (
+            resolved_inter_panel_gap_color
+            if panel_inner_border_color is None and legacy_gap_used and resolved_inter_panel_gap_color
+            else "#d0d0d0" if panel_inner_border_color is None else str(panel_inner_border_color)
+        )
+        gallery_gap_px = resolved_inter_panel_gap_px
+        gallery_gap_color = resolved_inter_panel_gap_color
         if (
             scale_bar_visible is not None
             and show_scale_bar is not None
             and bool(scale_bar_visible) != bool(show_scale_bar)
         ):
             raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        if scale_bar_position not in {"bottom-right", "bottom-left"}:
+            raise ValueError(
+                "scale_bar_position must be 'bottom-right' or 'bottom-left'; "
+                f"got {scale_bar_position!r}"
+            )
         ui = resolve_ui_mode(
             ui_mode,
             defaults={
@@ -1544,22 +2637,75 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if center is not None:
             # center=(row, col) sugar: the friendliest way to say where to look
             zoom_row, zoom_col = float(center[0]), float(center[1])
+        if identity_colors is None and marker_colors is not None:
+            identity_colors = marker_colors
+        panel_title_style = _normalize_panel_title_style(panel_title_style)
+        row_markers = _normalize_marker_mapping(row_markers, name="row_markers")
+        col_markers = _normalize_marker_mapping(col_markers, name="col_markers")
+        n_display_panels = len(labels or []) or (
+            int(data.shape[0]) if getattr(data, "ndim", 0) >= 3 else 1
+        )
+        scale_bar_panels = _normalize_panel_indices(
+            scale_bar_panels,
+            n_items=n_display_panels,
+            labels=labels,
+            name="scale_bar_panels",
+        )
+        if scale_bar_length is not None and (not np.isfinite(float(scale_bar_length)) or float(scale_bar_length) <= 0):
+            raise ValueError(f"scale_bar_length must be a positive finite value, got {scale_bar_length!r}")
+        scale_bar_style = _normalize_scale_bar_style(scale_bar_style)
+        panel_annotations = _normalize_panel_annotations(
+            panel_annotations,
+            n_items=n_display_panels,
+            labels=labels,
+        )
+        if overlays is not None and panel_overlays is not None:
+            raise ValueError("Use either overlays= or panel_overlays=, not both")
+        panel_overlays = _normalize_panel_overlays(
+            panel_overlays if panel_overlays is not None else overlays,
+            n_items=n_display_panels,
+            labels=labels,
+        )
+        if show_histogram_advanced:
+            histogram_advanced = True
+        if image_flips_horizontal:
+            flip_cols = any(bool(value) for value in image_flips_horizontal)
+        if image_flips_vertical:
+            flip_rows = any(bool(value) for value in image_flips_vertical)
         with self.hold_sync():
             self._init_sync(
-                data=data, labels=labels, title=title, cmap=base_cmap,
+                data=data, labels=labels, panel_title_spans=resolved_panel_title_spans,
+                title=title, cmap=base_cmap,
                 panel_cmaps=requested_panel_cmaps,
                 n_pages=n_pages, panels_per_page=panels_per_page,
                 page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                 show_title=show_title,
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
+                scale_bar_position=scale_bar_position,
+                scale_bar_panels=scale_bar_panels,
+                scale_bar_length=scale_bar_length,
+                scale_bar_label=scale_bar_label,
+                scale_bar_style=scale_bar_style,
+                show_zoom_indicator=show_zoom_indicator,
                 show_fft=show_fft, fft_window=fft_window, fft_metrics=fft_metrics,
                 show_controls=show_controls, controls_collapsed=controls_collapsed,
                 show_stats=show_stats, debug=debug,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
-                vmin=vmin, vmax=vmax,
+                contrast_preset=contrast_preset, histogram_advanced=histogram_advanced,
+                show_histogram_advanced=show_histogram_advanced,
+                vmin=vmin, vmax=vmax, identity_colors=identity_colors, marker_colors=marker_colors,
+                marker_style=marker_style, row_markers=row_markers,
+                col_markers=col_markers, inset_plots=inset_plots,
+                show_inset_plots=show_inset_plots,
+                panel_annotations=panel_annotations,
+                panel_overlays=panel_overlays,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
                 panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
+                rotation=rotation, rotations=rotations, rotation_scope=rotation_scope,
+                flip_rows=flip_rows, flip_cols=flip_cols,
+                image_flips_horizontal=image_flips_horizontal,
+                image_flips_vertical=image_flips_vertical,
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
@@ -1567,7 +2713,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
+                panel_title_style=panel_title_style,
+                inter_panel_gap_px=resolved_inter_panel_gap_px,
+                inter_panel_gap_color=resolved_inter_panel_gap_color,
+                gallery_outer_border_px=resolved_gallery_outer_border_px,
+                gallery_outer_border_color=resolved_gallery_outer_border_color,
+                panel_inner_border_px=resolved_panel_inner_border_px,
+                panel_inner_border_color=resolved_panel_inner_border_color,
                 gallery_gap_px=gallery_gap_px,
+                gallery_gap_color=gallery_gap_color,
                 verbose=verbose, state=state, _t0=_t0,
                 denoise=denoise, denoise_sigma=denoise_sigma,
                 denoise_bin=denoise_bin, denoise_scope=denoise_scope,
@@ -1582,18 +2736,33 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 underlay=underlay, underlay_alpha=underlay_alpha,
                 underlay_haadf_gain=underlay_haadf_gain,
                 underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
-                display_gamma=display_gamma, dual_gain=dual_gain)
+                display_gamma=display_gamma, dual_gain=dual_gain,
+                skip_initial_frame_pack=skip_initial_frame_pack,
+                skip_initial_stats=skip_initial_stats,
+                preserve_input_dtype_for_export=preserve_input_dtype_for_export)
 
-    def _init_sync(self, *, data, labels, title, cmap, panel_cmaps, n_pages, panels_per_page,
+    def _init_sync(self, *, data, labels, panel_title_spans, title, cmap, panel_cmaps, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
-                   scale_bar_visible, show_fft, fft_window, fft_metrics,
+                   scale_bar_visible, scale_bar_position, scale_bar_panels, scale_bar_length, scale_bar_label, scale_bar_style, show_zoom_indicator,
+                   show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
-                   vmin, vmax,
-                   ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom, zoom_row, zoom_col,
+                   contrast_preset, histogram_advanced, show_histogram_advanced,
+                   vmin, vmax, identity_colors, marker_colors, marker_style,
+                   row_markers, col_markers, inset_plots, panel_annotations,
+                   panel_overlays,
+                   show_inset_plots,
+                   ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom,
+                   rotation, rotations, rotation_scope,
+                   flip_rows, flip_cols, image_flips_horizontal, image_flips_vertical,
+                   zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    pad_ratio, pad_fill_mode, pad_scope,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
-                   panel_title_font_size, gallery_gap_px, verbose, state, _t0,
+                   panel_title_font_size, panel_title_style,
+                   inter_panel_gap_px, inter_panel_gap_color,
+                   gallery_outer_border_px, gallery_outer_border_color,
+                   panel_inner_border_px, panel_inner_border_color,
+                   gallery_gap_px, gallery_gap_color, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False,
                    show_denoise=False,
@@ -1603,7 +2772,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    underlay=False, underlay_alpha=0.95,
                    underlay_haadf_gain=0.35, underlay_mode="haadf",
                    stretch_percentiles=(4.0, 99.0), display_gamma=0.75,
-                   dual_gain=(1.0, 1.0)):
+                   dual_gain=(1.0, 1.0), skip_initial_frame_pack=False,
+                   skip_initial_stats=False,
+                   preserve_input_dtype_for_export=False):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -1709,8 +2880,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if data.ndim == 2:
             data = data[np.newaxis, ...]
 
-        # Avoid redundant copy: np.asarray is a no-op when already float32 + contiguous
-        if data.dtype == np.float32:
+        # Avoid redundant copy: np.asarray is a no-op when already float32 + contiguous.
+        # Folder export can preserve uint8 stress fixtures because the browser
+        # receives explicit external bytes and does not need an intermediate
+        # float32 trait payload.
+        if preserve_input_dtype_for_export and data.dtype == np.uint8:
+            self._data = np.asarray(data)
+        elif data.dtype == np.float32:
             self._data = np.array(data, dtype=np.float32, copy=True)
         else:
             self._data = np.asarray(data, dtype=np.float32)
@@ -1823,12 +2999,25 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._panel_stacks = panel_stacks
         self._panel_stacks_original = [stack for stack in panel_stacks]
         self._panel_stack_originals_are_views = True
-        self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
-        self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
+        self._updating_panel_frames = True
+        try:
+            self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
+            self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
+        finally:
+            self._updating_panel_frames = False
         self.panel_stack_offsets = [-1] * self.n_images
+        self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
+        self.show_inset_plots = bool(show_inset_plots)
+        self.panel_annotations = list(panel_annotations or [])
+        self.panel_overlays = list(panel_overlays or [])
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
-        self.image_rotations = [0] * self.n_images
+        self.rotation_scope = str(rotation_scope).lower()
+        self.image_rotations = _normalize_rotation_list(
+            n_items=self.n_images,
+            rotation=rotation,
+            rotations=rotations,
+        )
         if self.n_pages > 1:
             if self.panels_per_page <= 0:
                 raise ValueError("panels_per_page must be > 0 when n_pages > 1")
@@ -1857,12 +3046,29 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if overlay_label and len(resolved_labels) == self.n_images - 1:
                 resolved_labels.append(overlay_label)
             self.labels = resolved_labels
+        if panel_title_spans and len(panel_title_spans) in (self.n_images - 1, self.n_images):
+            resolved_spans = list(panel_title_spans)
+            if overlay_label and len(resolved_spans) == self.n_images - 1:
+                resolved_spans.append([])
+            self.panel_title_spans = resolved_spans
+        else:
+            self.panel_title_spans = []
         self.starred = [0] * self.n_images
         self.hidden_panels = []
         self.hidden_page_slots = []
         self.show_panel_titles = bool(show_panel_titles)
         self.panel_title_font_size = int(panel_title_font_size)
+        self.panel_title_style = dict(panel_title_style or {})
+        self.inter_panel_gap_px = int(inter_panel_gap_px)
+        self.inter_panel_gap_color = "" if inter_panel_gap_color is None else str(inter_panel_gap_color)
+        self.gallery_outer_border_px = int(gallery_outer_border_px)
+        self.gallery_outer_border_color = "" if gallery_outer_border_color is None else str(gallery_outer_border_color)
+        self.panel_inner_border_px = float(panel_inner_border_px)
+        self.panel_inner_border_color = (
+            "" if panel_inner_border_color is None else str(panel_inner_border_color)
+        )
         self.gallery_gap_px = int(gallery_gap_px)
+        self.gallery_gap_color = "" if gallery_gap_color is None else str(gallery_gap_color)
         if starred is not None:
             self.set_starred_panels(starred)
         if hidden_panels is not None:
@@ -1884,8 +3090,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     f"the number of Show2D panels ({self.n_images})"
                 )
             self.panel_cmaps = cmaps
+            self.panel_cmaps_memory = list(cmaps)
         else:
             self.panel_cmaps = []
+            self.panel_cmaps_memory = []
         # Resolve sampling + units to scalar pixel_size + pixel_unit (column axis).
         # Scalar shorthand: sampling=0.5 → (0.5, 0.5). units="nm" → ["nm", "nm"].
         if sampling is None:
@@ -1901,9 +3109,35 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         else:
             self.pixel_unit = str(units[-1])
         self.scale_bar_visible = scale_bar_visible
+        self.scale_bar_position = scale_bar_position
+        self.scale_bar_panels = list(scale_bar_panels or [])
+        self.scale_bar_length = None if scale_bar_length is None else float(scale_bar_length)
+        self.scale_bar_label = "" if scale_bar_label is None else str(scale_bar_label)
+        self.scale_bar_style = dict(scale_bar_style or {})
+        self.show_zoom_indicator = bool(show_zoom_indicator)
         self.pixel_sizes = []
         self.size = size
         self.smooth = smooth
+        self.contrast_preset = str(contrast_preset)
+        advanced_histogram = bool(histogram_advanced if show_histogram_advanced is None else show_histogram_advanced)
+        self.histogram_advanced = advanced_histogram
+        self.show_histogram_advanced = advanced_histogram
+        marker_source = marker_colors if marker_colors is not None else identity_colors
+        if marker_source is None:
+            colors = []
+        else:
+            colors = [str(value) for value in marker_source]
+            if colors and len(colors) != self.n_images:
+                raise ValueError(
+                    f"marker_colors length ({len(colors)}) must match "
+                    f"the number of Show2D panels ({self.n_images})"
+                )
+        self.identity_colors = colors
+        self.marker_colors = list(colors)
+        self.marker_style = str(marker_style).lower()
+        self.row_markers = dict(row_markers or {})
+        self.col_markers = dict(col_markers or {})
+        self.selected_panels = []
         # view_box sugar: sets zoom + zoom_row/col to center on box.
         # Two forms: (r0, r1, c0, c1) explicit bounds, or the friendlier
         # (row0, col0, size) = top-left corner + square size.
@@ -1919,6 +3153,25 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             zoom_col = (c0 + c1) / 2
             self.view_box = [r0, r1, c0, c1]
         self.initial_zoom = zoom
+        self.flip_rows = bool(flip_rows)
+        self.flip_cols = bool(flip_cols)
+        horizontal_flips = (
+            [bool(flip_cols)] * int(self.n_images)
+            if image_flips_horizontal is None
+            else [bool(value) for value in image_flips_horizontal]
+        )
+        vertical_flips = (
+            [bool(flip_rows)] * int(self.n_images)
+            if image_flips_vertical is None
+            else [bool(value) for value in image_flips_vertical]
+        )
+        if len(horizontal_flips) != int(self.n_images) or len(vertical_flips) != int(self.n_images):
+            raise ValueError(
+                "image_flips_horizontal and image_flips_vertical must match "
+                f"the number of Show2D panels ({int(self.n_images)})"
+            )
+        self.image_flips_horizontal = horizontal_flips
+        self.image_flips_vertical = vertical_flips
         self.zoom_row = zoom_row
         self.zoom_col = zoom_col
         # Auto-link zoom + pan in gallery (n_images >= 2) so dragging one panel
@@ -2188,10 +3441,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._view_ops_ready = True
 
         # Compute initial stats (from full-res data)
-        self._compute_all_stats()
+        if skip_initial_stats:
+            axes = (1, 2) if self._data.ndim == 3 else None
+            self.stats_mean = np.mean(self._data, axis=axes).ravel().tolist()
+            self.stats_min = np.min(self._data, axis=axes).ravel().tolist()
+            self.stats_max = np.max(self._data, axis=axes).ravel().tolist()
+            self.stats_std = np.std(self._data, axis=axes).ravel().tolist()
+        else:
+            self._compute_all_stats()
 
         # Send display data to JS (possibly binned)
-        self._update_all_frames()
+        if skip_initial_frame_pack:
+            self.frame_bytes = b""
+            self.panel_stack_bytes = b""
+        else:
+            self._update_all_frames()
 
         self.selected_idx = 0
 
@@ -2337,6 +3601,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
         return self._normalize_item_page_hidden(clean)
+
+    @traitlets.validate("selected_panels")
+    def _validate_selected_panels(self, proposal: dict) -> list[int]:
+        """Normalize the UI multi-panel selection to existing panel indices."""
+        n_img = int(getattr(self, "n_images", 0))
+        clean: list[int] = []
+        seen: set[int] = set()
+        for value in proposal["value"]:
+            if isinstance(value, bool):
+                continue
+            idx = int(value)
+            if 0 <= idx < n_img and idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
+        return clean
 
     def _normalize_hidden_page_slots(
         self,
@@ -3172,6 +4451,836 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         plt.close(fig)
         return path
 
+    def _gallery_export_chrome(self) -> dict[str, int | float | str]:
+        """Return resolved publication chrome for gallery exports and previews."""
+        gap_px = max(0, int(getattr(self, "inter_panel_gap_px", self.gallery_gap_px)))
+        gap_color = str(getattr(self, "inter_panel_gap_color", self.gallery_gap_color) or "")
+        outer_px = max(0, int(getattr(self, "gallery_outer_border_px", 0)))
+        outer_color = str(getattr(self, "gallery_outer_border_color", "") or gap_color)
+        panel_border_px = max(0.0, float(getattr(self, "panel_inner_border_px", 1.0)))
+        panel_border_color = str(getattr(self, "panel_inner_border_color", "#d0d0d0") or "#d0d0d0")
+        return {
+            "inter_panel_gap_px": gap_px,
+            "inter_panel_gap_color": gap_color,
+            "gallery_outer_border_px": outer_px,
+            "gallery_outer_border_color": outer_color,
+            "panel_inner_border_px": panel_border_px,
+            "panel_inner_border_color": panel_border_color,
+        }
+
+    def export_svg(
+        self,
+        path: str | pathlib.Path | None = None,
+        *,
+        scale: float = 3,
+        include_scale_bar: bool = True,
+        include_colorbar: bool = False,
+        title: str | None = None,
+    ) -> pathlib.Path:
+        """Export the current Show2D gallery as a hybrid SVG figure.
+
+        The SVG keeps figure chrome editable as vector elements: panel
+        frames, marker bars, panel labels, title, and scale-bar text/line. The
+        scientific image panels are embedded as PNG images at ``scale`` times
+        the widget display size, which preserves the measured pixels while
+        giving Illustrator or Inkscape sharp panels to place in a manuscript.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path, optional
+            Output SVG path. Defaults to a descriptive filename in the current
+            working directory.
+        scale : float, default 3
+            Embedded image scale relative to the widget display panel size.
+            Values below 1 are clamped to 1; use 3 for the default
+            high-resolution export, or a smaller value when file size matters.
+        include_scale_bar : bool, default True
+            Include the current scale bar when scale bars are visible on the
+            widget. Set False to omit scale-bar chrome from the SVG.
+        include_colorbar : bool, default False
+            Include an editable SVG colorbar for single-panel exports. The
+            live browser export uses the current Color switch state instead.
+        title : str, optional
+            Figure title override. Defaults to the widget title.
+
+        Returns
+        -------
+        pathlib.Path
+            The written SVG path.
+        """
+        from PIL import Image
+
+        chrome = self._gallery_export_chrome()
+        specs = self._static_panel_specs()
+        if not specs:
+            raise ValueError("Show2D has no visible panels to export")
+
+        export_path = pathlib.Path(path) if path is not None else self._default_svg_export_path()
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_scale = max(1.0, min(8.0, float(scale)))
+        panel_w = int(round(self._static_canvas_css_px()))
+        gap = int(chrome["inter_panel_gap_px"])
+        gap_color = str(chrome["inter_panel_gap_color"])
+        frame = int(chrome["gallery_outer_border_px"])
+        frame_color = str(chrome["gallery_outer_border_color"])
+        panel_border_px = float(chrome["panel_inner_border_px"])
+        panel_border_color = str(chrome["panel_inner_border_color"])
+        ncols = max(1, min(int(self.ncols), len(specs)))
+        title_text = self.title if title is None else str(title)
+        title_h = 30 if title_text and self.show_title else 0
+        draw_scale = bool(include_scale_bar and self.scale_bar_visible)
+        view = self.current_view
+        row0, row1, col0, col1 = view["box"]
+
+        def crop_slices(frame: np.ndarray) -> tuple[slice, slice]:
+            height, width = frame.shape[:2]
+            r0 = max(0, min(height - 1, int(math.floor(row0))))
+            r1 = max(r0 + 1, min(height, int(math.ceil(row1))))
+            c0 = max(0, min(width - 1, int(math.floor(col0))))
+            c1 = max(c0 + 1, min(width, int(math.ceil(col1))))
+            return slice(r0, r1), slice(c0, c1)
+
+        resample = Image.Resampling.BILINEAR if self.smooth else Image.Resampling.NEAREST
+        panels: list[dict[str, Any]] = []
+        overlays = self._static_overlay_texts(specs, css_px=panel_w)
+        for spec, overlay in zip(specs, overlays):
+            frame_arr = np.asarray(spec["frame"])
+            rows, cols = crop_slices(frame_arr)
+            cropped = frame_arr[rows, cols]
+            if spec.get("rgb"):
+                rgb = (np.clip(cropped[..., :3], 0.0, 1.0) * 255).astype(np.uint8)
+            else:
+                rgb = self._static_panel_rgb(
+                    cropped,
+                    float(spec["vmin"]),
+                    float(spec["vmax"]),
+                    str(spec["cmap"]),
+                    apply_log=bool(spec.get("apply_log")),
+                )
+            panel_h = max(1, int(round(panel_w * rgb.shape[0] / max(1, rgb.shape[1]))))
+            image = Image.fromarray(rgb, mode="RGB")
+            embed_w = max(1, int(round(panel_w * export_scale)))
+            embed_h = max(1, int(round(panel_h * export_scale)))
+            if image.size != (embed_w, embed_h):
+                image = image.resize((embed_w, embed_h), resample=resample)
+            buf = _io.BytesIO()
+            image.save(buf, format="PNG")
+            panel_index = int(spec.get("panel_index", len(panels)))
+            panels.append({
+                "panel_index": panel_index,
+                "label": str(spec.get("label", "")),
+                "height": panel_h,
+                "png": base64.b64encode(buf.getvalue()).decode("ascii"),
+                "bar_text": overlay[2] if draw_scale else "",
+                "bar_px": float(overlay[3]) if draw_scale else 0.0,
+                "vmin": float(spec.get("vmin", 0.0)),
+                "vmax": float(spec.get("vmax", 1.0)),
+                "cmap": str(spec.get("cmap", self.cmap)),
+            })
+
+        row_heights: list[int] = []
+        for start in range(0, len(panels), ncols):
+            row_heights.append(max(int(panel["height"]) for panel in panels[start:start + ncols]))
+        svg_w = 2 * frame + ncols * panel_w + (ncols - 1) * gap
+        svg_h = title_h + 2 * frame + sum(row_heights) + max(0, len(row_heights) - 1) * gap
+
+        def esc_text(value: object) -> str:
+            return html.escape(str(value), quote=False)
+
+        def esc_attr(value: object) -> str:
+            return html.escape(str(value), quote=True)
+
+        def svg_color(value: object, fallback: str = "") -> str:
+            text = str(value if value not in (None, "") else fallback).strip()
+            match = re.fullmatch(
+                r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(?:0|1|0?\.\d+)\s*\)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return f"rgb({int(match.group(1))}, {int(match.group(2))}, {int(match.group(3))})"
+            return text
+
+        def wrap_svg_label(value: object, font_size: int, max_width: float, max_lines: int = 3) -> list[str]:
+            text = str(value or "").strip()
+            if not text:
+                return []
+            width = max(1, int(max_width / max(1, font_size * 0.55)))
+            return textwrap.wrap(text, width=width, break_long_words=True, max_lines=max_lines)
+
+        latex_symbols = {
+            r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ",
+            r"\lambda": "λ", r"\mu": "μ", r"\sigma": "σ", r"\chi": "χ",
+            r"\omega": "ω", r"\Delta": "Δ", r"\Theta": "Θ", r"\pm": "±",
+            r"\times": "×", r"\cdot": "·", r"\degree": "°", r"\angstrom": "Å",
+            r"\le": "≤", r"\ge": "≥", r"\neq": "≠", r"\approx": "≈",
+            r"\infty": "∞",
+        }
+
+        def math_text(value: object) -> str:
+            text = str(value or "").strip().strip("$")
+            while "\\\\" in text:
+                text = text.replace("\\\\", "\\")
+            for key, symbol in latex_symbols.items():
+                text = text.replace(key, symbol)
+            superscript = str.maketrans({
+                "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+                "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+                "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+                "n": "ⁿ", "i": "ⁱ",
+            })
+            subscript = str.maketrans({
+                "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+                "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+                "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+                "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+                "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
+                "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
+                "v": "ᵥ", "x": "ₓ",
+            })
+
+            def read_group(start: int) -> tuple[str, int]:
+                if start >= len(text) or text[start] != "{":
+                    return (text[start] if start < len(text) else ""), start + 1
+                depth = 0
+                for idx in range(start, len(text)):
+                    if text[idx] == "{":
+                        depth += 1
+                    elif text[idx] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return text[start + 1:idx], idx + 1
+                return text[start + 1:], len(text)
+
+            out: list[str] = []
+            idx = 0
+            while idx < len(text):
+                char = text[idx]
+                if char in {"^", "_"} and idx + 1 < len(text):
+                    raw, next_idx = read_group(idx + 1)
+                    table = superscript if char == "^" else subscript
+                    out.append(raw.translate(table))
+                    idx = next_idx
+                    continue
+                if char in {"{", "}"}:
+                    idx += 1
+                    continue
+                out.append(char)
+                idx += 1
+            return "".join(out)
+
+        def span_text(span: Mapping[str, object]) -> str:
+            if span.get("math") not in (None, ""):
+                return math_text(span.get("math", ""))
+            return str(span.get("text", ""))
+
+        def dash_attr(spec: Mapping[str, object], width: float) -> str:
+            raw_dash = spec.get("dash")
+            if isinstance(raw_dash, Sequence) and not isinstance(raw_dash, (str, bytes, bytearray)):
+                vals = [float(v) for v in raw_dash if float(v) >= 0]
+                if any(vals):
+                    return f' stroke-dasharray="{esc_attr(" ".join(f"{v:g}" for v in vals))}" stroke-linecap="round"'
+            style = str(spec.get("line_style", "solid")).lower().replace("_", "-")
+            w = max(1.0, float(width))
+            patterns = {
+                "dashed": [4 * w, 2 * w],
+                "dash": [4 * w, 2 * w],
+                "dotted": [w, 1.8 * w],
+                "dot": [w, 1.8 * w],
+                "dashdot": [4 * w, 2 * w, w, 2 * w],
+                "dash-dot": [4 * w, 2 * w, w, 2 * w],
+            }
+            if style in patterns:
+                return f' stroke-dasharray="{esc_attr(" ".join(f"{v:g}" for v in patterns[style]))}" stroke-linecap="round"'
+            return ""
+
+        def overlay_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float) -> str:
+            shape = str(spec.get("shape", "circle")).lower()
+            if shape == "rectangle":
+                shape = "rect"
+            coords = str(spec.get("coords", "data")).lower()
+            view_h = max(1.0, float(row1) - float(row0))
+            view_w = max(1.0, float(col1) - float(col0))
+
+            def to_x(col: float) -> float:
+                if coords == "relative":
+                    return x + col * panel_w
+                return x + (col - float(col0)) / view_w * panel_w
+
+            def to_y(row: float) -> float:
+                if coords == "relative":
+                    return y + row * panel_h
+                return y + (row - float(row0)) / view_h * panel_h
+
+            def to_radius(radius: float) -> float:
+                if coords == "relative":
+                    return radius * min(panel_w, panel_h)
+                return radius / max(view_w, view_h) * max(panel_w, panel_h)
+
+            stroke = svg_color(spec.get("stroke"), "#00e5ff")
+            stroke_width = max(0.0, float(spec.get("stroke_width", 2.0)))
+            opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+            stroke_opacity = opacity * max(0.0, min(1.0, float(spec.get("stroke_opacity", 1.0))))
+            fill_value = spec.get("fill", "none")
+            fill = "none" if fill_value in (None, "", "none", "None") else svg_color(fill_value)
+            fill_opacity = opacity * max(0.0, min(1.0, float(spec.get("fill_opacity", 1.0 if fill != "none" else 0.0))))
+            common = (
+                f' fill="{esc_attr(fill)}" fill-opacity="{fill_opacity:g}"'
+                f' stroke="{esc_attr(stroke)}" stroke-width="{stroke_width:g}"'
+                f' stroke-opacity="{stroke_opacity:g}"{dash_attr(spec, stroke_width)}'
+            )
+            if shape == "circle":
+                row = float(spec.get("row", 0.0))
+                col = float(spec.get("col", 0.0))
+                radius = max(0.0, float(spec.get("radius", 0.0)))
+                cx = to_x(col)
+                cy = to_y(row)
+                r = to_radius(radius)
+                return f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
+            spec_row0 = float(spec.get("row0", 0.0))
+            spec_col0 = float(spec.get("col0", 0.0))
+            spec_row1 = float(spec.get("row1", spec_row0))
+            spec_col1 = float(spec.get("col1", spec_col0))
+            sx0 = to_x(min(spec_col0, spec_col1))
+            sx1 = to_x(max(spec_col0, spec_col1))
+            sy0 = to_y(min(spec_row0, spec_row1))
+            sy1 = to_y(max(spec_row0, spec_row1))
+            return f'<rect x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
+
+        def annotation_anchor(position: str) -> tuple[float, float, str, str]:
+            if "left" in position:
+                ax = 0.0
+                anchor = "start"
+            elif "right" in position:
+                ax = 1.0
+                anchor = "end"
+            else:
+                ax = 0.5
+                anchor = "middle"
+            if "top" in position:
+                ay = 0.0
+                baseline = "hanging"
+            elif "bottom" in position:
+                ay = 1.0
+                baseline = "baseline"
+            else:
+                ay = 0.5
+                baseline = "middle"
+            return ax, ay, anchor, baseline
+
+        def annotation_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float) -> str:
+            position = str(spec.get("position", "top-left"))
+            font_size = max(6.0, float(spec.get("font_size", 10.0)))
+            font_family = str(spec.get("font_family", "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"))
+            pad_x = max(0.0, float(spec.get("pad_x", 6.0 if spec.get("variant", "badge") != "plain" else 0.0)))
+            pad_y = max(0.0, float(spec.get("pad_y", 2.0 if spec.get("variant", "badge") != "plain" else 0.0)))
+            opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+            offset = spec.get("offset", (0.0, 0.0))
+            off_x, off_y = (float(offset[0]), float(offset[1])) if isinstance(offset, Sequence) and len(offset) >= 2 else (0.0, 0.0)
+            align = str(spec.get("align", "")).lower()
+            align_anchor = {
+                "left": "start",
+                "start": "start",
+                "center": "middle",
+                "middle": "middle",
+                "right": "end",
+                "end": "end",
+            }.get(align)
+            if "box" in spec:
+                left, top, width, height = (float(v) for v in spec["box"])
+                if align_anchor == "start":
+                    tx = x + left * panel_w + pad_x + off_x
+                elif align_anchor == "end":
+                    tx = x + (left + width) * panel_w - pad_x + off_x
+                else:
+                    tx = x + (left + width / 2.0) * panel_w + off_x
+                ty = y + (top + height / 2.0) * panel_h + off_y
+                anchor = align_anchor or "middle"
+                baseline = "middle"
+            elif "x" in spec and "y" in spec:
+                tx = x + float(spec.get("x", 0.0)) * panel_w + off_x
+                ty = y + float(spec.get("y", 0.0)) * panel_h + off_y
+                _, _, anchor, baseline = annotation_anchor(str(spec.get("anchor", "center")))
+                anchor = align_anchor or anchor
+            else:
+                ax, ay, anchor, baseline = annotation_anchor(position)
+                anchor = align_anchor or anchor
+                margin = 10.0
+                tx = x + margin + ax * (panel_w - 2 * margin) + off_x
+                ty = y + margin + ay * (panel_h - 2 * margin) + off_y
+            spans = spec.get("spans")
+            text = math_text(spec.get("math")) if spec.get("math") not in (None, "") else str(spec.get("text", ""))
+            text_len = max(len(text), sum(len(span_text(span)) for span in spans) if isinstance(spans, Sequence) else 0)
+            box_w = text_len * font_size * 0.62 + 2 * pad_x
+            box_h = font_size * 1.25 + 2 * pad_y
+            fg = svg_color(spec.get("fg", spec.get("color", "#fff")))
+            variant = str(spec.get("variant", "badge"))
+            outline_width = max(0.0, float(spec.get("outline_width", 0.0)))
+            outline_color = svg_color(spec.get("outline_color"), "rgba(0,0,0,0.85)")
+            parts = [f'<g opacity="{opacity:g}">']
+            if variant != "plain":
+                bg = svg_color(spec.get("bg"), "rgba(0,0,0,0.72)")
+                border = svg_color(spec.get("border_color"), "rgba(255,255,255,0.5)")
+                border_width = max(0.0, float(spec.get("border_width", 1.0 if variant in {"outline", "callout"} else 0.0)))
+                rect_x = tx - box_w / 2 if anchor == "middle" else tx - box_w if anchor == "end" else tx
+                rect_y = ty - box_h / 2 if baseline == "middle" else ty - font_size - pad_y if baseline == "baseline" else ty
+                parts.append(
+                    f'<rect x="{rect_x:g}" y="{rect_y:g}" width="{box_w:g}" height="{box_h:g}" '
+                    f'rx="{float(spec.get("radius", 3.0)):g}" fill="{esc_attr(bg)}" '
+                    f'stroke="{esc_attr(border)}" stroke-width="{border_width:g}"/>'
+                )
+            text_y = ty + (font_size * 0.4 if baseline == "middle" else 0.0)
+            text_attrs = (
+                f'x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
+                f'font-family="{esc_attr(font_family)}" '
+                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}"'
+            )
+            fill_parts = []
+            if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes, bytearray)):
+                for span in spans:
+                    if not isinstance(span, Mapping):
+                        continue
+                    color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
+                    fill_parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+            else:
+                fill_parts.append(esc_text(text))
+            fill_body = "".join(fill_parts)
+            if outline_width > 0:
+                plain = esc_text(text if text else "".join(span_text(span) for span in spans or [] if isinstance(span, Mapping)))
+                parts.append(
+                    f'<text {text_attrs} fill="none" stroke="{esc_attr(outline_color)}" '
+                    f'stroke-width="{outline_width:g}" stroke-linejoin="round">{plain}</text>'
+                )
+            parts.append(f'<text {text_attrs} fill="{esc_attr(fg)}">{fill_body}</text></g>')
+            return "".join(parts)
+
+        def inset_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, fallback_color: str) -> str:
+            if not spec:
+                return ""
+            xs = np.asarray(spec.get("x", []), dtype=float).ravel()
+            ys = np.asarray(spec.get("y", []), dtype=float).ravel()
+            finite = np.isfinite(xs) & np.isfinite(ys)
+            if xs.size != ys.size or finite.sum() < 2:
+                return ""
+            xs = xs[finite]
+            ys = ys[finite]
+            xlim = tuple(float(v) for v in spec.get("xlim", (float(xs.min()), float(xs.max()))))
+            ylim = tuple(float(v) for v in spec.get("ylim", (float(ys.min()), float(ys.max()))))
+            if xlim[1] <= xlim[0]:
+                xlim = (xlim[0] - 0.5, xlim[0] + 0.5)
+            if ylim[1] <= ylim[0]:
+                ylim = (ylim[0] - 0.5, ylim[0] + 0.5)
+            size = max(0.18, min(0.62, float(spec.get("size", 0.31))))
+            box_w = max(78.0, min(panel_w * 0.62, panel_w * size))
+            box_h = max(50.0, min(panel_h * 0.55, panel_w * float(spec.get("height", size * 0.68))))
+            if "box" in spec:
+                left, top, width, height = (float(v) for v in spec["box"])
+                box_w = max(48.0, min(panel_w, panel_w * width))
+                box_h = max(34.0, min(panel_h, panel_h * height))
+                x0 = x + max(0.0, min(panel_w - box_w, panel_w * left))
+                y0 = y + max(0.0, min(panel_h - box_h, panel_h * top))
+            else:
+                margin_raw = spec.get("margin", (12.0, 12.0))
+                if isinstance(margin_raw, (int, float)):
+                    margin_x = margin_y = float(margin_raw)
+                else:
+                    margin_x, margin_y = (float(v) for v in list(margin_raw)[:2])
+                pos = str(spec.get("position", "bottom-right"))
+                x0 = x + (panel_w - box_w - margin_x if "right" in pos else panel_w / 2 - box_w / 2 if "center" in pos else margin_x)
+                y0 = y + (panel_h - box_h - margin_y - (34.0 if self.scale_bar_visible and pos == "bottom-right" else 0.0) if "bottom" in pos else panel_h / 2 - box_h / 2 if "center" in pos else margin_y + 18.0)
+            show_ticks = bool(spec.get("show_ticks", False))
+            tick_font = max(5.0, min(14.0, float(spec.get("tick_font_size", 7.0))))
+            label_font = max(6.0, min(16.0, float(spec.get("label_font_size", 8.0))))
+            legend_font = max(6.0, min(18.0, float(spec.get("legend_font_size", 9.0))))
+            pad_l = max(22.0, tick_font * 3.2) if show_ticks or spec.get("ylabel") else 10.0
+            pad_r = 7.0
+            pad_t = max(13.0, legend_font + 6.0) if spec.get("title") or spec.get("legend") else 7.0
+            pad_b = max(16.0, tick_font + label_font + 4.0) if show_ticks or spec.get("xlabel") else 8.0
+            plot_x0 = x0 + pad_l
+            plot_y0 = y0 + pad_t
+            plot_w = box_w - pad_l - pad_r
+            plot_h = box_h - pad_t - pad_b
+            if plot_w <= 8 or plot_h <= 8:
+                return ""
+            sx = lambda value: plot_x0 + (float(value) - xlim[0]) / (xlim[1] - xlim[0]) * plot_w
+            sy = lambda value: plot_y0 + plot_h - (float(value) - ylim[0]) / (ylim[1] - ylim[0]) * plot_h
+            points = " ".join(f"{sx(px):g},{sy(py):g}" for px, py in zip(xs, ys))
+            line_color = svg_color(spec.get("color"), fallback_color)
+            text_color = svg_color(spec.get("text_color"), "rgba(255,255,255,0.92)")
+            tick_color = svg_color(spec.get("tick_color"), "rgba(255,255,255,0.72)")
+            parts = [
+                "<g>",
+                f'<rect x="{x0:g}" y="{y0:g}" width="{box_w:g}" height="{box_h:g}" '
+                f'fill="{esc_attr(svg_color(spec.get("background"), "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
+                f'stroke="{esc_attr(svg_color(spec.get("border_color"), "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
+                f'<path d="M {plot_x0:g} {plot_y0:g} V {plot_y0 + plot_h:g} H {plot_x0 + plot_w:g}" fill="none" stroke="{esc_attr(tick_color)}" stroke-opacity="0.45" stroke-width="1"/>',
+                f'<polyline points="{points}" fill="none" stroke="{esc_attr(line_color)}" stroke-width="{max(1.4, float(spec.get("line_width", 2.0))):g}" stroke-linejoin="round" stroke-linecap="round"/>',
+            ]
+            if "point" in spec:
+                point = np.asarray(spec["point"], dtype=float).ravel()
+                if point.size == 2 and np.isfinite(point).all():
+                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(svg_color(spec.get("point_color"), "#fff"))}" stroke="#000" stroke-width="1.5"/>')
+            if spec.get("title"):
+                parts.append(f'<text x="{x0 + 6:g}" y="{y0 + 12:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(text_color)}">{esc_text(spec["title"])}</text>')
+            if spec.get("legend"):
+                parts.append(f'<text x="{x0 + 6:g}" y="{y0 + box_h - 6:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(line_color)}">{esc_text(spec["legend"])}</text>')
+            if spec.get("xlabel"):
+                parts.append(f'<text x="{x0 + box_w - 7:g}" y="{y0 + box_h - 3:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{label_font:g}" fill="{esc_attr(tick_color)}">{esc_text(spec["xlabel"])}</text>')
+            if spec.get("ylabel"):
+                parts.append(f'<text x="{x0 + 5:g}" y="{plot_y0 + 2:g}" transform="rotate(-90 {x0 + 5:g} {plot_y0 + 2:g})" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{label_font:g}" fill="{esc_attr(tick_color)}">{esc_text(spec["ylabel"])}</text>')
+            parts.append("</g>")
+            return "".join(parts)
+
+        def colorbar_svg(panel: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, idx: int) -> tuple[str, str]:
+            grad_id = f"show2d-svg-colorbar-{idx}"
+            cmap_obj = matplotlib.colormaps.get_cmap(str(panel.get("cmap", self.cmap)))
+            stops = []
+            for step in range(9):
+                frac = step / 8.0
+                r, g, b, _ = cmap_obj(frac)
+                stops.append(
+                    f'<stop offset="{frac * 100:g}%" stop-color="rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)})"/>'
+                )
+            bar_h = min(160.0, panel_h * 0.62)
+            bar_w = 10.0
+            bx = x + panel_w - 22.0
+            by = y + 18.0
+            vmin = float(panel.get("vmin", 0.0))
+            vmax = float(panel.get("vmax", 1.0))
+            body = [
+                "<g>",
+                f'<rect x="{bx - 1:g}" y="{by - 1:g}" width="{bar_w + 2:g}" height="{bar_h + 2:g}" fill="#000" fill-opacity="0.45"/>',
+                f'<rect x="{bx:g}" y="{by:g}" width="{bar_w:g}" height="{bar_h:g}" fill="url(#{grad_id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/>',
+                f'<text x="{bx - 4:g}" y="{by + 4:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmax))}</text>',
+                f'<text x="{bx - 4:g}" y="{by + bar_h:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmin))}</text>',
+                "</g>",
+            ]
+            return (
+                f'<linearGradient id="{grad_id}" x1="0" x2="0" y1="1" y2="0">{"".join(stops)}</linearGradient>',
+                "".join(body),
+            )
+
+        elements: list[str] = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            (
+                f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{svg_w}" '
+                f'height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}" '
+                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}">'
+            ),
+        ]
+        defs: list[str] = []
+        if title_h:
+            elements.append(
+                f'<text x="{svg_w / 2:g}" y="19" text-anchor="middle" '
+                'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                f'font-size="14" font-weight="700" fill="#111">{esc_text(title_text)}</text>'
+            )
+        if frame > 0 and frame_color:
+            elements.append(
+                f'<rect x="0" y="{title_h:g}" width="{svg_w:g}" height="{max(0, svg_h - title_h):g}" '
+                f'fill="{esc_attr(svg_color(frame_color))}"/>'
+            )
+        if gap > 0 and gap_color:
+            elements.append(
+                f'<rect x="{frame:g}" y="{title_h + frame:g}" '
+                f'width="{max(0, svg_w - 2 * frame):g}" height="{max(0, svg_h - title_h - 2 * frame):g}" '
+                f'fill="{esc_attr(svg_color(gap_color))}"/>'
+            )
+
+        title_style = dict(getattr(self, "panel_title_style", {}) or {})
+        title_font_family = str(title_style.get("font_family", "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"))
+        title_fg = svg_color(title_style.get("fg"), "#fff")
+        title_opacity = max(0.0, min(1.0, float(title_style.get("opacity", 0.95))))
+        title_font_weight = title_style.get("font_weight", 700)
+        title_outline_width = max(0.0, float(title_style.get("outline_width", 0.0)))
+        title_outline_color = svg_color(title_style.get("outline_color"), "rgba(0,0,0,0.85)")
+
+        def title_anchor_for(value: str) -> str:
+            if "right" in value:
+                return "end"
+            if "center" in value:
+                return "middle"
+            return "start"
+
+        def title_baseline_y(value: str, y: float, panel_h: float, font_size: float) -> float:
+            if "bottom" in value:
+                return y + panel_h
+            if "center" in value:
+                return y + panel_h / 2.0 + font_size * 0.35
+            return y + font_size
+
+        def title_position(x: float, y: float, panel_w: float, panel_h: float, font_size: float) -> tuple[float, float, str]:
+            offset_raw = title_style.get("offset", (0.0, 0.0))
+            if isinstance(offset_raw, Sequence) and not isinstance(offset_raw, (str, bytes, bytearray)):
+                vals = list(offset_raw)
+                off_x = float(vals[0]) if vals else 0.0
+                off_y = float(vals[1]) if len(vals) > 1 else 0.0
+            else:
+                off_x = off_y = 0.0
+            if "x" in title_style or "y" in title_style:
+                rel_x = float(title_style.get("x", 0.5))
+                rel_y = float(title_style.get("y", 0.0))
+                anchor_value = str(title_style.get("anchor", "top-center")).lower()
+                return (
+                    x + rel_x * panel_w + off_x,
+                    title_baseline_y(anchor_value, y + rel_y * panel_h + off_y, 0.0, font_size),
+                    title_anchor_for(anchor_value),
+                )
+            align = str(title_style.get("align", "center")).lower()
+            if align in {"left", "start"}:
+                return x + 28.0, y + 6.0 + font_size, "start"
+            if align in {"right", "end"}:
+                return x + panel_w - 28.0, y + 6.0 + font_size, "end"
+            return x + panel_w / 2.0, y + 6.0 + font_size, "middle"
+
+        def title_text_attrs(anchor: str, *, shadow: bool = False) -> str:
+            if shadow:
+                return (
+                    f'text-anchor="{anchor}" font-family="{esc_attr(title_font_family)}" '
+                    f'font-size="{{font_size}}" font-weight="{esc_attr(title_font_weight)}" '
+                    'fill="#000" fill-opacity="0.85"'
+                )
+            return (
+                f'text-anchor="{anchor}" font-family="{esc_attr(title_font_family)}" '
+                f'font-size="{{font_size}}" font-weight="{esc_attr(title_font_weight)}" '
+                f'fill="{esc_attr(title_fg)}" fill-opacity="{title_opacity:g}"'
+            )
+
+        def title_outline_text(x_pos: float, y_pos: float, anchor: str, font_size: float, text: str) -> str:
+            return (
+                f'<text x="{x_pos:g}" y="{y_pos:g}" text-anchor="{anchor}" '
+                f'font-family="{esc_attr(title_font_family)}" font-size="{font_size:g}" '
+                f'font-weight="{esc_attr(title_font_weight)}" fill="none" '
+                f'stroke="{esc_attr(title_outline_color)}" stroke-width="{title_outline_width:g}" '
+                f'stroke-linejoin="round">{esc_text(text)}</text>'
+            )
+
+        y = title_h + frame
+        for row_idx, row_h in enumerate(row_heights):
+            row_panels = panels[row_idx * ncols:(row_idx + 1) * ncols]
+            for col_idx, panel in enumerate(row_panels):
+                x = frame + col_idx * (panel_w + gap)
+                panel_h = int(panel["height"])
+                panel_index = int(panel["panel_index"])
+                clip_id = f"show2d-svg-panel-clip-{panel_index}-{row_idx}-{col_idx}"
+                defs.append(
+                    f'<clipPath id="{clip_id}"><rect x="{x:g}" y="{y:g}" width="{panel_w:g}" height="{panel_h:g}"/></clipPath>'
+                )
+                marker_color = (
+                    svg_color(self.marker_colors[panel_index])
+                    if panel_index < len(self.marker_colors) and self.marker_colors[panel_index]
+                    else ""
+                )
+                panel_stroke = svg_color(panel_border_color, "#d0d0d0")
+                elements.extend([
+                    f'<g id="show2d-panel-{panel_index}">',
+                    f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="#000"/>',
+                    (
+                        f'<image x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" '
+                        f'xlink:href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
+                    ),
+                ])
+                if panel_border_px > 0:
+                    elements.append(
+                        f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="none" '
+                        f'stroke="{esc_attr(panel_stroke)}" stroke-width="{panel_border_px:g}"/>'
+                    )
+                if marker_color and str(self.marker_style or "left") == "around":
+                    elements.append(
+                        f'<rect x="{x + 1.5:g}" y="{y + 1.5:g}" width="{max(0, panel_w - 3):g}" '
+                        f'height="{max(0, panel_h - 3):g}" fill="none" '
+                        f'stroke="{esc_attr(marker_color)}" stroke-width="3"/>'
+                    )
+                elif marker_color:
+                    elements.append(
+                        f'<rect x="{x}" y="{y}" width="5" height="{panel_h}" fill="{esc_attr(marker_color)}"/>'
+                    )
+                label = panel["label"]
+                if label:
+                    font_size = max(8, int(self.panel_title_font_size or 11))
+                    spans = self.panel_title_spans[panel_index] if panel_index < len(self.panel_title_spans) else []
+                    title_x, title_y, title_anchor = title_position(x, y, panel_w, panel_h, font_size)
+                    if spans:
+                        line_y = title_y
+                        plain = "".join(span_text(span) for span in spans if isinstance(span, Mapping))
+                        if title_outline_width <= 0:
+                            elements.append(
+                                f'<text x="{title_x + 1:g}" y="{line_y + 1:g}" '
+                                + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
+                                + f'>{esc_text(plain)}</text>'
+                            )
+                        else:
+                            elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, plain))
+                        elements.append(
+                            f'<text x="{title_x:g}" y="{line_y:g}" '
+                            + title_text_attrs(title_anchor).format(font_size=font_size)
+                            + ">"
+                        )
+                        for span in spans:
+                            if not isinstance(span, Mapping):
+                                continue
+                            color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
+                            elements.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+                        elements.append("</text>")
+                    else:
+                        for line_idx, line in enumerate(wrap_svg_label(label, font_size, max(24, panel_w - 56), 3)):
+                            line_y = title_y + line_idx * font_size * 1.2
+                            if title_outline_width <= 0:
+                                elements.append(
+                                    f'<text x="{title_x + 1:g}" y="{line_y + 1:g}" '
+                                    + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
+                                    + f'>{esc_text(line)}</text>'
+                                )
+                            else:
+                                elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, line))
+                            elements.append(
+                                f'<text x="{title_x:g}" y="{line_y:g}" '
+                                + title_text_attrs(title_anchor).format(font_size=font_size)
+                                + f'>{esc_text(line)}</text>'
+                            )
+                elements.append(f'<g clip-path="url(#{clip_id})">')
+                if bool(self.show_inset_plots) and panel_index < len(self.inset_plots):
+                    elements.append(inset_svg(self.inset_plots[panel_index], x, y, panel_w, panel_h, marker_color))
+                if panel_index < len(self.panel_overlays):
+                    for overlay_spec in self.panel_overlays[panel_index]:
+                        if isinstance(overlay_spec, Mapping):
+                            elements.append(overlay_svg(overlay_spec, x, y, panel_w, panel_h))
+                if include_colorbar:
+                    grad, bar = colorbar_svg(panel, x, y, panel_w, panel_h, panel_index)
+                    defs.append(grad)
+                    elements.append(bar)
+                if panel_index < len(self.panel_annotations):
+                    for annotation_spec in self.panel_annotations[panel_index]:
+                        if isinstance(annotation_spec, Mapping):
+                            elements.append(annotation_svg(annotation_spec, x, y, panel_w, panel_h))
+                elements.append("</g>")
+                bar_text = panel["bar_text"]
+                bar_px = float(panel["bar_px"])
+                if bar_text and bar_px > 0:
+                    scale_style = dict(getattr(self, "scale_bar_style", {}) or {})
+                    scale_offset = scale_style.get("offset", [0.0, 0.0])
+                    try:
+                        offset_x = float(scale_offset[0])
+                        offset_y = float(scale_offset[1])
+                    except (TypeError, ValueError, IndexError):
+                        offset_x = 0.0
+                        offset_y = 0.0
+                    bar_height = float(scale_style.get("bar_height", 5.0))
+                    label_gap = float(scale_style.get("label_gap", 4.0))
+                    scale_font_size = float(scale_style.get("font_size", 16.0))
+                    scale_font_family = str(
+                        scale_style.get(
+                            "font_family",
+                            "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+                        )
+                    )
+                    scale_font_weight = scale_style.get("font_weight", "")
+                    scale_color = svg_color(scale_style.get("color"), "#fff")
+                    scale_outline_color = svg_color(scale_style.get("outline_color"), "#000")
+                    scale_outline_width = float(scale_style.get("outline_width", 0.0))
+                    shadow_value = scale_style.get("shadow_color")
+                    shadow_color = svg_color(shadow_value, "#000")
+                    scale_left = self.scale_bar_position == "bottom-left"
+                    bar_x = x + (12 if scale_left else panel_w - bar_px - 12) + offset_x
+                    bar_y = y + panel_h - 12 + offset_y
+                    font_weight_attr = f' font-weight="{esc_attr(scale_font_weight)}"' if scale_font_weight != "" else ""
+                    if shadow_value is not None:
+                        elements.append(
+                            f'<rect x="{bar_x + 1:g}" y="{bar_y + 1:g}" width="{bar_px:g}" '
+                            f'height="{bar_height:g}" fill="{esc_attr(shadow_color)}" fill-opacity="0.5"/>'
+                        )
+                    elements.append(
+                        f'<rect x="{bar_x:g}" y="{bar_y:g}" width="{bar_px:g}" height="{bar_height:g}" fill="{esc_attr(scale_color)}"/>'
+                    )
+                    text_x = bar_x + bar_px / 2
+                    text_y = bar_y - label_gap
+                    if scale_outline_width > 0:
+                        elements.extend([
+                            f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="none" stroke="{esc_attr(scale_outline_color)}" '
+                            f'stroke-width="{scale_outline_width:g}" stroke-linejoin="round">{esc_text(bar_text)}</text>',
+                            f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="{esc_attr(scale_color)}">{esc_text(bar_text)}</text>',
+                        ])
+                    else:
+                        elements.extend([
+                            f'<text x="{text_x + 1:g}" y="{text_y + 1:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="{esc_attr(shadow_color)}" fill-opacity="0.85">{esc_text(bar_text)}</text>',
+                            f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="{esc_attr(scale_color)}">{esc_text(bar_text)}</text>',
+                        ])
+                    if self.show_zoom_indicator:
+                        zoom_text = f"{min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0):.1f}×"
+                        zoom_x = x + (panel_w - 12 if scale_left else 12)
+                        anchor = "end" if scale_left else "start"
+                        elements.extend([
+                            f'<text x="{zoom_x + 1:g}" y="{y + panel_h - 6:g}" text-anchor="{anchor}" '
+                            f'font-family="{esc_attr(scale_font_family)}" '
+                            f'font-size="{scale_font_size:g}"{font_weight_attr} fill="{esc_attr(shadow_color)}" fill-opacity="0.85">{esc_text(zoom_text)}</text>',
+                            f'<text x="{zoom_x:g}" y="{y + panel_h - 7:g}" text-anchor="{anchor}" '
+                            f'font-family="{esc_attr(scale_font_family)}" '
+                            f'font-size="{scale_font_size:g}"{font_weight_attr} fill="{esc_attr(scale_color)}">{esc_text(zoom_text)}</text>',
+                        ])
+                elements.append("</g>")
+            y += row_h + (gap if row_idx < len(row_heights) - 1 else 0)
+
+        marker_top = title_h + frame
+        total_grid_h = sum(row_heights) + max(0, len(row_heights) - 1) * gap
+        for raw_row, color in dict(self.row_markers or {}).items():
+            color = svg_color(color)
+            try:
+                row_idx = int(raw_row)
+            except (TypeError, ValueError):
+                continue
+            if row_idx < 0 or row_idx >= len(row_heights):
+                continue
+            row_y = marker_top + sum(row_heights[:row_idx]) + row_idx * gap
+            row_count = min(ncols, max(0, len(panels) - row_idx * ncols))
+            row_w = row_count * panel_w + max(0, row_count - 1) * gap
+            elements.extend([
+                f'<rect x="{frame:g}" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{frame + 3:g}" y="{row_y + 3:g}" width="{max(0, row_w - 6):g}" height="{max(0, row_heights[row_idx] - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
+            ])
+        for raw_col, color in dict(self.col_markers or {}).items():
+            color = svg_color(color)
+            try:
+                col_idx = int(raw_col)
+            except (TypeError, ValueError):
+                continue
+            if col_idx < 0 or col_idx >= ncols:
+                continue
+            slots = [slot for slot in range(len(panels)) if slot % ncols == col_idx]
+            if not slots:
+                continue
+            row_min = min(slot // ncols for slot in slots)
+            row_max = max(slot // ncols for slot in slots)
+            col_x = frame + col_idx * (panel_w + gap)
+            col_y = marker_top + sum(row_heights[:row_min]) + row_min * gap
+            col_h = sum(row_heights[row_min:row_max + 1]) + max(0, row_max - row_min) * gap
+            elements.extend([
+                f'<rect x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{col_x + 3:g}" y="{col_y + 3:g}" width="{max(0, panel_w - 6):g}" height="{max(0, col_h - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
+            ])
+
+        if defs:
+            elements.insert(2, f'<defs>{"".join(defs)}</defs>')
+        elements.append("</svg>")
+        export_path.write_text("\n".join(elements), encoding="utf-8")
+        return export_path
+
+    def _default_svg_export_path(self) -> pathlib.Path:
+        """Default local filename for scripted Show2D SVG export."""
+        slug = "".join(c.lower() if c.isalnum() else "_" for c in (self.title or "show2d"))
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        slug = slug.strip("_") or "show2d"
+        shape = f"{self.n_images}x{self.height}x{self.width}" if int(self.n_images) > 1 else f"{self.height}x{self.width}"
+        return pathlib.Path.cwd() / f"{slug}_{shape}.svg"
+
     @property
     def view_corner(self):
         """Current view as ``(row0, col0, size)`` - paste straight into ``view_box=``.
@@ -3532,6 +5641,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "apply_log": self.log_scale and panel_rgb is None,
                 "label": label,
                 "stats": panel_stats_line(i, frame),
+                "panel_index": i,
             })
         if self.diff_mode and len(frames) >= 2:
             ref = int(self.diff_reference)
@@ -3557,6 +5667,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     "label": label if self.show_panel_titles else "",
                     "stats": stats_line(float(diff.mean()), float(diff.min()),
                                         float(diff.max()), float(diff.std())),
+                    "panel_index": other,
                 })
         return specs
 
@@ -3700,6 +5811,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return float(self.size)
         return 300.0 if self.n_images > 1 else 500.0
 
+    def _panel_has_scale_bar(self, panel_index: int) -> bool:
+        """Return whether a scale bar should be drawn for one panel."""
+        if not self.scale_bar_visible:
+            return False
+        panels = list(getattr(self, "scale_bar_panels", []) or [])
+        return not panels or int(panel_index) in {int(panel) for panel in panels}
+
     def _static_overlay_texts(self, specs: list[dict] | None = None,
                               *, css_px: float | None = None) -> list[tuple[str, str, str, float]]:
         """Per-panel overlay strings for the static PNG, one tuple
@@ -3721,22 +5839,27 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             css_px = self._static_canvas_css_px()
         # widget clamps initial_zoom to [MIN_ZOOM, MAX_ZOOM] (index.tsx)
         zoom = min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0)
-        zoom_text = f"{zoom:.1f}×"  # JS: `${zoom.toFixed(1)}×`
+        zoom_text = f"{zoom:.1f}×" if self.show_zoom_indicator else ""  # JS: `${zoom.toFixed(1)}×`
         calibrated = self.pixel_size > 0
         pixel_size = self.pixel_size if calibrated else 1.0
         unit = self.pixel_unit if calibrated else "px"
         texts: list[tuple[str, str, str, float]] = []
         for spec in specs:
-            if not self.scale_bar_visible:
+            panel_index = int(spec.get("panel_index", len(texts)))
+            if not self._panel_has_scale_bar(panel_index):
                 texts.append((spec["label"], zoom_text, "", 0.0))
                 continue
             full_w = spec["frame"].shape[1]
             effective_zoom = zoom * css_px / full_w
             # 60 CSS px target bar, rounded to a nice physical length
-            nice = _round_to_nice(60.0 / effective_zoom * pixel_size)
+            if self.scale_bar_length is not None and float(self.scale_bar_length) > 0:
+                nice = float(self.scale_bar_length)
+            else:
+                nice = _round_to_nice(60.0 / effective_zoom * pixel_size)
             bar_px = nice / pixel_size * effective_zoom
+            label = str(self.scale_bar_label or "") or _format_scale_label(nice, unit)
             texts.append((spec["label"], zoom_text,
-                          _format_scale_label(nice, unit), bar_px))
+                          label, bar_px))
         return texts
 
     @staticmethod
@@ -3820,6 +5943,167 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 path_effects=stroke,
             ))
 
+    def _draw_static_inset_plot(
+        self,
+        ax: matplotlib.axes.Axes,
+        spec: dict[str, Any],
+        *,
+        panel_index: int,
+        line_color: str,
+    ) -> None:
+        """Draw a compact per-panel calibration curve in the saved PNG."""
+        if not spec:
+            return
+        try:
+            x = np.asarray(spec.get("x"), dtype=float).ravel()
+            y = np.asarray(spec.get("y"), dtype=float).ravel()
+        except Exception:
+            return
+        if x.size != y.size or x.size < 2:
+            return
+        finite = np.isfinite(x) & np.isfinite(y)
+        if finite.sum() < 2:
+            return
+        x = x[finite]
+        y = y[finite]
+        xlim = tuple(float(v) for v in spec.get("xlim", (float(x.min()), float(x.max()))))
+        ylim = tuple(float(v) for v in spec.get("ylim", (float(y.min()), float(y.max()))))
+        if xlim[1] <= xlim[0]:
+            pad = max(1.0, abs(xlim[0]) * 0.05)
+            xlim = (xlim[0] - pad, xlim[1] + pad)
+        if ylim[1] <= ylim[0]:
+            pad = max(1.0, abs(ylim[0]) * 0.05)
+            ylim = (ylim[0] - pad, ylim[1] + pad)
+        position = str(spec.get("position", "bottom-right"))
+        size = max(0.18, min(0.55, float(spec.get("size", 0.31))))
+        box_w = min(0.62, size)
+        box_h = min(0.55, float(spec.get("height", box_w * 0.68)))
+        if "box" in spec:
+            left, top, width, height = (float(v) for v in spec["box"])
+            box_w = max(0.05, min(0.95, width))
+            box_h = max(0.05, min(0.95, height))
+            x0 = max(0.0, min(1.0 - box_w, left))
+            y0 = max(0.0, min(1.0 - box_h, 1.0 - top - box_h))
+        else:
+            margin = spec.get("margin", (0.035, 0.035))
+            if isinstance(margin, (int, float)):
+                margin_x = margin_y = float(margin) / 300.0
+            else:
+                vals = list(margin)
+                margin_x = float(vals[0]) / 300.0
+                margin_y = float(vals[1]) / 300.0
+            margin_x = max(0.0, min(0.45, margin_x))
+            margin_y = max(0.0, min(0.45, margin_y))
+            if "right" in position:
+                x0 = 1.0 - box_w - margin_x
+            elif "center" in position:
+                x0 = 0.5 - box_w / 2
+            else:
+                x0 = margin_x
+            if "bottom" in position:
+                y0 = margin_y + 0.08
+            elif "center" in position:
+                y0 = 0.5 - box_h / 2
+            else:
+                y0 = 1.0 - box_h - margin_y
+            if self.scale_bar_visible and position == "bottom-right":
+                y0 += 0.10
+        inset = ax.inset_axes([x0, y0, box_w, box_h])
+        background_alpha = max(0.0, min(1.0, float(spec.get("background_alpha", 0.68))))
+        inset.set_facecolor(spec.get("background") or (0.04, 0.05, 0.07, background_alpha))
+        for spine in inset.spines.values():
+            spine.set_color(spec.get("border_color") or (1, 1, 1, 0.35))
+            spine.set_linewidth(max(0.0, min(6.0, float(spec.get("border_width", 1.0)))) * 0.6)
+        inset.plot(
+            x,
+            y,
+            color=spec.get("color") or line_color,
+            linewidth=max(1.4, float(spec.get("line_width", 2.0))),
+            solid_capstyle="round",
+        )
+        if "point" in spec:
+            point = np.asarray(spec["point"], dtype=float).ravel()
+            if point.size == 2 and np.isfinite(point).all():
+                inset.scatter(
+                    [point[0]],
+                    [point[1]],
+                    s=18,
+                    color=spec.get("point_color") or "white",
+                    edgecolor="black",
+                    linewidth=0.4,
+                    zorder=5,
+        )
+        inset.set_xlim(*xlim)
+        inset.set_ylim(*ylim)
+        show_ticks = bool(spec.get("show_ticks", False))
+        tick_font_size = max(4.0, min(12.0, float(spec.get("tick_font_size", 4.5))))
+        label_font_size = max(4.0, min(14.0, float(spec.get("label_font_size", 4.5))))
+        legend_font_size = max(4.0, min(14.0, float(spec.get("legend_font_size", 5.5))))
+        text_color = spec.get("text_color") or "white"
+        tick_color = spec.get("tick_color") or (1, 1, 1, 0.72)
+        if show_ticks:
+            if "xticks" in spec:
+                inset.set_xticks([float(v) for v in spec["xticks"]])
+            else:
+                inset.set_xticks([xlim[0], xlim[1]])
+            if "yticks" in spec:
+                inset.set_yticks([float(v) for v in spec["yticks"]])
+            else:
+                inset.set_yticks([ylim[0], ylim[1]])
+            inset.tick_params(
+                axis="both",
+                colors=tick_color,
+                labelsize=tick_font_size,
+                length=1.5,
+                width=0.4,
+                pad=1,
+            )
+        else:
+            inset.set_xticks([])
+            inset.set_yticks([])
+        if spec.get("title"):
+            inset.set_title(str(spec["title"]), color=text_color, fontsize=legend_font_size, pad=1.5, weight="bold")
+        if spec.get("xlabel"):
+            inset.set_xlabel(str(spec["xlabel"]), color=tick_color, fontsize=label_font_size, labelpad=0.5)
+        if spec.get("ylabel"):
+            inset.set_ylabel(str(spec["ylabel"]), color=tick_color, fontsize=label_font_size, labelpad=0.5)
+        for text_key, pos_key, default_color in (
+            ("legend", "legend_position", spec.get("text_color") or spec.get("color") or line_color),
+            ("annotation", "annotation_position", text_color),
+        ):
+            if spec.get(text_key):
+                pos = str(spec.get(pos_key, "top-left" if text_key == "legend" else "top-right"))
+                x_txt = 0.96 if "right" in pos else 0.04
+                y_txt = 0.07 if "top" in pos else 0.93
+                inset.text(
+                    x_txt,
+                    y_txt,
+                    str(spec[text_key]),
+                    transform=inset.transAxes,
+                    ha="right" if "right" in pos else "left",
+                    va="top" if "top" in pos else "bottom",
+                    color=default_color,
+                    fontsize=legend_font_size,
+                    weight="bold",
+                    path_effects=[
+                        matplotlib.patheffects.withStroke(
+                            linewidth=0.8,
+                            foreground=(0, 0, 0, 0.7),
+                        )
+                    ],
+                )
+        if spec.get("show_panel_index", False):
+            inset.text(
+                0.98,
+                0.03,
+                str(panel_index + 1),
+                transform=inset.transAxes,
+                ha="right",
+                va="bottom",
+                color=(1, 1, 1, 0.42),
+                fontsize=4.0,
+            )
+
     def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
         """Base64 PNG of all panels, attached to the cell output.
 
@@ -3841,6 +6125,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         specs = self._static_panel_specs()
         if not specs:
             return None
+        chrome = self._gallery_export_chrome()
+        gap_px = int(chrome["inter_panel_gap_px"])
+        gap_color = str(chrome["inter_panel_gap_color"])
+        outer_px = int(chrome["gallery_outer_border_px"])
+        outer_color = str(chrome["gallery_outer_border_color"])
+        panel_border_px = float(chrome["panel_inner_border_px"])
+        panel_border_color = str(chrome["panel_inner_border_color"])
         base_roi_items = self._static_roi_items()
         if base_roi_items:
             specs = [{**spec, "roi_items": base_roi_items} for spec in specs]
@@ -3870,10 +6161,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         aspect = (rows0.stop - rows0.start) / (cols0.stop - cols0.start)
         # inter-panel gutter is the widget's own gallery gap (CSS px of the
         # live canvas), identical horizontally and vertically
-        gap_frac = max(0, int(self.gallery_gap_px)) / css_w
+        gap_frac = gap_px / css_w
+        outer_frac = outer_px / css_w
         cell_w_in = max_px / dpi  # cell width in inches so 1 panel = max_px device px
         cell_h_in = cell_w_in * aspect
         gap_in = gap_frac * cell_w_in
+        outer_in = outer_frac * cell_w_in
+        fig_w_in = ncols * cell_w_in + (ncols - 1) * gap_in + 2 * outer_in
+        fig_h_in = nrows * cell_h_in + (nrows - 1) * gap_in + 2 * outer_in
         # Build an unmanaged Figure rather than registering one through
         # pyplot. In a live Jupyter kernel this renderer runs from a
         # ``post_execute`` callback, alongside matplotlib-inline's own figure
@@ -3884,15 +6179,33 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Jupyter's global figure-manager lifecycle.
         fig = matplotlib.figure.Figure(
             figsize=(
-                ncols * cell_w_in + (ncols - 1) * gap_in,
-                nrows * cell_h_in + (nrows - 1) * gap_in,
+                fig_w_in,
+                fig_h_in,
             )
         )
+        bg_color = outer_color if outer_px > 0 and outer_color else gap_color if gap_px > 0 and gap_color else "white"
+        fig.patch.set_facecolor(bg_color)
+        left = outer_in / fig_w_in if fig_w_in > 0 else 0.0
+        right = 1.0 - left
+        bottom = outer_in / fig_h_in if fig_h_in > 0 else 0.0
+        top = 1.0 - bottom
+        if gap_px > 0 and gap_color:
+            fig.patches.append(
+                matplotlib.patches.Rectangle(
+                    (left, bottom),
+                    max(0.0, right - left),
+                    max(0.0, top - bottom),
+                    transform=fig.transFigure,
+                    facecolor=gap_color,
+                    edgecolor="none",
+                    zorder=-10,
+                )
+            )
         # wspace/hspace are fractions of cell width/height; both resolve to
         # the same gap_in inches so the white gutters match to the pixel
         grid = fig.add_gridspec(nrows, ncols, wspace=gap_frac,
                                 hspace=gap_frac / aspect,
-                                left=0, right=1, bottom=0, top=1)
+                                left=left, right=right, bottom=bottom, top=top)
         font_family = _static_overlay_font()
         # the live canvas is css_w CSS px wide but the PNG panel is max_px
         # device px wide, so every CSS-px size renders scaled by max_px/css_w
@@ -3916,6 +6229,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             ax.imshow(rgb, interpolation="nearest")
             bin_h, bin_w = rgb.shape[:2]
             ax.set(xlim=(-0.5, bin_w - 0.5), ylim=(bin_h - 0.5, -0.5))
+            if panel_border_px > 0:
+                ax.add_patch(matplotlib.patches.Rectangle(
+                    (-0.5, -0.5),
+                    bin_w,
+                    bin_h,
+                    facecolor="none",
+                    edgecolor=panel_border_color,
+                    linewidth=panel_border_px * point,
+                    joinstyle="miter",
+                ))
             for roi in spec.get("roi_items", []):
                 self._draw_static_roi(
                     ax,
@@ -3947,15 +6270,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         fontfamily=font_family, ha="center", va="top",
                         path_effects=stroke)
             if self.scale_bar_visible:
-                # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick
-                # bottom-right, 16px label centered 4px above the bar, zoom
-                # badge left-aligned at x=12 sharing the bar's bottom edge,
-                # all under a soft (1,1)-offset half-black shadow
-                bar_x = css_w - bar_css - 12
+                # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick,
+                # 16px label centered 4px above the bar, optional zoom badge
+                # on the opposite corner sharing the bar's bottom edge.
+                scale_left = self.scale_bar_position == "bottom-left"
+                bar_x = 12 if scale_left else css_w - bar_css - 12
                 bar_y = css_h - 12
-                ax.add_patch(matplotlib.patches.Rectangle(
-                    css_xy(bar_x + 1, bar_y + 1), bar_css * k, 5 * k,
-                    facecolor=(0, 0, 0, 0.5), edgecolor="none"))
                 ax.add_patch(matplotlib.patches.Rectangle(
                     css_xy(bar_x, bar_y), bar_css * k, 5 * k,
                     facecolor="white", edgecolor="none"))
@@ -3963,12 +6283,28 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         color="white", fontsize=16 * point,
                         fontfamily=font_family, ha="center", va="bottom",
                         path_effects=stroke)
-                ax.text(*css_xy(12, css_h - 12 + 5), zoom_text,
-                        color="white", fontsize=16 * point,
-                        fontfamily=font_family, ha="left", va="bottom",
-                        path_effects=stroke)
+                if self.show_zoom_indicator:
+                    zoom_x = css_w - 12 if scale_left else 12
+                    zoom_ha = "right" if scale_left else "left"
+                    ax.text(*css_xy(zoom_x, css_h - 12 + 5), zoom_text,
+                            color="white", fontsize=16 * point,
+                            fontfamily=font_family, ha=zoom_ha, va="bottom",
+                            path_effects=stroke)
+            panel_index = int(spec.get("panel_index", idx))
+            if panel_index < len(self.inset_plots):
+                line_color = (
+                    self.marker_colors[panel_index]
+                    if panel_index < len(self.marker_colors)
+                    else _IDENTITY_PALETTE[panel_index % len(_IDENTITY_PALETTE)]
+                )
+                self._draw_static_inset_plot(
+                    ax,
+                    self.inset_plots[panel_index],
+                    panel_index=panel_index,
+                    line_color=line_color,
+                )
         buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, facecolor="white",
+        fig.savefig(buf, format="png", dpi=dpi, facecolor=fig.get_facecolor(),
                     bbox_inches="tight", pad_inches=0.05)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -4155,11 +6491,22 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "show_title": self.show_title,
             "cmap": self.cmap,
             "panel_cmaps": list(self.panel_cmaps),
+            "panel_cmaps_memory": list(self.panel_cmaps_memory),
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
+            "contrast_preset": self.contrast_preset,
+            "histogram_advanced": self.histogram_advanced,
+            "show_histogram_advanced": self.show_histogram_advanced,
             "vmin": self.vmin,
             "vmax": self.vmax,
+            "identity_colors": list(self.identity_colors),
+            "marker_style": self.marker_style,
+            "row_markers": dict(self.row_markers),
+            "col_markers": dict(self.col_markers),
             "labels": list(self.labels),
+            "panel_title_spans": list(self.panel_title_spans),
+            "panel_annotations": list(self.panel_annotations),
+            "panel_overlays": list(self.panel_overlays),
             "starred": list(self.starred),
             "n_pages": int(self.n_pages),
             "page_idx": int(self.page_idx),
@@ -4175,6 +6522,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "panel_playback_fps": float(self.panel_playback_fps),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
+            "panel_title_spans": list(self.panel_title_spans),
+            "panel_title_style": dict(self.panel_title_style),
+            "inter_panel_gap_px": int(self.inter_panel_gap_px),
+            "inter_panel_gap_color": str(self.inter_panel_gap_color),
+            "gallery_outer_border_px": int(self.gallery_outer_border_px),
+            "gallery_outer_border_color": str(self.gallery_outer_border_color),
+            "panel_inner_border_px": float(self.panel_inner_border_px),
+            "panel_inner_border_color": str(self.panel_inner_border_color),
+            "gallery_gap_px": int(self.gallery_gap_px),
+            "gallery_gap_color": str(self.gallery_gap_color),
             "show_stats": self.show_stats,
             "debug": self.debug,
             "show_fft": self.show_fft,
@@ -4186,9 +6543,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "pixel_sizes": list(self.pixel_sizes),
             "pixel_unit": self.pixel_unit,
             "scale_bar_visible": self.scale_bar_visible,
+            "scale_bar_position": self.scale_bar_position,
+            "scale_bar_panels": list(self.scale_bar_panels),
+            "scale_bar_length": self.scale_bar_length,
+            "scale_bar_label": self.scale_bar_label,
+            "scale_bar_style": dict(self.scale_bar_style),
+            "show_zoom_indicator": self.show_zoom_indicator,
             "size": self.size,
             "smooth": self.smooth,
             "initial_zoom": self.initial_zoom,
+            "flip_rows": self.flip_rows,
+            "flip_cols": self.flip_cols,
             "vmins": self.vmins,
             "vmaxs": self.vmaxs,
             "link_zoom": self.link_zoom,
@@ -4209,11 +6574,18 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "diff_reference": int(self.diff_reference),
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
+            "marker_colors": list(self.marker_colors),
+            "selected_panels": list(self.selected_panels),
+            "inset_plots": list(self.inset_plots),
+            "show_inset_plots": self.show_inset_plots,
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
             "profile_line": self.profile_line,
             "image_rotations": list(self.image_rotations),
+            "rotation_scope": self.rotation_scope,
+            "image_flips_horizontal": list(self.image_flips_horizontal),
+            "image_flips_vertical": list(self.image_flips_vertical),
             "display_bin": self._display_bin,
             "denoise": self.denoise,
             "denoise_sigma": self.denoise_sigma,
@@ -4252,21 +6624,39 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def save(self, path: str):
         save_state_file(path, "Show2D", self.state_dict())
 
+    _HTML_EXPORT_SAFE_MB = 80.0
+
+    def _estimate_html_export_mb(self, *, quantized: bool, downsample: int) -> float:
+        """Rough MB an embedded single-file Show2D HTML would occupy."""
+        downsample_factor = max(1, int(downsample))
+        has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
+        if has_local_stacks and getattr(self, "_display_panel_stacks", None):
+            elements = sum(int(np.prod(stack.shape)) for stack in self._display_panel_stacks)
+        else:
+            data = self._display_data if self._display_data is not None else self._data
+            elements = int(np.prod(data.shape)) if data is not None else 0
+        elements //= downsample_factor**2
+        bytes_per = 1 if quantized else 4
+        payload_mb = elements * bytes_per * (4.0 / 3.0) / (1024 * 1024)
+        return payload_mb + 2.0
+
     def export_html(self, path: str | pathlib.Path | None = None,
                     *,
                     title: str | None = None,
                     mode: str = "single",
                     encoding: str = "full",
                     downsample: int | None = None,
-                    quantized: bool | None = None) -> pathlib.Path:
+                    quantized: bool | None = None,
+                    max_mb: float | None = _HTML_EXPORT_SAFE_MB) -> pathlib.Path:
         """Write a standalone HTML viewer for this widget.
 
         The exported file mounts the live anywidget JS bundle with the current
         widget state (data, labels, cmap, vmin/vmax, log_scale, sampling, ...).
         Opens in any browser without a Jupyter kernel.
         Preferred export options are ``mode="single"``, ``encoding="full"`` or
-        ``encoding="uint8"``, and ``downsample=None``. ``quantized`` is kept as
-        a compatibility alias for ``encoding="uint8"``.
+        ``encoding="uint8"``, and ``downsample=None``. Use ``downsample=2`` /
+        ``4`` / ``8`` with ``encoding="uint8"`` for compact visual reports.
+        ``quantized`` is kept as a compatibility alias for ``encoding="uint8"``.
 
         Parameters
         ----------
@@ -4287,17 +6677,45 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "the export clone rebuilds from the grayscale stack and would drop the color channels."
             )
 
-        quantized = self._normalise_html_export_options(
+        export_mode, quantized, downsample_factor = self._normalise_html_export_options(
             mode=mode,
             encoding=encoding,
             downsample=downsample,
             quantized=quantized,
         )
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(quantized)
-        self._write_html_export(export_path, quantized=quantized, title=title)
+        if export_mode == "single" and max_mb is not None:
+            estimate_mb = self._estimate_html_export_mb(
+                quantized=quantized,
+                downsample=downsample_factor,
+            )
+            if estimate_mb > float(max_mb):
+                uint8_mb = self._estimate_html_export_mb(
+                    quantized=True,
+                    downsample=downsample_factor,
+                )
+                raise ValueError(
+                    f"This export would embed about {estimate_mb:.0f} MB into one HTML file, "
+                    f"above the {float(max_mb):.0f} MB safe limit (large single-file exports often "
+                    f"fail to open under Chrome file://). Options: encoding='uint8' "
+                    f"(about {uint8_mb:.0f} MB), downsample=2 or 4 to shrink spatially, "
+                    f"mode='folder' for a thin HTML plus nearby data folder, or pass "
+                    f"max_mb={estimate_mb:.0f} to force this size."
+                )
+        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(
+            quantized,
+            downsample=downsample_factor,
+        )
+        self._write_html_export(
+            export_path,
+            quantized=quantized,
+            title=title,
+            mode=export_mode,
+            downsample=downsample_factor,
+        )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        label = self._export_mode_label(quantized)
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
+        label = self._export_mode_label(quantized, downsample=downsample_factor)
+        mode_label = "folder, " if export_mode == "folder" else ""
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {mode_label}{label})"
         return export_path
 
     def _normalise_html_export_options(
@@ -4307,7 +6725,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         encoding: str = "full",
         downsample: int | None = None,
         quantized: bool | None = None,
-    ) -> bool:
+    ) -> tuple[str, bool, int]:
         raw_mode = str(mode or "single").strip().lower().replace("_", "-")
         if raw_mode in {"exact", "full"}:
             raw_mode = "single"
@@ -4315,19 +6733,31 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         elif raw_mode in {"quantized", "uint8", "u8"}:
             raw_mode = "single"
             encoding = "uint8"
-        if raw_mode != "single":
-            raise ValueError("Show2D HTML export supports mode='single'")
-        if downsample not in (None, 1, "1", "", 0, "0"):
-            raise NotImplementedError("Show2D HTML export does not support downsample yet")
+        elif raw_mode in {"sidecar", "linked-folder", "linked-data-folder"}:
+            raw_mode = "folder"
+        if raw_mode not in {"single", "folder"}:
+            raise ValueError("Show2D HTML export supports mode='single' or mode='folder'")
+        if downsample in (None, "", 0, "0"):
+            downsample_factor = 1
+        else:
+            if isinstance(downsample, bool):
+                raise ValueError("Show2D HTML export downsample must be an integer factor, not bool")
+            downsample_factor = int(downsample)
+        if downsample_factor < 1:
+            raise ValueError(f"Show2D HTML export downsample must be >= 1, got {downsample!r}")
+        if downsample_factor not in {1, 2, 4, 8}:
+            raise ValueError("Show2D HTML export downsample must be one of 1, 2, 4, or 8")
         raw_encoding = str(encoding or "full").strip().lower().replace("_", "-")
         if quantized is True:
             raw_encoding = "uint8"
         elif quantized is False and raw_encoding in {"quantized", "uint8", "u8"}:
             raw_encoding = "uint8"
         if raw_encoding in {"full", "exact", "float32", "f32"}:
-            return False
+            if downsample_factor != 1:
+                raise ValueError("Show2D exact float32 HTML export does not support downsample; use encoding='uint8'")
+            return raw_mode, False, downsample_factor
         if raw_encoding in {"uint8", "u8", "quantized"}:
-            return True
+            return raw_mode, True, downsample_factor
         raise ValueError(f"unknown Show2D export encoding {encoding!r}; expected 'full' or 'uint8'")
 
     def _on_export_request_change(self, change: dict) -> None:
@@ -4342,26 +6772,29 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            quantized = self._normalise_html_export_options(
+            export_mode, quantized, downsample_factor = self._normalise_html_export_options(
                 mode=mode,
                 encoding=str(payload.get("encoding", "full")),
                 downsample=payload.get("downsample"),
                 quantized=None,
             )
             if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path(quantized).name)
+                filename = str(payload.get("filename") or self._default_html_export_path(
+                    quantized,
+                    downsample=downsample_factor,
+                ).name)
                 request_id = str(payload.get("id") or "")
                 self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes(quantized=quantized)
+                html = self._html_export_bytes(quantized=quantized, downsample=downsample_factor)
                 self.export_filename = filename
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                label = self._export_mode_label(quantized)
+                label = self._export_mode_label(quantized, downsample=downsample_factor)
                 self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
             else:
                 self.export_status = f"Exporting {mode} HTML..."
-                self.export_html(quantized=quantized)
+                self.export_html(mode=export_mode, quantized=quantized, downsample=downsample_factor)
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
 
@@ -4389,7 +6822,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         except Exception as exc:
             self.saved_view_status = f"State action failed: {exc}"
 
-    def _default_html_export_path(self, quantized: bool) -> pathlib.Path:
+    def _default_html_export_path(self, quantized: bool, *, downsample: int = 1) -> pathlib.Path:
         label = self.title.strip() or "show2d"
         slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
         while "__" in slug:
@@ -4397,11 +6830,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if not slug:
             slug = "show2d"
         mode = "quantized" if quantized else "exact"
+        suffix = f"_{int(downsample)}xdownsample" if quantized and int(downsample) > 1 else ""
         shape = f"{self.n_images}x{self.height}x{self.width}" if self.n_images > 1 else f"{self.height}x{self.width}"
-        return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}.html"
+        return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}{suffix}.html"
 
-    def _export_mode_label(self, quantized: bool) -> str:
-        return "uint8" if quantized else "full float32"
+    def _export_mode_label(self, quantized: bool, *, downsample: int = 1) -> str:
+        if not quantized:
+            return "full float32"
+        if int(downsample) > 1:
+            return f"uint8, {int(downsample)}x downsample"
+        return "uint8"
 
     def _write_html_export(
         self,
@@ -4409,6 +6847,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         *,
         quantized: bool,
         title: str | None = None,
+        mode: str = "single",
+        downsample: int = 1,
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
@@ -4417,8 +6857,57 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         page_title = title or self.title or "Show2D"
-        export_widget = self._clone_for_html_export(quantized=quantized)
+        has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
+        if mode == "folder" and not has_local_stacks and not any(self.is_rgb):
+            self._write_html_folder_export_fast(
+                export_path,
+                quantized=quantized,
+                title=page_title,
+            )
+            ensure_mobile_viewport(export_path)
+            return export_path
+        export_widget = self._clone_for_html_export(quantized=quantized, downsample=downsample)
         try:
+            if mode == "folder":
+                data_dir = export_path.parent / f"{export_path.stem}_files"
+                data_dir.mkdir(parents=True, exist_ok=True)
+                frame_name = "frame_bytes.bin"
+                frame_path = data_dir / frame_name
+                frame_path.write_bytes(bytes(export_widget.frame_bytes))
+                export_widget.frame_bytes = b""
+                export_widget.frame_bytes_url = f"{data_dir.name}/{frame_name}"
+                export_widget.frame_bytes_urls = []
+                panel_stack_size = 0
+                if export_widget.panel_stack_bytes:
+                    stack_name = "panel_stack_bytes.bin"
+                    stack_path = data_dir / stack_name
+                    stack_path.write_bytes(bytes(export_widget.panel_stack_bytes))
+                    panel_stack_size = stack_path.stat().st_size
+                    export_widget.panel_stack_bytes = b""
+                    export_widget.panel_stack_bytes_url = f"{data_dir.name}/{stack_name}"
+                else:
+                    export_widget.panel_stack_bytes_url = ""
+                (data_dir / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "format": "quantem.widget.show2d.folder.v1",
+                            "n_images": int(export_widget.n_images),
+                            "height": int(export_widget.height),
+                            "width": int(export_widget.width),
+                            "encoding": "uint8" if quantized else "float32",
+                            "frame_bytes": frame_name,
+                            "frame_bytes_size": frame_path.stat().st_size,
+                            "panel_stack_bytes": "panel_stack_bytes.bin" if panel_stack_size else "",
+                            "panel_stack_bytes_size": panel_stack_size,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                export_widget.frame_bytes_url = ""
+                export_widget.frame_bytes_urls = []
+                export_widget.panel_stack_bytes_url = ""
             state = dependency_state([export_widget], drop_defaults=False)
             embed_minimal_html(
                 str(export_path),
@@ -4432,13 +6921,160 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ensure_mobile_viewport(export_path)
         return export_path
 
-    def _html_export_bytes(self, *, quantized: bool) -> bytes:
+    def _folder_frame_payload(self, *, quantized: bool) -> tuple[bytes, list[float], list[float]]:
+        """Return packed display bytes and dequantization ranges for folder export."""
+        data = self._display_data if self._display_data is not None else self._data
+        data = self._crop_view_stack(data)
+        data = self._filtered_frames(data)
+        data = self._pad_view_stack(data)
+        if quantized:
+            if np.asarray(data).dtype == np.uint8:
+                arr = np.ascontiguousarray(data)
+                mins = [0.0] * int(arr.shape[0])
+                maxs = [255.0] * int(arr.shape[0])
+                return _b64_safe(arr.tobytes()), mins, maxs
+            arr = np.ascontiguousarray(data, dtype=np.float32)
+            flat = arr.reshape(arr.shape[0], -1)
+            out = np.empty(flat.shape, dtype=np.uint8)
+            mins, maxs = [], []
+            for i in range(flat.shape[0]):
+                finite = flat[i][np.isfinite(flat[i])]
+                lo = float(finite.min()) if finite.size else 0.0
+                hi = float(finite.max()) if finite.size else 1.0
+                rng = hi - lo if hi > lo else 1.0
+                out[i] = np.clip((flat[i] - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
+                mins.append(lo)
+                maxs.append(hi)
+            return _b64_safe(out.tobytes()), mins, maxs
+        arr = np.ascontiguousarray(data, dtype=np.float32)
+        return _b64_safe(arr.tobytes()), [], []
+
+    def _write_html_folder_export_fast(
+        self,
+        export_path: pathlib.Path,
+        *,
+        quantized: bool,
+        title: str,
+    ) -> None:
+        """Write folder-mode HTML without cloning or embedding pixel buffers."""
+        from ipywidgets.embed import dependency_state, embed_minimal_html
+
+        data_dir = export_path.parent / f"{export_path.stem}_files"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        frame_name = "frame_bytes.bin"
+        frame_bytes, mins, maxs = self._folder_frame_payload(quantized=quantized)
+        per_frame_bytes = int(self.height) * int(self.width)
+        identity_uint8 = (
+            quantized
+            and per_frame_bytes > 0
+            and len(frame_bytes) >= int(self.n_images) * per_frame_bytes
+            and len(mins) == int(self.n_images)
+            and len(maxs) == int(self.n_images)
+            and all(lo == 0.0 and hi == 255.0 for lo, hi in zip(mins, maxs, strict=False))
+        )
+        frame_file_names: list[str] = []
+        frame_bytes_size = 0
+        frame_path: pathlib.Path | None = None
+        if identity_uint8 and int(self.n_images) > 1:
+            view = memoryview(frame_bytes)
+            for image_index in range(int(self.n_images)):
+                name = f"frame_{image_index:06d}.bin"
+                start = image_index * per_frame_bytes
+                stop = start + per_frame_bytes
+                (data_dir / name).write_bytes(view[start:stop])
+                frame_file_names.append(name)
+            frame_name = ""
+            frame_bytes_size = sum((data_dir / name).stat().st_size for name in frame_file_names)
+        else:
+            frame_path = data_dir / frame_name
+            frame_path.write_bytes(frame_bytes)
+            frame_bytes_size = frame_path.stat().st_size
+
+        old_values = {
+            "_save_state": getattr(self, "_save_state", False),
+            "offline": self.offline,
+            "_export_light": self._export_light,
+            "frame_bytes": self.frame_bytes,
+            "frame_bytes_url": self.frame_bytes_url,
+            "frame_bytes_urls": list(self.frame_bytes_urls),
+            "panel_stack_bytes": self.panel_stack_bytes,
+            "panel_stack_bytes_url": self.panel_stack_bytes_url,
+            "_offline_mins": list(self._offline_mins),
+            "_offline_maxs": list(self._offline_maxs),
+            "_offline_min": self._offline_min,
+            "_offline_max": self._offline_max,
+            "_webgpu_filter_ok": self._webgpu_filter_ok,
+            "export_enabled": self.export_enabled,
+            "export_status": self.export_status,
+            "export_payload": self.export_payload,
+            "export_payload_id": self.export_payload_id,
+            "export_filename": self.export_filename,
+            "handoff_enabled": self.handoff_enabled,
+            "handoff_status": self.handoff_status,
+            "handoff_request": self.handoff_request,
+        }
+        try:
+            self._save_state = True
+            self.offline = quantized
+            self._export_light = True
+            self.frame_bytes = b""
+            self.frame_bytes_url = f"{data_dir.name}/{frame_name}" if frame_name else ""
+            self.frame_bytes_urls = [f"{data_dir.name}/{name}" for name in frame_file_names]
+            self.panel_stack_bytes = b""
+            self.panel_stack_bytes_url = ""
+            self._offline_mins = mins if quantized else []
+            self._offline_maxs = maxs if quantized else []
+            self._offline_min = mins[0] if mins else 0.0
+            self._offline_max = maxs[0] if maxs else 1.0
+            self._webgpu_filter_ok = True
+            self.export_enabled = False
+            self.export_status = ""
+            self.export_payload = b""
+            self.export_payload_id = ""
+            self.export_filename = ""
+            self.handoff_enabled = False
+            self.handoff_status = ""
+            self.handoff_request = ""
+            state = dependency_state([self], drop_defaults=False)
+            embed_minimal_html(
+                str(export_path),
+                views=[self],
+                title=title,
+                drop_defaults=False,
+                state=state,
+            )
+        finally:
+            for name, value in old_values.items():
+                setattr(self, name, value)
+        (data_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "quantem.widget.show2d.folder.v1",
+                    "n_images": int(self.n_images),
+                    "height": int(self.height),
+                    "width": int(self.width),
+                    "encoding": "uint8" if quantized else "float32",
+                    "frame_bytes": frame_name,
+                    "frame_bytes_files": frame_file_names,
+                    "frame_bytes_size": frame_bytes_size,
+                    "panel_stack_bytes": "",
+                    "panel_stack_bytes_size": 0,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _html_export_bytes(self, *, quantized: bool, downsample: int = 1) -> bytes:
         with tempfile.TemporaryDirectory(prefix="show2d-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path(quantized).name
-            self._write_html_export(path, quantized=quantized)
+            path = pathlib.Path(tmp) / self._default_html_export_path(
+                quantized,
+                downsample=downsample,
+            ).name
+            self._write_html_export(path, quantized=quantized, downsample=downsample)
             return path.read_bytes()
 
-    def _clone_for_html_export(self, *, quantized: bool) -> Self:
+    def _clone_for_html_export(self, *, quantized: bool, downsample: int = 1) -> Self:
         if any(self.is_rgb):
             raise NotImplementedError(
                 "HTML export is not supported when the gallery contains RGB panels; "
@@ -4447,17 +7083,36 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = self._display_data if self._display_data is not None else self._data
         if data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        downsample = int(downsample)
+
+        def downsample_frame(frame: np.ndarray) -> np.ndarray:
+            arr = np.ascontiguousarray(frame, dtype=np.float32)
+            if downsample <= 1:
+                return arr
+            from quantem.widget.utils.array import bin2d
+            return np.ascontiguousarray(bin2d(arr, factor=downsample, mode="mean"), dtype=np.float32)
+
+        def downsample_stack(stack: np.ndarray) -> np.ndarray:
+            arr = np.ascontiguousarray(stack, dtype=np.float32)
+            if downsample <= 1:
+                return arr
+            return np.ascontiguousarray(
+                np.stack([downsample_frame(frame) for frame in arr], axis=0),
+                dtype=np.float32,
+            )
+
         has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
         if has_local_stacks:
             display_stacks = getattr(self, "_display_panel_stacks", None)
             if not display_stacks:
                 raise ValueError("Cannot export local panel stacks after their data has been freed")
             export_data = [
-                np.ascontiguousarray(stack if stack.shape[0] > 1 else stack[0], dtype=np.float32)
+                downsample_stack(stack) if stack.shape[0] > 1 else downsample_frame(stack[0])
                 for stack in display_stacks
             ]
         else:
-            export_data = np.ascontiguousarray(data, dtype=np.float32)
+            export_data = downsample_stack(data)
+        export_pixel_size = self.pixel_size * downsample if self.pixel_size > 0 else self.pixel_size
         clone = type(self)(
             export_data,
             labels=list(self.labels),
@@ -4465,9 +7120,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             title=self.title,
             show_title=self.show_title,
             cmap=list(self.panel_cmaps) if self.panel_cmaps else self.cmap,
-            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            sampling=export_pixel_size if export_pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
+            scale_bar_position=self.scale_bar_position,
+            scale_bar_panels=list(self.scale_bar_panels),
+            scale_bar_length=self.scale_bar_length,
+            scale_bar_label=self.scale_bar_label,
+            scale_bar_style=dict(self.scale_bar_style),
+            show_zoom_indicator=self.show_zoom_indicator,
             show_fft=self.show_fft,
             fft_window=self.fft_window,
             fft_metrics=self.fft_metrics,
@@ -4498,6 +7159,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             panel_order=list(self.panel_order),
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=self.panel_title_font_size,
+            panel_title_style=dict(self.panel_title_style),
+            inter_panel_gap_px=int(self.inter_panel_gap_px),
+            inter_panel_gap_color=str(self.inter_panel_gap_color),
+            gallery_outer_border_px=int(self.gallery_outer_border_px),
+            gallery_outer_border_color=str(self.gallery_outer_border_color),
+            panel_inner_border_px=float(self.panel_inner_border_px),
+            panel_inner_border_color=str(self.panel_inner_border_color),
+            gallery_gap_px=int(self.gallery_gap_px),
+            gallery_gap_color=str(self.gallery_gap_color),
+            row_markers=dict(self.row_markers),
+            col_markers=dict(self.col_markers),
+            panel_annotations=list(self.panel_annotations),
+            panel_overlays=list(self.panel_overlays),
             display_bin=1,
         )
         clone.pixel_sizes = list(self.pixel_sizes)
@@ -4524,7 +7198,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Exported pages ship RAW frames plus the filter knobs: the browser
         # port (WGSL compute, CPU fallback without WebGPU) filters client-side
         # so sigma scrubs live with no kernel. Panels on non portable modes
-        # (tv, denova*) still bake their Python-filtered pixels because
+        # (tv) still bake their Python-filtered pixels because
         # _panel_browser_filtered is per panel.
         clone._webgpu_filter_ok = True
         clone._update_all_frames()
@@ -4580,6 +7254,62 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         for key in ("pad_ratios", "pad_fill_modes"):
             if key in state and isinstance(state[key], list) and len(state[key]) != int(self.n_images):
                 state.pop(key)
+        if "panel_title_spans" in state and isinstance(state["panel_title_spans"], list):
+            if len(state["panel_title_spans"]) not in (0, int(self.n_images)):
+                state.pop("panel_title_spans")
+        if "panel_title_style" in state:
+            try:
+                state["panel_title_style"] = _normalize_panel_title_style(state["panel_title_style"])
+            except (TypeError, ValueError):
+                state.pop("panel_title_style")
+        if "gallery_gap_px" in state:
+            try:
+                state["gallery_gap_px"] = max(0, int(state["gallery_gap_px"]))
+            except (TypeError, ValueError):
+                state.pop("gallery_gap_px")
+        if "gallery_gap_color" in state and state["gallery_gap_color"] is not None:
+            state["gallery_gap_color"] = str(state["gallery_gap_color"])
+        legacy_gap_color = str(state.get("gallery_gap_color") or "")
+        if "inter_panel_gap_px" not in state and "gallery_gap_px" in state:
+            state["inter_panel_gap_px"] = state["gallery_gap_px"]
+        if "inter_panel_gap_color" not in state and "gallery_gap_color" in state:
+            state["inter_panel_gap_color"] = state["gallery_gap_color"]
+        if "gallery_outer_border_px" not in state and legacy_gap_color and "gallery_gap_px" in state:
+            state["gallery_outer_border_px"] = state["gallery_gap_px"]
+        if "gallery_outer_border_color" not in state and legacy_gap_color:
+            state["gallery_outer_border_color"] = legacy_gap_color
+        if "panel_inner_border_color" not in state and legacy_gap_color:
+            state["panel_inner_border_color"] = legacy_gap_color
+        for key in ("inter_panel_gap_px", "gallery_outer_border_px"):
+            if key in state:
+                try:
+                    state[key] = _nonnegative_int(state[key], name=key)
+                except ValueError:
+                    state.pop(key)
+        if "panel_inner_border_px" in state:
+            try:
+                state["panel_inner_border_px"] = _nonnegative_float(
+                    state["panel_inner_border_px"],
+                    name="panel_inner_border_px",
+                )
+            except ValueError:
+                state.pop("panel_inner_border_px")
+        for key in (
+            "inter_panel_gap_color",
+            "gallery_outer_border_color",
+            "panel_inner_border_color",
+        ):
+            if key in state and state[key] is not None:
+                state[key] = str(state[key])
+        if "inter_panel_gap_px" in state:
+            state["gallery_gap_px"] = state["inter_panel_gap_px"]
+        if "inter_panel_gap_color" in state:
+            state["gallery_gap_color"] = state["inter_panel_gap_color"]
+        if "scale_bar_style" in state:
+            try:
+                state["scale_bar_style"] = _normalize_scale_bar_style(state["scale_bar_style"])
+            except (TypeError, ValueError):
+                state.pop("scale_bar_style")
         if "saved_view_states" in state:
             state["saved_view_states"] = self._normalize_saved_view_states(state["saved_view_states"])
         if "page_idx" in state:
@@ -4598,6 +7328,80 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
             if len(state["panel_cmaps"]) not in (0, int(self.n_images)):
                 state.pop("panel_cmaps")
+        if "panel_cmaps_memory" in state and isinstance(state["panel_cmaps_memory"], list):
+            if len(state["panel_cmaps_memory"]) not in (0, int(self.n_images)):
+                state.pop("panel_cmaps_memory")
+        if "inset_plots" in state:
+            try:
+                state["inset_plots"] = _normalize_inset_plot_specs(
+                    state["inset_plots"],
+                    n_items=int(self.n_images),
+                )
+            except (TypeError, ValueError):
+                state.pop("inset_plots")
+        if "panel_annotations" in state:
+            try:
+                state["panel_annotations"] = _normalize_panel_annotations(
+                    state["panel_annotations"],
+                    n_items=int(self.n_images),
+                    labels=list(self.labels),
+                )
+            except (TypeError, ValueError):
+                state.pop("panel_annotations")
+        if "panel_overlays" in state:
+            try:
+                state["panel_overlays"] = _normalize_panel_overlays(
+                    state["panel_overlays"],
+                    n_items=int(self.n_images),
+                    labels=list(self.labels),
+                )
+            except (TypeError, ValueError):
+                state.pop("panel_overlays")
+        if state.get("scale_bar_position") not in (None, "bottom-right", "bottom-left"):
+            state.pop("scale_bar_position")
+        if "scale_bar_panels" in state:
+            try:
+                state["scale_bar_panels"] = _normalize_panel_indices(
+                    state["scale_bar_panels"],
+                    n_items=int(self.n_images),
+                    labels=list(self.labels),
+                    name="scale_bar_panels",
+                )
+            except (TypeError, ValueError):
+                state.pop("scale_bar_panels")
+        if state.get("scale_bar_length") is not None:
+            try:
+                length = float(state["scale_bar_length"])
+                if not np.isfinite(length) or length <= 0:
+                    raise ValueError
+                state["scale_bar_length"] = length
+            except (TypeError, ValueError):
+                state.pop("scale_bar_length")
+        for key in ("marker_colors", "image_flips_horizontal", "image_flips_vertical"):
+            if key in state and isinstance(state[key], list) and len(state[key]) not in (0, int(self.n_images)):
+                state.pop(key)
+        if state.get("marker_style") not in (None, "left", "around"):
+            state.pop("marker_style")
+        for key in ("row_markers", "col_markers"):
+            if key in state:
+                try:
+                    state[key] = _normalize_marker_mapping(state[key], name=key)
+                except (TypeError, ValueError):
+                    state.pop(key)
+        if "selected_panels" in state and isinstance(state["selected_panels"], list):
+            selected: list[int] = []
+            seen_selected: set[int] = set()
+            for value in state["selected_panels"]:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < int(self.n_images) and idx not in seen_selected:
+                    selected.append(idx)
+                    seen_selected.add(idx)
+            state["selected_panels"] = selected
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
             n_img = int(self.n_images)
             clean_set: set[int] = set()
@@ -4869,7 +7673,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             Denoise method for the targeted panels: ``"none"``, ``"gaussian"``,
             or ``"anscombe"``. The compound spellings ``"bin2"``,
             ``"bin2_anscombe"`` and ``"bin4_anscombe"`` fold into a (mode, bin)
-            pair; ``"tv"``/``"denova*"`` stay available from Python.
+            pair; ``"tv"`` stays available from Python.
         sigma : float or None, optional
             Smoothing scale in pixels. ``None`` leaves each targeted panel's
             current sigma unchanged.
@@ -5850,8 +8654,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         The WGSL port (js/displayFilter.ts) covers the gaussian/bin2/anscombe
         modes; when the frontend negotiated ``_webgpu_filter_ok`` those panels
-        ship raw pixels and the browser filters. Non portable modes (tv,
-        denova*) keep the Python path even in a WebGPU session.
+        ship raw pixels and the browser filters. Non portable modes (tv) keep
+        the Python path even in a WebGPU session.
         """
         from quantem.widget.utils.display_filter import (
             BROWSER_DISPLAY_FILTER_MODES,

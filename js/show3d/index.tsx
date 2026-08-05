@@ -25,6 +25,7 @@ import Switch from "@mui/material/Switch";
 import Button from "@mui/material/Button";
 import Badge from "@mui/material/Badge";
 import Tooltip from "@mui/material/Tooltip";
+import TextField from "@mui/material/TextField";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PauseIcon from "@mui/icons-material/Pause";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
@@ -36,8 +37,18 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, formatZoomLabel, roundToNiceValue, unitSymbol, formatScaleLabel } from "../figure";
-import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
+import {
+  applyStandaloneWidgetViewState,
+  downloadBlob,
+  extractBytes,
+  extractFloat32,
+  formatNumber,
+  preserveRestoredWidgetModelsOnSave,
+  standaloneHtmlWithCurrentWidgetState,
+  standaloneWidgetStaticHtmlFromDocument,
+} from "../format";
 import { useHideStaticFallback } from "../staticFallback";
+import { packedPanelAutoByteRange } from "./packedPanelContrast";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
@@ -58,7 +69,119 @@ const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "show_fft" },
   { source: "hidden_panels" },
   { source: "hidden_page_slots" },
+  { source: "selected_panels" },
 ];
+
+const SHOW3D_STANDALONE_VIEW_STATE_KEYS = [
+  "auto_contrast",
+  "avg_window",
+  "blink_fps",
+  "bookmarked_frames",
+  "boomerang",
+  "cmap",
+  "col_markers",
+  "compare_background",
+  "compare_mode",
+  "compare_pair",
+  "contrast_preset",
+  "controls_collapsed",
+  "debug",
+  "denoise",
+  "denoise_bin",
+  "denoise_bins",
+  "denoise_enabled",
+  "denoise_modes",
+  "denoise_scope",
+  "denoise_sigma",
+  "denoise_sigmas",
+  "diff_cmap",
+  "diff_mode",
+  "fft_layout",
+  "fft_metrics",
+  "fft_overlay_position",
+  "fft_overlay_size",
+  "fft_overlay_zoom",
+  "fft_window",
+  "flip_horizontal",
+  "flip_vertical",
+  "fps",
+  "frame_rotations",
+  "frequency_filter",
+  "frequency_filter_center",
+  "frequency_filter_centers",
+  "frequency_filter_cutoff",
+  "frequency_filter_cutoffs",
+  "frequency_filter_enabled",
+  "frequency_filter_modes",
+  "frequency_filter_scope",
+  "frequency_filter_width",
+  "frequency_filter_widths",
+  "hidden_indices",
+  "hidden_page_slots",
+  "hidden_panels",
+  "identity_colors",
+  "image_rotation",
+  "image_vmax_pct",
+  "image_vmin_pct",
+  "link_contrast",
+  "link_panels",
+  "log_scale",
+  "loop",
+  "loop_end",
+  "loop_start",
+  "marker_colors",
+  "marker_style",
+  "max_cols",
+  "page_idx",
+  "panel_annotations",
+  "panel_cmaps",
+  "gallery_outer_border_color",
+  "gallery_outer_border_px",
+  "inter_panel_gap_color",
+  "inter_panel_gap_px",
+  "panel_gap",
+  "panel_groups",
+  "panel_inner_border_color",
+  "panel_inner_border_px",
+  "panel_order",
+  "panel_overlays",
+  "panel_title_font_size",
+  "panel_title_spans",
+  "panel_title_style",
+  "percentile_high",
+  "percentile_low",
+  "playback_path",
+  "playing",
+  "profile_line",
+  "profile_width",
+  "roi_active",
+  "roi_list",
+  "roi_selected_idx",
+  "rotation_scope",
+  "row_markers",
+  "scale_bar_visible",
+  "selected_panels",
+  "show_controls",
+  "show_denoise",
+  "show_fft",
+  "show_frequency_filter",
+  "show_kymograph",
+  "show_panel_titles",
+  "show_resize_handles",
+  "show_stats",
+  "show_title",
+  "show_zoom_indicator",
+  "slice_idx",
+  "smooth",
+  "starred",
+  "subpixel_align_enabled",
+  "subpixel_align_reference",
+  "view_state",
+  "vmax",
+  "vmax_per_panel",
+  "vmin",
+  "vmin_per_panel",
+] as const;
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
@@ -100,7 +223,16 @@ const sliderStyles = {
   },
 };
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
-const AVG_WINDOW_OPTIONS = Array.from({ length: 15 }, (_, idx) => idx + 1);
+const CONTRAST_PRESETS = [
+  { value: "custom", label: "Custom", low: 0, high: 100 },
+  { value: "0.5-99.5", label: "0.5–99.5", low: 0.5, high: 99.5 },
+  { value: "1-99", label: "1–99", low: 1, high: 99 },
+  { value: "2-98", label: "2–98", low: 2, high: 98 },
+  { value: "3-97", label: "3–97", low: 3, high: 97 },
+  { value: "5-95", label: "5–95", low: 5, high: 95 },
+  { value: "10-90", label: "10–90", low: 10, high: 90 },
+] as const;
+const IDENTITY_PALETTE = ["#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a"] as const;
 const OFFLINE_FRAME_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
 const OFFLINE_FRAME_CACHE_MIN_FRAMES = 2;
 const typography = {
@@ -122,6 +254,373 @@ type ReorderDragVisual = {
   offsetX: number;
   offsetY: number;
 };
+
+
+type RichTitleSpan = { text?: unknown; math?: unknown; color?: unknown };
+type PanelTitleStyle = Record<string, unknown>;
+type MarkerMap = Record<string, string>;
+type PanelGroup = { panels?: number[]; color?: string; label?: string };
+type PanelAnnotationSpec = {
+  text?: string;
+  math?: string;
+  spans?: RichTitleSpan[];
+  position?: string;
+  anchor?: string;
+  x?: number;
+  y?: number;
+  box?: [number, number, number, number];
+  variant?: string;
+  class_name?: string;
+  bg?: string;
+  fg?: string;
+  color?: string;
+  border_color?: string;
+  border_width?: number;
+  font_size?: number;
+  font_weight?: string | number;
+  pad_x?: number;
+  pad_y?: number;
+  radius?: number;
+  opacity?: number;
+  align?: string;
+  max_width?: string;
+  offset?: [number, number];
+};
+type PanelOverlaySpec = {
+  shape?: "circle" | "rect" | "rectangle" | "square";
+  coords?: "data" | "relative";
+  row?: number;
+  col?: number;
+  radius?: number;
+  row0?: number;
+  col0?: number;
+  row1?: number;
+  col1?: number;
+  stroke?: string;
+  stroke_width?: number;
+  line_style?: string;
+  dash?: number[];
+  fill?: string;
+  opacity?: number;
+  fill_opacity?: number;
+  stroke_opacity?: number;
+  z_order?: number;
+};
+type OverlaySelection = { panel: number; overlay: number };
+type OverlayDragState = {
+  mode: "move" | "resize";
+  panel: number;
+  overlay: number;
+  handle?: string;
+  startRow: number;
+  startCol: number;
+  original: PanelOverlaySpec;
+};
+
+function styleNumber(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function styleString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function withAlpha(color: string | undefined, alpha: number): string | undefined {
+  if (!color || color === "none") return undefined;
+  const a = Math.max(0, Math.min(1, alpha));
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((ch) => ch + ch).join("") : hex;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) return `rgba(${r}, ${g}, ${b}, ${a})`;
+    }
+  }
+  return color;
+}
+
+function overlayDashPattern(overlay: PanelOverlaySpec, lineWidth: number): number[] {
+  const custom = Array.isArray(overlay.dash)
+    ? overlay.dash.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+    : [];
+  if (custom.some((value) => value > 0)) return custom;
+  const w = Math.max(1, lineWidth);
+  const lineStyle = styleString(overlay.line_style, "solid").toLowerCase().replace("_", "-");
+  if (lineStyle === "dashed" || lineStyle === "dash") return [4 * w, 2 * w];
+  if (lineStyle === "dotted" || lineStyle === "dot") return [w, 1.8 * w];
+  if (lineStyle === "dashdot" || lineStyle === "dash-dot") return [4 * w, 2 * w, w, 2 * w];
+  return [];
+}
+
+const LATEX_SYMBOLS: Record<string, string> = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ε",
+  zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ", iota: "ι", kappa: "κ",
+  lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", pi: "π", rho: "ρ", varrho: "ϱ",
+  sigma: "σ", tau: "τ", upsilon: "υ", phi: "φ", varphi: "ϕ", chi: "χ",
+  psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ",
+  Xi: "Ξ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+  pm: "±", times: "×", cdot: "·", degree: "°", angstrom: "Å", le: "≤",
+  ge: "≥", neq: "≠", approx: "≈", infty: "∞",
+};
+
+function readLatexGroup(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] !== "{") return { text: expr[start] || "", next: start + 1 };
+  let depth = 0;
+  for (let i = start; i < expr.length; i += 1) {
+    if (expr[i] === "{") depth += 1;
+    if (expr[i] === "}") depth -= 1;
+    if (depth === 0) return { text: expr.slice(start + 1, i), next: i + 1 };
+  }
+  return { text: expr.slice(start + 1), next: expr.length };
+}
+
+function readLatexAtom(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] === "{") return readLatexGroup(expr, start);
+  if (expr[start] === "\\") {
+    const match = expr.slice(start + 1).match(/^[A-Za-z]+/);
+    if (match) return { text: `\\${match[0]}`, next: start + 1 + match[0].length };
+  }
+  return { text: expr[start] || "", next: start + 1 };
+}
+
+function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if ((ch === "^" || ch === "_") && i + 1 < expr.length) {
+      const atom = readLatexAtom(expr, i + 1);
+      const Tag = ch === "^" ? "sup" : "sub";
+      nodes.push(
+        <Tag key={`${keyPrefix}-script-${key++}`} style={{ fontSize: "0.72em", lineHeight: 0 }}>
+          {renderLatexMath(atom.text, `${keyPrefix}-script-${key}`)}
+        </Tag>
+      );
+      i = atom.next;
+      continue;
+    }
+    if (ch === "\\") {
+      const match = expr.slice(i + 1).match(/^[A-Za-z]+/);
+      if (match) {
+        const command = match[0];
+        i += command.length + 1;
+        if ((command === "mathrm" || command === "text") && expr[i] === "{") {
+          const group = readLatexGroup(expr, i);
+          nodes.push(<span key={`${keyPrefix}-roman-${key++}`} style={{ fontStyle: "normal" }}>{group.text}</span>);
+          i = group.next;
+          continue;
+        }
+        nodes.push(LATEX_SYMBOLS[command] || command);
+        continue;
+      }
+    }
+    if (ch === "{" || ch === "}") {
+      i += 1;
+      continue;
+    }
+    nodes.push(ch);
+    i += 1;
+  }
+  return nodes;
+}
+
+// Same UI font as panel titles / badges (not Cambria Math italic) so χ², λ, etc. match body text.
+const UI_MATH_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
+function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
+  const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
+  return (
+    <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: UI_MATH_FONT, fontStyle: "normal" }}>
+      {renderLatexMath(normalized, keyPrefix)}
+    </span>
+  );
+}
+
+function findUnescapedDollar(text: string, from = 0): number {
+  for (let i = from; i < text.length; i += 1) {
+    if (text[i] === "$" && text[i - 1] !== "\\") return i;
+  }
+  return -1;
+}
+
+function renderTextWithInlineMath(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let rest = text;
+  let key = 0;
+  while (rest.length) {
+    const dollar = findUnescapedDollar(rest);
+    const paren = rest.indexOf("\\(");
+    const starts = [dollar, paren].filter((idx) => idx >= 0);
+    if (!starts.length) {
+      nodes.push(rest.replace(/\\\$/g, "$"));
+      break;
+    }
+    const start = Math.min(...starts);
+    if (start > 0) nodes.push(rest.slice(0, start).replace(/\\\$/g, "$"));
+    const dollarMode = rest[start] === "$";
+    const close = dollarMode ? findUnescapedDollar(rest, start + 1) - (start + 1) : rest.indexOf("\\)", start + 2) - (start + 2);
+    if (close < 0) {
+      nodes.push(rest.slice(start).replace(/\\\$/g, "$"));
+      break;
+    }
+    const math = rest.slice(start + (dollarMode ? 1 : 2), start + (dollarMode ? 1 : 2) + close);
+    nodes.push(renderMathExpression(math, `${keyPrefix}-math-${key++}`));
+    rest = rest.slice(start + (dollarMode ? 2 : 4) + close);
+  }
+  return nodes;
+}
+
+function panelTitleChromeSx(
+  style: PanelTitleStyle | undefined,
+  defaults: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const s = style || {};
+  const borderWidth = Math.max(0, styleNumber(s.border_width, 0));
+  const bg = styleString(s.bg);
+  const align = styleString(s.align, String(defaults.textAlign || "center"));
+  const maxWidth = s.max_width;
+  const mode = typeof maxWidth === "string" ? maxWidth : "";
+  const sx: Record<string, unknown> = {
+    ...defaults,
+    color: styleString(s.fg, String(defaults.color || "rgba(255,255,255,0.95)")),
+    bgcolor: bg || defaults.bgcolor,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(s.border_color, "rgba(255,255,255,0.35)")}` : defaults.border,
+    borderRadius: s.radius != null ? `${Math.max(0, styleNumber(s.radius, 0))}px` : defaults.borderRadius,
+    px: s.pad_x != null ? `${Math.max(0, styleNumber(s.pad_x, 0))}px` : defaults.px,
+    py: s.pad_y != null ? `${Math.max(0, styleNumber(s.pad_y, 0))}px` : defaults.py,
+    fontWeight: s.font_weight != null ? s.font_weight : defaults.fontWeight,
+    opacity: s.opacity != null ? Math.max(0, Math.min(1, styleNumber(s.opacity, 1))) : defaults.opacity,
+    textAlign: align,
+    maxWidth: mode && mode !== "panel" && mode !== "hug" ? mode : defaults.maxWidth,
+    width: mode === "panel" ? (defaults.width || "calc(100% - 56px)") : defaults.width,
+    boxSizing: "border-box",
+  };
+  if (mode === "hug") {
+    sx.left = defaults.left != null && defaults.width != null
+      ? `calc(${String(defaults.left)} + (${String(defaults.width)}) / 2)`
+      : "50%";
+    sx.right = "auto";
+    sx.width = "fit-content";
+    sx.maxWidth = "calc(100% - 16px)";
+    sx.transform = defaults.transform
+      ? `${String(defaults.transform)} translateX(-50%)`
+      : "translateX(-50%)";
+  }
+  return sx;
+}
+
+function richTitlePlainText(spans: RichTitleSpan[] | undefined, fallback: string): string {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  const text = spans.map((span) => String(span?.text ?? span?.math ?? "")).join("");
+
+  return text || fallback;
+}
+
+function renderRichTitle(spans: RichTitleSpan[] | undefined, fallback: string): React.ReactNode {
+
+  if (!Array.isArray(spans) || spans.length === 0) return renderTextWithInlineMath(fallback, "title-fallback");
+  return spans.map((span, idx) => {
+    const text = String(span?.text ?? "");
+    const math = span?.math == null ? "" : String(span.math);
+    const color = typeof span?.color === "string" && span.color.trim() ? span.color : undefined;
+    return (
+      <span key={`title-span-${idx}`} style={color ? { color } : undefined}>
+        {math ? renderMathExpression(math, `title-span-${idx}`) : renderTextWithInlineMath(text, `title-span-${idx}`)}
+
+      </span>
+    );
+  });
+}
+
+
+function annotationAnchorTransform(anchor: string | undefined): string {
+  const value = anchor || "top-left";
+  const x = value.endsWith("center") || value === "center" ? "-50%" : value.endsWith("right") ? "-100%" : "0";
+  const y = value.startsWith("center") || value === "center" ? "-50%" : value.startsWith("bottom") ? "-100%" : "0";
+  return `translate(${x}, ${y})`;
+}
+
+function annotationPositionSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const margin = 8;
+  const position = spec.position || "top-left";
+  const offset = Array.isArray(spec.offset) ? spec.offset : [0, 0];
+  if (Array.isArray(spec.box) && spec.box.length === 4) {
+    const [left, top, width, height] = spec.box;
+    return {
+      left: `calc(${left * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${top * 100}% + ${offset[1] || 0}px)`,
+      width: `${width * 100}%`,
+      minHeight: `${height * 100}%`,
+    };
+  }
+  if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) {
+    return {
+      left: `calc(${Number(spec.x) * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${Number(spec.y) * 100}% + ${offset[1] || 0}px)`,
+      transform: annotationAnchorTransform(spec.anchor || "center"),
+    };
+  }
+  const sx: Record<string, unknown> = {};
+  if (position.includes("top")) sx.top = margin + (offset[1] || 0);
+  if (position.includes("bottom")) sx.bottom = margin - (offset[1] || 0);
+  if (position.includes("left")) sx.left = margin + (offset[0] || 0);
+  if (position.includes("right")) sx.right = margin - (offset[0] || 0);
+  if (position === "top-center" || position === "center" || position === "bottom-center") {
+    sx.left = `calc(50% + ${offset[0] || 0}px)`;
+  }
+  if (position === "center-left" || position === "center" || position === "center-right") {
+    sx.top = `calc(50% + ${offset[1] || 0}px)`;
+  }
+  sx.transform = annotationAnchorTransform(spec.anchor || position);
+  return sx;
+}
+
+function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const variant = spec.variant || "badge";
+  const plain = variant === "plain";
+  const outline = variant === "outline";
+  const callout = variant === "callout";
+  const pill = variant === "pill";
+  const fg = styleString(spec.fg ?? spec.color, plain ? "rgba(255,255,255,0.92)" : "#fff");
+  const bg = styleString(spec.bg, plain ? "transparent" : "rgba(0,0,0,0.72)");
+  const borderWidth = Math.max(0, styleNumber(spec.border_width, outline || callout ? 1 : 0));
+  return {
+    position: "absolute",
+    ...annotationPositionSx(spec),
+    display: "block",
+    boxSizing: "border-box",
+    pointerEvents: "none",
+    zIndex: 10,
+    px: spec.pad_x != null ? `${Math.max(0, styleNumber(spec.pad_x, 0))}px` : (plain ? 0 : "6px"),
+    py: spec.pad_y != null ? `${Math.max(0, styleNumber(spec.pad_y, 0))}px` : (plain ? 0 : "2px"),
+    borderRadius: spec.radius != null ? `${Math.max(0, styleNumber(spec.radius, 0))}px` : (pill ? "999px" : "3px"),
+    background: bg,
+    color: fg,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(spec.border_color, "rgba(255,255,255,0.5)")}` : "none",
+    opacity: spec.opacity != null ? Math.max(0, Math.min(1, styleNumber(spec.opacity, 1))) : 1,
+    fontFamily: UI_FONT,
+    fontSize: `${Math.max(6, styleNumber(spec.font_size, 10))}px`,
+    fontWeight: spec.font_weight != null ? spec.font_weight : 700,
+    lineHeight: 1.2,
+    textAlign: styleString(spec.align, "center"),
+    whiteSpace: Array.isArray(spec.box) ? "normal" : "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: styleString(spec.max_width, Array.isArray(spec.box) ? "100%" : "calc(100% - 16px)"),
+    textShadow: plain ? "0 1px 2px rgba(0,0,0,0.85)" : "none",
+    boxShadow: callout ? "0 1px 4px rgba(0,0,0,0.45)" : "none",
+  };
+}
+
+function renderPanelAnnotation(spec: PanelAnnotationSpec, fallback = ""): React.ReactNode {
+  if (spec.math) return renderMathExpression(spec.math, "panel-annotation-math");
+  return renderRichTitle(spec.spans, spec.text || fallback);
+}
+
 type ReorderDragStart = {
   x: number;
   y: number;
@@ -260,6 +759,58 @@ type Show3DWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show3DSavePickerOptions) => Promise<Show3DFileHandle>;
 };
 
+type BrowserEncodedVideoChunk = {
+  type: string;
+  timestamp: number;
+  duration?: number | null;
+  byteLength: number;
+  copyTo: (destination: Uint8Array) => void;
+};
+
+type BrowserEncodedVideoChunkMetadata = {
+  decoderConfig?: {
+    description?: ArrayBufferLike | ArrayBufferView<ArrayBufferLike>;
+  };
+};
+
+type BrowserVideoEncoderConfig = {
+  codec: string;
+  width: number;
+  height: number;
+  bitrate: number;
+  framerate: number;
+  hardwareAcceleration?: "prefer-hardware" | "prefer-software" | "no-preference";
+  avc?: { format: "avc" | "annexb" };
+};
+
+type BrowserVideoEncoder = {
+  configure: (config: BrowserVideoEncoderConfig) => void;
+  encode: (frame: BrowserVideoFrame, options?: { keyFrame?: boolean }) => void;
+  flush: () => Promise<void>;
+  close: () => void;
+};
+
+type BrowserVideoEncoderConstructor = {
+  new(init: {
+    output: (chunk: BrowserEncodedVideoChunk, metadata?: BrowserEncodedVideoChunkMetadata) => void;
+    error: (error: unknown) => void;
+  }): BrowserVideoEncoder;
+  isConfigSupported?: (config: BrowserVideoEncoderConfig) => Promise<{ supported: boolean; config?: BrowserVideoEncoderConfig }>;
+};
+
+type BrowserVideoFrame = {
+  close: () => void;
+};
+
+type BrowserVideoFrameConstructor = {
+  new(source: HTMLCanvasElement, init: { timestamp: number; duration: number }): BrowserVideoFrame;
+};
+
+type BrowserMp4Window = Window & typeof globalThis & {
+  VideoEncoder?: BrowserVideoEncoderConstructor;
+  VideoFrame?: BrowserVideoFrameConstructor;
+};
+
 type PanelStats = {
   panel: number;
   mean: number;
@@ -353,16 +904,55 @@ const valueToPct = (value: number | null | undefined, min: number, max: number, 
   return clampPct(((value - min) / (max - min)) * 100);
 };
 const pctToValue = (pct: number, min: number, max: number): number => min + (max - min) * (clampPct(pct) / 100);
+const clampByte = (x: number): number => Math.max(0, Math.min(255, Math.round(x)));
 
-function shouldIgnoreWidgetShortcut(target: EventTarget | null): boolean {
+/** Sample a packed offline frame without leaking across adjacent panel strips. */
+function samplePackedU8Viewport(
+  values: Uint8Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  minX: number,
+  maxX: number,
+  smooth: boolean,
+): number {
+  const safeX = Math.max(minX, Math.min(maxX, x));
+  const safeY = Math.max(0, Math.min(height - 1, y));
+  const x0 = Math.floor(safeX);
+  const y0 = Math.floor(safeY);
+  if (!smooth) return values[y0 * width + x0];
+
+  const x1 = Math.min(maxX, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const tx = safeX - x0;
+  const ty = safeY - y0;
+  const top = values[y0 * width + x0] * (1 - tx) + values[y0 * width + x1] * tx;
+  const bottom = values[y1 * width + x0] * (1 - tx) + values[y1 * width + x1] * tx;
+  return top * (1 - ty) + bottom * ty;
+}
+
+const WIDGET_SHORTCUT_IGNORE_SELECTOR = [
+  "input", "textarea", "button", "select",
+  "[contenteditable='true']", "[role='button']", "[role='slider']",
+  "[role='switch']", "[role='textbox']", "[role='combobox']", "[role='menuitem']",
+  ".MuiSlider-root", ".MuiSelect-select",
+].join(",");
+const WIDGET_TEXT_OR_VALUE_CONTROL_SELECTOR = [
+  "input", "textarea", "select",
+  "[contenteditable='true']", "[role='slider']",
+  "[role='switch']", "[role='textbox']", "[role='combobox']", "[role='menuitem']",
+  ".MuiSlider-root", ".MuiSelect-select",
+].join(",");
+const FRAME_NAVIGATION_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
+
+function shouldIgnoreWidgetShortcut(target: EventTarget | null, key = ""): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
-  return target.closest([
-    "input", "textarea", "button", "select",
-    "[contenteditable='true']", "[role='button']", "[role='slider']",
-    "[role='switch']", "[role='textbox']", "[role='combobox']", "[role='menuitem']",
-    ".MuiSlider-root", ".MuiSelect-select",
-  ].join(",")) !== null;
+  if (FRAME_NAVIGATION_KEYS.has(key)) {
+    return target.closest(WIDGET_TEXT_OR_VALUE_CONTROL_SELECTOR) !== null;
+  }
+  return target.closest(WIDGET_SHORTCUT_IGNORE_SELECTOR) !== null;
 }
 
 function findFFTPeak(
@@ -597,7 +1187,15 @@ const FRAME_SERVER_PREFETCH_FRAMES = 8;
 // ============================================================================
 // Inlined components (matches Show2D single-file convention)
 // ============================================================================
-function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
+function InfoTooltip({
+  text,
+  theme = "dark",
+  icon = "ⓘ",
+}: {
+  text: React.ReactNode;
+  theme?: "light" | "dark";
+  icon?: React.ReactNode;
+}) {
   const isDark = theme === "dark";
   const content = typeof text === "string"
     ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
@@ -611,7 +1209,7 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
       }}
     >
       <Typography component="span" sx={{ fontSize: 12, color: isDark ? "#888" : "#666", cursor: "help", ml: 0.5, "&:hover": { color: isDark ? "#aaa" : "#444" } }}>
-        ⓘ
+        {icon}
       </Typography>
     </Tooltip>
   );
@@ -641,6 +1239,8 @@ interface HistogramProps {
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  commitOnChange?: boolean;
   width?: number;
   height?: number;
   theme?: "light" | "dark";
@@ -655,6 +1255,8 @@ interface HistogramProps {
 
 const Histogram = React.memo(function Histogram({
   data, vminPct, vmaxPct, onRangeChange,
+  onRangePreview,
+  commitOnChange = true,
   width = 110, height = 40, theme = "dark",
   dataMin = 0, dataMax = 1, pinBinsToRange = true, ariaHidden = false,
   bins: precomputedBins = null,
@@ -664,7 +1266,10 @@ const Histogram = React.memo(function Histogram({
   const minLabelRef = React.useRef<HTMLElement | null>(null);
   const maxLabelRef = React.useRef<HTMLElement | null>(null);
   const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangePreviewRef = React.useRef(onRangePreview);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const previewRangeRef = React.useRef<[number, number] | null>(null);
+  const [previewRange, setPreviewRange] = React.useState<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
   // Bins source priority: GPU-precomputed > CPU memoized scan. The CPU path
   // is an O(N) pass over 16.8 M Float32 at 4k (89% of scrub cost in profiling)
@@ -748,6 +1353,37 @@ const Histogram = React.memo(function Histogram({
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
   }, [onRangeChange]);
+  React.useEffect(() => {
+    onRangePreviewRef.current = onRangePreview;
+  }, [onRangePreview]);
+  React.useEffect(() => {
+    if (commitOnChange) return;
+    const active = previewRangeRef.current;
+    if (
+      active &&
+      Math.abs(active[0] - vminPct) < 0.01 &&
+      Math.abs(active[1] - vmaxPct) < 0.01
+    ) {
+      previewRangeRef.current = null;
+      setPreviewRange(null);
+    }
+  }, [commitOnChange, vminPct, vmaxPct]);
+  const updatePreviewRange = React.useCallback((next: [number, number]) => {
+    if (commitOnChange) {
+      onRangeChangeRef.current(next[0], next[1]);
+      return;
+    }
+    previewRangeRef.current = next;
+    setPreviewRange(next);
+    applyRangePreview(next);
+    onRangePreviewRef.current?.(next[0], next[1]);
+  }, [applyRangePreview, commitOnChange]);
+  const commitRangePreview = React.useCallback((next: [number, number]) => {
+    previewRangeRef.current = next;
+    setPreviewRange(next);
+    applyRangePreview(next);
+    onRangeChangeRef.current(next[0], next[1]);
+  }, [applyRangePreview]);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
       window.cancelAnimationFrame(rangeRafRef.current);
@@ -756,10 +1392,9 @@ const Histogram = React.memo(function Histogram({
     const pending = pendingRangeRef.current;
     pendingRangeRef.current = null;
     if (pending) {
-      applyRangePreview(pending);
-      onRangeChangeRef.current(pending[0], pending[1]);
+      commitRangePreview(pending);
     }
-  }, [applyRangePreview]);
+  }, [commitRangePreview]);
   React.useEffect(() => () => {
     if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
   }, []);
@@ -780,7 +1415,8 @@ const Histogram = React.memo(function Histogram({
           const pending = pendingRangeRef.current;
           if (pending) {
             applyRangePreview(pending);
-            onRangeChangeRef.current(pending[0], pending[1]);
+            if (commitOnChange) onRangeChangeRef.current(pending[0], pending[1]);
+            else onRangePreviewRef.current?.(pending[0], pending[1]);
           }
         });
       }
@@ -797,6 +1433,7 @@ const Histogram = React.memo(function Histogram({
 
   const sliderInset = 4;
   const sliderWidth = Math.max(1, width - sliderInset * 2);
+  const sliderValue = previewRange ?? [vminPct, vmaxPct];
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
@@ -828,10 +1465,21 @@ const Histogram = React.memo(function Histogram({
         sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
-          value={[vminPct, vmaxPct]}
+          value={sliderValue}
           onChange={(_, v) => {
             const [newMin, newMax] = v as number[];
-            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+            updatePreviewRange([
+              Math.min(newMin, newMax - 1),
+              Math.max(newMax, newMin + 1),
+            ]);
+          }}
+          onChangeCommitted={(_, v) => {
+            if (commitOnChange) return;
+            const [newMin, newMax] = v as number[];
+            commitRangePreview([
+              Math.min(newMin, newMax - 1),
+              Math.max(newMax, newMin + 1),
+            ]);
           }}
           min={0} max={100} size="small"
           valueLabelDisplay="auto" valueLabelFormat={formatValue}
@@ -949,6 +1597,223 @@ function drawROI(
   }
 }
 
+function drawPanelOverlays(
+  ctx: CanvasRenderingContext2D,
+  overlays: PanelOverlaySpec[] | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlays?.length) return;
+  const ordered = [...overlays].sort((a, b) => styleNumber(a.z_order, 0) - styleNumber(b.z_order, 0));
+  for (const overlay of ordered) {
+    const coords = overlay.coords || "data";
+    const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+    const scaleRow = coords === "relative" ? imageH : 1;
+    const scaleCol = coords === "relative" ? imageW : 1;
+    const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+    const opacity = styleNumber(overlay.opacity, 1);
+    const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+    const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+    const stroke = withAlpha(styleString(overlay.stroke, "#00e5ff"), strokeOpacity);
+    const fill = withAlpha(overlay.fill, fillOpacity);
+    ctx.save();
+    ctx.lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+    ctx.setLineDash(overlayDashPattern(overlay, ctx.lineWidth));
+    ctx.lineCap = ctx.getLineDash().length ? "round" : "butt";
+    if (fill) ctx.fillStyle = fill;
+    if (stroke) ctx.strokeStyle = stroke;
+    if (shape === "circle") {
+      const col = styleNumber(overlay.col, 0) * scaleCol;
+      const row = styleNumber(overlay.row, 0) * scaleRow;
+      const radius = Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius);
+      const x = toScreenX(col);
+      const y = toScreenY(row);
+      const rx = Math.abs(toScreenX(col + radius) - x);
+      const ry = Math.abs(toScreenY(row + radius) - y);
+      const r = Math.max(0, (rx + ry) / 2);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      if (fill) ctx.fill();
+      if (stroke && ctx.lineWidth > 0) ctx.stroke();
+    } else {
+      const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+      const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+      const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+      const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+      const x0 = toScreenX(col0);
+      const y0 = toScreenY(row0);
+      const x1 = toScreenX(col1);
+      const y1 = toScreenY(row1);
+      const x = Math.min(x0, x1);
+      const y = Math.min(y0, y1);
+      const w = Math.abs(x1 - x0);
+      const h = Math.abs(y1 - y0);
+      if (fill) ctx.fillRect(x, y, w, h);
+      if (stroke && ctx.lineWidth > 0) ctx.strokeRect(x, y, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+function clonePanelOverlays(overlays: PanelOverlaySpec[][] | undefined): PanelOverlaySpec[][] {
+  return (overlays || []).map((items) => (items || []).map((item) => ({ ...item })));
+}
+
+function overlayGeometry(overlay: PanelOverlaySpec, imageW: number, imageH: number) {
+  const coords = overlay.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+  if (shape === "circle") {
+    return {
+      shape,
+      row: styleNumber(overlay.row, 0) * scaleRow,
+      col: styleNumber(overlay.col, 0) * scaleCol,
+      radius: Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius),
+    };
+  }
+  const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+  const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+  const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+  const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+  return {
+    shape,
+    row0: Math.min(row0, row1),
+    col0: Math.min(col0, col1),
+    row1: Math.max(row0, row1),
+    col1: Math.max(col0, col1),
+  };
+}
+
+function panelOverlayHit(
+  overlays: PanelOverlaySpec[] | undefined,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  hitRadius: number,
+): { overlay: number; mode: "move" | "resize"; handle?: string } | null {
+  if (!overlays?.length) return null;
+  const ordered = overlays.map((overlay, index) => ({ overlay, index })).sort((a, b) => styleNumber(a.overlay.z_order, 0) - styleNumber(b.overlay.z_order, 0));
+  for (let orderIdx = ordered.length - 1; orderIdx >= 0; orderIdx -= 1) {
+    const { overlay, index } = ordered[orderIdx];
+    const geom = overlayGeometry(overlay, imageW, imageH);
+    if (geom.shape === "circle") {
+      const dist = Math.hypot(col - geom.col, row - geom.row);
+      if (Math.abs(dist - geom.radius) <= hitRadius) return { overlay: index, mode: "resize" };
+      if (dist <= geom.radius) return { overlay: index, mode: "move" };
+      continue;
+    }
+    const inside = col >= geom.col0 - hitRadius && col <= geom.col1 + hitRadius && row >= geom.row0 - hitRadius && row <= geom.row1 + hitRadius;
+    if (!inside) continue;
+    const nearLeft = Math.abs(col - geom.col0) <= hitRadius;
+    const nearRight = Math.abs(col - geom.col1) <= hitRadius;
+    const nearTop = Math.abs(row - geom.row0) <= hitRadius;
+    const nearBottom = Math.abs(row - geom.row1) <= hitRadius;
+    if (nearLeft || nearRight || nearTop || nearBottom) {
+      return {
+        overlay: index,
+        mode: "resize",
+        handle: `${nearTop ? "t" : ""}${nearBottom ? "b" : ""}${nearLeft ? "l" : ""}${nearRight ? "r" : ""}` || "br",
+      };
+    }
+    return { overlay: index, mode: "move" };
+  }
+  return null;
+}
+
+function updateOverlayFromDrag(
+  original: PanelOverlaySpec,
+  mode: "move" | "resize",
+  startRow: number,
+  startCol: number,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  handle = "br",
+): PanelOverlaySpec {
+  const coords = original.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const toSpecRow = (value: number) => value / scaleRow;
+  const toSpecCol = (value: number) => value / scaleCol;
+  const toSpecRadius = (value: number) => value / scaleRadius;
+  const geom = overlayGeometry(original, imageW, imageH);
+  const next = { ...original };
+  if (geom.shape === "circle") {
+    if (mode === "move") {
+      next.row = toSpecRow(Math.max(0, Math.min(imageH, geom.row + row - startRow)));
+      next.col = toSpecCol(Math.max(0, Math.min(imageW, geom.col + col - startCol)));
+    } else {
+      next.radius = toSpecRadius(Math.max(1, Math.hypot(col - geom.col, row - geom.row)));
+    }
+    return next;
+  }
+  let row0 = geom.row0;
+  let row1 = geom.row1;
+  let col0 = geom.col0;
+  let col1 = geom.col1;
+  if (mode === "move") {
+    const dr = row - startRow;
+    const dc = col - startCol;
+    const h = row1 - row0;
+    const w = col1 - col0;
+    row0 = Math.max(0, Math.min(imageH - h, row0 + dr));
+    row1 = row0 + h;
+    col0 = Math.max(0, Math.min(imageW - w, col0 + dc));
+    col1 = col0 + w;
+  } else {
+    if (handle.includes("t")) row0 = row;
+    if (handle.includes("b") || (!handle.includes("t") && !handle.includes("l") && !handle.includes("r"))) row1 = row;
+    if (handle.includes("l")) col0 = col;
+    if (handle.includes("r") || (!handle.includes("t") && !handle.includes("b") && !handle.includes("l"))) col1 = col;
+    if (Math.abs(row1 - row0) < 1) row1 = row0 + (row1 >= row0 ? 1 : -1);
+    if (Math.abs(col1 - col0) < 1) col1 = col0 + (col1 >= col0 ? 1 : -1);
+  }
+  next.row0 = toSpecRow(Math.max(0, Math.min(imageH, Math.min(row0, row1))));
+  next.row1 = toSpecRow(Math.max(0, Math.min(imageH, Math.max(row0, row1))));
+  next.col0 = toSpecCol(Math.max(0, Math.min(imageW, Math.min(col0, col1))));
+  next.col1 = toSpecCol(Math.max(0, Math.min(imageW, Math.max(col0, col1))));
+  return next;
+}
+
+function drawPanelOverlaySelection(
+  ctx: CanvasRenderingContext2D,
+  overlay: PanelOverlaySpec | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlay) return;
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  ctx.save();
+  ctx.setLineDash([5, 3]);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  if (geom.shape === "circle") {
+    const x = toScreenX(geom.col);
+    const y = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - x) + Math.abs(toScreenY(geom.row + geom.radius) - y)) / 2);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const x0 = toScreenX(geom.col0);
+    const y0 = toScreenY(geom.row0);
+    const x1 = toScreenX(geom.col1);
+    const y1 = toScreenY(geom.row1);
+    ctx.strokeRect(Math.min(x0, x1) - 3, Math.min(y0, y1) - 3, Math.abs(x1 - x0) + 6, Math.abs(y1 - y0) + 6);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 import { WebGPUFFT, getWebGPUFFT, getGPUInfo, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, summarizeFftQualityMetrics, type FftQualityMetrics } from "../fftMetrics";
 import {
@@ -960,6 +1825,172 @@ import {
 } from "./frameTransform";
 
 const FFT_SNAP_RADIUS = 5;
+
+type SubpixelShift = {
+  row: number;
+  col: number;
+  quality: number;
+};
+
+function finiteMean(data: Float32Array): number {
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < data.length; i++) {
+    const value = data[i];
+    if (!Number.isFinite(value)) continue;
+    sum += value;
+    count++;
+  }
+  return count > 0 ? sum / count : 0;
+}
+
+function finiteMedianSample(data: Float32Array, maxSamples = 8192): number {
+  const step = Math.max(1, Math.floor(data.length / maxSamples));
+  const values: number[] = [];
+  for (let i = 0; i < data.length; i += step) {
+    const value = data[i];
+    if (Number.isFinite(value)) values.push(value);
+  }
+  if (!values.length) return 0;
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)];
+}
+
+function registrationImage(data: Float32Array, width: number, height: number): Float32Array {
+  const out = new Float32Array(width * height);
+  const mean = finiteMean(data);
+  for (let i = 0; i < out.length; i++) {
+    const value = data[i];
+    out[i] = Number.isFinite(value) ? value - mean : 0;
+  }
+  applyHannWindow2D(out, width, height);
+  return out;
+}
+
+async function fft2dComplex(
+  real: Float32Array,
+  imag: Float32Array,
+  width: number,
+  height: number,
+  inverse: boolean,
+  gpu: WebGPUFFT | null,
+): Promise<{ real: Float32Array; imag: Float32Array; width: number; height: number }> {
+  if (gpu && width === nextPow2(width) && height === nextPow2(height)) {
+    const out = await gpu.fft2D(real, imag, width, height, inverse);
+    return { ...out, width, height };
+  }
+  const paddedW = nextPow2(width);
+  const paddedH = nextPow2(height);
+  const realCopy = new Float32Array(paddedW * paddedH);
+  const imagCopy = new Float32Array(paddedW * paddedH);
+  for (let row = 0; row < height; row++) {
+    realCopy.set(real.subarray(row * width, row * width + width), row * paddedW);
+    imagCopy.set(imag.subarray(row * width, row * width + width), row * paddedW);
+  }
+  fft2d(realCopy, imagCopy, paddedW, paddedH, inverse);
+  return { real: realCopy, imag: imagCopy, width: paddedW, height: paddedH };
+}
+
+function wrappedPeakOffset(index: number, size: number): number {
+  return index > size / 2 ? index - size : index;
+}
+
+function parabolicPeakDelta(prev: number, center: number, next: number): number {
+  const denom = prev - 2 * center + next;
+  if (!Number.isFinite(denom) || Math.abs(denom) < 1e-12) return 0;
+  const delta = 0.5 * (prev - next) / denom;
+  if (!Number.isFinite(delta)) return 0;
+  return Math.max(-0.5, Math.min(0.5, delta));
+}
+
+async function estimateSubpixelShift(
+  reference: Float32Array,
+  moving: Float32Array,
+  width: number,
+  height: number,
+  gpu: WebGPUFFT | null,
+): Promise<SubpixelShift> {
+  const refReal = registrationImage(reference, width, height);
+  const movReal = registrationImage(moving, width, height);
+  const refF = await fft2dComplex(refReal, new Float32Array(refReal.length), width, height, false, gpu);
+  const movF = await fft2dComplex(movReal, new Float32Array(movReal.length), width, height, false, gpu);
+  const workW = refF.width;
+  const workH = refF.height;
+  const workSize = workW * workH;
+  const crossReal = new Float32Array(workSize);
+  const crossImag = new Float32Array(workSize);
+  for (let i = 0; i < workSize; i++) {
+    const real = refF.real[i] * movF.real[i] + refF.imag[i] * movF.imag[i];
+    const imag = refF.imag[i] * movF.real[i] - refF.real[i] * movF.imag[i];
+    crossReal[i] = real;
+    crossImag[i] = imag;
+  }
+  const corr = await fft2dComplex(crossReal, crossImag, workW, workH, true, gpu);
+  let peakIdx = 0;
+  let peakValue = -Infinity;
+  let total = 0;
+  for (let i = 0; i < corr.real.length; i++) {
+    const value = Math.hypot(corr.real[i], corr.imag[i]);
+    total += value;
+    if (value > peakValue) {
+      peakValue = value;
+      peakIdx = i;
+    }
+  }
+  const peakRow = Math.floor(peakIdx / corr.width);
+  const peakCol = peakIdx % corr.width;
+  const at = (row: number, col: number) => {
+    const r = (row + corr.height) % corr.height;
+    const c = (col + corr.width) % corr.width;
+    const idx = r * corr.width + c;
+    return Math.hypot(corr.real[idx], corr.imag[idx]);
+  };
+  const rowDelta = parabolicPeakDelta(at(peakRow - 1, peakCol), peakValue, at(peakRow + 1, peakCol));
+  const colDelta = parabolicPeakDelta(at(peakRow, peakCol - 1), peakValue, at(peakRow, peakCol + 1));
+  const row = wrappedPeakOffset(peakRow, corr.height) + rowDelta;
+  const col = wrappedPeakOffset(peakCol, corr.width) + colDelta;
+  const background = total > 0 ? (total - peakValue) / Math.max(1, corr.real.length - 1) : 0;
+  const quality = background > 1e-12 ? peakValue / background : peakValue;
+  return { row, col, quality };
+}
+
+function shiftFrameBilinear(
+  frame: Float32Array,
+  width: number,
+  height: number,
+  rowShift: number,
+  colShift: number,
+  fillValue: number,
+): Float32Array {
+  if (Math.abs(rowShift) < 1e-4 && Math.abs(colShift) < 1e-4) return frame;
+  const out = new Float32Array(width * height);
+  for (let row = 0; row < height; row++) {
+    const srcRow = row - rowShift;
+    const r0 = Math.floor(srcRow);
+    const rf = srcRow - r0;
+    for (let col = 0; col < width; col++) {
+      const srcCol = col - colShift;
+      const c0 = Math.floor(srcCol);
+      const cf = srcCol - c0;
+      const dst = row * width + col;
+      if (r0 < 0 || c0 < 0 || r0 >= height - 1 || c0 >= width - 1) {
+        out[dst] = fillValue;
+        continue;
+      }
+      const idx = r0 * width + c0;
+      const v00 = frame[idx];
+      const v01 = frame[idx + 1];
+      const v10 = frame[idx + width];
+      const v11 = frame[idx + width + 1];
+      out[dst] =
+        v00 * (1 - rf) * (1 - cf) +
+        v01 * (1 - rf) * cf +
+        v10 * rf * (1 - cf) +
+        v11 * rf * cf;
+    }
+  }
+  return out;
+}
 
 /** Sample intensity values along a line using bilinear interpolation. */
 function sampleSingleLine(data: Float32Array, w: number, h: number, row0: number, col0: number, row1: number, col1: number): Float32Array {
@@ -1080,14 +2111,445 @@ function pointToSegmentDistance(col: number, row: number, col0: number, row0: nu
 // never clobbers a cached playback slot.
 const OFFLINE_HIST_SLOT = 1_000_000;
 const CANVAS_TARGET_SIZE = 600;
+const MAX_INTERACTIVE_GRID_CANVAS_EDGE = 4096;
+const MAX_INTERACTIVE_GRID_CANVAS_PIXELS = 8_388_608;
 const MAX_PANEL_COLUMNS = 12;
 const FFT_OVERLAY_MAX_SOURCE_SIZE = 512;
+const FFT_PLAYBACK_UPDATE_INTERVAL_MS = 250;
 const MIN_ZOOM = 0.5;
 const MIN_IMAGE_ZOOM = 1;
 const MAX_ZOOM = 30;
-const MAX_PLAYBACK_FPS = 30;
+const MAX_PLAYBACK_FPS = 60;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
+const DEFAULT_ANIMATION_EXPORT_FPS = 8;
+const MIN_ANIMATION_TITLE_FONT_PX = 12;
+const MIN_ANIMATION_SCALE_FONT_PX = 12;
+const MIN_ANIMATION_SCALE_BAR_THICKNESS_PX = 5;
+const MIN_ANIMATION_OVERLAY_MARGIN_PX = 12;
 const ANIMATION_QUALITY_SCALE: Record<string, number> = { low: 0.35, medium: 0.6, high: 1.0 };
+const ANIMATION_QUALITY_OPTIONS = ["low", "medium", "high"] as const;
+type AnimationQuality = typeof ANIMATION_QUALITY_OPTIONS[number];
+type ExportPanelMode = "home" | "gif" | "html" | "mp4";
+type ExportSpatialPreset = "full" | "down2" | "down4" | "edge512" | "edge1024";
+type GifExportPreset = "slides" | "compact" | "full" | "custom";
+const EXPORT_SPATIAL_OPTIONS: Array<{
+  value: ExportSpatialPreset;
+  label: string;
+  downsample: number;
+  maxEdgePx: number | null;
+}> = [
+  { value: "full", label: "Full", downsample: 1, maxEdgePx: null },
+  { value: "down2", label: "2x downsample", downsample: 2, maxEdgePx: null },
+  { value: "down4", label: "4x downsample", downsample: 4, maxEdgePx: null },
+  { value: "edge512", label: "Max edge 512 px", downsample: 1, maxEdgePx: 512 },
+  { value: "edge1024", label: "Max edge 1024 px", downsample: 1, maxEdgePx: 1024 },
+];
+
+function fftOverlayTopInsetPad(
+  insetPad: number,
+  showPanelTitles: boolean | undefined,
+  panelCount: number,
+  panelTitleFontSize: number | undefined,
+): number {
+  if (showPanelTitles === false || panelCount <= 1) return insetPad;
+  const titleClearance = 6 + Math.max(14, (panelTitleFontSize || 11) * 1.35);
+  return Math.max(insetPad, titleClearance);
+}
+const GIF_EXPORT_PRESETS: Array<{ value: GifExportPreset; label: string }> = [
+  { value: "slides", label: "Slides" },
+  { value: "compact", label: "Compact" },
+  { value: "full", label: "Full" },
+];
+const PANEL_GPU_READY_TIMEOUT_MS = 1200;
+const INITIAL_NATIVE_PREVIEW_DELAY_MS = 350;
+
+let browserGifPaletteCache: Uint8Array | null = null;
+
+function asciiBytes(value: string): Uint8Array {
+  const out = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
+  return out;
+}
+
+function u16Bytes(value: number): Uint8Array {
+  const v = Math.max(0, Math.min(65535, Math.round(value)));
+  return new Uint8Array([v & 0xff, (v >> 8) & 0xff]);
+}
+
+function concatUint8(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+function browserGifPalette(): Uint8Array {
+  if (browserGifPaletteCache) return browserGifPaletteCache;
+  const palette = new Uint8Array(256 * 3);
+  let idx = 0;
+  for (let r = 0; r < 6; r++) {
+    for (let g = 0; g < 6; g++) {
+      for (let b = 0; b < 6; b++) {
+        const j = idx * 3;
+        palette[j] = r * 51;
+        palette[j + 1] = g * 51;
+        palette[j + 2] = b * 51;
+        idx++;
+      }
+    }
+  }
+  const grayCount = 256 - idx;
+  for (let i = 0; idx < 256; idx++, i++) {
+    const v = grayCount <= 1 ? 0 : Math.round((i / (grayCount - 1)) * 255);
+    const j = idx * 3;
+    palette[j] = v;
+    palette[j + 1] = v;
+    palette[j + 2] = v;
+  }
+  browserGifPaletteCache = palette;
+  return palette;
+}
+
+function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
+  const out = new Uint8Array(Math.floor(rgba.length / 4));
+  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
+    const a = rgba[j + 3];
+    const r = a === 255 ? rgba[j] : Math.round((rgba[j] * a + 255 * (255 - a)) / 255);
+    const g = a === 255 ? rgba[j + 1] : Math.round((rgba[j + 1] * a + 255 * (255 - a)) / 255);
+    const b = a === 255 ? rgba[j + 2] : Math.round((rgba[j + 2] * a + 255 * (255 - a)) / 255);
+    const rq = Math.max(0, Math.min(5, Math.round(r / 51)));
+    const gq = Math.max(0, Math.min(5, Math.round(g / 51)));
+    const bq = Math.max(0, Math.min(5, Math.round(b / 51)));
+    out[i] = rq * 36 + gq * 6 + bq;
+  }
+  return out;
+}
+
+function gifLzwEncode(indices: Uint8Array): Uint8Array {
+  const minCodeSize = 8;
+  const clearCode = 1 << minCodeSize;
+  const endCode = clearCode + 1;
+  const codeSize = minCodeSize + 1;
+  const bytes: number[] = [];
+  let bitBuffer = 0;
+  let bitCount = 0;
+  const writeCode = (code: number) => {
+    bitBuffer |= code << bitCount;
+    bitCount += codeSize;
+    while (bitCount >= 8) {
+      bytes.push(bitBuffer & 0xff);
+      bitBuffer >>= 8;
+      bitCount -= 8;
+    }
+  };
+
+  // Conservative "clear-block" GIF LZW: emit raw color indices and reset before
+  // the decoder grows past 9-bit codes. It is larger than dictionary-compressed
+  // GIF, but browser-side standalone export values correctness over file size.
+  writeCode(clearCode);
+  let sinceClear = 0;
+  for (let i = 0; i < indices.length; i++) {
+    if (sinceClear >= 250) {
+      writeCode(clearCode);
+      sinceClear = 0;
+    }
+    writeCode(indices[i]);
+    sinceClear++;
+  }
+  writeCode(endCode);
+  if (bitCount > 0) bytes.push(bitBuffer & 0xff);
+  return new Uint8Array(bytes);
+}
+
+function pushGifSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
+  for (let offset = 0; offset < data.length; offset += 255) {
+    const chunk = data.subarray(offset, Math.min(offset + 255, data.length));
+    parts.push(new Uint8Array([chunk.length]));
+    parts.push(chunk);
+  }
+  parts.push(new Uint8Array([0]));
+}
+
+function encodeIndexedGif(
+  width: number,
+  height: number,
+  frames: Uint8Array[],
+  delayCs: number,
+): Uint8Array {
+  if (width <= 0 || height <= 0 || frames.length === 0) {
+    throw new Error("GIF export needs at least one non-empty frame.");
+  }
+  const pixelCount = width * height;
+  for (const frame of frames) {
+    if (frame.length !== pixelCount) {
+      throw new Error(`GIF frame has ${frame.length} pixels; expected ${pixelCount}.`);
+    }
+  }
+  const parts: Uint8Array[] = [
+    asciiBytes("GIF89a"),
+    u16Bytes(width),
+    u16Bytes(height),
+    new Uint8Array([0xf7, 0, 0]),
+    browserGifPalette(),
+    new Uint8Array([0x21, 0xff, 0x0b]),
+    asciiBytes("NETSCAPE2.0"),
+    new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),
+  ];
+  const delay = Math.max(1, Math.min(65535, Math.round(delayCs)));
+  for (const frame of frames) {
+    parts.push(new Uint8Array([0x21, 0xf9, 0x04, 0x04]));
+    parts.push(u16Bytes(delay));
+    parts.push(new Uint8Array([0, 0]));
+    parts.push(new Uint8Array([0x2c, 0, 0, 0, 0]));
+    parts.push(u16Bytes(width));
+    parts.push(u16Bytes(height));
+    parts.push(new Uint8Array([0, 8]));
+    pushGifSubBlocks(parts, gifLzwEncode(frame));
+  }
+  parts.push(new Uint8Array([0x3b]));
+  return concatUint8(parts);
+}
+
+type Mp4Sample = {
+  data: Uint8Array;
+  timestamp: number;
+  duration: number;
+  key: boolean;
+};
+
+function mp4U8(...values: number[]): Uint8Array {
+  return new Uint8Array(values.map((value) => value & 0xff));
+}
+
+function mp4U16(value: number): Uint8Array {
+  const v = Math.max(0, Math.min(0xffff, Math.round(value)));
+  return new Uint8Array([(v >>> 8) & 0xff, v & 0xff]);
+}
+
+function mp4U32(value: number): Uint8Array {
+  const v = Math.max(0, Math.min(0xffffffff, Math.round(value)));
+  return new Uint8Array([(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]);
+}
+
+function mp4Ascii(value: string): Uint8Array {
+  return asciiBytes(value);
+}
+
+function mp4Zeros(length: number): Uint8Array {
+  return new Uint8Array(Math.max(0, Math.round(length)));
+}
+
+function copyMp4Bytes(source: ArrayBufferLike | ArrayBufferView<ArrayBufferLike>): Uint8Array {
+  const view = ArrayBuffer.isView(source)
+    ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+    : new Uint8Array(source);
+  const out = new Uint8Array(view.byteLength);
+  out.set(view);
+  return out;
+}
+
+function mp4Box(type: string, ...payloads: Uint8Array[]): Uint8Array {
+  const payload = concatUint8(payloads);
+  const size = 8 + payload.byteLength;
+  return concatUint8([mp4U32(size), mp4Ascii(type), payload]);
+}
+
+function mp4FullBox(type: string, version: number, flags: number, ...payloads: Uint8Array[]): Uint8Array {
+  return mp4Box(
+    type,
+    mp4U8(version & 0xff, (flags >>> 16) & 0xff, (flags >>> 8) & 0xff, flags & 0xff),
+    ...payloads,
+  );
+}
+
+function mp4Fixed16(value: number): Uint8Array {
+  return mp4U32(Math.round(value * 65536));
+}
+
+function mp4Fixed8(value: number): Uint8Array {
+  return mp4U16(Math.round(value * 256));
+}
+
+function mp4CompressorName(value: string): Uint8Array {
+  const out = new Uint8Array(32);
+  const name = asciiBytes(value.slice(0, 31));
+  out[0] = name.byteLength;
+  out.set(name, 1);
+  return out;
+}
+
+function mp4Matrix(): Uint8Array {
+  return concatUint8([
+    mp4Fixed16(1), mp4U32(0), mp4U32(0),
+    mp4U32(0), mp4Fixed16(1), mp4U32(0),
+    mp4U32(0), mp4U32(0), mp4U32(0x40000000),
+  ]);
+}
+
+function mp4Ftyp(): Uint8Array {
+  return mp4Box("ftyp", mp4Ascii("isom"), mp4U32(0x200), mp4Ascii("isom"), mp4Ascii("iso2"), mp4Ascii("avc1"), mp4Ascii("mp41"));
+}
+
+function mp4Stts(durations: number[]): Uint8Array {
+  const entries: { count: number; duration: number }[] = [];
+  for (const duration of durations) {
+    const d = Math.max(1, Math.round(duration));
+    const last = entries[entries.length - 1];
+    if (last && last.duration === d) last.count++;
+    else entries.push({ count: 1, duration: d });
+  }
+  return mp4FullBox("stts", 0, 0, mp4U32(entries.length), ...entries.flatMap((entry) => [mp4U32(entry.count), mp4U32(entry.duration)]));
+}
+
+function mp4Stss(samples: Mp4Sample[]): Uint8Array {
+  const keys = samples
+    .map((sample, index) => sample.key ? index + 1 : 0)
+    .filter((index) => index > 0);
+  const syncSamples = keys.length ? keys : [1];
+  return mp4FullBox("stss", 0, 0, mp4U32(syncSamples.length), ...syncSamples.map(mp4U32));
+}
+
+function mp4Avc1(width: number, height: number, avcDescription: Uint8Array): Uint8Array {
+  return mp4Box(
+    "avc1",
+    mp4Zeros(6),
+    mp4U16(1),
+    mp4U16(0),
+    mp4U16(0),
+    mp4Zeros(12),
+    mp4U16(width),
+    mp4U16(height),
+    mp4Fixed16(72),
+    mp4Fixed16(72),
+    mp4U32(0),
+    mp4U16(1),
+    mp4CompressorName("QuantEM WebCodecs"),
+    mp4U16(0x18),
+    mp4U16(0xffff),
+    mp4Box("avcC", avcDescription),
+  );
+}
+
+function mp4Moov(
+  samples: Mp4Sample[],
+  width: number,
+  height: number,
+  timescale: number,
+  avcDescription: Uint8Array,
+  chunkOffset: number,
+): Uint8Array {
+  const durations = samples.map((sample) => sample.duration);
+  const totalDuration = durations.reduce((sum, duration) => sum + duration, 0);
+  const sampleSizes = samples.map((sample) => sample.data.byteLength);
+  const mvhd = mp4FullBox(
+    "mvhd",
+    0,
+    0,
+    mp4U32(0),
+    mp4U32(0),
+    mp4U32(timescale),
+    mp4U32(totalDuration),
+    mp4Fixed16(1),
+    mp4Fixed8(1),
+    mp4Zeros(10),
+    mp4Matrix(),
+    mp4Zeros(24),
+    mp4U32(2),
+  );
+  const tkhd = mp4FullBox(
+    "tkhd",
+    0,
+    0x000007,
+    mp4U32(0),
+    mp4U32(0),
+    mp4U32(1),
+    mp4U32(0),
+    mp4U32(totalDuration),
+    mp4Zeros(8),
+    mp4U16(0),
+    mp4U16(0),
+    mp4Fixed8(0),
+    mp4U16(0),
+    mp4Matrix(),
+    mp4Fixed16(width),
+    mp4Fixed16(height),
+  );
+  const mdhd = mp4FullBox("mdhd", 0, 0, mp4U32(0), mp4U32(0), mp4U32(timescale), mp4U32(totalDuration), mp4U16(0x55c4), mp4U16(0));
+  const hdlr = mp4FullBox("hdlr", 0, 0, mp4U32(0), mp4Ascii("vide"), mp4Zeros(12), mp4Ascii("VideoHandler\0"));
+  const vmhd = mp4FullBox("vmhd", 0, 1, mp4U16(0), mp4U16(0), mp4U16(0), mp4U16(0));
+  const dref = mp4FullBox("dref", 0, 0, mp4U32(1), mp4FullBox("url ", 0, 1));
+  const dinf = mp4Box("dinf", dref);
+  const stsd = mp4FullBox("stsd", 0, 0, mp4U32(1), mp4Avc1(width, height, avcDescription));
+  const stsc = mp4FullBox("stsc", 0, 0, mp4U32(1), mp4U32(1), mp4U32(samples.length), mp4U32(1));
+  const stsz = mp4FullBox("stsz", 0, 0, mp4U32(0), mp4U32(sampleSizes.length), ...sampleSizes.map(mp4U32));
+  const stco = mp4FullBox("stco", 0, 0, mp4U32(1), mp4U32(chunkOffset));
+  const stbl = mp4Box("stbl", stsd, mp4Stts(durations), mp4Stss(samples), stsc, stsz, stco);
+  const minf = mp4Box("minf", vmhd, dinf, stbl);
+  const mdia = mp4Box("mdia", mdhd, hdlr, minf);
+  const trak = mp4Box("trak", tkhd, mdia);
+  return mp4Box("moov", mvhd, trak);
+}
+
+function encodeAvcMp4(samples: Mp4Sample[], width: number, height: number, avcDescription: Uint8Array): Uint8Array {
+  if (!samples.length) throw new Error("MP4 export needs at least one encoded frame.");
+  if (!avcDescription.byteLength) throw new Error("Browser did not provide the H.264 AVC configuration needed for MP4.");
+  const timescale = 1_000_000;
+  const mdatPayload = concatUint8(samples.map((sample) => sample.data));
+  const ftyp = mp4Ftyp();
+  let moov = mp4Moov(samples, width, height, timescale, avcDescription, 0);
+  const chunkOffset = ftyp.byteLength + moov.byteLength + 8;
+  moov = mp4Moov(samples, width, height, timescale, avcDescription, chunkOffset);
+  return concatUint8([ftyp, moov, mp4Box("mdat", mdatPayload)]);
+}
+
+function browserMp4Bitrate(width: number, height: number, fps: number): number {
+  const pixelsPerSecond = Math.max(1, width * height * clampPlaybackFps(fps));
+  return Math.max(500_000, Math.min(12_000_000, Math.round(pixelsPerSecond * 0.18)));
+}
+
+function browserMp4Window(): BrowserMp4Window {
+  return window as BrowserMp4Window;
+}
+
+const BROWSER_MP4_CODECS = ["avc1.42001e", "avc1.42E01E", "avc1.42001f"];
+
+function browserMp4Config(width: number, height: number, fps: number, codec = BROWSER_MP4_CODECS[0]): BrowserVideoEncoderConfig {
+  return {
+    codec,
+    width,
+    height,
+    bitrate: browserMp4Bitrate(width, height, fps),
+    framerate: clampPlaybackFps(fps),
+    hardwareAcceleration: "no-preference",
+    avc: { format: "avc" },
+  };
+}
+
+async function selectBrowserMp4Config(width = 512, height = 512, fps = 8): Promise<BrowserVideoEncoderConfig | null> {
+  const w = browserMp4Window();
+  if (!w.VideoEncoder || !w.VideoFrame || !w.VideoEncoder.isConfigSupported) return null;
+  const evenW = width + (width % 2);
+  const evenH = height + (height % 2);
+  for (const codec of BROWSER_MP4_CODECS) {
+    try {
+      const config = browserMp4Config(evenW, evenH, fps, codec);
+      const support = await w.VideoEncoder.isConfigSupported(config);
+      if (support.supported) return support.config || config;
+    } catch {
+      // Keep probing lower/fallback H.264 profiles.
+    }
+  }
+  return null;
+}
+
+async function supportsBrowserMp4(width = 512, height = 512, fps = 8): Promise<boolean> {
+  return (await selectBrowserMp4Config(width, height, fps)) !== null;
+}
 
 function formatEstimatedHtmlSize(payloadBytes: number): string {
   const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
@@ -1095,6 +2557,60 @@ function formatEstimatedHtmlSize(payloadBytes: number): string {
   if (mb >= 100) return `~${Math.round(mb)} MB`;
   if (mb >= 10) return `~${mb.toFixed(1)} MB`;
   return `~${mb.toFixed(2)} MB`;
+}
+
+function animationOutputScale(
+  width: number,
+  height: number,
+  quality: string,
+  downsample = 1,
+  maxEdgePx: number | null = null,
+  visiblePanels = 1,
+  maxCols = 1,
+  panelGap = 0,
+): number {
+  const base = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+  const factor = Math.max(1, Math.round(downsample || 1));
+  let scale = Math.min(1, base / factor);
+  if (maxEdgePx && maxEdgePx > 0) {
+    const panels = Math.max(1, Math.round(visiblePanels || 1));
+    const cols = maxCols <= 0 ? panels : Math.max(1, Math.min(Math.round(maxCols || 1), panels));
+    const rows = Math.max(1, Math.ceil(panels / cols));
+    const gap = Math.max(0, Number(panelGap) || 0);
+    const layoutW = cols * Math.max(1, width) + Math.max(0, cols - 1) * gap;
+    const layoutH = rows * Math.max(1, height) + Math.max(0, rows - 1) * gap;
+    scale = Math.min(scale, maxEdgePx / Math.max(1, layoutW, layoutH));
+  }
+  return Math.max(scale, 1 / Math.max(1, width, height));
+}
+
+function spatialOptionFor(value: ExportSpatialPreset) {
+  return EXPORT_SPATIAL_OPTIONS.find((option) => option.value === value) || EXPORT_SPATIAL_OPTIONS[0];
+}
+
+function buildAnimationFrameIndices(
+  nSlices: number,
+  startOne: number,
+  endOne: number,
+  everyN: number,
+  maxFrames: number,
+): number[] {
+  const total = Math.max(1, Math.floor(nSlices || 1));
+  const start = Math.max(0, Math.min(total - 1, Math.round(startOne || 1) - 1));
+  const end = Math.max(start, Math.min(total - 1, Math.round(endOne || total) - 1));
+  const step = Math.max(1, Math.round(everyN || 1));
+  const frames: number[] = [];
+  for (let idx = start; idx <= end; idx += step) frames.push(idx);
+  const cap = Math.max(0, Math.round(maxFrames || 0));
+  if (cap > 0 && frames.length > cap) {
+    if (cap === 1) return [frames[0]];
+    const sampled: number[] = [];
+    for (let i = 0; i < cap; i++) {
+      sampled.push(frames[Math.round((i * (frames.length - 1)) / (cap - 1))]);
+    }
+    return sampled;
+  }
+  return frames;
 }
 
 function formatEstimatedAnimationWork(
@@ -1105,21 +2621,23 @@ function formatEstimatedAnimationWork(
   maxCols: number,
   panelGap: number,
   quality: string,
+  downsample = 1,
+  maxEdgePx: number | null = null,
 ): string {
-  const scale = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+  const scale = animationOutputScale(width, height, quality, downsample, maxEdgePx, visiblePanels, maxCols, panelGap);
   const panelW = Math.max(1, Math.floor(Math.max(1, width) * scale));
   const panelH = Math.max(1, Math.floor(Math.max(1, height) * scale));
   const panels = Math.max(1, visiblePanels);
   const cols = maxCols <= 0 ? panels : Math.max(1, Math.min(maxCols, panels));
   const rows = Math.max(1, Math.ceil(panels / cols));
-  const gap = Math.max(0, Math.round(panelGap || 0));
+  const gap = Math.max(0, Math.round((panelGap || 0) * scale));
   const outW = cols * panelW + Math.max(0, cols - 1) * gap;
   const outH = rows * panelH + Math.max(0, rows - 1) * gap;
   const rgbBytes = outW * outH * Math.max(1, nSlices) * 3;
   const mb = rgbBytes / (1024 * 1024);
-  if (mb >= 100) return `~${Math.round(mb)} MB work`;
-  if (mb >= 10) return `~${mb.toFixed(1)} MB work`;
-  return `~${mb.toFixed(2)} MB work`;
+  if (mb >= 100) return `~${Math.round(mb)} MB before compression`;
+  if (mb >= 10) return `~${mb.toFixed(1)} MB before compression`;
+  return `~${mb.toFixed(2)} MB before compression`;
 }
 
 const clampPlaybackFps = (value: number) => {
@@ -1264,6 +2782,48 @@ function renderFramePlayback(
       rgba[j + 1] = lut[k + 1];
       rgba[j + 2] = lut[k + 2];
       rgba[j + 3] = 255;
+    }
+  }
+}
+
+/** Render one packed multi-panel slice into RGBA without allocating a panel copy.
+ *
+ * Large standalone reports can pack many panels side-by-side in one frame
+ * (for example 8 × 1366 × 1366). Copying each panel into a fresh Float32Array
+ * during playback allocates tens of MB per frame and can crash Chromium with
+ * `Array buffer allocation failed`. This renderer walks the packed source rows
+ * directly and writes into a reusable per-panel ImageData buffer.
+ */
+function renderPackedPanelPlayback(
+  source: Float32Array,
+  sourceWidth: number,
+  sourceX0: number,
+  panelWidth: number,
+  panelHeight: number,
+  rgba: Uint8ClampedArray,
+  lut: Uint8Array,
+  vmin: number,
+  vmax: number,
+  logScale: boolean,
+): void {
+  const range = vmax - vmin;
+  const invRange = range > 0 ? 255 / range : 0;
+  let dst = 0;
+  for (let row = 0; row < panelHeight; row++) {
+    let src = row * sourceWidth + sourceX0;
+    const end = src + panelWidth;
+    for (; src < end; src++) {
+      const raw = source[src];
+      const value = logScale
+        ? (raw >= 0 ? Math.log1p(raw) : -Math.log1p(-raw))
+        : raw;
+      const idx = value <= vmin ? 0 : value >= vmax ? 255 : ((value - vmin) * invRange) | 0;
+      const lutIdx = idx * 3;
+      rgba[dst] = lut[lutIdx];
+      rgba[dst + 1] = lut[lutIdx + 1];
+      rgba[dst + 2] = lut[lutIdx + 2];
+      rgba[dst + 3] = 255;
+      dst += 4;
     }
   }
 }
@@ -1438,6 +2998,7 @@ function Show3D() {
   const canvasRepaintSignal = useCanvasRepaintSignal();
   const model = useModel();
   const folderWatchLive = useFolderWatchModelLive(model);
+  React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   // Theme detection (offline HTML exports force a light/white background)
@@ -1468,6 +3029,12 @@ function Show3D() {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: UI_FONT, "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
   };
+  const themedFastMenuProps = {
+    ...themedMenuProps,
+    keepMounted: true,
+    transitionDuration: 0,
+    MenuListProps: { dense: true },
+  };
 
   // Model state (synced with Python)
   const [sliceIdx, setSliceIdx] = useModelState<number>("slice_idx");
@@ -1493,8 +3060,10 @@ function Show3D() {
   // Offline mode: standalone HTML can carry either a compact uint8 stack
   // (_offline_stack) or an exact float32 stack (_offline_float_stack). JS
   // slices locally on scrub so exported reports do not need a Python kernel.
+  // Sidecar path: empty _offline_stack + _offline_stack_url → fetch from disk.
   const [offline] = useModelState<boolean>("offline");
-  const [offlineStack] = useModelState<DataView>("_offline_stack");
+  const [offlineStackTrait] = useModelState<DataView>("_offline_stack");
+  const [offlineStackUrl] = useModelState<string>("_offline_stack_url");
   const [offlineFloatStack] = useModelState<DataView>("_offline_float_stack");
   const [offlineMin] = useModelState<number>("_offline_min");
   const [offlineMax] = useModelState<number>("_offline_max");
@@ -1504,6 +3073,10 @@ function Show3D() {
   const [panelWidthPx] = useModelState<number>("panel_width_px");
   const [sharedPanelSource] = useModelState<boolean>("shared_panel_source");
   const [separatePanelFrames] = useModelState<boolean>("separate_panel_frames");
+  const offlineStack: DataView | null =
+    offlineStackTrait && offlineStackTrait.byteLength > 0
+      ? offlineStackTrait
+      : null;
   // Reused scratch Float32Array sized to one frame so per-scrub dequant
   // doesn't re-allocate. Indexed by (RGB, width, height) since reshape resets it.
   const offlineScratch = React.useRef<Float32Array | null>(null);
@@ -1512,25 +3085,373 @@ function Show3D() {
   const offlineFramePrewarmSerialRef = React.useRef(0);
   // Local live index used by the offline frameBytes useMemo. During MUI Slider
   // drag, `setSliceIdx` (anywidget useModelState) goes through model.set +
-  // save_changes which appears to batch under rapid mousemove ticks - useMemo
-  // doesn't see sliceIdx change until the user releases the slider, so the
-  // canvas stays on the old frame the whole drag. Local React state updates
-  // synchronously per tick. scrubToSlice writes both; the model trait is still
-  // updated for state.dict round-trips and observers.
+  // save_changes and can batch under rapid pointer ticks. Keep slider/canvas
+  // state local while dragging; commit the synced model trait on release or
+  // after the scrub stream settles.
   const [liveSliceIdx, setLiveSliceIdx] = React.useState<number>(sliceIdx);
   React.useEffect(() => { setLiveSliceIdx(sliceIdx); }, [sliceIdx]);
+  // Sidecar: load FULL stack into RAM once (per-frame Uint8Array slots — never
+  // one multi-GB ArrayBuffer, which Chrome often refuses). Then scrub is free.
+  const sidecarU8FrameCacheRef = React.useRef<Map<number, Uint8Array>>(new Map());
+  const sidecarFetchInflightRef = React.useRef<Set<number>>(new Set());
+  const sidecarRamReadyRef = React.useRef(false);
+  const sidecarLoadKeyRef = React.useRef("");
+  const sidecarBitmapFrameCacheRef = React.useRef<Map<number, ImageBitmap[]>>(new Map());
+  const sidecarBitmapReadyRef = React.useRef(false);
+  const sidecarBitmapCompleteRef = React.useRef(false);
+  const sidecarBitmapBuildSerialRef = React.useRef(0);
+  const sidecarCompositeFrameCacheRef = React.useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const sidecarCompositeReadyRef = React.useRef(false);
+  const sidecarCompositeCompleteRef = React.useRef(false);
+  const sidecarCompositeBuildSerialRef = React.useRef(0);
+  const sidecarPaintScratchCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const sidecarGpuPresenterRef = React.useRef<{
+    device: GPUDevice;
+    context: GPUCanvasContext;
+    pipeline: GPURenderPipeline;
+    sampler: GPUSampler;
+    bindGroups: Map<number, GPUBindGroup>;
+    textures: GPUTexture[];
+    width: number;
+    height: number;
+  } | null>(null);
+  const sidecarGpuReadyRef = React.useRef(false);
+  const sidecarGpuBuildSerialRef = React.useRef(0);
+  const sidecarSliceCommitTimerRef = React.useRef<number | null>(null);
+  const sidecarDisplayCacheDirtyRef = React.useRef(false);
+  const sidecarCompositeStyleKeyRef = React.useRef("");
+  const [sidecarBitmapReady, setSidecarBitmapReady] = React.useState(false);
+  const [sidecarBitmapComplete, setSidecarBitmapComplete] = React.useState(false);
+  const [sidecarCompositeReady, setSidecarCompositeReady] = React.useState(false);
+  const [sidecarCompositeComplete, setSidecarCompositeComplete] = React.useState(false);
+  const [, setSidecarGpuReady] = React.useState(false);
+  const [sidecarU8Frame, setSidecarU8Frame] = React.useState<{
+    idx: number;
+    u8: Uint8Array;
+  } | null>(null);
+  const [sidecarRamReady, setSidecarRamReady] = React.useState(false);
+  const [offlineStackFetchStatus, setOfflineStackFetchStatusVisible] = React.useState<string>("");
+  // A display cache is an internal playback optimization, not report UI. In
+  // particular, updating a visible cache counter during its build causes extra
+  // React work precisely while the browser is preparing a smooth scrub/play
+  // path. Keep genuine sidecar-load messages and errors, but make all cache
+  // work silent and clear any preceding load message as it begins.
+  const setOfflineStackFetchStatus = React.useCallback((status: string) => {
+    if (/(?:display|playback) cache/i.test(status)) {
+      setOfflineStackFetchStatusVisible("");
+      return;
+    }
+    setOfflineStackFetchStatusVisible(status);
+  }, []);
+  const sidecarMode = Boolean(
+    (offlineStackUrl || "").trim()
+    && !(offlineStackTrait && offlineStackTrait.byteLength > 0),
+  );
+  const enableSidecarGpuTexturePresenter = true;
+  const enableSidecarNativePanelBitmapCache = false;
+  const clearSidecarBitmapCache = React.useCallback(() => {
+    sidecarCompositeFrameCacheRef.current.clear();
+    sidecarCompositeReadyRef.current = false;
+    sidecarCompositeCompleteRef.current = false;
+    setSidecarCompositeReady(false);
+    setSidecarCompositeComplete(false);
+    if (sidecarGpuPresenterRef.current) {
+      for (const texture of sidecarGpuPresenterRef.current.textures) {
+        try { texture.destroy(); } catch { /* ignore */ }
+      }
+    }
+    sidecarGpuPresenterRef.current = null;
+    sidecarGpuReadyRef.current = false;
+    setSidecarGpuReady(false);
+    for (const bitmaps of sidecarBitmapFrameCacheRef.current.values()) {
+      for (const bitmap of bitmaps) {
+        try { bitmap.close(); } catch { /* ignore */ }
+      }
+    }
+    sidecarBitmapFrameCacheRef.current.clear();
+    sidecarBitmapReadyRef.current = false;
+    sidecarBitmapCompleteRef.current = false;
+    setSidecarBitmapReady(false);
+    setSidecarBitmapComplete(false);
+  }, []);
+  const clearSidecarCompositeCache = React.useCallback(() => {
+    sidecarCompositeFrameCacheRef.current.clear();
+    sidecarCompositeReadyRef.current = false;
+    sidecarCompositeCompleteRef.current = false;
+    // A cache is only valid for the exact display style that generated it.
+    // Clear the key with the frames so a Smooth toggle cannot momentarily
+    // reuse a nearest-neighbour (or interpolated) composite while zooming.
+    sidecarCompositeStyleKeyRef.current = "";
+    setSidecarCompositeReady(false);
+    setSidecarCompositeComplete(false);
+    if (sidecarGpuPresenterRef.current) {
+      for (const texture of sidecarGpuPresenterRef.current.textures) {
+        try { texture.destroy(); } catch { /* ignore */ }
+      }
+    }
+    sidecarGpuPresenterRef.current = null;
+    sidecarGpuReadyRef.current = false;
+    setSidecarGpuReady(false);
+  }, []);
+  const invalidateSidecarViewportCache = React.useCallback((reason: string) => {
+    sidecarCompositeBuildSerialRef.current += 1;
+    sidecarGpuBuildSerialRef.current += 1;
+    sidecarCompositeStyleKeyRef.current = "";
+    sidecarDisplayCacheDirtyRef.current = false;
+    const hadViewportCache = (
+      sidecarCompositeFrameCacheRef.current.size > 0 ||
+      sidecarCompositeReadyRef.current ||
+      sidecarCompositeCompleteRef.current ||
+      sidecarGpuReadyRef.current ||
+      !!sidecarGpuPresenterRef.current
+    );
+    if (hadViewportCache) clearSidecarCompositeCache();
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.sidecarViewportInvalidatedReason = reason;
+      dbg.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+      dbg.sidecarGpuTextureFrames = 0;
+    }
+  }, [clearSidecarCompositeCache]);
+  React.useEffect(() => () => {
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+      sidecarSliceCommitTimerRef.current = null;
+    }
+  }, []);
+
+  // 1) Eager full-stack RAM load (once per url/shape).
+  React.useEffect(() => {
+    if (!sidecarMode) {
+      sidecarU8FrameCacheRef.current.clear();
+      sidecarRamReadyRef.current = false;
+      sidecarLoadKeyRef.current = "";
+      clearSidecarBitmapCache();
+      setSidecarRamReady(false);
+      setSidecarU8Frame(null);
+      setOfflineStackFetchStatus("");
+      return;
+    }
+    const url = (offlineStackUrl || "").trim();
+    const ch = isRgb ? 3 : 1;
+    const bytesPerFrame = Math.max(0, ch * Math.round(width || 0) * Math.round(height || 0));
+    const n = Math.max(1, Math.round(nSlices || 1));
+    if (!url || bytesPerFrame <= 0) return;
+
+    const loadKey = `${url}|${bytesPerFrame}|${n}|${ch}`;
+    if (sidecarLoadKeyRef.current === loadKey && sidecarRamReadyRef.current
+      && sidecarU8FrameCacheRef.current.size >= n) {
+      setSidecarRamReady(true);
+      setOfflineStackFetchStatus("");
+      return;
+    }
+
+    let cancelled = false;
+    sidecarRamReadyRef.current = false;
+    setSidecarRamReady(false);
+    sidecarU8FrameCacheRef.current.clear();
+    offlineFrameCacheRef.current.clear();
+    clearSidecarBitmapCache();
+    sidecarLoadKeyRef.current = loadKey;
+
+    const totalMb = (n * bytesPerFrame) / (1024 * 1024);
+    const loadStarted = performance.now();
+    const loadDebug = show3dPerfDebug();
+    if (loadDebug) {
+      loadDebug.sidecarRamFrames = 0;
+      loadDebug.sidecarRamLoadMs = null;
+      loadDebug.sidecarBytesPerFrame = bytesPerFrame;
+      loadDebug.sidecarTotalMb = Number(totalMb.toFixed(1));
+      loadDebug.sidecarBitmapComplete = false;
+    }
+    setOfflineStackFetchStatus(
+      `Loading full stack into RAM (0/${n} frames, ${totalMb.toFixed(0)} MB)…`,
+    );
+
+    (async () => {
+      try {
+        // Prefer streaming the whole file once, splitting into per-frame buffers
+        // as bytes arrive (avoids one giant ArrayBuffer and avoids N HTTP RTTs).
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const contentLen = Number(resp.headers.get("content-length") || 0);
+        const expected = n * bytesPerFrame;
+        if (contentLen > 0 && contentLen !== expected) {
+          // Fall through to Range-per-frame if size mismatches (partial file etc.)
+          throw new Error(`size mismatch content-length=${contentLen} expected=${expected}`);
+        }
+
+        if (resp.body) {
+          const reader = resp.body.getReader();
+          let received = 0;
+          let frameIdx = 0;
+          let frameFill = 0;
+          let current = new Uint8Array(bytesPerFrame);
+          while (frameIdx < n) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value || value.byteLength === 0) continue;
+            let off = 0;
+            while (off < value.byteLength && frameIdx < n) {
+              const need = bytesPerFrame - frameFill;
+              const take = Math.min(need, value.byteLength - off);
+              current.set(value.subarray(off, off + take), frameFill);
+              frameFill += take;
+              off += take;
+              received += take;
+              if (frameFill === bytesPerFrame) {
+                // Own buffer per frame (do not reuse `current` after store).
+                const stored = current;
+                sidecarU8FrameCacheRef.current.set(frameIdx, stored);
+                // Paint first available frame ASAP while the rest loads.
+                if (!cancelled && frameIdx === ((Math.round(liveSliceIdx) % n) + n) % n) {
+                  setSidecarU8Frame({ idx: frameIdx, u8: stored });
+                }
+                frameIdx += 1;
+                frameFill = 0;
+                if (frameIdx < n) current = new Uint8Array(bytesPerFrame);
+                if (!cancelled) {
+                  const dbg = show3dPerfDebug();
+                  if (dbg) dbg.sidecarRamFrames = frameIdx;
+                  const pct = ((100 * frameIdx) / n).toFixed(0);
+                  setOfflineStackFetchStatus(
+                    `Loading full stack into RAM… ${frameIdx}/${n} frames (${pct}%, ${totalMb.toFixed(0)} MB)`,
+                  );
+                }
+              }
+            }
+            if (cancelled) {
+              try { await reader.cancel(); } catch { /* ignore */ }
+              return;
+            }
+          }
+          if (frameIdx < n) {
+            throw new Error(`truncated stream: got ${frameIdx}/${n} frames (${received} bytes)`);
+          }
+        } else {
+          // No body stream: Range-fetch every frame (still no single multi-GB buffer).
+          for (let i = 0; i < n; i++) {
+            if (cancelled) return;
+            const start = i * bytesPerFrame;
+            const end = start + bytesPerFrame - 1;
+            const r = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+            if (!(r.ok || r.status === 206)) throw new Error(`HTTP ${r.status} frame ${i}`);
+            const buf = new Uint8Array(await r.arrayBuffer());
+            if (buf.byteLength !== bytesPerFrame) {
+              throw new Error(`frame ${i} size ${buf.byteLength}, expected ${bytesPerFrame}`);
+            }
+            sidecarU8FrameCacheRef.current.set(i, buf);
+            if (!cancelled) {
+              const pct = ((100 * (i + 1)) / n).toFixed(0);
+              setOfflineStackFetchStatus(
+                `Loading full stack into RAM… ${i + 1}/${n} frames (${pct}%, ${totalMb.toFixed(0)} MB)`,
+              );
+            }
+          }
+        }
+
+        if (cancelled) return;
+        sidecarRamReadyRef.current = true;
+        setSidecarRamReady(true);
+        setOfflineStackFetchStatus("Full stack in RAM; preparing full-resolution display cache…");
+        const ramDebug = show3dPerfDebug();
+        if (ramDebug) {
+          ramDebug.sidecarRamFrames = sidecarU8FrameCacheRef.current.size;
+          ramDebug.sidecarRamLoadMs = performance.now() - loadStarted;
+        }
+        const target = ((Math.round(liveSliceIdx) % n) + n) % n;
+        const u8 = sidecarU8FrameCacheRef.current.get(target);
+        if (u8) setSidecarU8Frame({ idx: target, u8 });
+      } catch (streamErr) {
+        // Fallback: sequential Range loads (works with Range servers even if
+        // full GET is awkward).
+        if (cancelled) return;
+        try {
+          setOfflineStackFetchStatus(
+            `Loading full stack into RAM (Range)… 0/${n} frames`,
+          );
+          for (let i = 0; i < n; i++) {
+            if (cancelled) return;
+            const start = i * bytesPerFrame;
+            const end = start + bytesPerFrame - 1;
+            const r = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+            if (!(r.ok || r.status === 206)) {
+              throw new Error(`HTTP ${r.status} for frame ${i}`);
+            }
+            const buf = new Uint8Array(await r.arrayBuffer());
+            if (buf.byteLength !== bytesPerFrame) {
+              throw new Error(`frame ${i} size ${buf.byteLength}, expected ${bytesPerFrame}`);
+            }
+            sidecarU8FrameCacheRef.current.set(i, buf);
+            if (!cancelled) {
+              const dbg = show3dPerfDebug();
+              if (dbg) dbg.sidecarRamFrames = i + 1;
+              const pct = ((100 * (i + 1)) / n).toFixed(0);
+              setOfflineStackFetchStatus(
+                `Loading full stack into RAM… ${i + 1}/${n} frames (${pct}%, ${totalMb.toFixed(0)} MB)`,
+              );
+            }
+          }
+          if (cancelled) return;
+          sidecarRamReadyRef.current = true;
+          setSidecarRamReady(true);
+          setOfflineStackFetchStatus("Full stack in RAM; preparing full-resolution display cache…");
+          const ramDebug = show3dPerfDebug();
+          if (ramDebug) {
+            ramDebug.sidecarRamFrames = sidecarU8FrameCacheRef.current.size;
+            ramDebug.sidecarRamLoadMs = performance.now() - loadStarted;
+          }
+          const target = ((Math.round(liveSliceIdx) % n) + n) % n;
+          const u8 = sidecarU8FrameCacheRef.current.get(target);
+          if (u8) setSidecarU8Frame({ idx: target, u8 });
+        } catch (err) {
+          if (!cancelled) {
+            sidecarRamReadyRef.current = false;
+            setSidecarRamReady(false);
+            setSidecarU8Frame(null);
+            setOfflineStackFetchStatus(
+              `Failed to load sidecar stack: ${err instanceof Error ? err.message : String(err)}`
+              + (streamErr instanceof Error ? ` (stream: ${streamErr.message})` : ""),
+            );
+          }
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally exclude liveSliceIdx — full load is once per stack identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidecarMode, offlineStackUrl, offlineStackTrait, width, height, nSlices, isRgb, clearSidecarBitmapCache]);
+
+  // 2) After RAM is ready, scrub only indexes memory (no network).
+  React.useEffect(() => {
+    if (!sidecarMode || !sidecarRamReady) return;
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const target = ((Math.round(liveSliceIdx) % n) + n) % n;
+    const u8 = sidecarU8FrameCacheRef.current.get(target);
+    if (u8) {
+      if (!sidecarBitmapReadyRef.current) setSidecarU8Frame({ idx: target, u8 });
+      setOfflineStackFetchStatus("");
+    }
+  }, [sidecarMode, sidecarRamReady, liveSliceIdx, nSlices]);
+
   const offlineFrameCacheLimit = React.useMemo(() => {
     const n = Math.max(1, Math.round(nSlices || 1));
     const pixelCount = Math.max(1, Math.round(width || 0) * Math.round(height || 0));
     if (!offline || pixelCount <= 0) return 0;
     if (offlineFloatStack && offlineFloatStack.byteLength > 0) return n;
+    if (sidecarMode) {
+      return Math.min(n, 2);
+    }
     const frameBytes = Math.max(1, pixelCount * (isRgb ? 3 : 1) * 4);
     const budgetFrames = Math.max(1, Math.floor(OFFLINE_FRAME_CACHE_BYTES / frameBytes));
     const minFrames = frameBytes <= OFFLINE_FRAME_CACHE_BYTES / OFFLINE_FRAME_CACHE_MIN_FRAMES
       ? OFFLINE_FRAME_CACHE_MIN_FRAMES
       : 1;
     return Math.max(1, Math.min(n, Math.max(minFrames, budgetFrames)));
-  }, [offline, offlineFloatStack, width, height, nSlices, isRgb]);
+  }, [offline, offlineFloatStack, width, height, nSlices, isRgb, sidecarMode]);
   React.useEffect(() => {
     offlineFrameCacheRef.current.clear();
     offlineFramePrewarmSerialRef.current++;
@@ -1581,48 +3502,79 @@ function Show3D() {
     const ch = isRgb ? 3 : 1;
     const floatsPerFrame = ch * width * height;
     const pixelCount = width * height;
+    if (offline && sidecarMode && (sidecarBitmapReady || sidecarCompositeReady) && !isRgb) {
+      return rawFrameBytes;
+    }
     if (offline && offlineFloatStack && offlineFloatStack.byteLength > 0 && floatsPerFrame > 0) {
       const f32 = float32FrameFromDataView(offlineFloatStack, liveSliceIdx, floatsPerFrame, false);
       if (f32) return new DataView(f32.buffer, f32.byteOffset, f32.byteLength);
     }
+    // Sidecar: prefer precomputed float cache (filled once after full RAM load).
+    if (offline && sidecarMode && width > 0 && height > 0) {
+      const n = Math.max(1, nSlices || 1);
+      const idx = ((Math.round(liveSliceIdx) % n) + n) % n;
+      const cached = offlineFrameCacheRef.current.get(idx);
+      if (cached && cached.length >= floatsPerFrame) {
+        return new DataView(cached.buffer, cached.byteOffset, floatsPerFrame * 4);
+      }
+    }
+    // Shared dequant path for embedded offline stack and Range-fetched sidecar frames.
+    const dequantU8Frame = (u8: Uint8Array): DataView | null => {
+      if (u8.byteLength < ch * pixelCount || width <= 0 || height <= 0) return null;
+      const key = ((isRgb ? 1 : 0) << 30) | (width << 15) | height;
+      if (offlineScratchKey.current !== key || offlineScratch.current === null) {
+        offlineScratch.current = new Float32Array(floatsPerFrame);
+        offlineScratchKey.current = key;
+      }
+      const f32 = offlineScratch.current;
+      if (isRgb) {
+        for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
+      } else {
+        // Offline uint8 packs are already display-quantized per panel. Restore
+        // physical units with a panel-tiled loop (not per-pixel panel index).
+        const panelCount = Math.max(1, nPanels || 1);
+        const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
+        const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+        if (panelRanges) {
+          for (let p = 0; p < panelCount; p++) {
+            const lo = offlineMins[p] ?? offlineMin;
+            const hi = offlineMaxs[p] ?? offlineMax;
+            const scale = (hi - lo) / 255.0;
+            const x0 = p * panelW;
+            const x1 = Math.min(width, x0 + panelW);
+            for (let r = 0; r < height; r++) {
+              let i = r * width + x0;
+              for (let x = x0; x < x1; x++, i++) f32[i] = u8[i] * scale + lo;
+            }
+          }
+        } else {
+          const scale = (offlineMax - offlineMin) / 255.0;
+          for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+        }
+      }
+      return new DataView(f32.buffer);
+    };
     if (offline && offlineStack && offlineStack.byteLength > 0 && width > 0 && height > 0) {
       // RGB uint8 pack is H*W*3 bytes per frame (display-ready 0–255 → /255).
       const bytesPerFrame = ch * pixelCount;
       const start = liveSliceIdx * bytesPerFrame;
       if (start + bytesPerFrame <= offlineStack.byteLength) {
         const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, bytesPerFrame);
-        const key = ((isRgb ? 1 : 0) << 30) | (width << 15) | height;
-        if (offlineScratchKey.current !== key || offlineScratch.current === null) {
-          offlineScratch.current = new Float32Array(floatsPerFrame);
-          offlineScratchKey.current = key;
-        }
-        const f32 = offlineScratch.current;
-        if (isRgb) {
-          for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
-        } else {
-          const panelCount = Math.max(1, nPanels || 1);
-          const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
-          const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
-          if (panelRanges) {
-            for (let r = 0; r < height; r++) {
-              const rowOffset = r * width;
-              for (let c = 0; c < width; c++) {
-                const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
-                const lo = offlineMins[panel] ?? offlineMin;
-                const hi = offlineMaxs[panel] ?? offlineMax;
-                f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
-              }
-            }
-          } else {
-            const scale = (offlineMax - offlineMin) / 255.0;
-            for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
-          }
-        }
-        return new DataView(f32.buffer);
+        const view = dequantU8Frame(u8);
+        if (view) return view;
       }
     }
+    if (
+      offline
+      && sidecarMode
+      && sidecarU8Frame
+      && sidecarU8Frame.idx === ((Math.round(liveSliceIdx) % Math.max(1, nSlices || 1)) + Math.max(1, nSlices || 1)) % Math.max(1, nSlices || 1)
+    ) {
+      const view = dequantU8Frame(sidecarU8Frame.u8);
+      if (view) return view;
+    }
     return rawFrameBytes;
-  }, [offline, offlineStack, offlineFloatStack, offlineMin, offlineMax, offlineMins, offlineMaxs, rawFrameBytes, liveSliceIdx, width, height, nPanels, panelWidthPx, isRgb]);
+  }, [offline, offlineStack, offlineFloatStack, offlineMin, offlineMax, offlineMins, offlineMaxs, rawFrameBytes, liveSliceIdx, width, height, nPanels, panelWidthPx, isRgb, sidecarMode, sidecarU8Frame, nSlices, sidecarBitmapReady, sidecarCompositeReady]);
   const getOfflineFrame = React.useCallback((idx: number): Float32Array | null => {
     // Cache per-frame Float32Array objects by frame index. The previous single
     // scratch buffer was unsafe because pointer-equality upload guards could skip
@@ -1653,34 +3605,76 @@ function Show3D() {
       if (frame) putOfflineFrameCache(normalized, frame);
       return frame;
     }
-    if (!offlineStack || offlineStack.byteLength === 0) return null;
     const bytesPerFrame = ch * pixelCount;
+    const dequantU8 = (u8: Uint8Array): Float32Array => {
+      const f32 = new Float32Array(floatsPerFrame);
+      if (isRgb) {
+        for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
+        return f32;
+      }
+      const panelCount = Math.max(1, nPanels || 1);
+      const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
+      const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+      if (panelRanges) {
+        for (let p = 0; p < panelCount; p++) {
+          const lo = offlineMins[p] ?? offlineMin;
+          const hi = offlineMaxs[p] ?? offlineMax;
+          const scale = (hi - lo) / 255.0;
+          const x0 = p * panelW;
+          const x1 = Math.min(width, x0 + panelW);
+          for (let r = 0; r < height; r++) {
+            let i = r * width + x0;
+            for (let x = x0; x < x1; x++, i++) f32[i] = u8[i] * scale + lo;
+          }
+        }
+      } else {
+        const scale = (offlineMax - offlineMin) / 255.0;
+        for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+      }
+      return f32;
+    };
+    // Sidecar path: full stack held in RAM as per-frame Uint8Arrays after load.
+    if (sidecarMode) {
+      const u8 = sidecarU8FrameCacheRef.current.get(normalized);
+      if (u8 && u8.byteLength >= bytesPerFrame) {
+        const f32 = dequantU8(u8);
+        putOfflineFrameCache(normalized, f32);
+        return f32;
+      }
+      // Not in RAM yet (still loading) — optional Range fetch for this frame only.
+      const url = (offlineStackUrl || "").trim();
+      if (
+        url
+        && bytesPerFrame > 0
+        && !sidecarRamReadyRef.current
+        && !sidecarFetchInflightRef.current.has(normalized)
+      ) {
+        sidecarFetchInflightRef.current.add(normalized);
+        const start = normalized * bytesPerFrame;
+        const end = start + bytesPerFrame - 1;
+        void fetch(url, { headers: { Range: `bytes=${start}-${end}` } })
+          .then(async (resp) => {
+            if (!(resp.ok || resp.status === 206)) return;
+            const buf = new Uint8Array(await resp.arrayBuffer());
+            if (buf.byteLength !== bytesPerFrame) return;
+            // Do not overwrite a frame already placed by the full-stack loader.
+            if (!sidecarU8FrameCacheRef.current.has(normalized)) {
+              sidecarU8FrameCacheRef.current.set(normalized, buf);
+            }
+            putOfflineFrameCache(normalized, dequantU8(buf));
+          })
+          .catch(() => { /* play tick retries */ })
+          .finally(() => {
+            sidecarFetchInflightRef.current.delete(normalized);
+          });
+      }
+      return null;
+    }
+    if (!offlineStack || offlineStack.byteLength === 0) return null;
     const start = normalized * bytesPerFrame;
     if (start < 0 || start + bytesPerFrame > offlineStack.byteLength) return null;
     const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, bytesPerFrame);
-    const f32 = new Float32Array(floatsPerFrame);
-    if (isRgb) {
-      for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
-      putOfflineFrameCache(normalized, f32);
-      return f32;
-    }
-    const panelCount = Math.max(1, nPanels || 1);
-    const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
-    const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
-    if (panelRanges) {
-      for (let r = 0; r < height; r++) {
-        const rowOffset = r * width;
-        for (let c = 0; c < width; c++) {
-          const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
-          const lo = offlineMins[panel] ?? offlineMin;
-          const hi = offlineMaxs[panel] ?? offlineMax;
-          f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
-        }
-      }
-    } else {
-      const scale = (offlineMax - offlineMin) / 255.0;
-      for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
-    }
+    const f32 = dequantU8(u8);
     putOfflineFrameCache(normalized, f32);
     return f32;
   }, [
@@ -1698,10 +3692,15 @@ function Show3D() {
     panelWidthPx,
     putOfflineFrameCache,
     isRgb,
+    sidecarMode,
+    offlineStackUrl,
   ]);
 
   React.useEffect(() => {
     if (!offline || width <= 0 || height <= 0 || nSlices <= 1 || offlineFrameCacheLimit <= 0) return;
+    // Sidecar: neighbor Range-fetch already runs in the sidecar effect. Do NOT
+    // also prewarm 10+ full float frames here (each is ~38–150 MB work).
+    if (sidecarMode) return;
     const serial = ++offlineFramePrewarmSerialRef.current;
     let cancelled = false;
     let timer: number | null = null;
@@ -1743,7 +3742,7 @@ function Show3D() {
       const d = show3dPerfDebug();
       if (d) d.offlineFramePrewarmActive = false;
     };
-  }, [offline, width, height, nSlices, liveSliceIdx, offlineFrameCacheLimit, getOfflineFrame]);
+  }, [offline, width, height, nSlices, liveSliceIdx, offlineFrameCacheLimit, getOfflineFrame, sidecarMode]);
 
   // Truthful first-render signal: flipped ONCE after the first frame_bytes
   // arrives and the browser has had time to composite two frames.  Python side
@@ -1764,9 +3763,11 @@ function Show3D() {
   const [dimSampling] = useModelState<number>("dim_sampling");
   const [dimUnit] = useModelState<string>("dim_unit");
   const [panelTitles] = useModelState<string[]>("panel_titles");
+  const [panelTitleSpans] = useModelState<RichTitleSpan[][]>("panel_title_spans");
   const [panelRealFrames] = useModelState<number[]>("panel_real_frames");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
   const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
   const [nPages] = useModelState<number>("n_pages");
@@ -1791,6 +3792,7 @@ function Show3D() {
   const reorderDragVisualRef = React.useRef<ReorderDragVisual | null>(null);
   const reorderGhostRef = React.useRef<HTMLDivElement>(null);
   const reorderGhostRafRef = React.useRef<number | null>(null);
+  const lastSelectedPanelRef = React.useRef<number | null>(null);
   const reorderGhostPendingRef = React.useRef<{ x: number; y: number } | null>(null);
   const reorderDragStartRef = React.useRef<ReorderDragStart | null>(null);
   const reorderDragActivatedRef = React.useRef(false);
@@ -1948,9 +3950,28 @@ function Show3D() {
   const visiblePanelCount = visiblePanelIndices.length;
   const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
   const hasPanelChoices = panelMenuTotal > 1;
+  const selectedPanelSet = React.useMemo(() => {
+    const out = new Set<number>();
+    for (const value of selectedPanels || []) {
+      const panel = Math.trunc(Number(value));
+      if (Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount && !hiddenPanelSet.has(panel)) out.add(panel);
+    }
+    return out;
+  }, [hiddenPanelSet, selectedPanels, totalPanelCount]);
+  const selectedVisiblePanels = React.useMemo(
+    () => visiblePanelIndices.filter((panel) => selectedPanelSet.has(panel)),
+    [selectedPanelSet, visiblePanelIndices],
+  );
+  const selectedVisibleCount = selectedVisiblePanels.length;
   const panelLabel = React.useCallback((panel: number) => (
     (panelTitles && panelTitles[panel]) || `Panel ${panel + 1}`
   ), [panelTitles]);
+  const panelTitleContent = React.useCallback((panel: number) => (
+    renderRichTitle(panelTitleSpans?.[panel], panelLabel(panel))
+  ), [panelLabel, panelTitleSpans]);
+  const panelTitleText = React.useCallback((panel: number) => (
+    richTitlePlainText(panelTitleSpans?.[panel], panelLabel(panel))
+  ), [panelLabel, panelTitleSpans]);
   const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
     if (panel < 0 || panel >= totalPanelCount) return;
     if (isPaged) {
@@ -1987,6 +4008,87 @@ function Show3D() {
     }
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
   }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const setPanelsHidden = React.useCallback((panels: number[], hidden: boolean) => {
+    const panelSet = new Set(
+      panels
+        .map((panel) => Math.trunc(Number(panel)))
+        .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount),
+    );
+    if (panelSet.size === 0) return;
+    if (isPaged) {
+      const next = new Set<number>();
+      for (const value of hiddenPageSlots || []) {
+        const slot = Math.trunc(Number(value));
+        if (Number.isFinite(slot) && slot >= 0 && slot < activePanelCount) next.add(slot);
+      }
+      for (const panel of panelSet) {
+        if (panel < activePageStart || panel >= activePageEnd) continue;
+        const slot = panel - activePageStart;
+        if (hidden) next.add(slot);
+        else next.delete(slot);
+      }
+      if (activePanelCount - next.size <= 0) return;
+      const slots = normalizeHiddenPageSlots(Array.from(next), activePanelCount);
+      setHiddenPageSlots(slots);
+      setHiddenPageSlotsTrait(slots);
+      return;
+    }
+    const next = new Set<number>();
+    for (const value of hiddenPanels || []) {
+      const idx = Math.trunc(Number(value));
+      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) next.add(idx);
+    }
+    for (const panel of panelSet) {
+      if (hidden) next.add(panel);
+      else next.delete(panel);
+    }
+    if (next.size >= totalPanelCount) return;
+    setHiddenPanels(Array.from(next).sort((a, b) => a - b));
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const handlePanelSelectionMouseDown = React.useCallback((event: React.MouseEvent, panel: number): boolean => {
+    if (!hasPanelChoices || reorderMode || panel < 0) return false;
+    const orderedVisible = displayOrderedPanelIndices.filter((idx) => visiblePanelIndices.includes(idx));
+    const current = new Set(selectedPanelSet);
+    let next: number[];
+    if (event.shiftKey) {
+      const anchor = lastSelectedPanelRef.current !== null && orderedVisible.includes(lastSelectedPanelRef.current)
+        ? lastSelectedPanelRef.current
+        : (selectedVisiblePanels[selectedVisiblePanels.length - 1] ?? orderedVisible[0] ?? panel);
+      const a = orderedVisible.indexOf(anchor);
+      const b = orderedVisible.indexOf(panel);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        next = orderedVisible.slice(lo, hi + 1);
+      } else {
+        next = [panel];
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (event.metaKey || event.ctrlKey) {
+      if (current.has(panel) && current.size > 1) current.delete(panel);
+      else current.add(panel);
+      next = orderedVisible.filter((idx) => current.has(idx));
+      event.preventDefault();
+      event.stopPropagation();
+    } else {
+      next = [panel];
+    }
+    lastSelectedPanelRef.current = panel;
+    setSelectedPanels(next);
+    return event.shiftKey || event.metaKey || event.ctrlKey;
+  }, [displayOrderedPanelIndices, hasPanelChoices, reorderMode, selectedPanelSet, selectedVisiblePanels, setSelectedPanels, visiblePanelIndices]);
+  React.useEffect(() => {
+    if (!hasPanelChoices) {
+      lastSelectedPanelRef.current = null;
+      if ((selectedPanels || []).length > 0) setSelectedPanels([]);
+      return;
+    }
+    const clean = visiblePanelIndices.filter((panel) => selectedPanelSet.has(panel));
+    if (!sameNumberArray(selectedPanels, clean)) setSelectedPanels(clean);
+    if (lastSelectedPanelRef.current !== null && !visiblePanelIndices.includes(lastSelectedPanelRef.current)) {
+      lastSelectedPanelRef.current = clean[clean.length - 1] ?? null;
+    }
+  }, [hasPanelChoices, selectedPanelSet, selectedPanels, setSelectedPanels, visiblePanelIndices]);
   const applyPanelOrder = React.useCallback((order: number[]) => {
     const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
     if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
@@ -2321,14 +4423,56 @@ function Show3D() {
   const [maxCols, setMaxCols] = useModelState<number>("max_cols");
   const [linkPanels, setLinkPanels] = useModelState<boolean>("link_panels");
   const [showResizeHandles] = useModelState<boolean>("show_resize_handles");
-  const allowResizeControls = showResizeHandles !== false && !isMobileViewport;
+  const allowResizeControls = showResizeHandles !== false;
   const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
-  const [panelGapTrait] = useModelState<number>("panel_gap");
+  const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
+  const [legacyPanelGapTrait] = useModelState<number>("panel_gap");
+  const [interPanelGapPxState] = useModelState<number>("inter_panel_gap_px");
+  const [interPanelGapColorState] = useModelState<string>("inter_panel_gap_color");
+  const [galleryOuterBorderPxState] = useModelState<number>("gallery_outer_border_px");
+  const [galleryOuterBorderColorState] = useModelState<string>("gallery_outer_border_color");
+  const [panelInnerBorderPxState] = useModelState<number>("panel_inner_border_px");
+  const [panelInnerBorderColorState] = useModelState<string>("panel_inner_border_color");
   const [linkContrast, setLinkContrast] = useModelState<boolean>("link_contrast");
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
+  const [markerColors] = useModelState<string[]>("marker_colors");
+  const [identityColors] = useModelState<string[]>("identity_colors");
+  const [markerStyle] = useModelState<string>("marker_style");
+  const [rowMarkers] = useModelState<MarkerMap>("row_markers");
+  const [colMarkers] = useModelState<MarkerMap>("col_markers");
+  const [panelGroups] = useModelState<PanelGroup[]>("panel_groups");
+  const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
+  const panelGapPx = Math.max(0, Number.isFinite(interPanelGapPxState) ? interPanelGapPxState : (Number.isFinite(legacyPanelGapTrait) ? legacyPanelGapTrait : 0));
+  const interPanelGapColor = String(interPanelGapColorState || themeColors.bg);
+  const galleryOuterBorderPx = Math.max(0, Number.isFinite(galleryOuterBorderPxState) ? galleryOuterBorderPxState : 0);
+  const galleryOuterBorderColor = String(galleryOuterBorderColorState || interPanelGapColor);
+  const panelInnerBorderPx = Math.max(0, Number.isFinite(panelInnerBorderPxState) ? panelInnerBorderPxState : 0);
+  const panelInnerBorderColor = String(panelInnerBorderColorState || "#000000");
+  const [flipRows, setFlipRows] = useModelState<boolean>("flip_vertical");
+  const [flipCols, setFlipCols] = useModelState<boolean>("flip_horizontal");
+  const [compareMode, setCompareMode] = useModelState<string>("compare_mode");
+  const [comparePair, setComparePair] = useModelState<number[]>("compare_pair");
+  const [blinkFps, setBlinkFps] = useModelState<number>("blink_fps");
+  const [diffCmap, setDiffCmap] = useModelState<string>("diff_cmap");
+  const [compareBackground, setCompareBackground] = useModelState<string>("compare_background");
+  const previousCompareModeRef = React.useRef<string>(compareMode || "off");
+  const [blinkPhase, setBlinkPhase] = React.useState(0);
+  const panelMarkerColor = React.useCallback((panel: number) => {
+    const value = identityColors?.[panel] || markerColors?.[panel];
+    return value || IDENTITY_PALETTE[panel % IDENTITY_PALETTE.length];
+  }, [identityColors, markerColors]);
+  const hasPanelMarkers = React.useMemo(
+    () => Boolean(
+      (Array.isArray(identityColors) && identityColors.some(Boolean))
+      || (Array.isArray(markerColors) && markerColors.some(Boolean)),
+    ),
+    [identityColors, markerColors],
+  );
+  const markerAround = (markerStyle || "left") === "around";
   const normalizedPanelCmaps = React.useMemo(
     () => Array.isArray(panelCmaps) ? panelCmaps : [],
     [panelCmaps],
@@ -2343,9 +4487,19 @@ function Show3D() {
     const first = panelCmapFor(0);
     return normalizedPanelCmaps.some((_, idx) => panelCmapFor(idx) !== first);
   }, [normalizedPanelCmaps, nPanels, panelCmapFor]);
+  const colorShared = normalizedPanelCmaps.length !== Math.max(1, nPanels || 1) || Math.max(1, nPanels || 1) <= 1;
+  const setColorShared = React.useCallback((shared: boolean, panelIdx = 0) => {
+    const n = Math.max(1, nPanels || 1);
+    if (shared || n <= 1) {
+      setCmap(panelCmapFor(panelIdx));
+      setPanelCmaps([]);
+      return;
+    }
+    setPanelCmaps(Array.from({ length: n }, (_, idx) => panelCmapFor(idx)));
+  }, [nPanels, panelCmapFor, setCmap, setPanelCmaps]);
   const setCmapForPanel = React.useCallback((panelIdx: number, value: string) => {
     const n = Math.max(1, nPanels || 1);
-    if (n <= 1) {
+    if (n <= 1 || colorShared) {
       setCmap(value);
       setPanelCmaps([]);
       return;
@@ -2357,7 +4511,18 @@ function Show3D() {
     next[idx] = value;
     setPanelCmaps(next);
     if (idx === 0) setCmap(value);
-  }, [cmap, normalizedPanelCmaps, nPanels, setCmap, setPanelCmaps]);
+  }, [cmap, colorShared, normalizedPanelCmaps, nPanels, setCmap, setPanelCmaps]);
+
+  const prioritizedSidecarFrameOrder = React.useCallback((start: number, n: number) => {
+    const total = Math.max(1, Math.round(n || 1));
+    const base = ((Math.round(start) % total) + total) % total;
+    const order: number[] = [base];
+    for (let offset = 1; order.length < total; offset++) {
+      order.push((base + offset) % total);
+      if (order.length < total) order.push((base - offset + total) % total);
+    }
+    return order;
+  }, []);
 
   // Playback
   const [playing, setPlaying] = useModelState<boolean>("playing");
@@ -2386,27 +4551,62 @@ function Show3D() {
   // top toolbar. Badge shows how many of its tools are active.
   const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [playbackStyleMenuAnchor, setPlaybackStyleMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [showRotationSettings, setShowRotationSettings] = React.useState(false);
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const [debug] = useModelState<boolean>("debug");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
   const showResizeControls = allowResizeControls && panelChromeVisible;
+  const toolControlsRef = React.useRef<HTMLDivElement>(null);
+  const [toolControlsHeight, setToolControlsHeight] = React.useState(28);
   const debugFps = useDebugFps(Boolean(debug));
+  const resizeGripSx = React.useMemo(() => ({
+    width: 16,
+    height: 16,
+    cursor: "nwse-resize",
+    opacity: 0.6,
+    background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+    touchAction: "none",
+    zIndex: 5,
+    "&:hover": { opacity: 1 },
+  }), [themeColors.accent]);
   const [statsMean] = useModelState<number>("stats_mean");
   const [statsMin] = useModelState<number>("stats_min");
   const [statsMax] = useModelState<number>("stats_max");
   const [statsStd] = useModelState<number>("stats_std");
 
+  React.useLayoutEffect(() => {
+    if (!controlsVisible) {
+      setToolControlsHeight(28);
+      return;
+    }
+    const element = toolControlsRef.current;
+    if (!element) return;
+    const measure = () => {
+      const next = Math.max(28, element.getBoundingClientRect().height);
+      setToolControlsHeight((current) => (Math.abs(current - next) < 0.5 ? current : next));
+    };
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    observer?.observe(element);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [controlsVisible]);
+
   // Display options
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
-  const [percentileLow] = useModelState<number>("percentile_low");
-  const [percentileHigh] = useModelState<number>("percentile_high");
+  const [percentileLow, setPercentileLow] = useModelState<number>("percentile_low");
+  const [percentileHigh, setPercentileHigh] = useModelState<number>("percentile_high");
   const [traitVmin] = useModelState<number | null>("vmin");
   const [traitVmax] = useModelState<number | null>("vmax");
   const [imageVminPct, setImageVminPct] = useModelState<number>("image_vmin_pct");
   const [imageVmaxPct, setImageVmaxPct] = useModelState<number>("image_vmax_pct");
+  const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
   const manualImageRangeBeforeAutoRef = React.useRef<{ min: number; max: number } | null>(null);
   const [vminPerPanel, setVminPerPanel] = useModelState<(number | null)[]>("vmin_per_panel");
   const [vmaxPerPanel, setVmaxPerPanel] = useModelState<(number | null)[]>("vmax_per_panel");
@@ -2422,6 +4622,163 @@ function Show3D() {
   const [dataMax] = useModelState<number>("data_max");
   const [autoVmins] = useModelState<number[]>("auto_vmins");
   const [autoVmaxs] = useModelState<number[]>("auto_vmaxs");
+  // Full-resolution display cache for sidecar scrub/play. The sidecar bytes
+  // are already quantized for display, so convert each native panel to an
+  // ImageBitmap once after RAM load. Scrub then swaps/draws bitmaps instead of
+  // dequantizing and CPU-colormapping ~38 Mpx on every step.
+  React.useEffect(() => {
+    if (!enableSidecarNativePanelBitmapCache) {
+      for (const bitmaps of sidecarBitmapFrameCacheRef.current.values()) {
+        for (const bitmap of bitmaps) {
+          try { bitmap.close(); } catch { /* ignore */ }
+        }
+      }
+      sidecarBitmapFrameCacheRef.current.clear();
+      sidecarBitmapReadyRef.current = false;
+      sidecarBitmapCompleteRef.current = false;
+      setSidecarBitmapReady(false);
+      setSidecarBitmapComplete(false);
+      return;
+    }
+    if (!sidecarMode || !sidecarRamReady || isRgb || sharedPanelSource || width <= 0 || height <= 0) {
+      clearSidecarBitmapCache();
+      return;
+    }
+    const panelCount = Math.max(1, nPanels || 1);
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+    if (panelCount <= 1 || panelW <= 0 || panelW * panelCount > width + panelW) {
+      clearSidecarBitmapCache();
+      setOfflineStackFetchStatus("");
+      return;
+    }
+
+    const serial = ++sidecarBitmapBuildSerialRef.current;
+    let cancelled = false;
+    clearSidecarBitmapCache();
+    setOfflineStackFetchStatus(`Preparing full-resolution display cache… 0/${n} frames`);
+
+    const buildCache = async () => {
+      const img = new ImageData(panelW, height);
+      const rgba = img.data;
+      const fallbackLut = COLORMAPS[cmap] || COLORMAPS.inferno;
+      const loByte = Math.max(0, Math.min(255, Math.round((Number(imageVminPct) || 0) * 2.55)));
+      const hiByte = Math.max(0, Math.min(255, Math.round((Number(imageVmaxPct) || 100) * 2.55)));
+      const byteSpan = Math.max(1, hiByte - loByte);
+      const started = performance.now();
+      let builtPanels = 0;
+      let builtFrames = 0;
+      const startFrame = ((Math.round(playbackIdxRef.current || 0) % n) + n) % n;
+      const frameOrder = Array.from({ length: n }, (_, idx) => (startFrame + idx) % n);
+      try {
+        for (const frameIdx of frameOrder) {
+          if (cancelled || serial !== sidecarBitmapBuildSerialRef.current) return;
+          const u8 = sidecarU8FrameCacheRef.current.get(frameIdx);
+          if (!u8 || u8.byteLength < width * height) continue;
+          const bitmaps: ImageBitmap[] = [];
+          for (let panel = 0; panel < panelCount; panel++) {
+            const x0 = panel * panelW;
+            if (x0 >= width) break;
+            const x1 = Math.min(width, x0 + panelW);
+            const lut = COLORMAPS[panelCmapFor(panel)] || fallbackLut;
+            for (let r = 0; r < height; r++) {
+              let src = r * width + x0;
+              let dst = r * panelW * 4;
+              for (let x = x0; x < x1; x++, src++, dst += 4) {
+                const v = Math.max(0, Math.min(255, Math.floor(((u8[src] - loByte) / byteSpan) * 255)));
+                const li = v * 3;
+                rgba[dst] = lut[li];
+                rgba[dst + 1] = lut[li + 1];
+                rgba[dst + 2] = lut[li + 2];
+                rgba[dst + 3] = 255;
+              }
+              for (let x = x1 - x0; x < panelW; x++, dst += 4) {
+                rgba[dst] = 0;
+                rgba[dst + 1] = 0;
+                rgba[dst + 2] = 0;
+                rgba[dst + 3] = 255;
+              }
+            }
+            bitmaps.push(await createImageBitmap(img));
+            builtPanels += 1;
+            if (builtPanels % 8 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          if (cancelled || serial !== sidecarBitmapBuildSerialRef.current) {
+            bitmaps.forEach((bitmap) => bitmap.close());
+            return;
+          }
+          sidecarBitmapFrameCacheRef.current.set(frameIdx, bitmaps);
+          builtFrames += 1;
+          if (!sidecarBitmapReadyRef.current) {
+            sidecarBitmapReadyRef.current = true;
+            setSidecarBitmapReady(true);
+          }
+          const loopDebug = show3dPerfDebug();
+          if (loopDebug) {
+            loopDebug.sidecarBitmapCacheFrames = sidecarBitmapFrameCacheRef.current.size;
+            loopDebug.sidecarBitmapCachePanels = builtPanels;
+            loopDebug.sidecarBitmapComplete = false;
+            loopDebug.sidecarFirstFrameMs = loopDebug.sidecarFirstFrameMs ?? (performance.now() - started);
+          }
+          if (builtFrames % 2 === 0 || builtFrames === 1 || builtFrames === n) {
+            const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+            setOfflineStackFetchStatus(
+              builtFrames === 1
+                ? `First full-resolution frame ready; optimizing playback cache… 1/${n} frames (${elapsed}s)`
+                : `Optimizing full-resolution playback cache… ${builtFrames}/${n} frames (${elapsed}s)`,
+            );
+          }
+        }
+        if (cancelled || serial !== sidecarBitmapBuildSerialRef.current) return;
+        sidecarBitmapCompleteRef.current = true;
+        setSidecarBitmapComplete(true);
+        setOfflineStackFetchStatus("");
+        const d = show3dPerfDebug();
+        if (d) {
+          d.sidecarBitmapCacheFrames = sidecarBitmapFrameCacheRef.current.size;
+          d.sidecarBitmapComplete = true;
+          d.sidecarBitmapCachePanels = builtPanels;
+          d.sidecarBitmapBuildMs = performance.now() - started;
+          d.sidecarBitmapPanelWidth = panelW;
+          d.sidecarBitmapContrastBytes = [loByte, hiByte];
+          d.lastRenderPath = "sidecar-imagebitmap-cache-ready";
+        }
+      } catch (err) {
+        clearSidecarBitmapCache();
+        setOfflineStackFetchStatus(
+          `Failed to prepare display cache: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void buildCache();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    sidecarMode,
+    sidecarRamReady,
+    isRgb,
+    sharedPanelSource,
+    width,
+    height,
+    nPanels,
+    panelWidthPx,
+    nSlices,
+    cmap,
+    panelCmapFor,
+    imageVminPct,
+    imageVmaxPct,
+    clearSidecarBitmapCache,
+  ]);
+  React.useEffect(() => {
+    if (compareMode !== "blink") {
+      setBlinkPhase(0);
+      return;
+    }
+    const intervalMs = 1000 / Math.max(0.25, Number(blinkFps || 2));
+    const id = window.setInterval(() => setBlinkPhase((phase) => (phase + 1) % 2), intervalMs);
+    return () => window.clearInterval(id);
+  }, [blinkFps, compareMode]);
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
   const [pixelUnit] = useModelState<string>("pixel_unit");
@@ -2433,6 +4790,10 @@ function Show3D() {
   const [displayFilter, setDisplayFilter] = useModelState<string>("denoise");
   const [displaySigma, setDisplaySigma] = useModelState<number>("denoise_sigma");
   const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
+  const [displayFilters, setDisplayFilters] = useModelState<string[]>("denoise_modes");
+  const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("denoise_sigmas");
+  const [spatialBins, setSpatialBins] = useModelState<number[]>("denoise_bins");
+  const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const [displayFilterBanner] = useModelState<string>("denoise_banner");
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
   // Master ON/OFF of the denoise EFFECT (off -> raw, config preserved & gated).
@@ -2442,13 +4803,25 @@ function Show3D() {
   const [frequencyFilterCutoff, setFrequencyFilterCutoff] = useModelState<number>("frequency_filter_cutoff");
   const [frequencyFilterCenter, setFrequencyFilterCenter] = useModelState<number>("frequency_filter_center");
   const [frequencyFilterWidth, setFrequencyFilterWidth] = useModelState<number>("frequency_filter_width");
+  const [frequencyFilterModes, setFrequencyFilterModes] = useModelState<string[]>("frequency_filter_modes");
+  const [frequencyFilterCutoffs, setFrequencyFilterCutoffs] = useModelState<number[]>("frequency_filter_cutoffs");
+  const [frequencyFilterCenters, setFrequencyFilterCenters] = useModelState<number[]>("frequency_filter_centers");
+  const [frequencyFilterWidths, setFrequencyFilterWidths] = useModelState<number[]>("frequency_filter_widths");
+  const [frequencyFilterScope, setFrequencyFilterScope] = useModelState<string>("frequency_filter_scope");
   const [showFrequencyFilter, setShowFrequencyFilter] = useModelState<boolean>("show_frequency_filter");
+  const [subpixelAlignEnabled, setSubpixelAlignEnabled] = useModelState<boolean>("subpixel_align_enabled");
+  const [subpixelAlignReference, setSubpixelAlignReference] = useModelState<number>("subpixel_align_reference");
+  const [subpixelAlignStatus, setSubpixelAlignStatus] = React.useState("Off");
+  const [subpixelAlignBusy, setSubpixelAlignBusy] = React.useState(false);
+  const [subpixelAlignVersion, setSubpixelAlignVersion] = React.useState(0);
+  const subpixelAlignShiftsRef = React.useRef<SubpixelShift[] | null>(null);
+  const subpixelAlignCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
+  const subpixelAlignSerialRef = React.useRef(0);
   const [frequencyDraft, setFrequencyDraft] = React.useState<number | null>(null);
   const [frequencyRenderVersion, setFrequencyRenderVersion] = React.useState(0);
   const [frequencyFilterBackend, setFrequencyFilterBackend] = React.useState("off");
   const frequencyFilterCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
   const frequencyFilterPendingRef = React.useRef<Set<string>>(new Set());
-  const frequencyFilterIsActive = !!frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) && !isRgb;
   const frequencyOptions = React.useMemo(() => {
     const mode = normalizeFrequencyFilterMode(frequencyFilter);
     return {
@@ -2458,6 +4831,61 @@ function Show3D() {
       width: frequencyFilterWidth,
     };
   }, [frequencyFilter, frequencyDraft, frequencyFilterCutoff, frequencyFilterCenter, frequencyFilterWidth]);
+  const scopedPanelForEdit = React.useMemo(() => {
+    const fallback = visiblePanelIndices[0] ?? 0;
+    const selected = selectedVisiblePanels[selectedVisiblePanels.length - 1] ?? fallback;
+    return Math.max(0, Math.min(Math.max(0, (nPanels || 1) - 1), selected));
+  }, [nPanels, selectedVisiblePanels, visiblePanelIndices]);
+  const denoiseScopeAll = String(denoiseScope || "all") === "all" || (nPanels || 1) <= 1;
+  const frequencyFilterScopeAll = String(frequencyFilterScope || "all") === "all" || (nPanels || 1) <= 1;
+  const updateScopedArray = React.useCallback(<T,>(
+    values: T[] | undefined,
+    nextValue: T,
+    fallback: T,
+    scopeAll: boolean,
+  ) => {
+    const count = Math.max(1, nPanels || 1);
+    const current = Array.from({ length: count }, (_, idx) => values?.[idx] ?? fallback);
+    if (scopeAll) return current.map(() => nextValue);
+    current[scopedPanelForEdit] = nextValue;
+    return current;
+  }, [nPanels, scopedPanelForEdit]);
+  const denoiseKnobsForPanel = React.useCallback((panel: number) => {
+    const idx = Math.max(0, Math.min(Math.max(0, (nPanels || 1) - 1), panel));
+    const mode = denoiseScopeAll ? displayFilter : (displayFilters?.[idx] ?? displayFilter);
+    return {
+      mode: resolveDenoiseMode(mode || "none", denoiseScopeAll ? (spatialBin || 1) : (spatialBins?.[idx] ?? spatialBin ?? 1)).mode,
+      sigma: denoiseScopeAll ? Number(displaySigma ?? 4) : Number(displaySigmas?.[idx] ?? displaySigma ?? 4),
+      bin: denoiseScopeAll ? Number(spatialBin || 1) : Number(spatialBins?.[idx] ?? spatialBin ?? 1),
+    };
+  }, [denoiseScopeAll, displayFilter, displayFilters, displaySigma, displaySigmas, nPanels, spatialBin, spatialBins]);
+  const frequencyKnobsForPanel = React.useCallback((panel: number) => {
+    const idx = Math.max(0, Math.min(Math.max(0, (nPanels || 1) - 1), panel));
+    const mode = normalizeFrequencyFilterMode(frequencyFilterScopeAll ? frequencyFilter : (frequencyFilterModes?.[idx] ?? frequencyFilter));
+    return {
+      mode,
+      cutoff: frequencyFilterScopeAll ? Number(frequencyFilterCutoff ?? 0.15) : Number(frequencyFilterCutoffs?.[idx] ?? frequencyFilterCutoff ?? 0.15),
+      center: frequencyFilterScopeAll ? Number(frequencyFilterCenter ?? 0.30) : Number(frequencyFilterCenters?.[idx] ?? frequencyFilterCenter ?? 0.30),
+      width: frequencyFilterScopeAll ? Number(frequencyFilterWidth ?? 0.12) : Number(frequencyFilterWidths?.[idx] ?? frequencyFilterWidth ?? 0.12),
+    };
+  }, [frequencyFilter, frequencyFilterCenter, frequencyFilterCenters, frequencyFilterCutoff, frequencyFilterCutoffs, frequencyFilterModes, frequencyFilterScopeAll, frequencyFilterWidth, frequencyFilterWidths, nPanels]);
+  const syncDenoisePanelKnob = React.useCallback((name: "mode" | "sigma" | "bin", value: string | number) => {
+    if (name === "mode") setDisplayFilters(updateScopedArray(displayFilters, String(value), "none", denoiseScopeAll));
+    else if (name === "sigma") setDisplaySigmas(updateScopedArray(displaySigmas, Number(value), 4, denoiseScopeAll));
+    else setSpatialBins(updateScopedArray(spatialBins, Number(value), 1, denoiseScopeAll));
+  }, [denoiseScopeAll, displayFilters, displaySigmas, setDisplayFilters, setDisplaySigmas, setSpatialBins, spatialBins, updateScopedArray]);
+  const syncFrequencyPanelKnob = React.useCallback((name: "mode" | "cutoff" | "center" | "width", value: string | number) => {
+    if (name === "mode") setFrequencyFilterModes(updateScopedArray(frequencyFilterModes, String(value), "none", frequencyFilterScopeAll));
+    else if (name === "cutoff") setFrequencyFilterCutoffs(updateScopedArray(frequencyFilterCutoffs, Number(value), 0.15, frequencyFilterScopeAll));
+    else if (name === "center") setFrequencyFilterCenters(updateScopedArray(frequencyFilterCenters, Number(value), 0.30, frequencyFilterScopeAll));
+    else setFrequencyFilterWidths(updateScopedArray(frequencyFilterWidths, Number(value), 0.12, frequencyFilterScopeAll));
+  }, [frequencyFilterScopeAll, frequencyFilterCenters, frequencyFilterCutoffs, frequencyFilterModes, frequencyFilterWidths, setFrequencyFilterCenters, setFrequencyFilterCutoffs, setFrequencyFilterModes, setFrequencyFilterWidths, updateScopedArray]);
+  const frequencyFilterIsActive = !!frequencyFilterEnabled && !isRgb && (
+    frequencyFilterScopeAll
+      ? frequencyFilterActive(frequencyFilter)
+      : Array.from({ length: Math.max(1, nPanels || 1) }, (_, panel) => frequencyKnobsForPanel(panel))
+          .some((knobs) => frequencyFilterActive(knobs.mode))
+  );
   const frequencyValueLabel = React.useCallback((value: number) => {
     const unit = String(pixelUnit || "").trim().toLowerCase();
     if (pixelSize > 0 && (unit === "nm" || unit.includes("nanometer"))) return `${(value / (2 * pixelSize)).toFixed(3)} nm⁻¹`;
@@ -2465,7 +4893,10 @@ function Show3D() {
     return `${value.toFixed(3)} Nyq`;
   }, [pixelSize, pixelUnit]);
   const setFrequencyMaster = (enabled: boolean) => {
-    if (enabled && !frequencyFilterActive(frequencyFilter)) setFrequencyFilter("lowpass");
+    if (enabled && !frequencyFilterActive(frequencyFilter)) {
+      setFrequencyFilter("lowpass");
+      syncFrequencyPanelKnob("mode", "lowpass");
+    }
     setFrequencyFilterEnabled(enabled);
     setShowFrequencyFilter(enabled); // reveal the settings row while filtering; hide it when off (mirrors Denoise)
   };
@@ -2487,8 +4918,10 @@ function Show3D() {
   const denoiseResolved = resolveDenoiseMode(displayFilter || "none", spatialBin || 1);
   const denoiseSigmaLive = sigmaDraft ?? Number(displaySigma ?? 4);
   const browserFilterKnobsOn = browserFilterActive
-    && filterKnobsActive(denoiseResolved.mode, denoiseResolved.bin)
-    && browserFilterSupported(denoiseResolved.mode);
+    && (denoiseScopeAll
+      ? filterKnobsActive(denoiseResolved.mode, denoiseResolved.bin) && browserFilterSupported(denoiseResolved.mode)
+      : Array.from({ length: Math.max(1, nPanels || 1) }, (_, panel) => denoiseKnobsForPanel(panel))
+          .some((knobs) => filterKnobsActive(knobs.mode, knobs.bin) && browserFilterSupported(knobs.mode)));
   // Filtered-frame cache keyed on the Python frame sequence as well as the
   // logical index and view knobs. During a live scrub, slice_idx can arrive
   // before the replacement frame_bytes. Without frameSeq, that old byte view
@@ -2499,11 +4932,11 @@ function Show3D() {
   const [browserFilterTick, setBrowserFilterTick] = React.useState(0);
   const applyPackedPanelTransform = React.useCallback(async (
     frame: Float32Array,
-    transform: (panelFrame: Float32Array, panelWidth: number, panelHeight: number) => Promise<Float32Array>,
+    transform: (panelFrame: Float32Array, panelWidth: number, panelHeight: number, panel: number) => Promise<Float32Array>,
   ): Promise<Float32Array> => {
     const panelCount = Math.max(1, nPanels || 1);
     if (panelCount <= 1 || sharedPanelSource || width % panelCount !== 0) {
-      return transform(frame, width, height);
+      return transform(frame, width, height, 0);
     }
     const panelWidth = width / panelCount;
     const output = new Float32Array(frame.length);
@@ -2515,7 +4948,7 @@ function Show3D() {
         const dstOffset = row * panelWidth;
         panelFrame.set(frame.subarray(srcOffset, srcOffset + panelWidth), dstOffset);
       }
-      const filtered = await transform(panelFrame, panelWidth, height);
+      const filtered = await transform(panelFrame, panelWidth, height, panel);
       for (let row = 0; row < height; row++) {
         const srcOffset = row * panelWidth;
         const dstOffset = row * width + srcX0;
@@ -2540,19 +4973,32 @@ function Show3D() {
   // The GPU filter is async, so on a cache miss we return the raw frame now and
   // repaint once the filtered result lands (setBrowserFilterTick). Stats/ROI
   // keep reading raw frames (frame_bytes ships raw), so numbers stay honest.
-  const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
-    if (!frame || !browserFilterKnobsOn) return frame;
-    const allowRawOnMiss = options.allowRawOnMiss !== false;
-    const key = browserFilterCacheKey({
+  const scopedDenoiseKey = Array.from({ length: Math.max(1, nPanels || 1) }, (_, panel) => {
+    const knobs = denoiseKnobsForPanel(panel);
+    return `${panel}:${knobs.mode}:${Number(knobs.sigma).toFixed(2)}:${Math.round(knobs.bin)}`;
+  }).join("|");
+  const browserFilterCacheKeyForIndex = React.useCallback((idx: number) => {
+    return browserFilterCacheKey({
       frameIndex: idx,
       frameSeq,
-      mode: denoiseResolved.mode,
-      sigma: denoiseSigmaLive,
-      bin: denoiseResolved.bin,
+      mode: denoiseScopeAll ? denoiseResolved.mode : scopedDenoiseKey,
+      sigma: denoiseScopeAll ? denoiseSigmaLive : 0,
+      bin: denoiseScopeAll ? denoiseResolved.bin : 1,
       avgWindow: playRef.current.avgWindow,
       diffMode: playRef.current.diffMode,
       panels: (Math.max(1, nPanels || 1) > 1 && !sharedPanelSource) ? Math.max(1, nPanels || 1) : 1,
     });
+  }, [denoiseResolved.mode, denoiseResolved.bin, denoiseScopeAll, denoiseSigmaLive, frameSeq, nPanels, scopedDenoiseKey, sharedPanelSource]);
+
+  const browserFilterReadyForIndex = React.useCallback((idx: number) => {
+    if (!browserFilterKnobsOn) return true;
+    return browserFilterCacheRef.current.has(browserFilterCacheKeyForIndex(idx));
+  }, [browserFilterCacheKeyForIndex, browserFilterKnobsOn]);
+
+  const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
+    if (!frame || !browserFilterKnobsOn) return frame;
+    const allowRawOnMiss = options.allowRawOnMiss !== false;
+    const key = browserFilterCacheKeyForIndex(idx);
     const cache = browserFilterCacheRef.current;
     const hit = cache.get(key);
     if (hit) return hit;
@@ -2560,7 +5006,11 @@ function Show3D() {
     browserFilterPendingRef.current.add(key);
     applyPackedPanelTransform(
       frame,
-      (panelFrame, panelWidth, panelHeight) => applyDisplayFilterBrowser(panelFrame, panelWidth, panelHeight, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin),
+      (panelFrame, panelWidth, panelHeight, panel) => {
+        const knobs = denoiseScopeAll ? { mode: denoiseResolved.mode, sigma: denoiseSigmaLive, bin: denoiseResolved.bin } : denoiseKnobsForPanel(panel);
+        if (!filterKnobsActive(knobs.mode, knobs.bin)) return Promise.resolve(panelFrame);
+        return applyDisplayFilterBrowser(panelFrame, panelWidth, panelHeight, knobs.mode, knobs.sigma, knobs.bin);
+      },
     )
       .then((filtered) => {
         browserFilterPendingRef.current.delete(key);
@@ -2570,7 +5020,7 @@ function Show3D() {
       })
       .catch(() => { browserFilterPendingRef.current.delete(key); });
     return allowRawOnMiss ? frame : null;
-  }, [applyPackedPanelTransform, browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, height, nPanels, sharedPanelSource, width]);
+  }, [applyPackedPanelTransform, browserFilterCacheKeyForIndex, browserFilterKnobsOn, denoiseKnobsForPanel, denoiseResolved.mode, denoiseResolved.bin, denoiseScopeAll, denoiseSigmaLive, height, width]);
   // The "Denoise" toggle is the master ON/OFF of the EFFECT: ON shows the
   // denoised view, OFF shows raw (nothing of the denoised view leaks through).
   // The config (mode/sigma/bin) is PRESERVED across the toggle; a clean widget
@@ -2579,10 +5029,20 @@ function Show3D() {
     const next = !denoiseEnabled;
     setDenoiseEnabled(next);
     setShowDenoise(next); // editor follows: shown while denoising, hidden when raw
-    if (next && displayFilterOff) setDisplayFilter("gaussian");
+    if (next && displayFilterOff) {
+      setDisplayFilter("gaussian");
+      syncDenoisePanelKnob("mode", "gaussian");
+    }
     // Turning OFF preserves the config; browserFilterActive gates the display.
   };
-  const [imageRotation] = useModelState<number>("image_rotation");
+  const [imageRotation, setImageRotation] = useModelState<number>("image_rotation");
+  const [rotationScope, setRotationScope] = useModelState<string>("rotation_scope");
+  const [frameRotations, setFrameRotations] = useModelState<number[]>("frame_rotations");
+  const normalizeRotation = React.useCallback((value: number) => {
+    const k = Math.round(Number(value) / 90);
+    if (Number.isFinite(k) && Math.abs(Number(value)) > 3) return ((k % 4) + 4) % 4;
+    return ((Math.round(Number(value)) % 4) + 4) % 4;
+  }, []);
 
   // Customization
   const [canvasSizeTrait, setCanvasSizeTrait] = useModelState<number>("size");
@@ -2650,17 +5110,38 @@ function Show3D() {
 
   // Canvas refs
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const [rootLayoutWidth, setRootLayoutWidth] = React.useState(0);
+  React.useLayoutEffect(() => {
+    const element = rootRef.current;
+    if (!element) return;
+    const measure = () => {
+      const next = Math.max(0, Math.floor(element.getBoundingClientRect().width));
+      setRootLayoutWidth((current) => (Math.abs(current - next) < 2 ? current : next));
+    };
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    observer?.observe(element);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
   const hasLiveFrameBytes = !!rawFrameBytes && rawFrameBytes.byteLength > 0;
   const hasOfflineStack = !!offlineStack && offlineStack.byteLength > 0;
   const hasOfflineFloatStack = !!offlineFloatStack && offlineFloatStack.byteLength > 0;
   const hasFrameServer = !offline && !!frameServerUrl;
   const canRenderLive = hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack || hasFrameServer;
+  const [framePopulation, setFramePopulation] = React.useState({ ready: 0, target: 0, active: false });
+  const [previewPopulation, setPreviewPopulation] = React.useState({ ready: false, idx: 0, factor: 1 });
   const transportSamplesRef = React.useRef<Record<string, unknown>[]>([]);
   const pendingTransportPaintRef = React.useRef<Record<string, unknown> | null>(null);
   const scrubPreviewRafRef = React.useRef<number | null>(null);
   const scrubPreviewPendingIdxRef = React.useRef<number | null>(null);
   const scrubPreviewTokenRef = React.useRef(0);
   const scrubPreviewLoggedFactorRef = React.useRef<number | null>(null);
+  const serverFallbackPreviewKeyRef = React.useRef<string>("");
+  const initialNativePreviewKeyRef = React.useRef<string>("");
   const recordTransportSample = React.useCallback((sample: Record<string, unknown>) => {
     const next = [...transportSamplesRef.current, sample];
     transportSamplesRef.current = next.length > 200 ? next.slice(next.length - 200) : next;
@@ -2681,6 +5162,34 @@ function Show3D() {
       endToEndUiLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
     });
   }, [recordTransportSample]);
+  const requestCommFramePreview = React.useCallback((idx: number, reason = "scrub"): boolean => {
+    if (offline || width <= 0 || height <= 0 || nSlices <= 0) return false;
+    const normalized = Math.max(0, Math.min(nSlices - 1, Math.round(idx)));
+    const key = `${reason}:${normalized}:${frameServerVersion || 0}`;
+    if (reason !== "scrub" && serverFallbackPreviewKeyRef.current === key) return true;
+    if (reason !== "scrub") serverFallbackPreviewKeyRef.current = key;
+    scrubPreviewPendingIdxRef.current = normalized;
+    if (scrubPreviewRafRef.current !== null) return true;
+    scrubPreviewRafRef.current = window.requestAnimationFrame(() => {
+      scrubPreviewRafRef.current = null;
+      const pendingIdx = scrubPreviewPendingIdxRef.current;
+      scrubPreviewPendingIdxRef.current = null;
+      if (pendingIdx == null) return;
+      const token = `${Date.now()}-${++scrubPreviewTokenRef.current}`;
+      const dbg = show3dPerfDebug();
+      if (dbg) {
+        dbg.lastCommPreviewRequest = pendingIdx;
+        dbg.lastCommPreviewReason = reason;
+      }
+      setScrubPreviewRequest(JSON.stringify({
+        token,
+        idx: pendingIdx,
+        maxBytes: 16 * 1024 * 1024,
+        reason,
+      }));
+    });
+    return true;
+  }, [offline, width, height, nSlices, frameServerVersion, setScrubPreviewRequest]);
   const staticFallbackUrl = staticFallbackJpeg
     ? `data:${staticFallbackMime || "image/jpeg"};base64,${staticFallbackJpeg}`
     : "";
@@ -2704,7 +5213,17 @@ function Show3D() {
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
+  const [exportPanelMode, setExportPanelMode] = React.useState<ExportPanelMode>("home");
+  const [exportQuality, setExportQuality] = React.useState<AnimationQuality>("medium");
+  const [exportFrameStart, setExportFrameStart] = React.useState(1);
+  const [exportFrameEnd, setExportFrameEnd] = React.useState(Math.max(1, nSlices || 1));
+  const [exportEveryN, setExportEveryN] = React.useState(1);
+  const [exportMaxFrames, setExportMaxFrames] = React.useState(40);
+  const [exportFps, setExportFps] = React.useState(DEFAULT_ANIMATION_EXPORT_FPS);
+  const [exportSpatialPreset, setExportSpatialPreset] = React.useState<ExportSpatialPreset>("edge512");
+  const [exportGifPreset, setExportGifPreset] = React.useState<GifExportPreset>("slides");
   const [localExportStatus, setLocalExportStatus] = React.useState("");
+  const [browserMp4Support, setBrowserMp4Support] = React.useState<"checking" | "supported" | "unsupported">("checking");
   const fftOverlayDragRef = React.useRef<{
     pointerId: number;
     startClientX: number;
@@ -2741,7 +5260,7 @@ function Show3D() {
     if (localExportStatus.startsWith("Preparing ") || localExportStatus.startsWith("Saving ")) return;
     const id = window.setTimeout(() => {
       setLocalExportStatus((current) => current === localExportStatus ? "" : current);
-    }, 5000);
+    }, 12000);
     return () => window.clearTimeout(id);
   }, [localExportStatus, exportBusy]);
   const voxelCount = Math.max(0, Math.floor(nSlices) * Math.floor(height) * Math.floor(width));
@@ -2750,16 +5269,114 @@ function Show3D() {
   const quantizedExportSize2 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 4));
   const quantizedExportSize4 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 16));
   const quantizedExportSize8 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 64));
-  const gifLowEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "low");
-  const gifMediumEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "medium");
-  const gifHighEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "high");
+  const selectedSpatialOption = spatialOptionFor(exportSpatialPreset);
+  const animationPanelWidth = sharedPanelSource
+    ? Math.max(1, width)
+    : Math.max(1, panelWidthPx || Math.floor(width / Math.max(1, nPanels || 1)) || width);
+  const animationPanelHeight = Math.max(1, height);
+  const exportFrameIndices = React.useMemo(
+    () => buildAnimationFrameIndices(nSlices, exportFrameStart, exportFrameEnd, exportEveryN, exportMaxFrames),
+    [nSlices, exportFrameStart, exportFrameEnd, exportEveryN, exportMaxFrames],
+  );
+  const animationWorkEstimate = formatEstimatedAnimationWork(
+    animationPanelWidth,
+    animationPanelHeight,
+    exportFrameIndices.length,
+    visiblePanelCount,
+    maxCols,
+    panelGapPx,
+    exportQuality,
+    selectedSpatialOption.downsample,
+    selectedSpatialOption.maxEdgePx,
+  );
+  const exportFpsValue = Math.max(1, Math.round(exportFps || DEFAULT_ANIMATION_EXPORT_FPS));
+  const exportDurationSeconds = exportFrameIndices.length / exportFpsValue;
+  const exportFrameSummary = `${exportFrameIndices.length}/${Math.max(1, nSlices || 1)} frames · ${exportDurationSeconds.toFixed(1)} s at ${exportFpsValue} fps`;
+  const animationExportRequest = React.useMemo(() => ({
+    fps: exportFpsValue,
+    frame_start: exportFrameIndices[0] ?? 0,
+    frame_stop: (exportFrameIndices[exportFrameIndices.length - 1] ?? 0) + 1,
+    every_n: Math.max(1, Math.round(exportEveryN || 1)),
+    max_frames: Math.max(0, Math.round(exportMaxFrames || 0)),
+    downsample: selectedSpatialOption.downsample,
+    max_edge_px: selectedSpatialOption.maxEdgePx || null,
+    preset: exportGifPreset === "custom" ? "custom" : exportGifPreset,
+    slides_preset: exportGifPreset === "slides",
+    show_panel_titles: showPanelTitles !== false,
+    show_scale_bar: Boolean(scaleBarVisible),
+    show_zoom: showZoomIndicator === true,
+  }), [
+    exportFpsValue,
+    exportFrameIndices,
+    exportEveryN,
+    exportMaxFrames,
+    selectedSpatialOption.downsample,
+    selectedSpatialOption.maxEdgePx,
+    exportGifPreset,
+    showPanelTitles,
+    scaleBarVisible,
+    showZoomIndicator,
+  ]);
+  const canDownloadCurrentHtml = !exportEnabled && (offline || hasOfflineStack || hasOfflineFloatStack || offlineForTheme);
+  const standaloneHtmlMode = hasOfflineFloatStack ? "exact" : "quantized";
+  const standaloneHtmlLabel = standaloneHtmlMode === "quantized"
+    ? `HTML encoded uint8 (${quantizedExportSize})`
+    : `HTML exact float32 (${exactExportSize})`;
+  const canExportStandaloneGif = !exportEnabled && offline && width > 0 && height > 0 && nSlices > 0 && (
+    hasOfflineStack || hasOfflineFloatStack || sidecarRamReady
+  );
+  const canExportStandaloneMp4 = canExportStandaloneGif && browserMp4Support === "supported";
+  const standaloneGifUnavailableTitle = sidecarMode && !sidecarRamReady
+    ? "GIF export becomes available after the folder data finishes loading into RAM."
+    : "GIF export needs embedded or loaded standalone image data.";
+  const standaloneMp4UnavailableTitle = !canExportStandaloneGif
+    ? "MP4 export needs embedded or loaded standalone image data."
+    : browserMp4Support === "checking"
+      ? "Checking browser WebCodecs H.264 support for standalone MP4 export."
+      : "Standalone MP4 export requires browser WebCodecs H.264 support. Use GIF here, or open the live Python widget for MP4.";
+  const standaloneAnimationUsesEncodedUint8 = !exportEnabled && hasOfflineStack && !hasOfflineFloatStack;
+  const standaloneAnimationSourceNote = exportEnabled
+    ? "Source: live Python widget can export from the original stack."
+    : hasOfflineFloatStack
+      ? "Source: exact float32 embedded data."
+      : hasOfflineStack
+        ? "Source: encoded uint8 standalone data. For best movie fidelity, export/open HTML exact float32 from the live widget."
+        : sidecarRamReady
+          ? "Source: loaded folder data in browser RAM."
+          : "";
+  const standaloneAnimationQualityWarning = standaloneAnimationUsesEncodedUint8
+    ? 'Warning: this standalone HTML stores encoded uint8 frames, not the original float32 stack. GIF adds a 256-color palette step and may change noisy or continuous colormaps. For publication-quality movies, export from the live widget or open an HTML exact float32 export with encoding="full".'
+    : "";
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
+    setExportPanelMode("home");
     setExportMenuAnchor(event.currentTarget);
   };
   const handleExportMenuClose = () => {
     setExportMenuAnchor(null);
   };
-  const handleExportSelect = async (mode: string, quality = "medium", downsample = 1) => {
+  React.useEffect(() => {
+    const total = Math.max(1, Math.floor(nSlices || 1));
+    setExportFrameStart((current) => Math.max(1, Math.min(total, Math.round(current || 1))));
+    setExportFrameEnd((current) => Math.max(1, Math.min(total, Math.round(current || total))));
+  }, [nSlices]);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!offline) {
+      setBrowserMp4Support("unsupported");
+      return () => { cancelled = true; };
+    }
+    setBrowserMp4Support("checking");
+    void supportsBrowserMp4().then((supported) => {
+      if (!cancelled) setBrowserMp4Support(supported ? "supported" : "unsupported");
+    });
+    return () => { cancelled = true; };
+  }, [offline]);
+  const handleExportSelect = async (
+    mode: string,
+    quality = "medium",
+    downsample = 1,
+    requestOptions: Record<string, unknown> = {},
+  ) => {
     setExportMenuAnchor(null);
     if (mode !== "exact" && mode !== "quantized" && mode !== "gif" && mode !== "mp4") return;
     const filename = makeExportFilename(title, nSlices, height, width, mode, quality, downsample);
@@ -2787,7 +5404,573 @@ function Show3D() {
     }
     pendingExportRef.current = { id, filename, mode, downsample, handle };
     setLocalExportStatus(`Preparing ${filename}...`);
-    setExportRequest(JSON.stringify({ mode, quality, downsample, id, filename, download: true }));
+    setExportRequest(JSON.stringify({ mode, quality, downsample, ...requestOptions, id, filename, download: true }));
+  };
+  const handleStandaloneHtmlDownload = () => {
+    setExportMenuAnchor(null);
+    const filename = makeExportFilename(title, nSlices, height, width, standaloneHtmlMode);
+    try {
+      const html = `<!doctype html>\n${standaloneHtmlWithCurrentWidgetState(
+        model,
+        standaloneWidgetStaticHtmlFromDocument(),
+        SHOW3D_STANDALONE_VIEW_STATE_KEYS,
+      )}`;
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      downloadBlob(blob, filename);
+      setLocalExportStatus(`Downloaded ${filename} to browser Downloads (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const renderStandaloneAnimationCanvas = (
+    frameIdx: number,
+    quality: string,
+    options: { downsample: number; maxEdgePx: number | null },
+  ): { width: number; height: number; canvas: HTMLCanvasElement } | null => {
+    const frame = getOfflineFrame(frameIdx);
+    if (!frame) return null;
+    const sourcePanelCount = Math.max(1, nPanels || 1);
+    const panelW = sharedPanelSource ? Math.max(1, width) : Math.max(1, panelWidthPx || Math.floor(width / sourcePanelCount) || width);
+    const panelH = Math.max(1, height);
+    const panels = (visiblePanelIndices.length ? visiblePanelIndices : [0])
+      .filter((panel) => panel >= 0 && panel < sourcePanelCount);
+    const activePanels = panels.length ? panels : [0];
+    const cols = panelColsForCount(activePanels.length);
+    const rows = Math.max(1, Math.ceil(activePanels.length / cols));
+    const scale = animationOutputScale(
+      panelW,
+      panelH,
+      quality,
+      options.downsample,
+      options.maxEdgePx,
+      activePanels.length,
+      cols,
+      panelGapPx,
+    );
+    const panelOutW = Math.max(1, Math.round(panelW * scale));
+    const panelOutH = Math.max(1, Math.round(panelH * scale));
+    const gap = activePanels.length > 1 ? Math.max(0, Math.round((panelGapPx) * scale)) : 0;
+    const outer = Math.max(0, Math.round(galleryOuterBorderPx * scale));
+    const innerBorder = Math.max(0, Math.round(panelInnerBorderPx * scale));
+    const outW = cols * panelOutW + Math.max(0, cols - 1) * gap + 2 * outer;
+    const outH = rows * panelOutH + Math.max(0, rows - 1) * gap + 2 * outer;
+    const out = document.createElement("canvas");
+    out.width = outW;
+    out.height = outH;
+    const outCtx = out.getContext("2d");
+    if (!outCtx) return null;
+    outCtx.imageSmoothingEnabled = smooth;
+    outCtx.fillStyle = galleryOuterBorderPx > 0 ? galleryOuterBorderColor : interPanelGapColor;
+    outCtx.fillRect(0, 0, outW, outH);
+    if (gap > 0) {
+      outCtx.fillStyle = interPanelGapColor;
+      outCtx.fillRect(outer, outer, Math.max(0, outW - 2 * outer), Math.max(0, outH - 2 * outer));
+    }
+
+    const panelCanvas = document.createElement("canvas");
+    panelCanvas.width = panelW;
+    panelCanvas.height = panelH;
+    const panelCtx = panelCanvas.getContext("2d");
+    if (!panelCtx) return null;
+    const panelImage = panelCtx.createImageData(panelW, panelH);
+    const fallbackLut = COLORMAPS[cmap] || COLORMAPS.inferno;
+    let sharedAutoRange: { vmin: number; vmax: number } | null = null;
+    if (autoContrast && linkContrast) {
+      sharedAutoRange =
+        cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale) ||
+        cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, frameIdx, logScale);
+      if (!sharedAutoRange) {
+        const data = logScale ? applyLogScale(frame) : frame;
+        sharedAutoRange = percentileClip(data, percentileLow, percentileHigh);
+      }
+    }
+
+    for (let slot = 0; slot < activePanels.length; slot++) {
+      const panel = activePanels[slot];
+      const panelData = extractPanelSlice(frame, panel, logScale);
+      if (!panelData) continue;
+      const lut = COLORMAPS[panelCmapFor(panel)] || fallbackLut;
+      let range: { vmin: number; vmax: number };
+      if (autoContrast) {
+        if (sharedAutoRange && linkContrast) {
+          range = sharedAutoRange;
+        } else {
+          const clipped = percentileClip(panelData, percentileLow, percentileHigh);
+          if (clipped.vmax > clipped.vmin) {
+            range = clipped;
+          } else {
+            const fallback = findDataRange(panelData);
+            range = { vmin: fallback.min, vmax: fallback.max };
+          }
+        }
+      } else if (!linkContrast && activePanels.length > 1) {
+        const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+        const pdr = panelDataRanges[panel];
+        const bounds = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stackBounds;
+        range = resolvePanelRange(panel, bounds);
+      } else {
+        range = resolveDisplayRange(
+          dataMin,
+          dataMax,
+          traitVmin,
+          traitVmax,
+          logScale,
+          imageVminPct,
+          imageVmaxPct,
+        );
+      }
+      renderFramePlayback(panelData, panelImage.data, lut, range.vmin, range.vmax, false);
+      panelCtx.putImageData(panelImage, 0, 0);
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      const x = outer + col * (panelOutW + gap);
+      const y = outer + row * (panelOutH + gap);
+      outCtx.save();
+      outCtx.beginPath();
+      outCtx.rect(x, y, panelOutW, panelOutH);
+      outCtx.clip();
+      outCtx.translate(x, y);
+      if (flipCols || flipRows) {
+        outCtx.translate(flipCols ? panelOutW : 0, flipRows ? panelOutH : 0);
+        outCtx.scale(flipCols ? -1 : 1, flipRows ? -1 : 1);
+      }
+      if (imageRotation % 4 !== 0) {
+        outCtx.translate(panelOutW / 2, panelOutH / 2);
+        outCtx.rotate((imageRotation * Math.PI) / 2);
+        outCtx.translate(-panelOutW / 2, -panelOutH / 2);
+      }
+      outCtx.drawImage(panelCanvas, 0, 0, panelW, panelH, 0, 0, panelOutW, panelOutH);
+      outCtx.restore();
+      if (innerBorder > 0) {
+        outCtx.save();
+        outCtx.strokeStyle = panelInnerBorderColor;
+        outCtx.lineWidth = innerBorder;
+        const inset = innerBorder / 2;
+        outCtx.strokeRect(x + inset, y + inset, Math.max(0, panelOutW - innerBorder), Math.max(0, panelOutH - innerBorder));
+        outCtx.restore();
+      }
+      if (showPanelTitles !== false) {
+        const label = panelTitleText(panel);
+        if (label) {
+          outCtx.save();
+          outCtx.font = `700 ${Math.max(MIN_ANIMATION_TITLE_FONT_PX, Math.round((panelTitleFontSize || 11) * scale))}px ${UI_FONT}`;
+          outCtx.textAlign = "center";
+          outCtx.textBaseline = "top";
+          outCtx.shadowColor = "rgba(0,0,0,0.75)";
+          outCtx.shadowBlur = 2;
+          outCtx.shadowOffsetX = 1;
+          outCtx.shadowOffsetY = 1;
+          outCtx.fillStyle = "white";
+          outCtx.fillText(label, x + panelOutW / 2, y + Math.max(3, Math.round(3 * scale)));
+          outCtx.restore();
+        }
+      }
+      if (scaleBarVisible && pixelSize > 0) {
+        const outputPixelSize = pixelSize / Math.max(1e-6, scale);
+        const targetBarPx = Math.min(60, panelOutW * 0.25);
+        const nicePhysical = roundToNiceValue(targetBarPx * outputPixelSize);
+        const barPx = Math.max(1, (nicePhysical / outputPixelSize));
+        const barThickness = Math.max(MIN_ANIMATION_SCALE_BAR_THICKNESS_PX, Math.round(5 * scale));
+        const fontSize = Math.max(MIN_ANIMATION_SCALE_FONT_PX, Math.round(16 * scale));
+        const margin = Math.max(MIN_ANIMATION_OVERLAY_MARGIN_PX, Math.round(12 * scale));
+        const barX = x + panelOutW - barPx - margin;
+        const barY = y + panelOutH - margin;
+        outCtx.save();
+        outCtx.fillStyle = "white";
+        outCtx.fillRect(barX, barY, barPx, barThickness);
+        outCtx.shadowColor = "rgba(0,0,0,0.75)";
+        outCtx.shadowBlur = 2;
+        outCtx.shadowOffsetX = 1;
+        outCtx.shadowOffsetY = 1;
+        outCtx.font = `${fontSize}px ${UI_FONT}`;
+        outCtx.textAlign = "center";
+        outCtx.textBaseline = "bottom";
+        outCtx.fillText(formatScaleLabel(nicePhysical, pixelUnit || "px"), barX + barPx / 2, barY - Math.max(2, Math.round(4 * scale)));
+        if (showZoomIndicator === true) {
+          outCtx.textAlign = "left";
+          outCtx.fillText(formatZoomLabel(1), x + margin, y + panelOutH - margin + barThickness);
+        }
+        outCtx.restore();
+      }
+    }
+    return { width: outW, height: outH, canvas: out };
+  };
+  const renderStandaloneGifFrame = (
+    frameIdx: number,
+    quality: string,
+    options: { downsample: number; maxEdgePx: number | null },
+  ): { width: number; height: number; indices: Uint8Array } | null => {
+    const rendered = renderStandaloneAnimationCanvas(frameIdx, quality, options);
+    if (!rendered) return null;
+    const ctx = rendered.canvas.getContext("2d");
+    if (!ctx) return null;
+    const rgba = ctx.getImageData(0, 0, rendered.width, rendered.height).data;
+    return { width: rendered.width, height: rendered.height, indices: quantizeRgbaForBrowserGif(rgba) };
+  };
+  const handleStandaloneGifDownload = async (
+    quality = "medium",
+    requestOptions: Record<string, unknown> = {},
+  ) => {
+    setExportMenuAnchor(null);
+    if (!canExportStandaloneGif) {
+      setLocalExportStatus(standaloneGifUnavailableTitle);
+      return;
+    }
+    const filename = makeExportFilename(title, nSlices, height, width, "gif", quality);
+    setExportBusy(true);
+    setLocalExportStatus(`Preparing ${filename}...`);
+    try {
+      const frames: Uint8Array[] = [];
+      let outW = 0;
+      let outH = 0;
+      const frameIndices = exportFrameIndices.length ? exportFrameIndices : [Math.max(0, Math.min(Math.max(1, nSlices || 1) - 1, sliceIdx || 0))];
+      const spatialOption = {
+        downsample: Number(requestOptions.downsample ?? selectedSpatialOption.downsample),
+        maxEdgePx: requestOptions.max_edge_px == null ? null : Number(requestOptions.max_edge_px),
+      };
+      const total = frameIndices.length;
+      for (let slot = 0; slot < total; slot++) {
+        const frameIdx = frameIndices[slot];
+        const rendered = renderStandaloneGifFrame(frameIdx, quality, spatialOption);
+        if (!rendered) throw new Error(`frame ${frameIdx + 1}/${Math.max(1, nSlices || 1)} is not loaded`);
+        outW = rendered.width;
+        outH = rendered.height;
+        frames.push(rendered.indices);
+        if (slot === 0 || slot === total - 1 || (slot + 1) % 4 === 0) {
+          setLocalExportStatus(`Encoding ${filename}... ${slot + 1}/${total}`);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+      const delayCs = 100 / clampPlaybackFps(Number(requestOptions.fps ?? exportFps ?? playbackFps));
+      const gif = encodeIndexedGif(outW, outH, frames, delayCs);
+      const blob = new Blob([gif as BlobPart], { type: "image/gif" });
+      downloadBlob(blob, filename);
+      setLocalExportStatus(`Downloaded ${filename} to browser Downloads (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+  const evenVideoCanvas = (canvas: HTMLCanvasElement, width: number, height: number): { canvas: HTMLCanvasElement; width: number; height: number } => {
+    const evenW = width + (width % 2);
+    const evenH = height + (height % 2);
+    if (evenW === width && evenH === height) return { canvas, width, height };
+    const out = document.createElement("canvas");
+    out.width = evenW;
+    out.height = evenH;
+    const ctx = out.getContext("2d");
+    if (!ctx) throw new Error("Could not create an MP4 export canvas.");
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, evenW, evenH);
+    ctx.drawImage(canvas, 0, 0);
+    return { canvas: out, width: evenW, height: evenH };
+  };
+  const handleStandaloneMp4Download = async (
+    quality = "medium",
+    requestOptions: Record<string, unknown> = {},
+  ) => {
+    setExportMenuAnchor(null);
+    if (!canExportStandaloneMp4) {
+      setLocalExportStatus(standaloneMp4UnavailableTitle);
+      return;
+    }
+    const w = browserMp4Window();
+    if (!w.VideoEncoder || !w.VideoFrame) {
+      setLocalExportStatus("Export failed: this browser does not expose WebCodecs VideoEncoder.");
+      return;
+    }
+    const VideoFrameCtor = w.VideoFrame;
+    const filename = makeExportFilename(title, nSlices, height, width, "mp4", quality);
+    setExportBusy(true);
+    setLocalExportStatus(`Preparing ${filename}...`);
+    try {
+      const frameIndices = exportFrameIndices.length ? exportFrameIndices : [Math.max(0, Math.min(Math.max(1, nSlices || 1) - 1, sliceIdx || 0))];
+      const spatialOption = {
+        downsample: Number(requestOptions.downsample ?? selectedSpatialOption.downsample),
+        maxEdgePx: requestOptions.max_edge_px == null ? null : Number(requestOptions.max_edge_px),
+      };
+      const fps = clampPlaybackFps(Number(requestOptions.fps ?? exportFps ?? playbackFps));
+      const frameDurationUs = Math.max(1, Math.round(1_000_000 / fps));
+      const firstRendered = renderStandaloneAnimationCanvas(frameIndices[0], quality, spatialOption);
+      if (!firstRendered) throw new Error(`frame ${frameIndices[0] + 1}/${Math.max(1, nSlices || 1)} is not loaded`);
+      const first = evenVideoCanvas(firstRendered.canvas, firstRendered.width, firstRendered.height);
+      const config = await selectBrowserMp4Config(first.width, first.height, fps);
+      if (!config) {
+        throw new Error("this browser cannot encode H.264/AVC MP4 at the selected size. Try Size = Max edge 1024 px or 2x downsample.");
+      }
+
+      const samples: Mp4Sample[] = [];
+      let avcDescription: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+      let encoderError: unknown = null;
+      const encoder = new w.VideoEncoder({
+        output: (chunk, metadata) => {
+          const data = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(data);
+          const description = metadata?.decoderConfig?.description;
+          if (description) avcDescription = copyMp4Bytes(description);
+          samples.push({
+            data,
+            timestamp: Math.max(0, Math.round(chunk.timestamp || 0)),
+            duration: Math.max(1, Math.round(chunk.duration || frameDurationUs)),
+            key: chunk.type === "key",
+          });
+        },
+        error: (error) => {
+          encoderError = error;
+        },
+      });
+      encoder.configure(config);
+
+      const encodeCanvas = (canvas: HTMLCanvasElement, slot: number) => {
+        const frame = new VideoFrameCtor(canvas, {
+          timestamp: slot * frameDurationUs,
+          duration: frameDurationUs,
+        });
+        try {
+          encoder.encode(frame, { keyFrame: slot === 0 });
+        } finally {
+          frame.close();
+        }
+      };
+
+      encodeCanvas(first.canvas, 0);
+      const total = frameIndices.length;
+      for (let slot = 1; slot < total; slot++) {
+        const frameIdx = frameIndices[slot];
+        const rendered = renderStandaloneAnimationCanvas(frameIdx, quality, spatialOption);
+        if (!rendered) throw new Error(`frame ${frameIdx + 1}/${Math.max(1, nSlices || 1)} is not loaded`);
+        const even = evenVideoCanvas(rendered.canvas, rendered.width, rendered.height);
+        encodeCanvas(even.canvas, slot);
+        if (slot === total - 1 || (slot + 1) % 4 === 0) {
+          setLocalExportStatus(`Encoding ${filename}... ${slot + 1}/${total}`);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+      await encoder.flush();
+      encoder.close();
+      if (encoderError) throw encoderError instanceof Error ? encoderError : new Error(String(encoderError));
+      samples.sort((a, b) => a.timestamp - b.timestamp);
+      setLocalExportStatus(`Muxing ${filename}...`);
+      const mp4 = encodeAvcMp4(samples, first.width, first.height, avcDescription);
+      const blob = new Blob([mp4 as BlobPart], { type: "video/mp4" });
+      downloadBlob(blob, filename);
+      setLocalExportStatus(`Downloaded ${filename} to browser Downloads (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+  const handleAnimationExportSelect = (mode: "gif" | "mp4", quality: string, requestOptions = animationExportRequest) => {
+    if (mode === "gif" && canExportStandaloneGif) {
+      void handleStandaloneGifDownload(quality, requestOptions);
+      return;
+    }
+    if (mode === "mp4" && canExportStandaloneMp4) {
+      void handleStandaloneMp4Download(quality, requestOptions);
+      return;
+    }
+    void handleExportSelect(mode, quality, 1, requestOptions);
+  };
+  const applyGifExportPreset = React.useCallback((preset: GifExportPreset) => {
+    setExportPanelMode("gif");
+    setExportGifPreset(preset);
+    setExportFrameStart(1);
+    setExportFrameEnd(Math.max(1, nSlices || 1));
+    if (preset === "slides") {
+      setExportQuality("medium");
+      setExportEveryN(1);
+      setExportMaxFrames(40);
+      setExportFps(DEFAULT_ANIMATION_EXPORT_FPS);
+      setExportSpatialPreset("edge512");
+    } else if (preset === "compact") {
+      setExportQuality("low");
+      setExportEveryN(Math.max(1, Math.ceil(Math.max(1, nSlices || 1) / 24)));
+      setExportMaxFrames(24);
+      setExportFps(8);
+      setExportSpatialPreset("down4");
+    } else if (preset === "full") {
+      setExportQuality("high");
+      setExportEveryN(1);
+      setExportMaxFrames(0);
+      setExportFps(DEFAULT_ANIMATION_EXPORT_FPS);
+      setExportSpatialPreset("full");
+    }
+  }, [nSlices]);
+  const applyMp4ExportDefaults = React.useCallback(() => {
+    setExportPanelMode("mp4");
+    setExportGifPreset("custom");
+    setExportQuality("high");
+    setExportFrameStart(1);
+    setExportFrameEnd(Math.max(1, nSlices || 1));
+    setExportEveryN(1);
+    setExportMaxFrames(0);
+    setExportFps(DEFAULT_ANIMATION_EXPORT_FPS);
+    setExportSpatialPreset("edge1024");
+  }, [nSlices]);
+  const markGifPresetCustom = React.useCallback(() => {
+    setExportGifPreset((preset) => preset === "custom" ? preset : "custom");
+  }, []);
+  const exportNumberFieldSx = {
+    width: 72,
+    "& .MuiInputBase-input": { py: 0.45, px: 0.75, fontSize: 11 },
+  } as const;
+  const exportPanelButtonSx = { ...compactButton, fontSize: 11, border: `1px solid ${themeColors.border}` } as const;
+  const renderAnimationExportPanel = (mode: "gif" | "mp4") => {
+    const isGif = mode === "gif";
+    const disabled = isGif ? !(exportEnabled || canExportStandaloneGif) : !(exportEnabled || canExportStandaloneMp4);
+    const disabledTitle = isGif ? standaloneGifUnavailableTitle : standaloneMp4UnavailableTitle;
+    const titleText = isGif ? "GIF" : "MP4 video";
+    return (
+      <Box sx={{ width: 360, maxWidth: "90vw", px: 1.25, py: 1, display: "flex", flexDirection: "column", gap: 0.9 }}>
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
+          <Button size="small" sx={compactButton} onClick={() => setExportPanelMode("home")}>Back</Button>
+          <Box sx={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+            <Typography sx={{ ...typography.title, fontSize: 12 }}>{titleText}</Typography>
+            {isGif && (
+              <InfoTooltip
+                theme={themeInfo.theme}
+                icon="?"
+                text={(
+                  <Box sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                    <b>GIF export lifecycle</b>
+                    <br />1. Pick a preset or adjust frames, fps, quality, and size.
+                    <br />2. Press <b>Export GIF</b>; the widget renders panel-only frames using the current contrast and overlays.
+                    <br />3. In standalone HTML, the browser downloads the GIF to Downloads. In a live notebook, choose a save location when prompted.
+                  </Box>
+                )}
+              />
+            )}
+          </Box>
+        </Box>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+          {isGif
+            ? "GIF exports the current panel movie without toolbar chrome. Use a preset, then export."
+            : canExportStandaloneMp4
+              ? "MP4 uses browser WebCodecs H.264 when available, with the same panel-only frames as GIF."
+              : "MP4 is secondary for presentation workflows. Use the live Python backend, or a browser with WebCodecs H.264 support."}
+        </Typography>
+        {standaloneAnimationSourceNote && (
+          <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+            {standaloneAnimationSourceNote}
+          </Typography>
+        )}
+        {standaloneAnimationQualityWarning && (
+          <Box
+            data-show3d-encoded-source-animation-warning="true"
+            sx={{
+              border: `1px solid ${themeColors.accentYellow}`,
+              bgcolor: themeInfo.theme === "dark" ? "rgba(255, 193, 7, 0.12)" : "rgba(255, 193, 7, 0.18)",
+              color: themeColors.text,
+              px: 0.8,
+              py: 0.65,
+              fontSize: 11,
+              lineHeight: 1.35,
+            }}
+          >
+            {standaloneAnimationQualityWarning}
+          </Box>
+        )}
+        {isGif && (
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 0.5 }}>
+            {GIF_EXPORT_PRESETS.map((preset) => (
+              <Button
+                key={preset.value}
+                size="small"
+                sx={{
+                  ...compactButton,
+                  minWidth: 0,
+                  border: `1px solid ${exportGifPreset === preset.value ? themeColors.accent : themeColors.border}`,
+                  bgcolor: exportGifPreset === preset.value ? "rgba(25,118,210,0.12)" : "transparent",
+                }}
+                onClick={() => applyGifExportPreset(preset.value)}
+              >
+                {preset.label}
+              </Button>
+            ))}
+          </Box>
+        )}
+        <Box sx={{ display: "grid", gridTemplateColumns: "auto 1fr auto 1fr", alignItems: "center", gap: 0.75 }}>
+          <Typography sx={typography.label}>Frames</Typography>
+          <TextField size="small" type="number" value={exportFrameStart} onChange={(event) => { markGifPresetCustom(); setExportFrameStart(Number(event.target.value)); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export first frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>to</Typography>
+          <TextField size="small" type="number" value={exportFrameEnd} onChange={(event) => { markGifPresetCustom(); setExportFrameEnd(Number(event.target.value)); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export last frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Every</Typography>
+          <TextField size="small" type="number" value={exportEveryN} onChange={(event) => { markGifPresetCustom(); setExportEveryN(Math.max(1, Number(event.target.value))); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export every Nth frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Max frames</Typography>
+          <TextField size="small" type="number" value={exportMaxFrames} onChange={(event) => { markGifPresetCustom(); setExportMaxFrames(Math.max(0, Number(event.target.value))); }} inputProps={{ min: 0, max: Math.max(1, nSlices || 1), "aria-label": "Maximum exported frames; zero means all" }} sx={exportNumberFieldSx} />
+        </Box>
+        <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
+          <Typography sx={typography.label}>fps</Typography>
+          <TextField size="small" type="number" value={exportFps} onChange={(event) => { markGifPresetCustom(); setExportFps(Math.max(1, Number(event.target.value))); }} inputProps={{ min: 1, max: MAX_PLAYBACK_FPS, "aria-label": "Export animation frames per second" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Quality</Typography>
+          <Select size="small" value={exportQuality} onChange={(event) => { markGifPresetCustom(); setExportQuality(event.target.value as AnimationQuality); }} sx={{ ...themedSelect, minWidth: 86, fontSize: 11 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Animation quality" }}>
+            {ANIMATION_QUALITY_OPTIONS.map((quality) => <MenuItem key={quality} value={quality}>{quality}</MenuItem>)}
+          </Select>
+          <Typography sx={typography.label}>Size</Typography>
+          <Select size="small" value={exportSpatialPreset} onChange={(event) => { markGifPresetCustom(); setExportSpatialPreset(event.target.value as ExportSpatialPreset); }} sx={{ ...themedSelect, minWidth: 144, fontSize: 11 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Animation spatial size" }}>
+            {EXPORT_SPATIAL_OPTIONS.map((option) => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
+          </Select>
+        </Box>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+          {exportFrameSummary} · {animationWorkEstimate}
+          {selectedSpatialOption.downsample > 1 ? ` · ${selectedSpatialOption.downsample}x downsample` : ""}
+          {selectedSpatialOption.maxEdgePx ? ` · max edge ${selectedSpatialOption.maxEdgePx}px` : ""}
+        </Typography>
+        <Button
+          size="small"
+          sx={exportPanelButtonSx}
+          disabled={disabled || exportBusy}
+          title={disabled ? disabledTitle : undefined}
+          onClick={() => handleAnimationExportSelect(mode, exportQuality, animationExportRequest)}
+        >
+          {isGif ? "Export GIF" : "Export MP4"}
+        </Button>
+      </Box>
+    );
+  };
+  const renderHtmlExportPanel = () => (
+    <Box sx={{ width: 340, maxWidth: "86vw", px: 1.25, py: 1, display: "flex", flexDirection: "column", gap: 0.8 }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        <Button size="small" sx={compactButton} onClick={() => setExportPanelMode("home")}>Back</Button>
+        <Typography sx={{ ...typography.title, fontSize: 12 }}>Interactive HTML</Typography>
+      </Box>
+      <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+        HTML is the primary interactive sharing path. Exact keeps float32 data; encoded uint8 is smaller for visual reports.
+      </Typography>
+      {exportEnabled && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</Button>}
+      {exportEnabled && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized")}>HTML encoded uint8 ({quantizedExportSize})</Button>}
+      {exportEnabled && height >= 2 && width >= 2 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML encoded uint8, 2x downsample ({quantizedExportSize2})</Button>}
+      {exportEnabled && height >= 4 && width >= 4 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML encoded uint8, 4x downsample ({quantizedExportSize4})</Button>}
+      {exportEnabled && height >= 8 && width >= 8 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML encoded uint8, 8x downsample ({quantizedExportSize8})</Button>}
+      {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Exact float32 is not embedded in this standalone page; open the live widget for exact export.</Typography>}
+      {canDownloadCurrentHtml && <Button size="small" sx={exportPanelButtonSx} onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</Button>}
+      {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Encoded uint8 export requires the Python backend to repack the current float32 stack.</Typography>}
+    </Box>
+  );
+  const renderExportMenuContent = () => {
+    if (exportPanelMode === "gif") return renderAnimationExportPanel("gif");
+    if (exportPanelMode === "mp4") return renderAnimationExportPanel("mp4");
+    if (exportPanelMode === "html") return renderHtmlExportPanel();
+    return (
+      <Box sx={{ width: 320, maxWidth: "86vw", py: 0.5 }}>
+        <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => applyGifExportPreset("slides")}>
+          GIF
+        </MenuItem>
+        <MenuItem disabled={!(exportEnabled || canDownloadCurrentHtml)} onClick={() => setExportPanelMode("html")}>
+          Interactive HTML
+        </MenuItem>
+        <MenuItem disabled={!(exportEnabled || canExportStandaloneMp4)} title={!(exportEnabled || canExportStandaloneMp4) ? standaloneMp4UnavailableTitle : undefined} onClick={applyMp4ExportDefaults}>
+          MP4 video (secondary)
+        </MenuItem>
+        <Box sx={{ px: 2, py: 0.75, borderTop: `1px solid ${themeColors.border}` }}>
+          <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+            Use GIF for slides, HTML for interactive review, and MP4 only when a video file is required.
+          </Typography>
+        </Box>
+      </Box>
+    );
   };
 
   React.useEffect(() => {
@@ -2814,7 +5997,11 @@ function Show3D() {
         if (canceled) return;
         pendingExportRef.current = null;
         setExportBusy(false);
-        setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(bytes.byteLength)})`);
+        setLocalExportStatus(
+          pending.handle
+            ? `Saved ${filename} to selected location (${formatSavedBytes(bytes.byteLength)})`
+            : `Downloaded ${filename} to browser Downloads (${formatSavedBytes(bytes.byteLength)})`,
+        );
         setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
       } catch (err) {
         if (canceled) return;
@@ -2838,6 +6025,49 @@ function Show3D() {
   const roiItems = (roiList || []).map((roi, i) => normalizeROI(roi, i));
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < roiItems.length ? roiItems[roiSelectedIdx] : null;
   const [showRoiResizeHint, setShowRoiResizeHint] = React.useState(true);
+  const [overlayEditMode, setOverlayEditMode] = React.useState(false);
+  const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
+  const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
+  const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  React.useEffect(() => {
+    if (!overlayBaselineRef.current && hasPanelOverlays) {
+      overlayBaselineRef.current = clonePanelOverlays(panelOverlays);
+    }
+  }, [hasPanelOverlays, panelOverlays]);
+  React.useEffect(() => {
+    if (!overlaySelection) return;
+    const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
+    if (!exists) setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays]);
+
+  const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
+    const next = clonePanelOverlays(panelOverlays);
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || overlay < 0 || overlay >= next[panel].length) return;
+    next[panel][overlay] = nextSpec;
+    setPanelOverlays(next);
+  }, [panelOverlays, setPanelOverlays]);
+
+  const deleteSelectedOverlay = React.useCallback(() => {
+    if (!overlaySelection) return;
+    const next = clonePanelOverlays(panelOverlays);
+    const items = next[overlaySelection.panel];
+    if (!items || overlaySelection.overlay < 0 || overlaySelection.overlay >= items.length) return;
+    items.splice(overlaySelection.overlay, 1);
+    setPanelOverlays(next);
+    setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays, setPanelOverlays]);
+
+  const resetPanelOverlays = React.useCallback(() => {
+    if (!overlayBaselineRef.current) return;
+    setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
+    setOverlaySelection(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+  }, [setPanelOverlays]);
   const pendingRoiAddRef = React.useRef<{ row: number; col: number } | null>(null);
 
   // Preview panel state (JS-only, shows ROI crop at full resolution - auto-shows when ROI selected)
@@ -2892,6 +6122,7 @@ function Show3D() {
     imageVminPct: 0,
     imageVmaxPct: 100,
   };
+  type RenderRange = { vmin: number; vmax: number };
   type Show3DViewState = {
     linked_state?: Partial<PanelState>;
     panel_states?: Partial<PanelState>[];
@@ -2946,12 +6177,86 @@ function Show3D() {
     }
     prevLinkRef.current = linkPanels;
   }, [linkPanels]);
-  const stateFor = (panelIdx: number): PanelState => {
+  const stateFor = React.useCallback((panelIdx: number): PanelState => {
     const livePanels = panelStatesLiveRef.current;
     return linkPanels
       ? linkedStateLiveRef.current
       : (livePanels[panelIdx] || panelStates[panelIdx] || initialState);
-  };
+  }, [linkPanels, panelStates]);
+  // A cached packed composite already includes rotation and flips.  Plain
+  // zoom/pan can be applied while painting that image, but those orientation
+  // transforms need the original per-pixel viewport path to retain their
+  // exact screen-space pan semantics.
+  const packedViewportTransformRequiresRebuild = imageRotation % 4 !== 0 || flipRows || flipCols;
+  const sidecarDisplayStyleKey = React.useMemo(() => {
+    const panels = visiblePanelIndices.length
+      ? visiblePanelIndices
+      : Array.from({ length: Math.max(1, nPanels || 1) }, (_, idx) => idx);
+    return JSON.stringify({
+      cmap,
+      smooth,
+      autoContrast,
+      logScale,
+      percentileLow: Number(percentileLow || 0).toFixed(3),
+      percentileHigh: Number(percentileHigh || 100).toFixed(3),
+      linkContrast,
+      linkPanels,
+      imageRotation,
+      flipRows,
+      flipCols,
+      panelGapPx,
+      imageVminPct: Number(imageVminPct || 0).toFixed(3),
+      imageVmaxPct: Number(imageVmaxPct || 100).toFixed(3),
+      autoVmins: (autoVmins || []).map((value) => Number(value).toFixed(6)),
+      autoVmaxs: (autoVmaxs || []).map((value) => Number(value).toFixed(6)),
+      panels: panels.map((panel) => {
+        const state = linkPanels ? linkedState : (panelStates[panel] || initialState);
+        return [
+          panel,
+          panelCmapFor(panel),
+          Number(state.imageVminPct || 0).toFixed(3),
+          Number(state.imageVmaxPct || 100).toFixed(3),
+          packedViewportTransformRequiresRebuild ? Number(state.zoom || 1).toFixed(4) : null,
+          packedViewportTransformRequiresRebuild ? Number(state.panX || 0).toFixed(1) : null,
+          packedViewportTransformRequiresRebuild ? Number(state.panY || 0).toFixed(1) : null,
+          offlineMins?.[panel] ?? offlineMin ?? null,
+          offlineMaxs?.[panel] ?? offlineMax ?? null,
+          vminPerPanel?.[panel] ?? null,
+          vmaxPerPanel?.[panel] ?? null,
+        ];
+      }),
+    });
+  }, [
+    smooth,
+    autoContrast,
+    autoVmins,
+    autoVmaxs,
+    cmap,
+    flipCols,
+    flipRows,
+    imageVminPct,
+    imageVmaxPct,
+    imageRotation,
+    initialState,
+    linkContrast,
+    linkPanels,
+    linkedState,
+    logScale,
+    nPanels,
+    offlineMin,
+    offlineMax,
+    offlineMins,
+    offlineMaxs,
+    panelCmapFor,
+    panelGapPx,
+    panelStates,
+    packedViewportTransformRequiresRebuild,
+    percentileLow,
+    percentileHigh,
+    visiblePanelIndices,
+    vminPerPanel,
+    vmaxPerPanel,
+  ]);
   const syncPlaybackPanelTransform = (panelIdx: number, nextZoom: number, nextPanX: number, nextPanY: number) => {
     const clampAxis = (pan: number, viewport: number, zoomValue: number) => {
       if (viewport <= 0) return 0;
@@ -2961,7 +6266,7 @@ function Show3D() {
     const panelCount = Math.max(1, visiblePanelCount || 1);
     const cols = panelColsForCount(panelCount);
     const rows = Math.max(1, Math.ceil(panelCount / cols));
-    const gap = panelCount > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = panelCount > 1 ? (panelGapPx) : 0;
     const viewportW = (canvasW - gap * (cols - 1)) / cols;
     const viewportH = (canvasH - gap * (rows - 1)) / rows;
     const zoomValue = Math.max(MIN_IMAGE_ZOOM, Math.min(MAX_ZOOM, nextZoom));
@@ -2979,7 +6284,37 @@ function Show3D() {
       c.panelStates = next;
       panelStatesLiveRef.current = next;
     }
+    if (
+      sidecarMode ||
+      (
+        packedViewportTransformRequiresRebuild &&
+        offline &&
+        !isRgb &&
+        !sharedPanelSource &&
+        Math.max(1, nPanels || 1) > 1 &&
+        !!offlineStack
+      )
+    ) {
+      invalidateSidecarViewportCache("view-transform");
+    }
   };
+  const clampPanelViewForDraw = React.useCallback((
+    panelState: PanelState,
+    viewportW: number,
+    viewportH: number,
+  ) => {
+    const clampAxis = (pan: number, viewport: number, zoomValue: number) => {
+      if (viewport <= 0) return 0;
+      if (zoomValue <= 1) return viewport * (1 - zoomValue) / 2;
+      return Math.max(viewport * (1 - zoomValue), Math.min(0, pan));
+    };
+    const zoomValue = Math.max(MIN_IMAGE_ZOOM, Math.min(MAX_ZOOM, panelState.zoom || 1));
+    return {
+      zoom: zoomValue,
+      panX: clampAxis(panelState.panX || 0, viewportW, zoomValue),
+      panY: clampAxis(panelState.panY || 0, viewportH, zoomValue),
+    };
+  }, []);
   // Back-compat aliases for the single-panel code paths (ROI, profile, etc.)
   // which still expect plain zoom/panX/panY. Use panel 0's state.
   const zoom = stateFor(0).zoom;
@@ -2989,20 +6324,40 @@ function Show3D() {
   const [panStart, setPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
   const panStartPanelRef = React.useRef<number>(0);
   const [mainCanvasSize, setMainCanvasSize] = React.useState(CANVAS_TARGET_SIZE);
+  // Raw scientific pixels for the current frame. Display-only transforms such
+  // as denoise/frequency filtering must always start from this source; the
+  // painted/display frame below may already be filtered.
+  const sourceFrameDataRef = React.useRef<Float32Array | null>(null);
   const rawFrameDataRef = React.useRef<Float32Array | null>(null);
   const initialCanvasSizeRef = React.useRef<number>(canvasSizeTrait > 0 ? canvasSizeTrait : CANVAS_TARGET_SIZE);
+  const defaultPanelCssSizeForCount = React.useCallback((count: number) => {
+    const n = Math.max(1, count || 1);
+    if (canvasSizeTrait > 0) return canvasSizeTrait;
+    if (n <= 1) return CANVAS_TARGET_SIZE;
+    const requestedCols = (maxCols && maxCols > 0)
+      ? Math.min(maxCols, n, MAX_PANEL_COLUMNS)
+      : Math.min(n, MAX_PANEL_COLUMNS);
+    if (n >= 8 && requestedCols >= 3 && rootLayoutWidth > 0) {
+      return Math.max(180, Math.min(500, Math.floor(rootLayoutWidth / requestedCols)));
+    }
+    return 500;
+  }, [canvasSizeTrait, maxCols, rootLayoutWidth]);
   const panelColsForCount = React.useCallback((count: number) => {
     const n = Math.max(1, count || 1);
     const requestedCols = (maxCols && maxCols > 0) ? Math.min(maxCols, n, MAX_PANEL_COLUMNS) : Math.min(n, MAX_PANEL_COLUMNS);
     if (n <= 1) return 1;
-    return Math.max(1, requestedCols);
-  }, [maxCols]);
+    const preferredPanelWidth = defaultPanelCssSizeForCount(n);
+    const responsiveCols = rootLayoutWidth > 0
+      ? Math.max(1, Math.min(n, Math.floor(rootLayoutWidth / Math.max(1, preferredPanelWidth))))
+      : requestedCols;
+    return Math.max(1, Math.min(requestedCols, responsiveCols));
+  }, [defaultPanelCssSizeForCount, maxCols, rootLayoutWidth]);
   const show3dColumnOptions = React.useMemo(() => {
     const n = Math.max(1, visiblePanelCount || 1);
     const values = new Set<number>([1, 2, 3, 4, 5, 6, 8, 10, 12]);
     return Array.from(values).filter((cols) => cols >= 1 && cols <= n).sort((a, b) => a - b);
   }, [visiblePanelCount]);
-  const clampedMaxCols = Math.max(1, Math.min((maxCols && maxCols > 0) ? maxCols : visiblePanelCount || 1, visiblePanelCount || 1, MAX_PANEL_COLUMNS));
+  const clampedMaxCols = panelColsForCount(visiblePanelCount || 1);
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<CursorInfo | null>(null);
@@ -3062,6 +6417,7 @@ function Show3D() {
   // Reusable rendering buffers (avoid per-frame allocation)
   const mainOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const mainImgDataRef = React.useRef<ImageData | null>(null);
+  const mainOffscreenSourcePanelWidthRef = React.useRef<number | undefined>(undefined);
   const scaledPlaybackImgDataRef = React.useRef<{ width: number; height: number; imageData: ImageData } | null>(null);
   const scaledPlaybackMapRef = React.useRef<{
     srcW: number;
@@ -3099,6 +6455,45 @@ function Show3D() {
   const [playbackUiSliceIdx, setPlaybackUiSliceIdx] = React.useState(sliceIdx);
   const [localStats, setLocalStats] = React.useState<{ mean: number; min: number; max: number; std: number } | null>(null);
   const [localPanelStats, setLocalPanelStats] = React.useState<PanelStats[] | null>(null);
+  const setCompareActiveFromCurrentFrame = React.useCallback((enabled: boolean) => {
+    if (!enabled) {
+      setCompareMode("off");
+      return;
+    }
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const current = ((Math.round(playbackIdxRef.current || displaySliceIdx || sliceIdx || 0) % n) + n) % n;
+    const neighbor = current < n - 1 ? current + 1 : Math.max(0, current - 1);
+    setComparePair([current, neighbor]);
+    setCompareMode("blink");
+  }, [displaySliceIdx, nSlices, setCompareMode, setComparePair, sliceIdx]);
+  const frameRotationFor = React.useCallback((frame: number) => {
+    return ((Math.round(frameRotations?.[frame] ?? 0) % 4) + 4) % 4;
+  }, [frameRotations]);
+  const rotationActive = ((imageRotation % 4) + 4) % 4 !== 0
+    || Boolean(frameRotations?.some(k => ((k % 4) + 4) % 4 !== 0));
+  const clearRotations = React.useCallback(() => {
+    setImageRotation(0);
+    setFrameRotations(Array.from({ length: Math.max(1, nSlices || 1) }, () => 0));
+    setShowRotationSettings(false);
+  }, [nSlices, setFrameRotations, setImageRotation]);
+  const setRotationForScope = React.useCallback((quarterTurns: number) => {
+    const k = normalizeRotation(quarterTurns);
+    if ((rotationScope || "all") === "frame") {
+      const idx = Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(displaySliceIdx || sliceIdx || 0)));
+      const next = Array.from({ length: Math.max(1, nSlices || 1) }, (_, frame) => frameRotationFor(frame));
+      next[idx] = k;
+      setFrameRotations(next);
+      setImageRotation(k);
+      return;
+    }
+    setImageRotation(k);
+  }, [displaySliceIdx, frameRotationFor, nSlices, normalizeRotation, rotationScope, setFrameRotations, setImageRotation, sliceIdx]);
+  React.useEffect(() => {
+    if ((rotationScope || "all") !== "frame") return;
+    const idx = Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(displaySliceIdx || sliceIdx || 0)));
+    const k = frameRotationFor(idx);
+    if (((imageRotation % 4) + 4) % 4 !== k) setImageRotation(k);
+  }, [displaySliceIdx, frameRotationFor, imageRotation, nSlices, rotationScope, setImageRotation, sliceIdx]);
 
   // WebGPU FFT state
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
@@ -3128,7 +6523,7 @@ function Show3D() {
     logScale: boolean;
   } | null>(null);
   const gpuRenderSerialRef = React.useRef(0);
-  const gpuDisplayVisibleRef = React.useRef<boolean | null>(null);
+  const gpuDisplayVisibleRef = React.useRef<boolean | null>(false);
   const [gpuDisplayVisible, setGpuDisplayVisibleState] = React.useState(false);
 
   const ensureFftGpu = React.useCallback(async (): Promise<WebGPUFFT | null> => {
@@ -3160,8 +6555,153 @@ function Show3D() {
     return gpuFftInitPromiseRef.current;
   }, []);
 
+  const subpixelAlignSupported =
+    !!offline &&
+    !isRgb &&
+    Math.max(1, nPanels || 1) === 1 &&
+    width > 0 &&
+    height > 0 &&
+    nSlices > 1 &&
+    ((!!offlineFloatStack && offlineFloatStack.byteLength >= nSlices * width * height * 4) ||
+      (!!offlineStack && offlineStack.byteLength >= nSlices * width * height));
+
+  const computeSubpixelAlignment = React.useCallback(async () => {
+    const serial = ++subpixelAlignSerialRef.current;
+    subpixelAlignCacheRef.current.clear();
+    if (!subpixelAlignEnabled) {
+      subpixelAlignShiftsRef.current = null;
+      setSubpixelAlignStatus("Off");
+      setSubpixelAlignVersion((value) => value + 1);
+      return;
+    }
+    if (!subpixelAlignSupported) {
+      subpixelAlignShiftsRef.current = null;
+      setSubpixelAlignStatus("Needs a single-panel client-side stack");
+      setSubpixelAlignVersion((value) => value + 1);
+      return;
+    }
+    const n = Math.max(1, nSlices || 1);
+    const refIdx = Math.max(0, Math.min(n - 1, Math.round(subpixelAlignReference || 0)));
+    const reference = getOfflineFrame(refIdx);
+    if (!reference || reference.length < width * height) {
+      subpixelAlignShiftsRef.current = null;
+      setSubpixelAlignStatus("Reference frame unavailable");
+      setSubpixelAlignVersion((value) => value + 1);
+      return;
+    }
+    setSubpixelAlignBusy(true);
+    setSubpixelAlignStatus(`Aligning to frame ${refIdx + 1}…`);
+    try {
+      // Use the shared CPU FFT for this first production path. The WebGPU FFT
+      // remains excellent for display FFTs, but registration needs stricter
+      // row/column parity: a browser drive caught the GPU path reporting
+      // near-zero row shifts on an intentionally drifted stack. Keep alignment
+      // correct and visibly trustworthy, then promote a GPU path after parity
+      // tests prove the same shifts.
+      const gpu: WebGPUFFT | null = null;
+      const shifts: SubpixelShift[] = [];
+      for (let idx = 0; idx < n; idx++) {
+        if (serial !== subpixelAlignSerialRef.current) return;
+        if (idx === refIdx) {
+          shifts.push({ row: 0, col: 0, quality: Infinity });
+          continue;
+        }
+        const frame = getOfflineFrame(idx);
+        if (!frame || frame.length < width * height) {
+          shifts.push({ row: 0, col: 0, quality: 0 });
+          continue;
+        }
+        shifts.push(await estimateSubpixelShift(reference, frame, width, height, gpu));
+      }
+      if (serial !== subpixelAlignSerialRef.current) return;
+      subpixelAlignShiftsRef.current = shifts;
+      subpixelAlignCacheRef.current.clear();
+      const maxRow = shifts.reduce((value, shift) => Math.max(value, Math.abs(shift.row)), 0);
+      const maxCol = shifts.reduce((value, shift) => Math.max(value, Math.abs(shift.col)), 0);
+      const currentIdx = Math.max(0, Math.min(n - 1, Math.round(liveSliceIdx || 0)));
+      const currentShift = shifts[currentIdx] ?? { row: 0, col: 0, quality: 0 };
+      const backend = gpu ? "WebGPU" : "CPU";
+      setSubpixelAlignStatus(
+        `Aligned to frame ${refIdx + 1} · current row ${currentShift.row.toFixed(1)} px, col ${currentShift.col.toFixed(1)} px · max ${maxRow.toFixed(1)}/${maxCol.toFixed(1)} px · ${backend}`,
+      );
+      setSubpixelAlignVersion((value) => value + 1);
+    } catch (error) {
+      if (serial !== subpixelAlignSerialRef.current) return;
+      console.warn("[Show3D] sub-pixel alignment failed", error);
+      subpixelAlignShiftsRef.current = null;
+      setSubpixelAlignStatus("Alignment failed; showing raw frames");
+      setSubpixelAlignVersion((value) => value + 1);
+    } finally {
+      if (serial === subpixelAlignSerialRef.current) setSubpixelAlignBusy(false);
+    }
+  }, [
+    ensureFftGpu,
+    getOfflineFrame,
+    height,
+    isRgb,
+    liveSliceIdx,
+    nPanels,
+    nSlices,
+    offline,
+    offlineFloatStack,
+    offlineStack,
+    subpixelAlignEnabled,
+    subpixelAlignReference,
+    subpixelAlignSupported,
+    width,
+  ]);
+
+  React.useEffect(() => {
+    subpixelAlignCacheRef.current.clear();
+    subpixelAlignShiftsRef.current = null;
+    setSubpixelAlignVersion((value) => value + 1);
+    if (!subpixelAlignEnabled) {
+      setSubpixelAlignStatus("Off");
+      return;
+    }
+    if (!subpixelAlignSupported) {
+      setSubpixelAlignStatus("Needs a single-panel client-side stack");
+      return;
+    }
+    const refIdx = Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(subpixelAlignReference || 0)));
+    setSubpixelAlignStatus(`Ready · press Align to use frame ${refIdx + 1}`);
+  }, [nSlices, subpixelAlignEnabled, subpixelAlignReference, subpixelAlignSupported]);
+
+  const subpixelAlignFrameForIndex = React.useCallback((idx: number, frame: Float32Array | null): Float32Array | null => {
+    if (!frame || !subpixelAlignEnabled) return frame;
+    const shifts = subpixelAlignShiftsRef.current;
+    if (!shifts || shifts.length === 0) return frame;
+    const n = Math.max(1, nSlices || 1);
+    const normalized = ((Math.round(idx) % n) + n) % n;
+    const shift = shifts[normalized];
+    if (!shift) return frame;
+    const key = [
+      normalized,
+      frameSeq,
+      subpixelAlignVersion,
+      playRef.current.avgWindow,
+      playRef.current.diffMode,
+      shift.row.toFixed(4),
+      shift.col.toFixed(4),
+    ].join(":");
+    const cached = subpixelAlignCacheRef.current.get(key);
+    if (cached) return cached;
+    const shifted = shiftFrameBilinear(
+      frame,
+      width,
+      height,
+      shift.row,
+      shift.col,
+      finiteMedianSample(frame),
+    );
+    subpixelAlignCacheRef.current.set(key, shifted);
+    if (subpixelAlignCacheRef.current.size > 48) {
+      subpixelAlignCacheRef.current.delete(subpixelAlignCacheRef.current.keys().next().value as string);
+    }
+    return shifted;
+  }, [frameSeq, height, nSlices, subpixelAlignEnabled, subpixelAlignVersion, width]);
+
   const setGpuDisplayVisible = React.useCallback((visible: boolean) => {
-    if (gpuDisplayVisibleRef.current === visible) return;
     gpuDisplayVisibleRef.current = visible;
     const gpuCanvas = gpuCanvasRef.current;
     const canvas = canvasRef.current;
@@ -3318,6 +6858,8 @@ function Show3D() {
     frameFetchPendingRef.current.clear();
     panelGpuFramePendingRef.current.clear();
     gpuFrameCacheUploadedRef.current.clear();
+    setFramePopulation({ ready: 0, target: Math.max(0, nSlices), active: !!frameServerUrl });
+    setPreviewPopulation({ ready: false, idx: 0, factor: 1 });
     // set_image() intentionally publishes an empty buffer and bumps the frame
     // server version. Empty payloads do not enter the parser effect, so clear
     // both playback buffers here or same-shape replacement data can replay the
@@ -3337,6 +6879,34 @@ function Show3D() {
       dbg.frameFetchPendingSize = 0;
     }
   }, [frameServerUrl, frameServerVersion, width, height, nSlices]);
+
+  React.useEffect(() => {
+    if (offline || !frameServerUrl || width <= 0 || height <= 0 || nSlices <= 0) return;
+    if (hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack) return;
+    if (separatePanelFrames) return;
+    const normalized = ((Math.round(sliceIdx) % nSlices) + nSlices) % nSlices;
+    const key = `${frameServerVersion || 0}:${normalized}:${width}:${height}`;
+    if (initialNativePreviewKeyRef.current === key) return;
+    initialNativePreviewKeyRef.current = key;
+    const timer = window.setTimeout(() => {
+      if (rawFrameDataRef.current && mainOffscreenSourcePanelWidthRef.current === undefined) return;
+      requestCommFramePreview(normalized, "initial-native-preview");
+    }, INITIAL_NATIVE_PREVIEW_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    offline,
+    frameServerUrl,
+    frameServerVersion,
+    width,
+    height,
+    nSlices,
+    sliceIdx,
+    hasLiveFrameBytes,
+    hasOfflineStack,
+    hasOfflineFloatStack,
+    separatePanelFrames,
+    requestCommFramePreview,
+  ]);
 
   const fetchFrameFromServer = React.useCallback(async (idx: number): Promise<Float32Array | null> => {
     if (offline || !frameServerUrl || width <= 0 || height <= 0 || nSlices <= 0) return null;
@@ -3381,6 +6951,11 @@ function Show3D() {
         }
         const frame = new Float32Array(buffer);
         putCachedServerFrame(normalized, frame);
+        setFramePopulation(prev => ({
+          ready: Math.max(prev.ready, frameFetchCacheRef.current.size),
+          target: Math.max(0, nSlices),
+          active: frameFetchPendingRef.current.size > 0,
+        }));
         if (dbg) {
           dbg.lastFrameFetchMs = performance.now() - t0;
           dbg.lastFetchedFrame = normalized;
@@ -3388,6 +6963,7 @@ function Show3D() {
         }
         return frame;
       } catch (err) {
+        requestCommFramePreview(normalized, "frame-server-fallback");
         if (dbg) {
           dbg.lastFrameFetchError = err instanceof Error ? err.message : String(err);
           dbg.lastFrameFetchErrorAt = performance.now();
@@ -3400,10 +6976,15 @@ function Show3D() {
       }
       const d = show3dPerfDebug();
       if (d) d.frameFetchPendingSize = frameFetchPendingRef.current.size;
+      setFramePopulation(prev => ({
+        ...prev,
+        target: Math.max(0, nSlices),
+        active: frameFetchPendingRef.current.size > 0,
+      }));
     });
     frameFetchPendingRef.current.set(normalized, promise);
     return promise;
-  }, [offline, frameServerUrl, frameServerVersion, width, height, nSlices, getCachedServerFrame, putCachedServerFrame]);
+  }, [offline, frameServerUrl, frameServerVersion, width, height, nSlices, getCachedServerFrame, putCachedServerFrame, requestCommFramePreview]);
 
   const fetchPanelFrameFromServer = React.useCallback(async (idx: number, panel: number): Promise<Float32Array | null> => {
     if (offline || !frameServerUrl || panelWidthPx <= 0 || height <= 0 || nSlices <= 0) return null;
@@ -3438,6 +7019,7 @@ function Show3D() {
       if (dbg) dbg.lastPanelFrameFetchMs = performance.now() - t0;
       return new Float32Array(buffer);
     } catch (err) {
+      requestCommFramePreview(normalized, "panel-server-fallback");
       if (dbg) {
         // Real misses only (failed fetch), not every attempt - the old counter
         // incremented at the top of try and read as "~every request missed".
@@ -3447,7 +7029,53 @@ function Show3D() {
       }
       return null;
     }
-  }, [offline, frameServerUrl, frameServerVersion, panelWidthPx, height, nSlices, nPanels]);
+  }, [offline, frameServerUrl, frameServerVersion, panelWidthPx, height, nSlices, nPanels, requestCommFramePreview]);
+
+  const fetchSeparatePanelPackedFrameFromServer = React.useCallback(async (idx: number): Promise<Float32Array | null> => {
+    if (offline || !frameServerUrl || !separatePanelFrames || panelWidthPx <= 0 || height <= 0 || width <= 0 || nSlices <= 0) return null;
+    const normalized = ((Math.round(idx) % nSlices) + nSlices) % nSlices;
+    const cached = getCachedServerFrame(normalized);
+    if (cached) return cached;
+    const n = Math.max(1, Math.round(nPanels || 1));
+    const packed = new Float32Array(width * height);
+    const t0 = performance.now();
+    for (let panel = 0; panel < n; panel++) {
+      const frame = await fetchPanelFrameFromServer(normalized, panel);
+      if (!frame) return null;
+      for (let row = 0; row < height; row++) {
+        const src = row * panelWidthPx;
+        const dst = row * width + panel * panelWidthPx;
+        packed.set(frame.subarray(src, src + panelWidthPx), dst);
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
+    putCachedServerFrame(normalized, packed);
+    setFramePopulation(prev => ({
+      ready: Math.max(prev.ready, frameFetchCacheRef.current.size),
+      target: Math.max(0, nSlices),
+      active: frameFetchPendingRef.current.size > 0 || panelGpuFramePendingRef.current.size > 0,
+    }));
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.lastFrameSource = "cpu-packed-panel-native";
+      dbg.lastPackedPanelFrame = normalized;
+      dbg.lastPackedPanelFrameMs = Number((performance.now() - t0).toFixed(2));
+      dbg.frameFetchCacheSize = frameFetchCacheRef.current.size;
+    }
+    return packed;
+  }, [
+    offline,
+    frameServerUrl,
+    separatePanelFrames,
+    panelWidthPx,
+    height,
+    width,
+    nSlices,
+    nPanels,
+    getCachedServerFrame,
+    putCachedServerFrame,
+    fetchPanelFrameFromServer,
+  ]);
 
   React.useEffect(() => {
     if (!separatePanelFrames) return;
@@ -3473,7 +7101,17 @@ function Show3D() {
     if (pending) return pending;
 
     const promise = (async () => {
+      const waitStartedAt = performance.now();
       while (!gpuCmapReadyRef.current || !gpuCmapRef.current) {
+        if (performance.now() - waitStartedAt > PANEL_GPU_READY_TIMEOUT_MS) {
+          const dbg = show3dPerfDebug();
+          if (dbg) {
+            dbg.lastPanelGpuWaitTimeoutFrame = normalized;
+            dbg.lastPanelGpuWaitTimeoutMs = PANEL_GPU_READY_TIMEOUT_MS;
+            dbg.lastFrameSource = "panel-gpu-unavailable";
+          }
+          return false;
+        }
         await new Promise<void>(resolve => setTimeout(resolve, 25));
       }
       const engine = gpuCmapRef.current;
@@ -3501,6 +7139,11 @@ function Show3D() {
         return false;
       }
       gpuFrameCacheUploadedRef.current.add(normalized);
+      setFramePopulation(prev => ({
+        ready: Math.max(prev.ready, gpuFrameCacheUploadedRef.current.size),
+        target: Math.max(0, nSlices),
+        active: panelGpuFramePendingRef.current.size > 0,
+      }));
       const cacheLimit = getSeparatePanelGpuCacheLimit();
       while (gpuFrameCacheUploadedRef.current.size > cacheLimit) {
         let oldest = gpuFrameCacheUploadedRef.current.keys().next().value;
@@ -3526,6 +7169,11 @@ function Show3D() {
       if (panelGpuFramePendingRef.current.get(normalized) === promise) {
         panelGpuFramePendingRef.current.delete(normalized);
       }
+      setFramePopulation(prev => ({
+        ...prev,
+        target: Math.max(0, nSlices),
+        active: panelGpuFramePendingRef.current.size > 0,
+      }));
     });
     panelGpuFramePendingRef.current.set(normalized, promise);
     return promise;
@@ -3543,6 +7191,7 @@ function Show3D() {
     fetchPanelFrameFromServer,
     getSeparatePanelGpuCacheLimit,
     releasePanelGpuFrame,
+    requestCommFramePreview,
   ]);
 
   React.useEffect(() => {
@@ -3731,10 +7380,22 @@ function Show3D() {
   const [imageDataRange, setImageDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const [panelHistogramData, setPanelHistogramData] = React.useState<(Float32Array | null)[]>([]);
   const [panelDataRanges, setPanelDataRanges] = React.useState<{ min: number; max: number }[]>([]);
+  const imageHistogramPreviewPctRef = React.useRef<[number, number] | null>(null);
+  const panelHistogramPreviewPctRef = React.useRef<Map<number, [number, number]>>(new Map());
+  const histogramPreviewPaintRafRef = React.useRef<number | null>(null);
   const perPanelHistogramEnabled = (nPanels || 1) > 1 && !linkContrast;
 
   const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
-    setPanelStates(prev => prev.map((state, i) => i === panel ? { ...state, ...patch } : state));
+    const n = Math.max(1, nPanels || 1);
+    const live = panelStatesLiveRef.current.length === n
+      ? panelStatesLiveRef.current
+      : panelStates;
+    const next = Array.from({ length: n }, (_, i) => {
+      const state = live[i] || panelStates[i] || initialState;
+      return i === panel ? { ...state, ...patch } : state;
+    });
+    panelStatesLiveRef.current = next;
+    setPanelStates(next);
   };
   const setPanelRangeValues = (panel: number, minValue: number | null, maxValue: number | null) => {
     const n = Math.max(1, nPanels || 1);
@@ -3872,6 +7533,51 @@ function Show3D() {
     panelStatesLiveRef.current = nextStates;
     setPanelStates(nextStates);
   };
+  const freezeCurrentPanelContrastAsManual = (
+    editedPanel: number | null = null,
+    editedRangePct: { min: number; max: number } | null = null,
+  ) => {
+    const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const n = Math.max(1, nPanels || 1);
+    const liveStates = panelStatesLiveRef.current.length === n ? panelStatesLiveRef.current : panelStates;
+    const nextStates = Array.from({ length: n }, (_, i) => {
+      const state = liveStates[i] || panelStates[i] || initialState;
+      return i === editedPanel && editedRangePct
+        ? { ...state, imageVminPct: editedRangePct.min, imageVmaxPct: editedRangePct.max }
+        : { ...state };
+    });
+    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanelLiveRef.current[i] ?? null);
+    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanelLiveRef.current[i] ?? null);
+    for (let i = 0; i < n; i++) {
+      const panelRange = panelDataRanges[i];
+      const range = (panelRange && panelRange.max > panelRange.min) ? panelRange : stackBounds;
+      if (range.max <= range.min) continue;
+      const state = nextStates[i] || initialState;
+      nextMins[i] = pctToValue(state.imageVminPct, range.min, range.max);
+      nextMaxs[i] = pctToValue(state.imageVmaxPct, range.min, range.max);
+    }
+    panelStatesLiveRef.current = nextStates;
+    vminPerPanelLiveRef.current = nextMins;
+    vmaxPerPanelLiveRef.current = nextMaxs;
+    setPanelStates(nextStates);
+    setVminPerPanel(nextMins);
+    setVmaxPerPanel(nextMaxs);
+  };
+  const freezeCurrentSharedContrastAsManual = () => {
+    const bounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const span = bounds.max - bounds.min;
+    if (span <= 0) return;
+    const renderIdx = clampSlice(displaySliceIdx);
+    const cached = cachedAutoDisplayRange(autoVmins, autoVmaxs, renderIdx, logScale)
+      || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, renderIdx, logScale);
+    const range = cached
+      ?? (imageHistogramData && imageHistogramData.length > 0
+        ? percentileClip(imageHistogramData, percentileLow, percentileHigh)
+        : null);
+    if (!range || range.vmax <= range.vmin) return;
+    setImageVminPct(Math.max(0, Math.min(100, ((range.vmin - bounds.min) / span) * 100)));
+    setImageVmaxPct(Math.max(0, Math.min(100, ((range.vmax - bounds.min) / span) * 100)));
+  };
 
   const resolvePanelRenderRange = (
     panel: number,
@@ -3905,8 +7611,12 @@ function Show3D() {
         // causing a 1-frame flash to washed contrast on every toggle.
       } else {
         // OFF restores manual contrast. If the user never set a manual range,
-        // default to each panel's full local histogram range.
-        restorePanelManualClipPcts();
+        // keep the visible Auto windows as the editable manual baseline.
+        const hasManualPanelWindow =
+          vminPerPanelLiveRef.current.some((value) => value != null) ||
+          vmaxPerPanelLiveRef.current.some((value) => value != null);
+        if (hasManualPanelWindow) restorePanelManualClipPcts();
+        else freezeCurrentPanelContrastAsManual();
         manualImageRangeBeforeAutoRef.current = null;
       }
       return;
@@ -3930,11 +7640,21 @@ function Show3D() {
         setImageVmaxPct(restore.max);
         manualImageRangeBeforeAutoRef.current = null;
       } else {
-        setImageVminPct(0);
-        setImageVmaxPct(100);
+        freezeCurrentSharedContrastAsManual();
       }
     }
   };
+  const applyContrastPreset = React.useCallback((preset: string) => {
+    setContrastPreset(preset);
+    if (preset === "custom") return;
+    const match = preset.match(/^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$/);
+    if (!match) return;
+    const lo = Math.max(0, Math.min(99, Number(match[1])));
+    const hi = Math.max(lo + 0.01, Math.min(100, Number(match[2])));
+    setPercentileHigh(hi);
+    setPercentileLow(lo);
+    handleAutoContrastChange(true);
+  }, [handleAutoContrastChange, setContrastPreset, setPercentileHigh, setPercentileLow]);
 
   // Histogram state for FFT
   const [fftVminPct, setFftVminPct] = React.useState(0);
@@ -3977,7 +7697,8 @@ function Show3D() {
 
   const handleRootMouseDownCapture = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement | null;
-    if (target?.closest("canvas")) rootRef.current?.focus();
+    if (target && target.closest(WIDGET_TEXT_OR_VALUE_CONTROL_SELECTOR)) return;
+    rootRef.current?.focus({ preventScroll: true });
   };
 
   const lastBenchmarkTokenRef = React.useRef<unknown>(null);
@@ -3986,7 +7707,14 @@ function Show3D() {
     const req = benchmarkRequest ?? {};
     const token = req.token;
     const mode = typeof req.mode === "string" ? req.mode : "playback";
-    if ((typeof token !== "string" && typeof token !== "number") || mode === "renderBurst" || mode === "scrubTransport" || mode === "scrubPreviewTransport" || lastBenchmarkTokenRef.current === token) return;
+    if (
+      (typeof token !== "string" && typeof token !== "number")
+      || mode === "renderBurst"
+      || mode === "scrubTransport"
+      || mode === "scrubPreviewTransport"
+      || mode === "transformBurst"
+      || lastBenchmarkTokenRef.current === token
+    ) return;
     lastBenchmarkTokenRef.current = token;
 
     let cancelled = false;
@@ -4251,6 +7979,8 @@ function Show3D() {
   const [fftZoom, setFftZoom] = React.useState(1);
   const [fftPanX, setFftPanX] = React.useState(0);
   const [fftPanY, setFftPanY] = React.useState(0);
+  const defaultFftViewState = React.useMemo(() => ({ zoom: 1, panX: 0, panY: 0 }), []);
+  const [panelFftStates, setPanelFftStates] = React.useState<Map<number, { zoom: number; panX: number; panY: number }>>(new Map());
   const internalFftZoomSyncRef = React.useRef(false);
   const fftViewLiveRef = React.useRef({ zoom: 1, panX: 0, panY: 0 });
   const fftViewRafRef = React.useRef<number | null>(null);
@@ -4298,6 +8028,24 @@ function Show3D() {
     }
   }, [commitFftViewReactState, setFftOverlayZoomTrait]);
 
+  const getFftViewForPanel = React.useCallback((panelIdx: number) => {
+    return linkPanels
+      ? fftViewLiveRef.current
+      : (panelFftStates.get(panelIdx) || defaultFftViewState);
+  }, [defaultFftViewState, linkPanels, panelFftStates]);
+
+  const setFftViewForPanel = React.useCallback((panelIdx: number, next: { zoom: number; panX: number; panY: number }, syncTrait = false, directOnly = false) => {
+    if (linkPanels) {
+      scheduleFftViewState(next, syncTrait, directOnly);
+      return;
+    }
+    setPanelFftStates(prev => {
+      const map = new Map(prev);
+      map.set(panelIdx, next);
+      return map;
+    });
+  }, [linkPanels, scheduleFftViewState]);
+
   React.useEffect(() => {
     fftViewLiveRef.current = { zoom: fftZoom, panX: fftPanX, panY: fftPanY };
   }, [fftZoom, fftPanX, fftPanY]);
@@ -4331,6 +8079,23 @@ function Show3D() {
     setFftPanX(reset.panX);
     setFftPanY(reset.panY);
   }, [resolvedFftOverlayZoom]);
+
+  const previousFftLinkPanelsRef = React.useRef(linkPanels);
+  React.useEffect(() => {
+    const previous = previousFftLinkPanelsRef.current;
+    if (previous && !linkPanels) {
+      const shared = { zoom: fftZoom, panX: fftPanX, panY: fftPanY };
+      setPanelFftStates(() => new Map(Array.from({ length: totalPanelCount }, (_, idx) => [idx, { ...shared }])));
+    } else if (!previous && linkPanels) {
+      const panel = visiblePanelIndices[0] ?? 0;
+      const current = panelFftStates.get(panel) || defaultFftViewState;
+      fftViewLiveRef.current = current;
+      setFftZoom(current.zoom);
+      setFftPanX(current.panX);
+      setFftPanY(current.panY);
+    }
+    previousFftLinkPanelsRef.current = linkPanels;
+  }, [defaultFftViewState, fftPanX, fftPanY, fftZoom, linkPanels, panelFftStates, totalPanelCount, visiblePanelIndices]);
 
   React.useEffect(() => {
     if (fftLayoutOverlay && !fftOverlayWasActiveRef.current) {
@@ -4398,13 +8163,13 @@ function Show3D() {
     // drags the resize handle larger when they want pixel-1:1.
     const n = Math.max(1, visiblePanelCount || 1);
     const cols = panelColsForCount(n);
-    const perPanel = canvasSizeTrait > 0 ? canvasSizeTrait : (n > 1 ? 500 : CANVAS_TARGET_SIZE);
+    const perPanel = defaultPanelCssSizeForCount(n);
     const target = perPanel * cols;
     setMainCanvasSize(target);
     if (initialCanvasSizeRef.current === CANVAS_TARGET_SIZE) {
       initialCanvasSizeRef.current = target;
     }
-  }, [canvasSizeTrait, visiblePanelCount, panelColsForCount]);
+  }, [defaultPanelCssSizeForCount, visiblePanelCount, panelColsForCount]);
 
   // Calculate display scale. In multi-panel mode `width` may be either the
   // concatenated source width or one shared source frame drawn into N slots.
@@ -4419,24 +8184,127 @@ function Show3D() {
     : Math.max(1, width);
   const sourcePanelHeight = Math.max(1, height);
   const isMultiPanelSource = totalPanelCount > 1;
-  const displayScale = isMultiPanelSource
+  const requestedDisplayScale = isMultiPanelSource
     ? mainCanvasSize / Math.max(1, sourcePanelWidth * _colsLocal)
     : mainCanvasSize / Math.max(width, height);
   // For 90°/270° rotations, swap canvas dims so non-square images fit without clipping.
   const rotSwap = (imageRotation % 2) !== 0;
+  const requestedCanvasW = isMultiPanelSource
+    ? Math.round(sourcePanelWidth * requestedDisplayScale * _colsLocal)
+    : Math.round((rotSwap ? height : width) * requestedDisplayScale);
+  // Grid layout: when max_cols wraps panels into multiple rows, canvasH grows to fit `rows` rows.
+  const _requestedCanvasHSingleRow = Math.round((rotSwap ? width : height) * requestedDisplayScale);
+  const _gapForLayout = _nPanelsLocal > 1 ? (panelGapPx) : 0;
+  const _requestedSlotWForLayout = (requestedCanvasW - _gapForLayout * (_colsLocal - 1)) / _colsLocal;
+  const _requestedSlotHForLayout = _requestedSlotWForLayout * (sourcePanelHeight / sourcePanelWidth);
+  const requestedCanvasH = isMultiPanelSource
+    ? Math.round(_requestedSlotHForLayout * _rowsLocal + _gapForLayout * (_rowsLocal - 1))
+    : _requestedCanvasHSingleRow;
+  const gridCanvasCap = isMultiPanelSource
+    ? Math.min(
+        1,
+        MAX_INTERACTIVE_GRID_CANVAS_EDGE / Math.max(1, requestedCanvasW, requestedCanvasH),
+        Math.sqrt(MAX_INTERACTIVE_GRID_CANVAS_PIXELS / Math.max(1, requestedCanvasW * requestedCanvasH)),
+      )
+    : 1;
+  const displayScale = requestedDisplayScale * gridCanvasCap;
   const canvasW = isMultiPanelSource
     ? Math.round(sourcePanelWidth * displayScale * _colsLocal)
     : Math.round((rotSwap ? height : width) * displayScale);
-  // Grid layout: when max_cols wraps panels into multiple rows, canvasH grows to fit `rows` rows.
   const _canvasHSingleRow = Math.round((rotSwap ? width : height) * displayScale);
-  const _gapForLayout = _nPanelsLocal > 1 ? (panelGapTrait ?? 10) : 0;
   const _slotWForLayout = (canvasW - _gapForLayout * (_colsLocal - 1)) / _colsLocal;
   const _slotHForLayout = _slotWForLayout * (sourcePanelHeight / sourcePanelWidth);
   const canvasH = isMultiPanelSource
     ? Math.round(_slotHForLayout * _rowsLocal + _gapForLayout * (_rowsLocal - 1))
     : _canvasHSingleRow;
-  const mainPanelWidth = `min(100%, ${canvasW}px)`;
+  const mainPanelFrameWidth = canvasW + 2 * galleryOuterBorderPx;
+  const mainPanelWidth = `min(100%, ${mainPanelFrameWidth}px)`;
   const mainPanelAspectRatio = `${Math.max(canvasW, 1)} / ${Math.max(canvasH, 1)}`;
+  React.useEffect(() => {
+    const dbg = show3dPerfDebug();
+    if (!dbg) return;
+    dbg.layoutWidth = rootLayoutWidth;
+    dbg.layoutRequestedMaxCols = maxCols;
+    dbg.layoutCols = _colsLocal;
+    dbg.layoutRows = _rowsLocal;
+    dbg.layoutCanvasW = canvasW;
+    dbg.layoutCanvasH = canvasH;
+    dbg.layoutGridCanvasCap = gridCanvasCap;
+  }, [rootLayoutWidth, maxCols, _colsLocal, _rowsLocal, canvasW, canvasH, gridCanvasCap]);
+  const groupMarkerOverlays = React.useMemo(() => {
+    if ((nPanels || 1) <= 1 || visiblePanelIndices.length === 0 || canvasW <= 0 || canvasH <= 0) return [];
+    const count = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(count);
+    const gap = count > 1 ? (panelGapPx) : 0;
+    const rows = Math.ceil(count / cols);
+    const panelW = (canvasW - gap * (cols - 1)) / cols;
+    const panelH = (canvasH - gap * (rows - 1)) / rows;
+    type GroupMarkerOverlay = {
+      key: string;
+      axis: "row" | "col" | "panel";
+      color: string;
+      leftPct: number;
+      topPct: number;
+      widthPct: number;
+      heightPct: number;
+      label?: string;
+    };
+    const boundsForSlots = (slots: number[]) => {
+      if (slots.length === 0) return null;
+      const rowVals = slots.map((slot) => Math.floor(slot / cols));
+      const colVals = slots.map((slot) => slot % cols);
+      const row0 = Math.min(...rowVals);
+      const row1 = Math.max(...rowVals);
+      const col0 = Math.min(...colVals);
+      const col1 = Math.max(...colVals);
+      const left = col0 * (panelW + gap);
+      const top = row0 * (panelH + gap);
+      return {
+        leftPct: (left / Math.max(1, canvasW)) * 100,
+        topPct: (top / Math.max(1, canvasH)) * 100,
+        widthPct: (((col1 - col0 + 1) * panelW + Math.max(0, col1 - col0) * gap) / Math.max(1, canvasW)) * 100,
+        heightPct: (((row1 - row0 + 1) * panelH + Math.max(0, row1 - row0) * gap) / Math.max(1, canvasH)) * 100,
+      };
+    };
+    const build = (markers: MarkerMap | undefined, axis: "row" | "col") => Object.entries(markers || {})
+      .map(([rawKey, color]) => {
+        const target = Number(rawKey);
+        if (!Number.isFinite(target) || target < 0 || !color) return null;
+        const slots = visiblePanelIndices
+          .map((_, slot) => slot)
+          .filter((slot) => (axis === "row" ? Math.floor(slot / cols) : slot % cols) === target);
+        const bounds = boundsForSlots(slots);
+        if (!bounds) return null;
+        return {
+          key: `${axis}-${rawKey}`,
+          axis,
+          color: String(color),
+          ...bounds,
+        };
+      })
+      .filter(Boolean) as GroupMarkerOverlay[];
+    const visibleSlotByPanel = new Map<number, number>();
+    visiblePanelIndices.forEach((panel, slot) => visibleSlotByPanel.set(panel, slot));
+    const panelGroupOverlays = (panelGroups || [])
+      .map((group, index) => {
+        const slots = (group?.panels || [])
+          .map((panel) => visibleSlotByPanel.get(Number(panel)))
+          .filter((slot): slot is number => Number.isFinite(slot));
+        const bounds = boundsForSlots(slots);
+        if (!bounds) return null;
+        const color = group?.color ? String(group.color) : "#22c55e";
+        const label = group?.label ? String(group.label) : undefined;
+        return {
+          key: `panel-group-${index}`,
+          axis: "panel" as const,
+          color,
+          label,
+          ...bounds,
+        };
+      })
+      .filter(Boolean) as GroupMarkerOverlay[];
+    return [...build(rowMarkers, "row"), ...build(colMarkers, "col"), ...panelGroupOverlays];
+  }, [canvasH, canvasW, colMarkers, nPanels, panelColsForCount, panelGapPx, panelGroups, rowMarkers, visiblePanelCount, visiblePanelIndices]);
   const effectiveLoopEnd = loopEnd < 0 ? nSlices - 1 : loopEnd;
   // ROI hidden while the kymograph is shown - both are line/region analysis on
   // the same side slot, and showing them together confuses which panel is which.
@@ -4457,7 +8325,7 @@ function Show3D() {
     const n = _nPanelsLocal;
     const cols = _colsLocal;
     const rows = _rowsLocal;
-    const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = n > 1 ? (panelGapPx) : 0;
     const slotW = (canvasW - gap * (cols - 1)) / cols;
     const slotH = (canvasH - gap * (rows - 1)) / rows;
     return { n, cols, rows, gap, slotW, slotH };
@@ -4482,7 +8350,7 @@ function Show3D() {
     };
   };
   const getFftSlot = React.useCallback((slot: number, count: number, cols: number, rows: number) => {
-    const gap = count > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = count > 1 ? (panelGapPx) : 0;
     const slotW = (canvasW - gap * (cols - 1)) / cols;
     const slotH = (canvasH - gap * (rows - 1)) / rows;
     const col = slot % cols;
@@ -4493,12 +8361,26 @@ function Show3D() {
       w: slotW,
       h: slotH,
     };
-  }, [canvasW, canvasH, panelGapTrait]);
+  }, [canvasW, canvasH, panelGapPx]);
+  const clearWithGridBackground = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = interPanelGapColor;
+    ctx.fillRect(0, 0, w, h);
+  };
+  const strokePanelInnerBorder = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) => {
+    if (panelInnerBorderPx <= 0) return;
+    ctx.save();
+    ctx.strokeStyle = panelInnerBorderColor;
+    ctx.lineWidth = panelInnerBorderPx;
+    const inset = panelInnerBorderPx / 2;
+    ctx.strokeRect(x + inset, y + inset, Math.max(0, w - panelInnerBorderPx), Math.max(0, h - panelInnerBorderPx));
+    ctx.restore();
+  };
   const drawFftOffscreen = React.useCallback((ctx: CanvasRenderingContext2D, offscreen: HTMLCanvasElement) => {
     ctx.clearRect(0, 0, canvasW, canvasH);
     const grid = fftPanelGridRef.current;
     if (grid) {
-      ctx.fillStyle = themeColors.bg;
+      ctx.fillStyle = interPanelGapColor;
       ctx.fillRect(0, 0, canvasW, canvasH);
       for (let slot = 0; slot < grid.count; slot++) {
         const srcCol = slot % grid.cols;
@@ -4506,13 +8388,15 @@ function Show3D() {
         const srcX = srcCol * grid.panelWidth;
         const srcY = srcRow * grid.panelHeight;
         const dst = getFftSlot(slot, grid.count, grid.cols, grid.rows);
+        const panel = visiblePanelIndices[slot] ?? slot;
+        const view = linkPanels ? { zoom: fftZoom, panX: fftPanX, panY: fftPanY } : (panelFftStates.get(panel) || defaultFftViewState);
         ctx.imageSmoothingEnabled = grid.panelWidth < dst.w || grid.panelHeight < dst.h;
         ctx.save();
         ctx.beginPath();
         ctx.rect(dst.x, dst.y, dst.w, dst.h);
         ctx.clip();
-        ctx.translate(dst.x + fftPanX, dst.y + fftPanY);
-        ctx.scale(fftZoom, fftZoom);
+        ctx.translate(dst.x + view.panX, dst.y + view.panY);
+        ctx.scale(view.zoom, view.zoom);
         ctx.drawImage(
           offscreen,
           srcX,
@@ -4534,7 +8418,7 @@ function Show3D() {
       ctx.drawImage(offscreen, 0, 0, canvasW, canvasH);
       ctx.restore();
     }
-  }, [canvasW, canvasH, fftPanX, fftPanY, fftZoom, getFftSlot, themeColors.bg]);
+  }, [canvasW, canvasH, defaultFftViewState, fftPanX, fftPanY, fftZoom, getFftSlot, interPanelGapColor, linkPanels, panelFftStates, visiblePanelIndices]);
   const panelGlobalColOffset = (panelIdx: number) => (totalPanelCount > 1 && !sharedPanelSource) ? panelIdx * sourcePanelWidth : 0;
   const panelLocalCol = (globalCol: number, panelIdx: number) => globalCol - panelGlobalColOffset(panelIdx);
   const panelGlobalCol = (localCol: number, panelIdx: number) => localCol + panelGlobalColOffset(panelIdx);
@@ -4709,11 +8593,17 @@ function Show3D() {
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
+    logBufferRef.current = new Float32Array(width * height);
+    if (mainOffscreenRef.current && mainOffscreenSourcePanelWidthRef.current !== undefined && !rawFrameDataRef.current) {
+      scaledPlaybackImgDataRef.current = null;
+      scaledPlaybackMapRef.current = null;
+      return;
+    }
     mainOffscreenRef.current = canvas;
+    mainOffscreenSourcePanelWidthRef.current = undefined;
     mainImgDataRef.current = canvas.getContext("2d")!.createImageData(width, height);
     scaledPlaybackImgDataRef.current = null;
     scaledPlaybackMapRef.current = null;
-    logBufferRef.current = new Float32Array(width * height);
   }, [width, height]);
 
   // Prevent page scroll on secondary canvas containers. Main image wheel is
@@ -4803,7 +8693,9 @@ function Show3D() {
     const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
     const input = activeThumb?.querySelector("input") as HTMLInputElement | null;
     const count = playbackLiveCountRef.current
-      ?? playbackSliderRef.current?.parentElement?.querySelector("[data-show3d-playback-count]");
+      ?? playbackSliderRef.current?.parentElement?.querySelector("[data-show3d-playback-count]")
+      ?? rootRef.current?.querySelector("[data-show3d-playback-count]")
+      ?? document.querySelector("[data-show3d-playback-count]");
     if (activeThumb) {
       activeThumb.style.left = `${pct}%`;
       activeThumb.setAttribute("aria-valuenow", String(clamped));
@@ -4813,19 +8705,73 @@ function Show3D() {
       track.style.left = "0%";
       track.style.width = `${pct}%`;
     }
-    if (count) count.textContent = hiddenSet.size ? `${clamped + 1}/${visibleCount} (${total})` : `${clamped + 1}/${total}`;
+    if (count) {
+      count.textContent = hiddenSet.size ? `${clamped + 1}/${visibleCount} (${total})` : `${clamped + 1}/${total}`;
+      const dbg = show3dPerfDebug();
+      if (dbg) dbg.lastPlaybackLiveCountText = count.textContent;
+    }
+    const panelCounts = rootRef.current?.querySelectorAll("[data-show3d-panel-frame-count]") ?? [];
+    panelCounts.forEach((node) => {
+      const el = node as HTMLElement;
+      const panelTotal = Math.max(1, Math.round(Number(el.dataset.realFrameCount || total) || total));
+      const shown = Math.min(clamped + 1, panelTotal);
+      el.textContent = `${shown}/${panelTotal}`;
+    });
   }, [hiddenSet.size, nSlices, visibleCount]);
+
+  const sidecarViewTransformActive = React.useCallback(() => {
+    if (imageRotation % 4 !== 0 || flipRows || flipCols) return true;
+    const panels = visiblePanelIndices.length
+      ? visiblePanelIndices
+      : Array.from({ length: Math.max(1, nPanels || 1) }, (_, idx) => idx);
+    for (const panelIdx of panels) {
+      const state = linkPanels
+        ? linkedStateLiveRef.current
+        : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      if (
+        Math.abs((state.zoom || 1) - 1) > 1e-3 ||
+        Math.abs(state.panX || 0) > 0.5 ||
+        Math.abs(state.panY || 0) > 0.5
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }, [flipCols, flipRows, imageRotation, linkPanels, nPanels, stateFor, visiblePanelIndices]);
+
+  const preparePagedPageChange = React.useCallback(() => {
+    if (!isPaged) return;
+    if (sidecarMode) invalidateSidecarViewportCache("page-change");
+  }, [invalidateSidecarViewportCache, isPaged, sidecarMode]);
+
+  const previousActivePageStartRef = React.useRef(activePageStart);
+  React.useEffect(() => {
+    const previous = previousActivePageStartRef.current;
+    previousActivePageStartRef.current = activePageStart;
+    if (previous === activePageStart || !isPaged) return;
+    preparePagedPageChange();
+  }, [activePageStart, isPaged, preparePagedPageChange]);
 
   const frameTransformActive = () => requiresClientFrameTransform({
     offline,
     diffMode: playRef.current.diffMode,
     avgWindow: playRef.current.avgWindow,
-  }) || browserFilterOnRef.current || frequencyFilterIsActive;
+  }) || browserFilterOnRef.current || frequencyFilterIsActive || !!subpixelAlignEnabled;
 
   const rawFrameForIndex = (idx: number, currentIdx: number, currentFrame: Float32Array | null): Float32Array | null => {
     const n = Math.max(1, nSlices || 1);
     const normalized = ((Math.round(idx) % n) + n) % n;
     if (currentFrame && normalized === ((Math.round(currentIdx) % n) + n) % n) return currentFrame;
+    if (
+      offline &&
+      !frameTransformActive() &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      )
+    ) {
+      return null;
+    }
     if (offline) return getOfflineFrame(normalized);
     const frameSize = width * height;
     const fromBuffer = getFrameFromBuffer(bufferRef.current, bufferStartRef.current, bufferCountRef.current, n, normalized, frameSize)
@@ -4933,17 +8879,33 @@ function Show3D() {
 
   const frequencyFilterKeyForIndex = React.useCallback((idx: number) => {
     const mode = normalizeFrequencyFilterMode(frequencyFilter);
+    const scopedFrequencyKey = frequencyFilterScopeAll
+      ? ""
+      : Array.from({ length: Math.max(1, nPanels || 1) }, (_, panel) => {
+          const knobs = frequencyKnobsForPanel(panel);
+          return `${panel}:${knobs.mode}:${Number(knobs.cutoff).toFixed(4)}:${Number(knobs.center).toFixed(4)}:${Number(knobs.width).toFixed(4)}`;
+        }).join("|");
     const packedPanels = (Math.max(1, nPanels || 1) > 1 && !sharedPanelSource) ? Math.max(1, nPanels || 1) : 1;
+    // Frequency filtering runs after display denoise/diff/avg. Its cache key
+    // must include the upstream display transform; otherwise a σ/bin/mode
+    // change can correctly update the denoise cache but the final painted
+    // frequency-filtered frame stays frozen on the old upstream pixels.
+    const denoiseKey = browserFilterKnobsOn
+      ? `${denoiseResolved.mode}:${Number(denoiseSigmaLive ?? 0).toFixed(3)}:bin${denoiseResolved.bin}`
+      : "raw";
     return [
       Math.round(idx),
       frameSeq,
-      mode,
+      denoiseKey,
+      `avg${playRef.current.avgWindow}`,
+      `diff${playRef.current.diffMode}`,
+      frequencyFilterScopeAll ? mode : scopedFrequencyKey,
       Number(frequencyOptions.cutoff ?? 0).toFixed(4),
       Number(frequencyOptions.center ?? 0).toFixed(4),
       Number(frequencyOptions.width ?? 0).toFixed(4),
       `panels${packedPanels}`,
     ].join(":");
-  }, [frameSeq, frequencyFilter, frequencyOptions, nPanels, sharedPanelSource]);
+  }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, frequencyFilter, frequencyFilterScopeAll, frequencyKnobsForPanel, frequencyOptions, nPanels, sharedPanelSource]);
 
   const frequencyFilterFrameForDisplay = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     if (!frame || !frequencyFilterIsActive) return frame;
@@ -4956,7 +8918,11 @@ function Show3D() {
     frequencyFilterPendingRef.current.add(key);
     applyPackedPanelTransform(
       frame,
-      (panelFrame, panelWidth, panelHeight) => applyFrequencyFilterBrowser(panelFrame, panelWidth, panelHeight, frequencyOptions),
+      (panelFrame, panelWidth, panelHeight, panel) => {
+        const knobs = frequencyFilterScopeAll ? frequencyOptions : frequencyKnobsForPanel(panel);
+        if (!frequencyFilterActive(knobs.mode)) return Promise.resolve(panelFrame);
+        return applyFrequencyFilterBrowser(panelFrame, panelWidth, panelHeight, knobs);
+      },
     )
       .then((filtered) => {
         frequencyFilterPendingRef.current.delete(key);
@@ -4970,15 +8936,39 @@ function Show3D() {
         console.warn("[Show3D] frequency filter failed; showing unfiltered frame", error);
       });
     return allowRawOnMiss ? frame : null;
-  }, [applyPackedPanelTransform, frequencyFilterIsActive, frequencyFilterKeyForIndex, frequencyOptions, height, width]);
+  }, [applyPackedPanelTransform, frequencyFilterIsActive, frequencyFilterKeyForIndex, frequencyFilterScopeAll, frequencyKnobsForPanel, frequencyOptions, height, width]);
 
   const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
-    const frame = averagedFrameForIndex(idx, idx, currentFrame);
+    const activeCompareMode = String(compareMode || "off");
+    const compareFrameFor = (frameIdx: number): Float32Array | null => {
+      const clamped = clampSlice(frameIdx);
+      const raw = clamped === idx ? currentFrame : getOfflineFrame(clamped);
+      return subpixelAlignFrameForIndex(clamped, averagedFrameForIndex(clamped, idx, raw));
+    };
+    let frame = subpixelAlignFrameForIndex(idx, averagedFrameForIndex(idx, idx, currentFrame));
+    if (!isRgb && (nPanels || 1) === 1 && activeCompareMode !== "off") {
+      const aIdx = clampSlice(comparePair?.[0] ?? 0);
+      const bIdx = clampSlice(comparePair?.[1] ?? Math.min(1, nSlices - 1));
+      const a = compareFrameFor(aIdx);
+      const b = compareFrameFor(bIdx);
+      if (activeCompareMode === "blink") {
+        frame = (blinkPhase % 2 === 0 ? a : b) || frame;
+      } else if (a && b) {
+        const frameSize = width * height;
+        const out = new Float32Array(frameSize);
+        if (activeCompareMode === "difference") {
+          for (let k = 0; k < frameSize; k++) out[k] = b[k] - a[k];
+        } else if (activeCompareMode === "overlay") {
+          for (let k = 0; k < frameSize; k++) out[k] = 0.5 * a[k] + 0.5 * b[k];
+        }
+        frame = out;
+      }
+    }
     const activeDiffMode = playRef.current.diffMode;
     let result: Float32Array | null = frame;
     if (frame && shouldApplyClientDifference(offline, activeDiffMode)) {
       const refIdx = activeDiffMode === "first" ? 0 : Math.max(0, Math.round(idx) - 1);
-      const ref = averagedFrameForIndex(refIdx, idx, currentFrame);
+      const ref = subpixelAlignFrameForIndex(refIdx, averagedFrameForIndex(refIdx, idx, currentFrame));
       if (ref) {
         const frameSize = width * height;
         const out = new Float32Array(frameSize);
@@ -4992,8 +8982,64 @@ function Show3D() {
 
   const displayAndFrequencyFrameForIndex = (idx: number, currentFrame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     const display = displayFrameForIndex(idx, currentFrame, options);
+    if (frequencyFilterIsActive && browserFilterKnobsOn && !browserFilterReadyForIndex(idx)) {
+      // Denoise/filter are layered display transforms. On a denoise cache miss,
+      // displayFrameForIndex returns the pre-denoise fallback so the canvas can
+      // stay responsive while WGSL finishes. Do not let the frequency filter
+      // cache that fallback under the new sigma/bin key; otherwise a scientist
+      // can drag sigma, see the label move, and keep looking at low-pass(raw).
+      return display;
+    }
     return frequencyFilterFrameForDisplay(idx, display, options);
   };
+  const refreshCurrentDisplayFrameForTransform = React.useCallback(() => {
+    if (!offline || isRgb || width <= 0 || height <= 0 || nSlices <= 0) return;
+    if (
+      !frameTransformActive() &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      )
+    ) {
+      return;
+    }
+    const idx = clampSlice(liveSliceIdx);
+    const raw = getOfflineFrame(idx);
+    if (!raw) return;
+    const display = displayAndFrequencyFrameForIndex(idx, raw, { allowRawOnMiss: true }) ?? raw;
+    rawFrameDataRef.current = display;
+    rgbFrameDataRef.current = null;
+    gpuUploadRef.current = null;
+  }, [
+    avgWindow,
+    browserFilterTick,
+    diffMode,
+    displayFilter,
+    frequencyFilterIsActive,
+    frequencyRenderVersion,
+    getOfflineFrame,
+    height,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    sidecarMode,
+    sidecarBitmapReady,
+    sidecarCompositeReady,
+    spatialBin,
+    subpixelAlignEnabled,
+    subpixelAlignVersion,
+    width,
+  ]);
+
+  // A completed sub-pixel alignment changes the display transform, not the
+  // underlying frame bytes. Refresh the currently visible offline frame before
+  // the passive canvas paint effect runs; otherwise the More → Align button can
+  // report "Aligned" while the canvas still holds the old unaligned buffer until
+  // the user scrubs or toggles another display control.
+  React.useLayoutEffect(() => {
+    refreshCurrentDisplayFrameForTransform();
+  }, [refreshCurrentDisplayFrameForTransform]);
 
   const warmPlaybackDisplayFrame = (idx: number, currentIdx: number, currentFrame: Float32Array | null) => {
     const raw = rawFrameForIndex(idx, currentIdx, currentFrame);
@@ -5001,18 +9047,97 @@ function Show3D() {
     void displayAndFrequencyFrameForIndex(idx, raw, { allowRawOnMiss: true });
   };
 
+  const sharedDirectDisplayRange = (
+    normalized: number,
+    c: typeof playRef.current,
+  ): RenderRange => {
+    if (c.autoContrast) {
+      const cached = cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
+        || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, normalized, c.logScale);
+      if (cached) return cached;
+    }
+    return resolveDisplayRange(
+      c.dataMin,
+      c.dataMax,
+      c.traitVmin,
+      c.traitVmax,
+      c.logScale,
+      c.imageVminPct,
+      c.imageVmaxPct,
+    );
+  };
+
+  const directPanelRanges = (
+    normalized: number,
+    panels: number[],
+    c: typeof playRef.current,
+  ): RenderRange | RenderRange[] => {
+    if (panels.length > 1 && !c.linkContrast) {
+      const sharedAutoRange = c.autoContrast ? sharedDirectDisplayRange(normalized, c) : null;
+      const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+      return panels.map((panel) => {
+        const pdr = panelDataRanges[panel];
+        const bounds = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stack;
+        return resolvePanelRange(panel, bounds, sharedAutoRange);
+      });
+    }
+    return sharedDirectDisplayRange(normalized, c);
+  };
+
+  const directPanelTransforms = (
+    panels: number[],
+    c: typeof playRef.current,
+  ): { zoom: number; panX: number; panY: number }[] => panels.map((panel) => {
+    const base = c.panelStates[panel] || initialState;
+    return {
+      zoom: c.linkPanels ? c.linkedState.zoom : base.zoom,
+      panX: c.linkPanels ? c.linkedState.panX : base.panX,
+      panY: c.linkPanels ? c.linkedState.panY : base.panY,
+    };
+  });
+
   const renderGpuPanelSlice = (idx: number, updateDisplayState = true): boolean => {
     const normalized = ((Math.round(idx) % Math.max(1, nSlices)) + Math.max(1, nSlices)) % Math.max(1, nSlices);
-    if (!separatePanelFrames || !gpuFrameCacheUploadedRef.current.has(normalized)) return false;
+    if (!separatePanelFrames) return false;
     const engine = gpuCmapRef.current;
     if (!engine || !gpuCmapReadyRef.current) return false;
     const c = playRef.current;
     if (c.imageRotation % 4 !== 0) return false;
     const sourcePanelCount = Math.max(1, nPanels || 1);
+    const rawPackedFrame = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
+    const transformPixelsActive = (
+      requiresClientFrameTransform({ offline, diffMode: c.diffMode, avgWindow: c.avgWindow })
+      || browserFilterOnRef.current
+      || frequencyFilterIsActive
+    );
+    const packedFrame = rawPackedFrame && transformPixelsActive
+      ? (displayAndFrequencyFrameForIndex(normalized, rawPackedFrame) ?? rawPackedFrame)
+      : rawPackedFrame;
+    const hasPackedFrame = !!packedFrame && packedFrame.length >= c.width * c.height;
+    if (!gpuFrameCacheUploadedRef.current.has(normalized)) {
+      if (!offline && !hasPackedFrame) return false;
+      const raw = packedFrame;
+      if (!raw || raw.length < c.width * c.height) {
+        if (!hasPackedFrame) return false;
+      } else {
+      const uploadPanelW = Math.max(1, panelWidthPx || Math.round(c.width / sourcePanelCount));
+      for (let panel = 0; panel < sourcePanelCount; panel++) {
+        const panelFrame = extractPanelSlice(raw, panel, false);
+        if (!panelFrame || panelFrame.length < uploadPanelW * c.height) return false;
+        engine.uploadData(normalized * sourcePanelCount + panel, panelFrame, uploadPanelW, c.height, undefined, true);
+      }
+      gpuFrameCacheUploadedRef.current.add(normalized);
+      const dbg = show3dPerfDebug();
+      if (dbg) {
+        dbg.gpuFrameCacheUploaded = gpuFrameCacheUploadedRef.current.size;
+        dbg.lastFrameSource = "offline-panel-gpu-upload";
+      }
+      }
+    }
     const n = Math.max(1, visiblePanelCount || 1);
     const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
-    const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = n > 1 ? (panelGapPx) : 0;
 
     const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
     engine.uploadLUT(c.cmap, lut);
@@ -5087,6 +9212,69 @@ function Show3D() {
         panY: c.linkPanels ? c.linkedState.panY : base.panY,
       };
     });
+    const hasActivePanelTransform = transforms.some(t => (
+      Math.abs(t.zoom - 1) > 1e-6 ||
+      Math.abs(t.panX) > 1e-3 ||
+      Math.abs(t.panY) > 1e-3
+    ));
+    if (!hasActivePanelTransform && hasPackedFrame && packedFrame) {
+      const packedSlotIdx = Math.max(1, nSlices || 1) * sourcePanelCount + normalized;
+      const rgbaCapacity = Math.max(1, Math.round(c.canvasW * c.canvasH));
+      const sourcePanelWidth = Math.max(1, panelWidthPx || Math.round(c.width / sourcePanelCount));
+      engine.uploadData(packedSlotIdx, packedFrame, c.width, c.height, rgbaCapacity);
+      const renderedPacked = engine.renderCombinedPanelRegionsDirectToCanvas(
+        packedSlotIdx,
+        renderRanges,
+        renderLogScale,
+        gpuCtx,
+        {
+          width: c.canvasW,
+          height: c.canvasH,
+          panelCount: n,
+          cols,
+          rows,
+          gap,
+          bgRgb: packedRgbFromHex(interPanelGapColor),
+          sourcePanelWidth,
+          transforms,
+          sourcePanelIndices: visiblePanelIndices,
+          smooth: c.smooth,
+        },
+      );
+      if (renderedPacked) {
+        setGpuDisplayVisible(true);
+        playbackIdxRef.current = normalized;
+        if (updateDisplayState) setDisplaySliceIdx(normalized);
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          dbg.missingFrame = null;
+          dbg.lastFrame = normalized;
+          dbg.lastFrameSource = "gpu-packed-frame-transform";
+          dbg.lastRenderPath = hasActivePanelTransform
+            ? "webgpu-grid-separate-panels-packed-transform-fragment"
+            : "webgpu-grid-separate-panels-packed-transform-compute";
+          dbg.lastRenderMs = Number((performance.now() - renderStartMs).toFixed(2));
+          dbg.lastPanelTransforms = transforms.map(t => ({
+            zoom: Number(t.zoom.toFixed(3)),
+            panX: Number(t.panX.toFixed(1)),
+            panY: Number(t.panY.toFixed(1)),
+          }));
+          dbg.lastDirectPanelRanges = Array.isArray(renderRanges)
+            ? renderRanges.map(r => ({
+                vmin: Number(r.vmin.toPrecision(6)),
+                vmax: Number(r.vmax.toPrecision(6)),
+              }))
+            : {
+                vmin: Number(renderRanges.vmin.toPrecision(6)),
+                vmax: Number(renderRanges.vmax.toPrecision(6)),
+              };
+          dbg.lastDirectSourcePanelIndices = visiblePanelIndices.slice();
+          dbg.lastDirectSourcePanelWidth = sourcePanelWidth;
+          dbg.lastDirectPackedFrameShape = [c.width, c.height];
+        }
+        return true;
+      }
+    }
     const rendered = engine.renderPanelSlotsDirectToCanvas(
       panelSlots,
       renderRanges,
@@ -5099,8 +9287,9 @@ function Show3D() {
         cols,
         rows,
         gap,
-        bgRgb: packedRgbFromHex(themeColors.bg),
+        bgRgb: packedRgbFromHex(interPanelGapColor),
         transforms,
+        smooth: c.smooth,
       },
     );
     if (!rendered) return false;
@@ -5119,6 +9308,125 @@ function Show3D() {
         panX: Number(t.panX.toFixed(1)),
         panY: Number(t.panY.toFixed(1)),
       }));
+    }
+    return true;
+  };
+
+  const renderGpuPackedPanelTransformSlice = (idx: number, updateDisplayState = false): boolean => {
+    const packedPanelSource = !separatePanelFrames;
+    if (
+      !packedPanelSource
+      || sharedPanelSource
+      || isRgb
+      || hasMixedPanelCmaps
+      || flipRows
+      || flipCols
+      || imageRotation % 4 !== 0
+    ) {
+      return false;
+    }
+    const panelSourceCount = Math.max(1, nPanels || 1);
+    if (panelSourceCount <= 1 || width <= 0 || height <= 0 || canvasW <= 0 || canvasH <= 0) return false;
+    const normalized = ((Math.round(idx) % Math.max(1, nSlices)) + Math.max(1, nSlices)) % Math.max(1, nSlices);
+    const engine = gpuCmapRef.current;
+    if (!engine || !gpuCmapReadyRef.current) return false;
+    const c = playRef.current;
+    if (c.imageRotation % 4 !== 0 || c.width <= 0 || c.height <= 0 || c.canvasW <= 0 || c.canvasH <= 0) return false;
+    const panels = (c.visiblePanelIndices.length ? c.visiblePanelIndices : visiblePanelIndices)
+      .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < panelSourceCount);
+    if (panels.length === 0) return false;
+    const sourcePanelWidth = Math.max(1, panelWidthPx || Math.round(c.width / panelSourceCount));
+    if (sourcePanelWidth <= 0 || sourcePanelWidth > c.width) return false;
+    const gpuCtx = ensureGpuDisplayContext(engine, c.canvasW, c.canvasH);
+    if (!gpuCtx) return false;
+
+    const rawCurrentFrame = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
+    const transformPixelsActive = (
+      requiresClientFrameTransform({ offline, diffMode, avgWindow })
+      || browserFilterOnRef.current
+      || frequencyFilterIsActive
+    );
+    if (transformPixelsActive && (!rawFrameDataRef.current || rawCurrentFrame !== rawFrameDataRef.current)) {
+      return false;
+    }
+    let slotIdx: number | null = null;
+    let renderLogScale = c.logScale;
+    if (gpuFrameCacheUploadedRef.current.has(normalized)) {
+      slotIdx = normalized;
+    } else {
+      const upload = gpuUploadRef.current;
+      if (
+        upload &&
+        rawCurrentFrame &&
+        upload.source === rawCurrentFrame &&
+        upload.width === c.width &&
+        upload.height === c.height
+      ) {
+        slotIdx = 0;
+        renderLogScale = upload.logScale ? false : c.logScale;
+      } else if (rawCurrentFrame && rawCurrentFrame.length >= c.width * c.height) {
+        const rgbaCapacity = Math.max(1, Math.round(c.canvasW * c.canvasH));
+        engine.uploadData(normalized, rawCurrentFrame, c.width, c.height, rgbaCapacity);
+        gpuFrameCacheUploadedRef.current.add(normalized);
+        slotIdx = normalized;
+      }
+    }
+    if (slotIdx === null) return false;
+
+    const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
+    engine.uploadLUT(c.cmap, lut);
+    const panelCount = panels.length;
+    const cols = panelColsForCount(panelCount);
+    const rows = Math.ceil(panelCount / cols);
+    const gap = panelCount > 1 ? panelGapPx : 0;
+    const ranges = directPanelRanges(normalized, panels, c);
+    const transforms = directPanelTransforms(panels, c);
+    const rendered = engine.renderCombinedPanelRegionsDirectToCanvas(
+      slotIdx,
+      ranges,
+      renderLogScale,
+      gpuCtx,
+      {
+        width: c.canvasW,
+        height: c.canvasH,
+        panelCount,
+        cols,
+        rows,
+        gap,
+        bgRgb: packedRgbFromHex(interPanelGapColor),
+        sourcePanelWidth,
+        transforms,
+        sourcePanelIndices: panels,
+        smooth: c.smooth,
+      },
+    );
+    if (!rendered) return false;
+    setGpuDisplayVisible(true);
+    playbackIdxRef.current = normalized;
+    if (updateDisplayState) setDisplaySliceIdx(normalized);
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.missingFrame = null;
+      dbg.lastFrame = normalized;
+      dbg.lastFrameSource = slotIdx === normalized ? "gpu-cache" : "gpu-current-upload";
+      dbg.lastRenderPath = "webgpu-grid-packed-panels-transform-direct-fragment";
+      dbg.lastPanelTransforms = transforms.map(t => ({
+        zoom: Number(t.zoom.toFixed(3)),
+        panX: Number(t.panX.toFixed(1)),
+        panY: Number(t.panY.toFixed(1)),
+      }));
+      dbg.lastDirectPanelRanges = Array.isArray(ranges)
+        ? ranges.map(r => ({
+            vmin: Number(r.vmin.toPrecision(6)),
+            vmax: Number(r.vmax.toPrecision(6)),
+          }))
+        : {
+            vmin: Number(ranges.vmin.toPrecision(6)),
+            vmax: Number(ranges.vmax.toPrecision(6)),
+          };
+      dbg.lastDirectSourcePanelIndices = panels.slice();
+      dbg.lastDirectSourcePanelWidth = sourcePanelWidth;
+      dbg.gpuFrameCacheUploaded = gpuFrameCacheUploadedRef.current.size;
     }
     return true;
   };
@@ -5179,7 +9487,7 @@ function Show3D() {
     const n = Math.max(1, nPanels || 1);
     const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
-    const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = n > 1 ? (panelGapPx) : 0;
     const renderStartMs = performance.now();
     if (n > 1 && !c.linkContrast && !sharedPanelSource) {
       const panelW = Math.max(1, panelWidthPx || Math.round(c.width / n));
@@ -5246,7 +9554,7 @@ function Show3D() {
       cols,
       rows,
       gap,
-      bgRgb: packedRgbFromHex(themeColors.bg),
+      bgRgb: packedRgbFromHex(interPanelGapColor),
       sourcePanelWidth: sourcePanelWidthForGrid,
       sharedSource: !!sharedPanelSource,
     };
@@ -5366,7 +9674,18 @@ function Show3D() {
           void fetch(reportUrl, { method: "POST", mode: "no-cors", body: JSON.stringify(result) }).catch(() => {});
         }
       } catch (err) {
-        setStatus("error", { error: err instanceof Error ? err.message : String(err) });
+        const result = {
+          token,
+          label,
+          status: "error",
+          mode,
+          targetFps: 0,
+          error: err instanceof Error ? err.message : String(err),
+        };
+        setBenchmarkResult(result);
+        if (reportUrl) {
+          void fetch(reportUrl, { method: "POST", mode: "no-cors", body: JSON.stringify(result) }).catch(() => {});
+        }
       }
     })();
 
@@ -5473,11 +9792,21 @@ function Show3D() {
         const pp = c.playbackPath;
         let pi = pathIdxRef.current;
         if (c.boomerang) {
+          // Loop remains the master repeat control. When a scientist turns
+          // Loop off, Bounce should shape motion only until the path endpoint;
+          // it must not keep ping-ponging forever.
           // Visit endpoints once (matches grid-mode boomerang). Earlier code
           // jumped to pp.length-2 / 1 on overshoot, skipping endpoints.
           pi += bounceDirRef.current;
-          if (pi >= pp.length) { bounceDirRef.current = -1; pi = pp.length - 1; }
-          else if (pi < 0) { bounceDirRef.current = 1; pi = 0; }
+          if (pi >= pp.length) {
+            if (!c.loop) { setPlaying(false); return; }
+            bounceDirRef.current = -1;
+            pi = pp.length - 1;
+          } else if (pi < 0) {
+            if (!c.loop) { setPlaying(false); return; }
+            bounceDirRef.current = 1;
+            pi = 0;
+          }
         } else {
           pi += (c.reverse ? -1 : 1);
           if (pi >= pp.length) { if (!c.loop) { setPlaying(false); return; } pi = 0; }
@@ -5489,12 +9818,21 @@ function Show3D() {
       } else {
         const rangeStart = c.loop ? Math.max(0, Math.min(c.loopStart, c.nSlices - 1)) : 0;
         const rangeEnd = c.loop ? Math.max(rangeStart, Math.min(c.loopEnd, c.nSlices - 1)) : c.nSlices - 1;
-        const prev = playbackIdxRef.current;
+        const prev = Number.isFinite(playbackIdxRef.current)
+          ? Math.round(playbackIdxRef.current)
+          : Math.max(rangeStart, Math.min(rangeEnd, Math.round(displaySliceIdx || 0)));
 
         if (c.boomerang) {
           next = prev + bounceDirRef.current;
-          if (next > rangeEnd) { bounceDirRef.current = -1; next = prev - 1 >= rangeStart ? prev - 1 : prev; }
-          else if (next < rangeStart) { bounceDirRef.current = 1; next = prev + 1 <= rangeEnd ? prev + 1 : prev; }
+          if (next > rangeEnd) {
+            if (!c.loop) { setPlaying(false); return; }
+            bounceDirRef.current = -1;
+            next = prev - 1 >= rangeStart ? prev - 1 : prev;
+          } else if (next < rangeStart) {
+            if (!c.loop) { setPlaying(false); return; }
+            bounceDirRef.current = 1;
+            next = prev + 1 <= rangeEnd ? prev + 1 : prev;
+          }
         } else {
           next = prev + (c.reverse ? -1 : 1);
           if (c.reverse) {
@@ -5524,6 +9862,33 @@ function Show3D() {
       // rotation, which froze playback (renderedFrames + canvas stuck, playing
       // true). When rotated, skip the GPU-cache path so the frame is fetched and
       // drawMain applies the rotation. Verified bug 2026-05-29.
+      if (
+        offline &&
+        !isRgb &&
+        !transformActive &&
+        (
+          (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+          (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+        )
+      ) {
+        if (drawSidecarBitmapFrame(next, false, "playback")) {
+          playbackIdxRef.current = next;
+          updatePlaybackLiveControls(next);
+          if (dbg) {
+            dbg.missingFrame = null;
+            dbg.lastFrame = next;
+            dbg.lastFrameSource = sidecarMode ? "sidecar-imagebitmap-cache" : "embedded-viewport-cache";
+          }
+          const d = show3dPerfDebug();
+          if (d) {
+            recordFramePacingDebug(d, performance.now(), intervalMs);
+            d.renderedFrames = ((d.renderedFrames as number | undefined) ?? 0) + 1;
+          }
+          lastUIUpdate = tickNow;
+          scheduleTick();
+          return;
+        }
+      }
       const rotationAllowsGpuCache = (c.imageRotation % 4) === 0;
       const gpuCachedSlotReady = !offline
         && !transformActive
@@ -5593,6 +9958,7 @@ function Show3D() {
         dbg.lastFrameSource = frameSource;
       }
 
+      const sourceFrame = frame;
       if (frame && transformActive && !isRgb) {
         const filteredFrame = displayAndFrequencyFrameForIndex(next, frame, { allowRawOnMiss: false });
         if (!filteredFrame) {
@@ -5610,8 +9976,10 @@ function Show3D() {
       updatePlaybackLiveControls(next);
       if (frame && isRgb && offline && frame.length >= c.width * c.height * 3) {
         rgbFrameDataRef.current = frame;
+        sourceFrameDataRef.current = sourceFrame;
         rawFrameDataRef.current = rgbFrameToLuminance(frame, c.width * c.height);
       } else if (frame) {
+        sourceFrameDataRef.current = sourceFrame;
         rawFrameDataRef.current = frame;
       }
       const offlinePackedPanelPlaybackUsesStaticCanvas = (
@@ -5638,7 +10006,7 @@ function Show3D() {
       // entirely. The two paths fought on Mac/retina (Linux didn't expose it),
       // producing the "play is flaky while drag is smooth" symptom verified
       // 2026-05-24 on sample_device_trial.html.
-      if (offline && !offlineDirectRender) {
+      if (offline && !offlineDirectRender && !offlinePackedPanelPlaybackUsesStaticCanvas) {
         setGpuDisplayVisible(false);
         const d = show3dPerfDebug();
         if (d) {
@@ -5778,7 +10146,7 @@ function Show3D() {
           const n = Math.max(1, nPanels || 1);
           const cols = panelColsForCount(n);
           const rows = Math.ceil(n / cols);
-          const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+          const gap = n > 1 ? (panelGapPx) : 0;
           const outPanelW = (c.canvasW - gap * (cols - 1)) / cols;
           const outPanelH = (c.canvasH - gap * (rows - 1)) / rows;
           ctx.clearRect(0, 0, c.canvasW, c.canvasH);
@@ -5801,21 +10169,25 @@ function Show3D() {
           const ctx = canvas?.getContext("2d");
           if (!offscreen || !offCtx || !ctx) return false;
           const panelW = Math.max(1, Math.floor(c.width / panelCountForGrid));
+          const sourceW = frame.length === c.height * panelW ? panelW : c.width;
+          if (sourceW <= 0 || frame.length < c.height * sourceW) return false;
           const panelImg = offCtx.createImageData(panelW, c.height);
           const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
           offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
           for (const panel of c.visiblePanelIndices) {
             if (panel < 0 || panel >= panelCountForGrid) continue;
-            const panelData = extractPanelSlice(frame, panel, c.logScale);
-            if (!panelData) continue;
+            const srcPanel = Math.min(Math.max(0, panel), panelCountForGrid - 1);
+            const x0 = Math.min(Math.max(0, srcPanel * panelW), Math.max(0, sourceW - panelW));
             const pdr = panelDataRanges[panel];
-            const panelRange = panelData.length > 0
-              ? findDataRange(panelData)
-              : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
-                  ? pdr
-                  : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
-            const range = resolvePanelRenderRange(panel, panelRange, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
-            applyColormap(panelData, panelImg.data, lut, range.vmin, range.vmax);
+            // Do not allocate/copy the panel during playback. The detailed
+            // per-panel percentile window refreshes on idle/static paints; the
+            // playback hot path reuses the remembered panel range (or the
+            // stack range) so large real-data reports stay responsive.
+            const panelRange = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+              ? pdr
+              : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+            const range = resolvePanelRenderRange(panel, panelRange, sharedAutoRange, null, c.autoContrast, c.percentileLow, c.percentileHigh);
+            renderPackedPanelPlayback(frame, sourceW, x0, panelW, c.height, panelImg.data, lut, range.vmin, range.vmax, c.logScale);
             offCtx.putImageData(panelImg, panel * panelW, 0);
           }
           drawMain(ctx, offscreen);
@@ -5894,7 +10266,7 @@ function Show3D() {
                 const n = panelCountForGrid;
                 const cols = panelColsForCount(n);
                 const rows = Math.ceil(n / cols);
-                const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+                const gap = n > 1 ? (panelGapPx) : 0;
                 const sourcePanelWidthForGrid = sharedPanelSource
                   ? Math.max(1, panelWidthPx || c.width)
                   : Math.max(1, panelWidthPx || Math.round(c.width / n));
@@ -5905,7 +10277,7 @@ function Show3D() {
                   cols,
                   rows,
                   gap,
-                  bgRgb: packedRgbFromHex(themeColors.bg),
+                  bgRgb: packedRgbFromHex(interPanelGapColor),
                   sourcePanelWidth: sourcePanelWidthForGrid,
                   sharedSource: !!sharedPanelSource,
                 };
@@ -5943,9 +10315,10 @@ function Show3D() {
                       cols,
                       rows,
                       gap,
-                      bgRgb: packedRgbFromHex(themeColors.bg),
+                      bgRgb: packedRgbFromHex(interPanelGapColor),
                       sourcePanelWidth: panelW,
                       transforms: panelTransformsForDirect,
+                      smooth: c.smooth,
                     },
                   );
                   if (dbg) {
@@ -6107,23 +10480,16 @@ function Show3D() {
         playbackHistogramCounterRef.current = (playbackHistogramCounterRef.current + 1) % 2;
         if (playbackHistogramCounterRef.current === 0) {
           if ((nPanels || 1) > 1 && !linkContrast && frame) {
-            // Per-panel histograms have no single GPU slot; keep the per-panel
-            // CPU extract (cold-ish, only when contrast is unlinked).
-            const n = Math.max(1, nPanels || 1);
-            const nextData: (Float32Array | null)[] = Array.from({ length: n }, () => null);
-            const nextRanges: { min: number; max: number }[] = Array.from(
-              { length: n },
-              () => resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale),
-            );
-            for (const panel of c.visiblePanelIndices) {
-              const panelData = extractPanelSlice(frame, panel, c.logScale);
-              nextData[panel] = panelData;
-              nextRanges[panel] = panelData && panelData.length > 0
-                ? findDataRange(panelData)
-                : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+            // Keep playback free of per-panel Float32Array copies. The static
+            // histogram effect refreshes panel ranges after playback stops or
+            // when the user commits a scrub. On large 8-panel exports this is
+            // the difference between microscope-like playback and a browser
+            // ArrayBuffer allocation crash.
+            const d = show3dPerfDebug();
+            if (d) {
+              d.lastHistogramFrame = next;
+              d.lastHistogramSource = "deferred-per-panel-playback";
             }
-            setPanelHistogramData(nextData);
-            setPanelDataRanges(nextRanges);
           } else {
             // GPU histogram for the current frame (honors WebGPU-first-class):
             // refreshHistogram computes bins on the GPU (live slot or offline
@@ -6194,9 +10560,11 @@ function Show3D() {
     if (isRgb) {
       // Keep color plane for paint; expose Rec. 709 luminance for stats/FFT.
       rgbFrameDataRef.current = parsed;
+      sourceFrameDataRef.current = parsed;
       rawFrameDataRef.current = rgbFrameToLuminance(parsed, width * height);
     } else {
       rgbFrameDataRef.current = null;
+      sourceFrameDataRef.current = parsed;
       const displayFrame = displayAndFrequencyFrameForIndex(offline ? liveSliceIdx : sliceIdx, parsed) ?? parsed;
       rawFrameDataRef.current = displayFrame;
     }
@@ -6228,7 +10596,7 @@ function Show3D() {
     } else {
       setLocalPanelStats(null);
     }
-  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions, browserFilterTick, frameTransportTiming, markTransportPaintProxy]);
+  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions, browserFilterTick, subpixelAlignEnabled, subpixelAlignVersion, frameTransportTiming, markTransportPaintProxy]);
 
   // Histogram bins are computed on the GPU via `engine.computeHistogramWithRange`
   // when the colormap engine is ready. CPU fallback (computeHistogramFromBytes
@@ -6241,6 +10609,14 @@ function Show3D() {
   const histogramRefreshSerialRef = React.useRef(0);
   const refreshHistogram = React.useCallback(async (idxArg?: number) => {
     if (isRgb) return;
+    if (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current) && !perPanelHistogramEnabled) {
+      const d = show3dPerfDebug();
+      if (d) {
+        d.lastHistogramFrame = clampSlice(idxArg ?? displaySliceIdx);
+        d.lastHistogramSource = "sidecar-display-cache-skip";
+      }
+      return;
+    }
     const renderIdx = clampSlice(idxArg ?? displaySliceIdx);
     if (histogramRefreshInFlightRef.current) {
       histogramRefreshPendingIdxRef.current = renderIdx;
@@ -6375,7 +10751,7 @@ function Show3D() {
         window.setTimeout(() => { void refreshHistogram(pending); }, 0);
       }
     }
-  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, visiblePanelIndices, extractPanelSlice, displaySliceIdx, separatePanelFrames, canvasW, canvasH, ensurePanelFrameGpu, isRgb]);
+  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, visiblePanelIndices, extractPanelSlice, displaySliceIdx, separatePanelFrames, canvasW, canvasH, ensurePanelFrameGpu, isRgb, sidecarMode]);
   refreshHistogramRef.current = refreshHistogram;
   React.useEffect(() => {
     if (playing) {
@@ -6480,14 +10856,99 @@ function Show3D() {
     return () => window.clearTimeout(timer);
   }, [effectiveRoiActive, roiItems.length, showRoiResizeHint]);
 
+  React.useEffect(() => {
+    if (compareMode !== "blink") {
+      setBlinkPhase(0);
+      return;
+    }
+    const hz = Math.max(0.25, Math.min(8, Number(blinkFps) || 2));
+    const timer = window.setInterval(() => setBlinkPhase((value) => (value + 1) % 2), Math.round(1000 / hz));
+    return () => window.clearInterval(timer);
+  }, [blinkFps, compareMode]);
+
+  React.useEffect(() => {
+    if (!sidecarMode) return;
+    if (compareMode === "blink") {
+      invalidateSidecarViewportCache("compare-blink");
+    } else if (compareMode !== "off") {
+      invalidateSidecarViewportCache("compare-mode");
+    }
+  }, [blinkPhase, compareMode, comparePair, sidecarMode, invalidateSidecarViewportCache]);
+
+  React.useEffect(() => {
+    if (!sidecarMode) return;
+    invalidateSidecarViewportCache("visibility-sidecar");
+  }, [sidecarMode, visiblePanelIndices, invalidateSidecarViewportCache]);
+
   // Data effect: normalize + colormap → reusable offscreen canvas, then draw
   React.useEffect(() => {
     // Invalidate any rAF/mapAsync work from the previous render before every
     // early ownership return (notably the transition into playback).
     const renderSerial = ++gpuRenderSerialRef.current;
-    const frameData = rawFrameDataRef.current;
-    if (!frameData || frameData.length === 0) return;
+    const confirmOfflineStaticCanvasPresent = (reason: string) => {
+      if (!offline || playing || sidecarMode) return;
+      const present = (phase: string) => {
+        if (renderSerial !== gpuRenderSerialRef.current) return;
+        const canvas = canvasRef.current;
+        const offscreen = mainOffscreenRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (!canvas || !offscreen || !ctx) return;
+        setGpuDisplayVisible(false);
+        drawMain(ctx, offscreen, {
+          sourcePanelWidth: mainOffscreenSourcePanelWidthRef.current,
+        });
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          dbg.lastInitialStaticPresent = `${reason}:${phase}`;
+          dbg.lastStaticPaintSkipReason = null;
+        }
+      };
+      requestAnimationFrame(() => requestAnimationFrame(() => present("raf2")));
+      window.setTimeout(() => present("timeout"), 180);
+    };
+    const sourceFrameData = sourceFrameDataRef.current ?? rawFrameDataRef.current;
+    if (!sourceFrameData || sourceFrameData.length === 0) return;
+    const renderIdx = offline ? liveSliceIdx : displaySliceIdx;
+    const transformedFrame = !isRgb
+      ? displayAndFrequencyFrameForIndex(renderIdx, sourceFrameData, { allowRawOnMiss: true })
+      : sourceFrameData;
+    let frameData = transformedFrame ?? sourceFrameData;
+    rawFrameDataRef.current = frameData;
+    if (!isRgb && compareMode !== "off" && width > 0 && height > 0) {
+      const n = Math.max(1, nSlices || 1);
+      const aIdx = Math.max(0, Math.min(n - 1, Math.round(comparePair?.[0] ?? 0)));
+      const bIdx = Math.max(0, Math.min(n - 1, Math.round(comparePair?.[1] ?? Math.min(1, n - 1))));
+      const aFrame = getOfflineFrame(aIdx) ?? frameData;
+      const bFrame = getOfflineFrame(bIdx) ?? frameData;
+      if (aFrame.length === frameData.length && bFrame.length === frameData.length) {
+        if (compareMode === "blink") {
+          frameData = blinkPhase % 2 === 0 ? aFrame : bFrame;
+        } else if (compareMode === "difference" || compareMode === "overlay") {
+          const diff = new Float32Array(frameData.length);
+          for (let i = 0; i < diff.length; i++) diff[i] = bFrame[i] - aFrame[i];
+          frameData = diff;
+        }
+      }
+    }
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return;
+    if (
+      gpuDisplayVisibleRef.current === true &&
+      imageRotation % 4 === 0 &&
+      !playing &&
+      !sidecarMode &&
+      !isRgb &&
+      compareMode === "off"
+    ) {
+      try {
+        if (renderCurrentPanelTransformDirect()) {
+          const d = show3dPerfDebug();
+          if (d) d.lastStaticPaintSkipReason = "gpu-transform-display";
+          return;
+        }
+      } catch (err) {
+        console.warn("[Show3D] WebGPU transform refresh failed during static paint; using retained 2D canvas", err);
+      }
+    }
     // True-color RGB: paint on the GPU (paintRgbFrame), applying the moving
     // average across color frames when avg > 1 so an avg change re-denoises the
     // static frame, not just live playback.
@@ -6607,6 +11068,7 @@ function Show3D() {
         renderToOffscreenReuse(processed, lut, vmin, vmax, offscreen, imgData);
       }
       drawMain(ctx, offscreen);
+      confirmOfflineStaticCanvasPresent("offline-static");
       return;
     }
 
@@ -6766,7 +11228,7 @@ function Show3D() {
         if (ok && !playing) requestAnimationFrame(() => { void blitAndDraw(true); });
       });
     } else {
-      // WebGPU-only per CLAUDE.md "WebGPU is THE pipeline" rule.
+      // WebGPU-only: do not silently substitute a CPU rendering path.
       // setGpuCmapReady(true) upstream triggers this effect to re-fire as
       // soon as the engine resolves. Skip painting until then (canvas
       // briefly blank for ~50-200 ms on some GPU workstations, never CPU-rendered).
@@ -6780,7 +11242,7 @@ function Show3D() {
       const ctx = canvas.getContext("2d");
       if (ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
     }
-  }, [frameBytes, frameSeq, width, height, cmap, panelCmapFor, hasMixedPanelCmaps, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, sharedPanelSource, visiblePanelIndices, perPanelHistogramEnabled, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb, browserFilterTick, denoiseSigmaLive, displayFilter, spatialBin, browserFilterKnobsOn, frequencyRenderVersion, frequencyFilterIsActive]);
+  }, [frameBytes, frameSeq, width, height, cmap, panelCmapFor, hasMixedPanelCmaps, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, sharedPanelSource, visiblePanelIndices, perPanelHistogramEnabled, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb, browserFilterTick, denoiseSigmaLive, displayFilter, spatialBin, browserFilterKnobsOn, frequencyRenderVersion, frequencyFilterIsActive, subpixelAlignEnabled, subpixelAlignVersion, compareMode, comparePair, blinkPhase, getOfflineFrame, nSlices]);
 
   // Per-panel render: each slot gets its own zoom/pan transform. 2px gap
   // between slots painted as the canvas bg (transparent through clearRect).
@@ -6801,14 +11263,22 @@ function Show3D() {
         linkedState.panX === 0 &&
         linkedState.panY === 0
       ));
-    if (!keepDirectGpuVisible && !options.preserveGpuDisplay) {
+    const preserveActiveGpuTransform =
+      gpuDisplayVisibleRef.current === true &&
+      imageRotation % 4 === 0 &&
+      !sidecarMode &&
+      !frameTransformActive() &&
+      sidecarViewTransformActive();
+    if (!keepDirectGpuVisible && !options.preserveGpuDisplay && !preserveActiveGpuTransform) {
       setGpuDisplayVisible(false);
+    } else if (preserveActiveGpuTransform) {
+      const d = show3dPerfDebug();
+      if (d) d.lastDrawMainPreservedGpu = "active-view-transform";
     }
     ctx.imageSmoothingEnabled = smooth;
-    // Clear entire canvas. Slot-level bg fill happens inside the per-panel
-    // loop so empty grid cells (partial last row) stay transparent - the
-    // page bg shows through instead of a dead white block.
-    ctx.clearRect(0, 0, canvasW, canvasH);
+    // Clear entire canvas to the configured inter-panel layer. Slot-level bg
+    // fill happens inside the per-panel loop.
+    clearWithGridBackground(ctx, canvasW, canvasH);
     const n = Math.max(1, visiblePanelCount || 1);
     const sourcePanelCount = Math.max(1, nPanels || 1);
     const cols = panelColsForCount(n);
@@ -6819,7 +11289,7 @@ function Show3D() {
       ? offscreen.width
       : Math.max(1, panelWidthPx || offscreen.width / sourcePanelCount);
     const srcH = offscreen.height;
-    const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = n > 1 ? (panelGapPx) : 0;
     const outPanelW = (canvasW - gap * (cols - 1)) / cols;
     const outPanelH = (canvasH - gap * (rows - 1)) / rows;
     for (let slot = 0; slot < n; slot++) {
@@ -6845,6 +11315,10 @@ function Show3D() {
       ctx.translate(slotX + panelState.panX, slotY + panelState.panY);
       ctx.scale(panelState.zoom, panelState.zoom);
       const w = outPanelW, h = outPanelH;
+      if (flipCols || flipRows) {
+        ctx.translate(flipCols ? w : 0, flipRows ? h : 0);
+        ctx.scale(flipCols ? -1 : 1, flipRows ? -1 : 1);
+      }
       if (imageRotation % 4 !== 0) {
         const cx = w / 2 / panelState.zoom, cy = h / 2 / panelState.zoom;
         ctx.translate(cx, cy);
@@ -6855,9 +11329,1817 @@ function Show3D() {
       const srcX = sharedPanelSource ? 0 : i * srcPanelW;
       ctx.drawImage(offscreen as CanvasImageSource, srcX, 0, srcPanelW, srcH, 0, 0, w, h);
       ctx.restore();
+      strokePanelInnerBorder(ctx, slotX, slotY, outPanelW, outPanelH);
       // No end badge - blur alone signals past-real-frame.
     }
   };
+
+  const paintSidecarPanelBitmapsToContext = React.useCallback((
+    ctx: CanvasRenderingContext2D,
+    drawIdx: number,
+    targetW: number,
+    targetH: number,
+  ): boolean => {
+    const bitmaps = sidecarBitmapFrameCacheRef.current.get(drawIdx);
+    if (!bitmaps || bitmaps.length === 0) return false;
+    ctx.imageSmoothingEnabled = smooth;
+    clearWithGridBackground(ctx, targetW, targetH);
+    const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(visibleCountLocal);
+    const rows = Math.ceil(visibleCountLocal / cols);
+    const gap = visibleCountLocal > 1 ? (panelGapPx) : 0;
+    const outPanelW = (targetW - gap * (cols - 1)) / cols;
+    const outPanelH = (targetH - gap * (rows - 1)) / rows;
+    for (let slot = 0; slot < visibleCountLocal; slot++) {
+      const panelIdx = visiblePanelIndices[slot] ?? slot;
+      const bitmap = bitmaps[panelIdx];
+      if (!bitmap) continue;
+      const panelState = stateFor(panelIdx);
+      const drawView = clampPanelViewForDraw(panelState, outPanelW, outPanelH);
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      const slotX = col * (outPanelW + gap);
+      const slotY = row * (outPanelH + gap);
+      ctx.fillStyle = themeColors.bg;
+      ctx.fillRect(slotX, slotY, outPanelW, outPanelH);
+      const realN = panelRealFrames && panelRealFrames[panelIdx];
+      const pastEnd = !!(realN && drawIdx >= realN);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(slotX, slotY, outPanelW, outPanelH);
+      ctx.clip();
+      ctx.translate(slotX + drawView.panX, slotY + drawView.panY);
+      ctx.scale(drawView.zoom, drawView.zoom);
+      if (flipCols || flipRows) {
+        ctx.translate(flipCols ? outPanelW : 0, flipRows ? outPanelH : 0);
+        ctx.scale(flipCols ? -1 : 1, flipRows ? -1 : 1);
+      }
+      if (imageRotation % 4 !== 0) {
+        const cx = outPanelW / 2 / drawView.zoom;
+        const cy = outPanelH / 2 / drawView.zoom;
+        ctx.translate(cx, cy);
+        ctx.rotate((imageRotation * Math.PI) / 2);
+        ctx.translate(-outPanelW / 2, -outPanelH / 2);
+      }
+      if (pastEnd) ctx.filter = "blur(4px)";
+      ctx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, outPanelW, outPanelH);
+      ctx.restore();
+      strokePanelInnerBorder(ctx, slotX, slotY, outPanelW, outPanelH);
+    }
+    return true;
+  }, [
+    smooth,
+    visiblePanelCount,
+    visiblePanelIndices,
+    panelColsForCount,
+    panelGapPx,
+    interPanelGapColor,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
+    stateFor,
+    clampPanelViewForDraw,
+    themeColors.bg,
+    panelRealFrames,
+    flipCols,
+    flipRows,
+    imageRotation,
+  ]);
+
+  const paintSidecarU8ViewportToContext = React.useCallback((
+    ctx: CanvasRenderingContext2D,
+    drawIdx: number,
+    targetW: number,
+    targetH: number,
+  ): boolean => {
+    if (isRgb || sharedPanelSource) return false;
+    const u8 = sidecarU8FrameCacheRef.current.get(drawIdx);
+    if (!u8 || u8.byteLength < width * height) return false;
+    const rotation = ((Math.round(imageRotation) % 4) + 4) % 4;
+    const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(visibleCountLocal);
+    const rows = Math.ceil(visibleCountLocal / cols);
+    const gap = visibleCountLocal > 1 ? Math.max(0, Math.round(panelGapPx)) : 0;
+    const sourcePanelW = Math.max(1, Math.round(panelWidthPx || Math.floor(width / Math.max(1, nPanels || 1)) || width));
+    let img: ImageData;
+    try {
+      img = ctx.getImageData(0, 0, targetW, targetH);
+    } catch {
+      img = ctx.createImageData(targetW, targetH);
+    }
+    if (img.width !== targetW || img.height !== targetH) {
+      img = ctx.createImageData(targetW, targetH);
+    }
+    const rgba = img.data;
+    const bg = themeColors.bg || interPanelGapColor || "#fff";
+    const parsedBg = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(bg.trim());
+    let bgR = 255, bgG = 255, bgB = 255;
+    if (parsedBg) {
+      const raw = parsedBg[1];
+      const hex = raw.length === 3 ? raw.split("").map((ch) => ch + ch).join("") : raw;
+      const value = Number.parseInt(hex, 16);
+      bgR = (value >> 16) & 255;
+      bgG = (value >> 8) & 255;
+      bgB = value & 255;
+    }
+    for (let p = 0; p < rgba.length; p += 4) {
+      if (rgba[p + 3] !== 0) continue;
+      rgba[p] = bgR;
+      rgba[p + 1] = bgG;
+      rgba[p + 2] = bgB;
+      rgba[p + 3] = 255;
+    }
+    const outPanelWFloat = (targetW - gap * (cols - 1)) / cols;
+    const outPanelHFloat = (targetH - gap * (rows - 1)) / rows;
+    const debugPaintPanels: Array<Record<string, number | string | boolean | null>> = [];
+    for (let slot = 0; slot < visibleCountLocal; slot++) {
+      const panelIdx = visiblePanelIndices[slot] ?? slot;
+      const panelState = linkPanels
+        ? linkedStateLiveRef.current
+        : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      const panelContrastState =
+        panelStatesLiveRef.current[panelIdx]
+        || panelStates[panelIdx]
+        || stateFor(panelIdx);
+      const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
+      const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
+      const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
+      const slotX1 = Math.min(targetW, Math.round(slotX0 + outPanelWFloat));
+      const slotY1 = Math.min(targetH, Math.round(slotY0 + outPanelHFloat));
+      if (slotX1 <= slotX0 || slotY1 <= slotY0) continue;
+      const realN = panelRealFrames && panelRealFrames[panelIdx];
+      if (realN && drawIdx >= realN) continue;
+      const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
+      const panelStateRange = !linkContrast && Math.max(1, nPanels || 1) > 1
+        ? panelContrastState
+        : null;
+      const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
+      const sharedPreview = imageHistogramPreviewPctRef.current;
+      const preview = panelStateRange ? panelPreview : sharedPreview;
+      const panelByteMin = (
+        offlineMins?.length >= Math.max(1, nPanels || 1) &&
+        Number.isFinite(offlineMins[panelIdx])
+      )
+        ? offlineMins[panelIdx]
+        : offlineMin;
+      const panelByteMax = (
+        offlineMaxs?.length >= Math.max(1, nPanels || 1) &&
+        Number.isFinite(offlineMaxs[panelIdx])
+      )
+        ? offlineMaxs[panelIdx]
+        : offlineMax;
+      const valueToPanelByte = (value: number): number | null => {
+        if (!Number.isFinite(value) || !Number.isFinite(panelByteMin) || !Number.isFinite(panelByteMax) || panelByteMax <= panelByteMin) {
+          return null;
+        }
+        return clampByte(((value - panelByteMin) / (panelByteMax - panelByteMin)) * 255);
+      };
+      let loByte: number;
+      let hiByte: number;
+      let byteRangeSource = "manual-percent";
+      if (preview) {
+        loByte = clampByte((Number(preview[0]) || 0) * 2.55);
+        hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
+        byteRangeSource = "histogram-preview";
+      } else if (autoContrast) {
+        const autoRange = !linkContrast
+          ? null
+          : cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
+          || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, drawIdx, logScale);
+        const localAuto = !linkContrast ? panelStateRange : null;
+        const localAutoBytes = !linkContrast
+          ? packedPanelAutoByteRange(
+              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
+              percentileLow, percentileHigh,
+            )
+          : null;
+        const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
+        const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
+        if (localAutoBytes) {
+          loByte = localAutoBytes.lo;
+          hiByte = localAutoBytes.hi;
+          byteRangeSource = "auto-panel-percentile";
+        } else if (localAuto) {
+          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
+          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
+          byteRangeSource = "auto-panel-state";
+        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+          loByte = mappedLo;
+          hiByte = mappedHi;
+          byteRangeSource = "auto-range";
+        } else {
+          loByte = clampByte((Number(percentileLow) || 0) * 2.55);
+          hiByte = clampByte((Number(percentileHigh) || 100) * 2.55);
+          byteRangeSource = "auto-percent-fallback";
+        }
+      } else {
+        const loPct = panelStateRange ? panelStateRange.imageVminPct : imageVminPct;
+        const hiPct = panelStateRange ? panelStateRange.imageVmaxPct : imageVmaxPct;
+        loByte = clampByte((Number(loPct) || 0) * 2.55);
+        hiByte = clampByte((Number(hiPct) || 100) * 2.55);
+      }
+      if (hiByte <= loByte) {
+        hiByte = Math.min(255, loByte + 1);
+      }
+      const byteSpan = Math.max(1, hiByte - loByte);
+      const srcPanelX = Math.max(0, Math.min(width - 1, panelIdx * sourcePanelW));
+      const srcPanelXMax = Math.max(srcPanelX, Math.min(width - 1, srcPanelX + sourcePanelW - 1));
+      let wrotePanelPixel = false;
+      let sampleByte: number | null = null;
+      let sampleMapped: number | null = null;
+      let sampleRgb: number | null = null;
+      for (let y = slotY0; y < slotY1; y++) {
+        const localDrawY = ((y - slotY0) - drawView.panY) / drawView.zoom;
+        if (localDrawY < 0 || localDrawY >= outPanelHFloat) continue;
+        let localY = localDrawY / Math.max(1, outPanelHFloat);
+        if (flipRows) localY = 1 - localY;
+        let dst = (y * targetW + slotX0) * 4;
+        for (let x = slotX0; x < slotX1; x++, dst += 4) {
+          const localDrawX = ((x - slotX0) - drawView.panX) / drawView.zoom;
+          if (localDrawX < 0 || localDrawX >= outPanelWFloat) continue;
+          let localX = localDrawX / Math.max(1, outPanelWFloat);
+          if (flipCols) localX = 1 - localX;
+          let srcNormX = localX;
+          let srcNormY = localY;
+          if (rotation === 1) {
+            srcNormX = localY;
+            srcNormY = 1 - localX;
+          } else if (rotation === 2) {
+            srcNormX = 1 - localX;
+            srcNormY = 1 - localY;
+          } else if (rotation === 3) {
+            srcNormX = 1 - localY;
+            srcNormY = localX;
+          }
+          const srcY = Math.max(0, Math.min(height - 1, srcNormY * height));
+          const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + srcNormX * sourcePanelW));
+          const sample = samplePackedU8Viewport(
+            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax, smooth,
+          );
+          const v = Math.max(0, Math.min(255, Math.floor(((sample - loByte) / byteSpan) * 255)));
+          const li = v * 3;
+          if (sampleByte === null) {
+            sampleByte = Math.round(sample);
+            sampleMapped = v;
+            sampleRgb = lut[li];
+          }
+          rgba[dst] = lut[li];
+          rgba[dst + 1] = lut[li + 1];
+          rgba[dst + 2] = lut[li + 2];
+          rgba[dst + 3] = 255;
+          wrotePanelPixel = true;
+        }
+      }
+      debugPaintPanels.push({
+        panelIdx,
+        slot,
+        slotX0,
+        slotY0,
+        srcPanelX,
+        loByte,
+        hiByte,
+        byteRangeSource,
+        zoom: Number((panelState.zoom || 1).toFixed(3)),
+        panX: Number((panelState.panX || 0).toFixed(1)),
+        panY: Number((panelState.panY || 0).toFixed(1)),
+        rotation,
+        flipCols,
+        flipRows,
+        wrote: wrotePanelPixel,
+        effectiveZoom: Number(drawView.zoom.toFixed(3)),
+        effectivePanX: Number(drawView.panX.toFixed(1)),
+        effectivePanY: Number(drawView.panY.toFixed(1)),
+        sampleByte,
+        sampleMapped,
+        sampleRgb,
+      });
+    }
+    ctx.putImageData(img, 0, 0);
+    if (panelInnerBorderPx > 0) {
+      ctx.save();
+      ctx.strokeStyle = panelInnerBorderColor;
+      ctx.lineWidth = panelInnerBorderPx;
+      const inset = panelInnerBorderPx / 2;
+      for (let slot = 0; slot < visibleCountLocal; slot++) {
+        const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
+        const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
+        const slotX1 = Math.min(targetW, Math.round(slotX0 + outPanelWFloat));
+        const slotY1 = Math.min(targetH, Math.round(slotY0 + outPanelHFloat));
+        ctx.strokeRect(
+          slotX0 + inset,
+          slotY0 + inset,
+          Math.max(0, slotX1 - slotX0 - panelInnerBorderPx),
+          Math.max(0, slotY1 - slotY0 - panelInnerBorderPx),
+        );
+      }
+      ctx.restore();
+    }
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.sidecarViewportPaintVisibleCount = visibleCountLocal;
+      debug.sidecarViewportPaintCanvas = { width: targetW, height: targetH };
+      debug.sidecarViewportPaintPanels = debugPaintPanels;
+    }
+    return true;
+  }, [
+    isRgb,
+    sharedPanelSource,
+    imageRotation,
+    flipCols,
+    flipRows,
+    width,
+    height,
+    visiblePanelCount,
+    panelColsForCount,
+    panelGapPx,
+    panelWidthPx,
+    nPanels,
+    offlineMins,
+    offlineMaxs,
+    offlineMin,
+    offlineMax,
+    autoContrast,
+    autoVmins,
+    autoVmaxs,
+    logScale,
+    percentileLow,
+    percentileHigh,
+    imageVminPct,
+    imageVmaxPct,
+    themeColors.bg,
+    interPanelGapColor,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
+    visiblePanelIndices,
+    stateFor,
+    clampPanelViewForDraw,
+    linkPanels,
+    panelRealFrames,
+    panelCmapFor,
+    linkContrast,
+  ]);
+
+  const paintEmbeddedPackedViewportToContext = React.useCallback((
+    ctx: CanvasRenderingContext2D,
+    drawIdx: number,
+    targetW: number,
+    targetH: number,
+  ): boolean => {
+    if (
+      !offline ||
+      sidecarMode ||
+      isRgb ||
+      sharedPanelSource ||
+      !offlineStack ||
+      offlineStack.byteLength <= 0 ||
+      width <= 0 ||
+      height <= 0
+    ) {
+      return false;
+    }
+    const panelCount = Math.max(1, nPanels || 1);
+    if (panelCount <= 1) return false;
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const frameIdx = ((Math.round(drawIdx) % n) + n) % n;
+    const bytesPerFrame = width * height;
+    const start = frameIdx * bytesPerFrame;
+    if (start < 0 || start + bytesPerFrame > offlineStack.byteLength) return false;
+    const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, bytesPerFrame);
+    const rotation = ((Math.round(imageRotation) % 4) + 4) % 4;
+    const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(visibleCountLocal);
+    const rows = Math.ceil(visibleCountLocal / cols);
+    const gap = visibleCountLocal > 1 ? Math.max(0, Math.round(panelGapPx)) : 0;
+    const sourcePanelW = Math.max(1, Math.round(panelWidthPx || Math.floor(width / panelCount) || width));
+    let img: ImageData;
+    try {
+      img = ctx.getImageData(0, 0, targetW, targetH);
+    } catch {
+      img = ctx.createImageData(targetW, targetH);
+    }
+    if (img.width !== targetW || img.height !== targetH) {
+      img = ctx.createImageData(targetW, targetH);
+    }
+    const rgba = img.data;
+    const bg = themeColors.bg || interPanelGapColor || "#fff";
+    const parsedBg = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(bg.trim());
+    let bgR = 255, bgG = 255, bgB = 255;
+    if (parsedBg) {
+      const raw = parsedBg[1];
+      const hex = raw.length === 3 ? raw.split("").map((ch) => ch + ch).join("") : raw;
+      const value = Number.parseInt(hex, 16);
+      bgR = (value >> 16) & 255;
+      bgG = (value >> 8) & 255;
+      bgB = value & 255;
+    }
+    for (let p = 0; p < rgba.length; p += 4) {
+      rgba[p] = bgR;
+      rgba[p + 1] = bgG;
+      rgba[p + 2] = bgB;
+      rgba[p + 3] = 255;
+    }
+    const outPanelWFloat = (targetW - gap * (cols - 1)) / cols;
+    const outPanelHFloat = (targetH - gap * (rows - 1)) / rows;
+    for (let slot = 0; slot < visibleCountLocal; slot++) {
+      const panelIdx = visiblePanelIndices[slot] ?? slot;
+      if (panelIdx < 0 || panelIdx >= panelCount) continue;
+      const panelState = linkPanels
+        ? linkedStateLiveRef.current
+        : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      const panelContrastState =
+        panelStatesLiveRef.current[panelIdx]
+        || panelStates[panelIdx]
+        || stateFor(panelIdx);
+      const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
+      const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
+      const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
+      const slotX1 = Math.min(targetW, Math.round(slotX0 + outPanelWFloat));
+      const slotY1 = Math.min(targetH, Math.round(slotY0 + outPanelHFloat));
+      if (slotX1 <= slotX0 || slotY1 <= slotY0) continue;
+      const realN = panelRealFrames && panelRealFrames[panelIdx];
+      if (realN && frameIdx >= realN) continue;
+      const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
+      const panelStateRange = !linkContrast ? panelContrastState : null;
+      const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
+      const sharedPreview = imageHistogramPreviewPctRef.current;
+      const preview = panelStateRange ? panelPreview : sharedPreview;
+      const panelByteMin = (
+        offlineMins?.length >= panelCount &&
+        Number.isFinite(offlineMins[panelIdx])
+      )
+        ? offlineMins[panelIdx]
+        : offlineMin;
+      const panelByteMax = (
+        offlineMaxs?.length >= panelCount &&
+        Number.isFinite(offlineMaxs[panelIdx])
+      )
+        ? offlineMaxs[panelIdx]
+        : offlineMax;
+      const valueToPanelByte = (value: number): number | null => {
+        if (!Number.isFinite(value) || !Number.isFinite(panelByteMin) || !Number.isFinite(panelByteMax) || panelByteMax <= panelByteMin) {
+          return null;
+        }
+        return clampByte(((value - panelByteMin) / (panelByteMax - panelByteMin)) * 255);
+      };
+      let loByte: number;
+      let hiByte: number;
+      if (preview) {
+        loByte = clampByte((Number(preview[0]) || 0) * 2.55);
+        hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
+      } else if (autoContrast) {
+        const autoRange = !linkContrast
+          ? null
+          : cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale)
+          || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, frameIdx, logScale);
+        const localAuto = !linkContrast ? panelStateRange : null;
+        const localAutoBytes = !linkContrast
+          ? packedPanelAutoByteRange(
+              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
+              percentileLow, percentileHigh,
+            )
+          : null;
+        const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
+        const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
+        if (localAutoBytes) {
+          loByte = localAutoBytes.lo;
+          hiByte = localAutoBytes.hi;
+        } else if (localAuto) {
+          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
+          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
+        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+          loByte = mappedLo;
+          hiByte = mappedHi;
+        } else {
+          loByte = clampByte((Number(percentileLow) || 0) * 2.55);
+          hiByte = clampByte((Number(percentileHigh) || 100) * 2.55);
+        }
+      } else {
+        const loPct = panelStateRange ? panelStateRange.imageVminPct : imageVminPct;
+        const hiPct = panelStateRange ? panelStateRange.imageVmaxPct : imageVmaxPct;
+        loByte = clampByte((Number(loPct) || 0) * 2.55);
+        hiByte = clampByte((Number(hiPct) || 100) * 2.55);
+      }
+      if (hiByte <= loByte) hiByte = Math.min(255, loByte + 1);
+      const byteSpan = Math.max(1, hiByte - loByte);
+      const srcPanelX = Math.max(0, Math.min(width - 1, panelIdx * sourcePanelW));
+      const srcPanelXMax = Math.max(srcPanelX, Math.min(width - 1, srcPanelX + sourcePanelW - 1));
+      for (let y = slotY0; y < slotY1; y++) {
+        const localDrawY = ((y - slotY0) - drawView.panY) / drawView.zoom;
+        if (localDrawY < 0 || localDrawY >= outPanelHFloat) continue;
+        let localY = localDrawY / Math.max(1, outPanelHFloat);
+        if (flipRows) localY = 1 - localY;
+        let dst = (y * targetW + slotX0) * 4;
+        for (let x = slotX0; x < slotX1; x++, dst += 4) {
+          const localDrawX = ((x - slotX0) - drawView.panX) / drawView.zoom;
+          if (localDrawX < 0 || localDrawX >= outPanelWFloat) continue;
+          let localX = localDrawX / Math.max(1, outPanelWFloat);
+          if (flipCols) localX = 1 - localX;
+          let srcNormX = localX;
+          let srcNormY = localY;
+          if (rotation === 1) {
+            srcNormX = localY;
+            srcNormY = 1 - localX;
+          } else if (rotation === 2) {
+            srcNormX = 1 - localX;
+            srcNormY = 1 - localY;
+          } else if (rotation === 3) {
+            srcNormX = 1 - localY;
+            srcNormY = localX;
+          }
+          const srcY = Math.max(0, Math.min(height - 1, srcNormY * height));
+          const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + srcNormX * sourcePanelW));
+          const sample = samplePackedU8Viewport(
+            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax, smooth,
+          );
+          const v = clampByte(((sample - loByte) / byteSpan) * 255);
+          const li = v * 3;
+          rgba[dst] = lut[li];
+          rgba[dst + 1] = lut[li + 1];
+          rgba[dst + 2] = lut[li + 2];
+          rgba[dst + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    if (panelInnerBorderPx > 0) {
+      ctx.save();
+      ctx.strokeStyle = panelInnerBorderColor;
+      ctx.lineWidth = panelInnerBorderPx;
+      const inset = panelInnerBorderPx / 2;
+      for (let slot = 0; slot < visibleCountLocal; slot++) {
+        const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
+        const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
+        const slotX1 = Math.min(targetW, Math.round(slotX0 + outPanelWFloat));
+        const slotY1 = Math.min(targetH, Math.round(slotY0 + outPanelHFloat));
+        ctx.strokeRect(
+          slotX0 + inset,
+          slotY0 + inset,
+          Math.max(0, slotX1 - slotX0 - panelInnerBorderPx),
+          Math.max(0, slotY1 - slotY0 - panelInnerBorderPx),
+        );
+      }
+      ctx.restore();
+    }
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.embeddedPackedViewportPaint = {
+        frame: frameIdx,
+        visibleCount: visibleCountLocal,
+        width: targetW,
+        height: targetH,
+      };
+    }
+    return true;
+  }, [
+    offline,
+    sidecarMode,
+    isRgb,
+    sharedPanelSource,
+    offlineStack,
+    width,
+    height,
+    nPanels,
+    nSlices,
+    imageRotation,
+    flipCols,
+    flipRows,
+    visiblePanelCount,
+    panelColsForCount,
+    panelGapPx,
+    panelWidthPx,
+    themeColors.bg,
+    interPanelGapColor,
+    visiblePanelIndices,
+    linkPanels,
+    stateFor,
+    clampPanelViewForDraw,
+    panelRealFrames,
+    panelCmapFor,
+    linkContrast,
+    offlineMins,
+    offlineMaxs,
+    offlineMin,
+    offlineMax,
+    autoContrast,
+    autoVmins,
+    autoVmaxs,
+    logScale,
+    percentileLow,
+    percentileHigh,
+    imageVminPct,
+    imageVmaxPct,
+    panelInnerBorderPx,
+    panelInnerBorderColor,
+  ]);
+
+  // Packed offline exports retain an untransformed composite for every frame.
+  // Reusing that image while drawing per-panel viewport transforms keeps a
+  // zoom/pan gesture from rebuilding the entire movie on the main thread.
+  const paintEmbeddedPackedCompositeTransform = React.useCallback((
+    ctx: CanvasRenderingContext2D,
+    composite: HTMLCanvasElement,
+    targetW: number,
+    targetH: number,
+  ): boolean => {
+    if (
+      sidecarMode ||
+      packedViewportTransformRequiresRebuild ||
+      sharedPanelSource ||
+      Math.max(1, nPanels || 1) <= 1
+    ) return false;
+    const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(visibleCountLocal);
+    const rows = Math.ceil(visibleCountLocal / cols);
+    const gap = visibleCountLocal > 1 ? panelGapPx : 0;
+    const outPanelW = (targetW - gap * (cols - 1)) / cols;
+    const outPanelH = (targetH - gap * (rows - 1)) / rows;
+    clearWithGridBackground(ctx, targetW, targetH);
+    ctx.imageSmoothingEnabled = smooth;
+    for (let slot = 0; slot < visibleCountLocal; slot++) {
+      const panelIdx = visiblePanelIndices[slot] ?? slot;
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      const slotX = col * (outPanelW + gap);
+      const slotY = row * (outPanelH + gap);
+      const panelState = linkPanels
+        ? linkedStateLiveRef.current
+        : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      const drawView = clampPanelViewForDraw(panelState, outPanelW, outPanelH);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(slotX, slotY, outPanelW, outPanelH);
+      ctx.clip();
+      ctx.translate(slotX + drawView.panX, slotY + drawView.panY);
+      ctx.scale(drawView.zoom, drawView.zoom);
+      ctx.drawImage(
+        composite,
+        slotX,
+        slotY,
+        outPanelW,
+        outPanelH,
+        0,
+        0,
+        outPanelW,
+        outPanelH,
+      );
+      ctx.restore();
+      strokePanelInnerBorder(ctx, slotX, slotY, outPanelW, outPanelH);
+    }
+    return true;
+  }, [
+    sidecarMode,
+    packedViewportTransformRequiresRebuild,
+    sharedPanelSource,
+    nPanels,
+    visiblePanelCount,
+    panelColsForCount,
+    panelGapPx,
+    visiblePanelIndices,
+    linkPanels,
+    stateFor,
+    clampPanelViewForDraw,
+    themeColors.bg,
+    interPanelGapColor,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
+    smooth,
+  ]);
+
+  const getSidecarPaintScratchContext = React.useCallback((
+    targetW: number,
+    targetH: number,
+  ): CanvasRenderingContext2D | null => {
+    if (typeof document === "undefined") return null;
+    let scratch = sidecarPaintScratchCanvasRef.current;
+    if (!scratch) {
+      scratch = document.createElement("canvas");
+      sidecarPaintScratchCanvasRef.current = scratch;
+    }
+    if (scratch.width !== targetW) scratch.width = targetW;
+    if (scratch.height !== targetH) scratch.height = targetH;
+    return scratch.getContext("2d");
+  }, []);
+
+  const drawSidecarBitmapFrame = React.useCallback((
+    idx: number,
+    updateDisplayState = true,
+    reason = "scrub",
+  ): boolean => {
+    const canvas = canvasRef.current;
+    if (!canvas) return false;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    const nSlicesLocal = Math.max(1, Math.round(nSlices || 1));
+    const drawIdx = ((Math.round(idx) % nSlicesLocal) + nSlicesLocal) % nSlicesLocal;
+    const start = performance.now();
+    const transformActive = sidecarViewTransformActive();
+    const embeddedPackedViewportCacheReady = (
+      !sidecarMode &&
+      sidecarCompositeReadyRef.current &&
+      sidecarCompositeStyleKeyRef.current === sidecarDisplayStyleKey &&
+      !sharedPanelSource &&
+      Math.max(1, nPanels || 1) > 1 &&
+      !!offlineStack
+    );
+    const liveViewportPaint = (
+      (transformActive && !embeddedPackedViewportCacheReady) ||
+      sidecarDisplayCacheDirtyRef.current ||
+      (
+        !embeddedPackedViewportCacheReady &&
+        !sidecarCompositeReadyRef.current &&
+        !sidecarGpuReadyRef.current &&
+        sidecarRamReadyRef.current
+      )
+    );
+    if (liveViewportPaint) {
+      setGpuDisplayVisible(false);
+      const scratchCtx = getSidecarPaintScratchContext(canvasW, canvasH);
+      const paintCtx = scratchCtx || ctx;
+      if (scratchCtx) {
+        scratchCtx.imageSmoothingEnabled = false;
+        scratchCtx.clearRect(0, 0, canvasW, canvasH);
+        scratchCtx.drawImage(canvas, 0, 0, canvasW, canvasH);
+      }
+      const ok = paintSidecarU8ViewportToContext(paintCtx, drawIdx, canvasW, canvasH);
+      if (!ok) return false;
+      if (scratchCtx) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(scratchCtx.canvas, 0, 0, canvasW, canvasH);
+      }
+      playbackIdxRef.current = drawIdx;
+      if (updateDisplayState) {
+        if (displaySliceIdx !== drawIdx) setDisplaySliceIdx(drawIdx);
+        if (playbackUiSliceIdx !== drawIdx) setPlaybackUiSliceIdx(drawIdx);
+      }
+      const d = show3dPerfDebug();
+      if (d) {
+        d.lastRenderPath = transformActive
+          ? `sidecar-u8-viewport-transform-${reason}`
+          : sidecarDisplayCacheDirtyRef.current
+          ? `sidecar-u8-viewport-display-style-${reason}`
+          : `sidecar-u8-viewport-live-${reason}`;
+        d.lastRenderMs = performance.now() - start;
+        d.lastPaintMs = d.lastRenderMs;
+        d.lastFrame = drawIdx;
+        d.sidecarCompositeSource = transformActive
+          ? "u8-viewport-transform"
+          : sidecarDisplayCacheDirtyRef.current
+          ? "u8-viewport-display-style"
+          : "u8-viewport-live";
+      }
+      return true;
+    }
+    // Once native-resolution sidecar frames are uploaded, use the WebGPU
+    // presenter before the CPU compositor. This keeps playback on the cached
+    // GPU path instead of redrawing every multi-panel frame on the CPU.
+    if (sidecarGpuReadyRef.current && renderSidecarGpuFrame(drawIdx, reason)) {
+      if (updateDisplayState) {
+        if (displaySliceIdx !== drawIdx) setDisplaySliceIdx(drawIdx);
+        if (playbackUiSliceIdx !== drawIdx) setPlaybackUiSliceIdx(drawIdx);
+      }
+      return true;
+    }
+    setGpuDisplayVisible(false);
+    const composite = sidecarCompositeReadyRef.current
+      ? sidecarCompositeFrameCacheRef.current.get(drawIdx)
+      : null;
+    if (composite) {
+      const scratchCtx = getSidecarPaintScratchContext(canvasW, canvasH);
+      const paintCtx = scratchCtx || ctx;
+      paintCtx.imageSmoothingEnabled = false;
+      const transformed = transformActive && embeddedPackedViewportCacheReady && paintEmbeddedPackedCompositeTransform(
+        paintCtx,
+        composite,
+        canvasW,
+        canvasH,
+      );
+      if (!transformed) {
+        paintCtx.drawImage(composite, 0, 0, composite.width, composite.height, 0, 0, canvasW, canvasH);
+      }
+      if (scratchCtx) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(scratchCtx.canvas, 0, 0, canvasW, canvasH);
+      }
+      playbackIdxRef.current = drawIdx;
+      if (updateDisplayState) {
+        if (displaySliceIdx !== drawIdx) setDisplaySliceIdx(drawIdx);
+        if (playbackUiSliceIdx !== drawIdx) setPlaybackUiSliceIdx(drawIdx);
+      }
+      const d = show3dPerfDebug();
+      if (d) {
+        d.lastRenderPath = transformed
+          ? `embedded-packed-composite-transform-${reason}`
+          : `sidecar-composite-${reason}`;
+        d.lastRenderMs = performance.now() - start;
+        d.lastPaintMs = d.lastRenderMs;
+        d.lastFrame = drawIdx;
+        d.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+      }
+      return true;
+    }
+    const bitmaps = sidecarBitmapFrameCacheRef.current.get(drawIdx);
+    if (!bitmaps || bitmaps.length === 0) return false;
+    const scratchCtx = getSidecarPaintScratchContext(canvasW, canvasH);
+    const paintCtx = scratchCtx || ctx;
+    paintCtx.imageSmoothingEnabled = smooth;
+    clearWithGridBackground(paintCtx, canvasW, canvasH);
+    const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
+    const cols = panelColsForCount(visibleCountLocal);
+    const rows = Math.ceil(visibleCountLocal / cols);
+    const gap = visibleCountLocal > 1 ? (panelGapPx) : 0;
+    const outPanelW = (canvasW - gap * (cols - 1)) / cols;
+    const outPanelH = (canvasH - gap * (rows - 1)) / rows;
+    for (let slot = 0; slot < visibleCountLocal; slot++) {
+      const panelIdx = visiblePanelIndices[slot] ?? slot;
+      const bitmap = bitmaps[panelIdx];
+      if (!bitmap) continue;
+      const panelState = stateFor(panelIdx);
+      const drawView = clampPanelViewForDraw(panelState, outPanelW, outPanelH);
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      const slotX = col * (outPanelW + gap);
+      const slotY = row * (outPanelH + gap);
+      paintCtx.fillStyle = themeColors.bg;
+      paintCtx.fillRect(slotX, slotY, outPanelW, outPanelH);
+      const realN = panelRealFrames && panelRealFrames[panelIdx];
+      const pastEnd = !!(realN && drawIdx >= realN);
+      paintCtx.save();
+      paintCtx.beginPath();
+      paintCtx.rect(slotX, slotY, outPanelW, outPanelH);
+      paintCtx.clip();
+      paintCtx.translate(slotX + drawView.panX, slotY + drawView.panY);
+      paintCtx.scale(drawView.zoom, drawView.zoom);
+      if (flipCols || flipRows) {
+        paintCtx.translate(flipCols ? outPanelW : 0, flipRows ? outPanelH : 0);
+        paintCtx.scale(flipCols ? -1 : 1, flipRows ? -1 : 1);
+      }
+      if (imageRotation % 4 !== 0) {
+        const cx = outPanelW / 2 / drawView.zoom;
+        const cy = outPanelH / 2 / drawView.zoom;
+        paintCtx.translate(cx, cy);
+        paintCtx.rotate((imageRotation * Math.PI) / 2);
+        paintCtx.translate(-outPanelW / 2, -outPanelH / 2);
+      }
+      if (pastEnd) paintCtx.filter = "blur(4px)";
+      paintCtx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, outPanelW, outPanelH);
+      paintCtx.restore();
+      strokePanelInnerBorder(paintCtx, slotX, slotY, outPanelW, outPanelH);
+    }
+    if (scratchCtx) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(scratchCtx.canvas, 0, 0, canvasW, canvasH);
+    }
+    playbackIdxRef.current = drawIdx;
+    if (updateDisplayState) {
+      if (displaySliceIdx !== drawIdx) setDisplaySliceIdx(drawIdx);
+      if (playbackUiSliceIdx !== drawIdx) setPlaybackUiSliceIdx(drawIdx);
+    }
+    const d = show3dPerfDebug();
+    if (d) {
+      d.lastRenderPath = `sidecar-imagebitmap-${reason}`;
+      d.lastRenderMs = performance.now() - start;
+      d.lastPaintMs = d.lastRenderMs;
+      d.lastFrame = drawIdx;
+      d.sidecarBitmapCacheFrames = sidecarBitmapFrameCacheRef.current.size;
+    }
+    return true;
+  }, [
+    canvasW,
+    canvasH,
+    smooth,
+    visiblePanelCount,
+    visiblePanelIndices,
+    panelColsForCount,
+    panelGapPx,
+    nPanels,
+    sidecarMode,
+    sharedPanelSource,
+    offlineStack,
+    interPanelGapColor,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
+    nSlices,
+    stateFor,
+    clampPanelViewForDraw,
+    getSidecarPaintScratchContext,
+    themeColors.bg,
+    panelRealFrames,
+    flipCols,
+    flipRows,
+    imageRotation,
+    displaySliceIdx,
+    playbackUiSliceIdx,
+    setGpuDisplayVisible,
+    sidecarViewTransformActive,
+    paintSidecarU8ViewportToContext,
+    paintEmbeddedPackedCompositeTransform,
+  ]);
+
+  const previousSidecarPagePaintStartRef = React.useRef(activePageStart);
+  React.useLayoutEffect(() => {
+    const previous = previousSidecarPagePaintStartRef.current;
+    previousSidecarPagePaintStartRef.current = activePageStart;
+    if (previous === activePageStart || !offline || !sidecarMode || playing) return;
+    preparePagedPageChange();
+    const frameIdx = Number.isFinite(playbackIdxRef.current) ? playbackIdxRef.current : liveSliceIdx;
+    drawSidecarBitmapFrame(frameIdx, false, "page-change");
+    updatePlaybackLiveControls(frameIdx);
+    const raf = window.requestAnimationFrame(() => {
+      drawSidecarBitmapFrame(frameIdx, false, "page-change");
+      updatePlaybackLiveControls(frameIdx);
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [
+    activePageStart,
+    drawSidecarBitmapFrame,
+    liveSliceIdx,
+    offline,
+    playing,
+    preparePagedPageChange,
+    sidecarMode,
+    updatePlaybackLiveControls,
+  ]);
+
+  const paintHistogramPreviewSidecar = React.useCallback((reason = "hist-preview") => {
+    if (
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady ||
+      isRgb ||
+      canvasW <= 0 ||
+      canvasH <= 0
+    ) {
+      return;
+    }
+    if (!sidecarCompositeReadyRef.current && !sidecarGpuReadyRef.current) return;
+    sidecarDisplayCacheDirtyRef.current = true;
+    setGpuDisplayVisible(false);
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
+    drawSidecarBitmapFrame(drawIdx, false, reason);
+    updatePlaybackLiveControls(drawIdx);
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.sidecarDisplayStyleDirty = true;
+      debug.sidecarDisplayStyleImmediateFrame = drawIdx;
+      debug.sidecarHistogramPreview = true;
+    }
+  }, [
+    canvasH,
+    canvasW,
+    drawSidecarBitmapFrame,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    setGpuDisplayVisible,
+    sidecarMode,
+    sidecarRamReady,
+    updatePlaybackLiveControls,
+  ]);
+
+  const scheduleHistogramPreviewPaint = React.useCallback((reason = "hist-preview") => {
+    if (histogramPreviewPaintRafRef.current !== null) return;
+    histogramPreviewPaintRafRef.current = window.requestAnimationFrame(() => {
+      histogramPreviewPaintRafRef.current = null;
+      paintHistogramPreviewSidecar(reason);
+    });
+  }, [paintHistogramPreviewSidecar]);
+
+  React.useEffect(() => () => {
+    if (histogramPreviewPaintRafRef.current !== null) {
+      window.cancelAnimationFrame(histogramPreviewPaintRafRef.current);
+      histogramPreviewPaintRafRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const preview = imageHistogramPreviewPctRef.current;
+    if (
+      preview &&
+      Math.abs(preview[0] - imageVminPct) < 0.01 &&
+      Math.abs(preview[1] - imageVmaxPct) < 0.01
+    ) {
+      imageHistogramPreviewPctRef.current = null;
+    }
+  }, [imageVminPct, imageVmaxPct]);
+
+  React.useEffect(() => {
+    const previews = panelHistogramPreviewPctRef.current;
+    if (previews.size === 0) return;
+    for (const [panel, preview] of Array.from(previews.entries())) {
+      const state = panelStates[panel];
+      if (
+        state &&
+        Math.abs(preview[0] - state.imageVminPct) < 0.01 &&
+        Math.abs(preview[1] - state.imageVmaxPct) < 0.01
+      ) {
+        previews.delete(panel);
+      }
+    }
+  }, [panelStates]);
+
+  React.useEffect(() => {
+    const dbg = show3dPerfDebug();
+    if (!dbg) return;
+    const percentile = (values: number[], pct: number) => {
+      if (!values.length) return 0;
+      const sorted = [...values].sort((a, b) => a - b);
+      const idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil((pct / 100) * sorted.length) - 1));
+      return sorted[idx];
+    };
+    const drawCachedFrame = (idx: number) => {
+      const n = Math.max(1, Math.round(nSlices || 1));
+      const frame = ((Math.round(idx) % n) + n) % n;
+      const t0 = performance.now();
+      const ok = drawSidecarBitmapFrame(frame, false, "debug-direct");
+      updatePlaybackLiveControls(frame);
+      return {
+        ok,
+        frame,
+        drawMs: performance.now() - t0,
+        path: dbg.lastRenderPath ?? null,
+      };
+    };
+    const benchCachedFrames = async (steps = 120) => {
+      const n = Math.max(1, Math.round(nSlices || 1));
+      const requested = Math.max(1, Math.round(Number(steps) || 120));
+      const drawMs: number[] = [];
+      const intervals: number[] = [];
+      const frames: number[] = [];
+      let last = performance.now();
+      let idx = Number.isFinite(playbackIdxRef.current) ? playbackIdxRef.current : 0;
+      for (let i = 0; i < requested; i++) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const before = performance.now();
+        intervals.push(before - last);
+        last = before;
+        idx = (idx + 1) % n;
+        const result = drawCachedFrame(idx);
+        drawMs.push(result.drawMs);
+        frames.push(result.frame);
+      }
+      const elapsedMs = intervals.reduce((sum, value) => sum + value, 0);
+      const meanIntervalMs = elapsedMs / Math.max(1, intervals.length);
+      const meanDrawMs = drawMs.reduce((sum, value) => sum + value, 0) / Math.max(1, drawMs.length);
+      const result = {
+        steps: requested,
+        frames,
+        meanIntervalMs,
+        p50IntervalMs: percentile(intervals, 50),
+        p95IntervalMs: percentile(intervals, 95),
+        fps: meanIntervalMs > 0 ? 1000 / meanIntervalMs : 0,
+        meanDrawMs,
+        p50DrawMs: percentile(drawMs, 50),
+        p95DrawMs: percentile(drawMs, 95),
+        path: dbg.lastRenderPath ?? null,
+      };
+      dbg.sidecarDirectBenchLast = result;
+      return result;
+    };
+    dbg.sidecarDrawCachedFrame = drawCachedFrame;
+    dbg.sidecarBenchCachedFrames = benchCachedFrames;
+    return () => {
+      if (dbg.sidecarDrawCachedFrame === drawCachedFrame) delete dbg.sidecarDrawCachedFrame;
+      if (dbg.sidecarBenchCachedFrames === benchCachedFrames) delete dbg.sidecarBenchCachedFrames;
+    };
+  }, [drawSidecarBitmapFrame, nSlices, updatePlaybackLiveControls]);
+
+  React.useEffect(() => {
+    const d = show3dPerfDebug();
+    const transformActive = sidecarViewTransformActive();
+    if (d) {
+      d.sidecarViewportEffectSeen = performance.now();
+      d.sidecarViewportFlags = {
+        offline,
+        sidecarMode,
+        sidecarRamReady,
+        isRgb,
+        canvasW,
+        canvasH,
+        nSlices,
+        transformActive,
+      };
+    }
+    if (
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady ||
+      isRgb ||
+      canvasW <= 0 ||
+      canvasH <= 0 ||
+      transformActive
+    ) {
+      if (d) {
+        d.sidecarViewportSkipReason = !offline
+          ? "not-offline"
+          : !sidecarMode
+            ? "not-sidecar"
+            : !sidecarRamReady
+              ? "ram-not-ready"
+              : isRgb
+                ? "rgb"
+                : canvasW <= 0 || canvasH <= 0
+                  ? "missing-canvas"
+                  : "view-transform";
+      }
+    if (transformActive) {
+      invalidateSidecarViewportCache("view-transform");
+      setOfflineStackFetchStatus("");
+    } else {
+      clearSidecarCompositeCache();
+    }
+    return;
+  }
+  if (d) d.sidecarViewportSkipReason = "";
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const serial = ++sidecarCompositeBuildSerialRef.current;
+    let cancelled = false;
+    const build = async () => {
+      clearSidecarCompositeCache();
+      setOfflineStackFetchStatus(
+        sidecarDisplayCacheDirtyRef.current
+          ? `Updating display playback cache… 0/${n} frames`
+          : `Building display cache… 0/${n} frames`,
+      );
+      const scratch = document.createElement("canvas");
+      scratch.width = Math.max(1, Math.round(canvasW));
+      scratch.height = Math.max(1, Math.round(canvasH));
+      const ctx = scratch.getContext("2d");
+      if (!ctx) {
+        setOfflineStackFetchStatus("Failed to prepare display cache: no 2D context");
+        return;
+      }
+      const started = performance.now();
+      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || liveSliceIdx || 0, n);
+      let builtFrames = 0;
+      try {
+        for (const idx of order) {
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+          const ok = paintSidecarU8ViewportToContext(ctx, idx, scratch.width, scratch.height);
+          if (!ok) {
+            const debug = show3dPerfDebug();
+            if (debug) debug.sidecarViewportSkipReason = "unsupported-layout";
+            setOfflineStackFetchStatus("Viewport cache needs native fallback for this layout");
+            return;
+          }
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current || sidecarViewTransformActive()) return;
+          const retained = document.createElement("canvas");
+          retained.width = scratch.width;
+          retained.height = scratch.height;
+          const retainedCtx = retained.getContext("2d");
+          if (!retainedCtx) continue;
+          retainedCtx.drawImage(scratch, 0, 0);
+          sidecarCompositeFrameCacheRef.current.set(idx, retained);
+          builtFrames += 1;
+          if (!sidecarCompositeReadyRef.current) {
+            sidecarCompositeReadyRef.current = true;
+            // The first retained frame is already safe to use: associate it
+            // with this exact style now, rather than waiting for the whole
+            // stack to finish building.  A later Smooth toggle clears the
+            // key before any frame from the old cache can be sampled.
+            sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
+            setSidecarCompositeReady(true);
+            if ((compareMode || "off") === "off") {
+              drawSidecarBitmapFrame(idx, false, "viewport-first");
+            }
+          }
+          if (builtFrames === 1 || builtFrames % 8 === 0 || builtFrames === n) {
+            const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+            setOfflineStackFetchStatus(
+              builtFrames === n
+                ? ""
+                : `Building display cache… ${builtFrames}/${n} frames (${elapsed}s)`,
+            );
+          }
+          const d = show3dPerfDebug();
+          if (d) {
+            d.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+            d.sidecarCompositeBuildMs = performance.now() - started;
+            d.sidecarCompositeWidth = scratch.width;
+            d.sidecarCompositeHeight = scratch.height;
+            d.sidecarCompositeSource = "u8-viewport";
+            d.lastRenderPath = d.lastRenderPath ?? "sidecar-u8-viewport-cache-building";
+          }
+          if (builtFrames % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+        sidecarCompositeReadyRef.current = true;
+        sidecarCompositeCompleteRef.current = true;
+        sidecarDisplayCacheDirtyRef.current = false;
+        sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
+        setSidecarCompositeReady(true);
+        setSidecarCompositeComplete(true);
+        setOfflineStackFetchStatus("");
+        const d = show3dPerfDebug();
+        if (d) {
+          d.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+          d.sidecarCompositeBuildMs = performance.now() - started;
+          d.sidecarCompositeWidth = scratch.width;
+          d.sidecarCompositeHeight = scratch.height;
+          d.sidecarCompositeSource = "u8-viewport";
+          d.sidecarDisplayStyleDirty = false;
+          d.sidecarDisplayStyleKey = sidecarDisplayStyleKey;
+          d.sidecarHistogramPreview = false;
+          d.lastRenderPath = "sidecar-u8-viewport-cache-ready";
+        }
+      } catch (err) {
+        clearSidecarCompositeCache();
+        setOfflineStackFetchStatus(
+          `Failed to prepare display cache: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    const hasWarmCache = sidecarCompositeFrameCacheRef.current.size > 0 || sidecarGpuReadyRef.current;
+    const rebuildDelayMs = sidecarDisplayCacheDirtyRef.current && hasWarmCache ? 180 : 0;
+    let timer: number | null = null;
+    if (rebuildDelayMs > 0) {
+      const debug = show3dPerfDebug();
+      if (debug) {
+        debug.sidecarCompositeRebuildDebounceMs = rebuildDelayMs;
+        debug.sidecarCompositeRebuildReason = "display-style";
+      }
+      setOfflineStackFetchStatus(`Updating display playback cache…`);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void build();
+      }, rebuildDelayMs);
+    } else {
+      void build();
+    }
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [
+    offline,
+    sidecarMode,
+    sidecarRamReady,
+    isRgb,
+    canvasW,
+    canvasH,
+    nSlices,
+    liveSliceIdx,
+    prioritizedSidecarFrameOrder,
+    paintSidecarU8ViewportToContext,
+    drawSidecarBitmapFrame,
+    clearSidecarCompositeCache,
+    invalidateSidecarViewportCache,
+    sidecarViewTransformActive,
+    sidecarDisplayStyleKey,
+  ]);
+
+  React.useEffect(() => {
+    const panelCount = Math.max(1, nPanels || 1);
+    const canCacheEmbeddedPackedViewport = (
+      offline &&
+      !sidecarMode &&
+      !isRgb &&
+      !sharedPanelSource &&
+      panelCount > 1 &&
+      !!offlineStack &&
+      offlineStack.byteLength >= width * height * Math.max(1, nSlices || 1) &&
+      canvasW > 0 &&
+      canvasH > 0
+    );
+    if (!canCacheEmbeddedPackedViewport) {
+      if (!sidecarMode) clearSidecarCompositeCache();
+      return;
+    }
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const serial = ++sidecarCompositeBuildSerialRef.current;
+    let cancelled = false;
+    const build = async () => {
+      clearSidecarCompositeCache();
+      setOfflineStackFetchStatus(`Building display cache… 0/${n} frames`);
+      const scratch = document.createElement("canvas");
+      scratch.width = Math.max(1, Math.round(canvasW));
+      scratch.height = Math.max(1, Math.round(canvasH));
+      const ctx = scratch.getContext("2d");
+      if (!ctx) {
+        setOfflineStackFetchStatus("Failed to prepare display cache: no 2D context");
+        return;
+      }
+      const started = performance.now();
+      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || liveSliceIdx || 0, n);
+      let builtFrames = 0;
+      try {
+        for (const idx of order) {
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+          const ok = paintEmbeddedPackedViewportToContext(ctx, idx, scratch.width, scratch.height);
+          if (!ok) {
+            setOfflineStackFetchStatus("");
+            return;
+          }
+          const retained = document.createElement("canvas");
+          retained.width = scratch.width;
+          retained.height = scratch.height;
+          const retainedCtx = retained.getContext("2d");
+          if (!retainedCtx) continue;
+          retainedCtx.drawImage(scratch, 0, 0);
+          sidecarCompositeFrameCacheRef.current.set(idx, retained);
+          builtFrames += 1;
+          if (!sidecarCompositeReadyRef.current) {
+            sidecarCompositeReadyRef.current = true;
+            // See the sidecar builder above: this enables the current-style
+            // cache immediately, while refusing a cache made with another
+            // Smooth setting during a zoom gesture.
+            sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
+            setSidecarCompositeReady(true);
+            drawSidecarBitmapFrame(idx, false, "embedded-viewport-first");
+          }
+          if (builtFrames === 1 || builtFrames % 4 === 0 || builtFrames === n) {
+            const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+            setOfflineStackFetchStatus(
+              builtFrames === n
+                ? ""
+                : `Building display cache… ${builtFrames}/${n} frames (${elapsed}s)`,
+            );
+          }
+          const d = show3dPerfDebug();
+          if (d) {
+            d.embeddedPackedViewportCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+            d.embeddedPackedViewportCacheBuildMs = performance.now() - started;
+            d.sidecarCompositeSource = "embedded-packed-viewport";
+          }
+          if (builtFrames % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+        sidecarCompositeReadyRef.current = true;
+        sidecarCompositeCompleteRef.current = true;
+        sidecarDisplayCacheDirtyRef.current = false;
+        sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
+        setSidecarCompositeReady(true);
+        setSidecarCompositeComplete(true);
+        setOfflineStackFetchStatus("");
+        const d = show3dPerfDebug();
+        if (d) {
+          d.embeddedPackedViewportCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+          d.embeddedPackedViewportCacheBuildMs = performance.now() - started;
+          d.sidecarCompositeSource = "embedded-packed-viewport";
+          d.lastRenderPath = "embedded-packed-viewport-cache-ready";
+        }
+      } catch (err) {
+        clearSidecarCompositeCache();
+        setOfflineStackFetchStatus(
+          `Failed to prepare display cache: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void build();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    offline,
+    sidecarMode,
+    isRgb,
+    sharedPanelSource,
+    nPanels,
+    offlineStack,
+    width,
+    height,
+    nSlices,
+    canvasW,
+    canvasH,
+    liveSliceIdx,
+    prioritizedSidecarFrameOrder,
+    paintEmbeddedPackedViewportToContext,
+    drawSidecarBitmapFrame,
+    clearSidecarCompositeCache,
+    sidecarDisplayStyleKey,
+  ]);
+
+  React.useLayoutEffect(() => {
+    if (
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady ||
+      isRgb ||
+      canvasW <= 0 ||
+      canvasH <= 0
+    ) {
+      return;
+    }
+    if (!sidecarCompositeReadyRef.current && !sidecarGpuReadyRef.current) return;
+    const previous = sidecarCompositeStyleKeyRef.current;
+    if (!previous || previous === sidecarDisplayStyleKey) return;
+    sidecarDisplayCacheDirtyRef.current = true;
+    setGpuDisplayVisible(false);
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
+    drawSidecarBitmapFrame(drawIdx, false, "immediate");
+    updatePlaybackLiveControls(drawIdx);
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.sidecarDisplayStyleDirty = true;
+      debug.sidecarDisplayStyleImmediateFrame = drawIdx;
+      debug.sidecarDisplayStyleKey = sidecarDisplayStyleKey;
+    }
+  }, [
+    canvasH,
+    canvasW,
+    compareMode,
+    drawSidecarBitmapFrame,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    setGpuDisplayVisible,
+    sidecarDisplayStyleKey,
+    sidecarMode,
+    sidecarRamReady,
+    updatePlaybackLiveControls,
+  ]);
+
+  React.useEffect(() => {
+    if (!offline || !sidecarMode || playing) return;
+    if (!sidecarRamReady && !sidecarBitmapReady && !sidecarCompositeReady) return;
+    drawSidecarBitmapFrame(liveSliceIdx, true, "scrub");
+  }, [
+    offline,
+    sidecarMode,
+    playing,
+    sidecarRamReady,
+    sidecarBitmapReady,
+    sidecarCompositeReady,
+    liveSliceIdx,
+    visiblePanelIndices,
+    drawSidecarBitmapFrame,
+  ]);
+
+  React.useEffect(() => {
+    if (!enableSidecarNativePanelBitmapCache) return;
+    if (
+      !offline ||
+      !sidecarMode ||
+      !sidecarBitmapComplete ||
+      canvasW <= 0 ||
+      canvasH <= 0
+    ) {
+      clearSidecarCompositeCache();
+      return;
+    }
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const serial = ++sidecarCompositeBuildSerialRef.current;
+    let cancelled = false;
+    clearSidecarCompositeCache();
+    setOfflineStackFetchStatus(`Building display cache… 0/${n} frames`);
+    const build = async () => {
+      const scratch = document.createElement("canvas");
+      scratch.width = Math.max(1, Math.round(canvasW));
+      scratch.height = Math.max(1, Math.round(canvasH));
+      const ctx = scratch.getContext("2d");
+      if (!ctx) {
+        setOfflineStackFetchStatus("Failed to prepare display cache: no 2D context");
+        return;
+      }
+      const started = performance.now();
+      try {
+        for (let idx = 0; idx < n; idx++) {
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+          const ok = paintSidecarPanelBitmapsToContext(ctx, idx, scratch.width, scratch.height);
+          if (!ok) continue;
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) {
+            return;
+          }
+          const retained = document.createElement("canvas");
+          retained.width = scratch.width;
+          retained.height = scratch.height;
+          const retainedCtx = retained.getContext("2d");
+          if (!retainedCtx) continue;
+          retainedCtx.drawImage(scratch, 0, 0);
+          sidecarCompositeFrameCacheRef.current.set(idx, retained);
+          if (idx % 4 === 0 || idx === n - 1) {
+            const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+            setOfflineStackFetchStatus(`Building display cache… ${idx + 1}/${n} frames (${elapsed}s)`);
+          }
+          if (idx % 4 === 3) await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
+        sidecarCompositeReadyRef.current = true;
+        sidecarCompositeCompleteRef.current = true;
+        setSidecarCompositeReady(true);
+        setSidecarCompositeComplete(true);
+        setOfflineStackFetchStatus("");
+        const d = show3dPerfDebug();
+        if (d) {
+          d.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+          d.sidecarCompositeBuildMs = performance.now() - started;
+          d.sidecarCompositeWidth = scratch.width;
+          d.sidecarCompositeHeight = scratch.height;
+          d.lastRenderPath = "sidecar-composite-cache-ready";
+        }
+      } catch (err) {
+        clearSidecarCompositeCache();
+        setOfflineStackFetchStatus(
+          `Failed to prepare display cache: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void build();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    offline,
+    sidecarMode,
+    sidecarBitmapComplete,
+    canvasW,
+    canvasH,
+    nSlices,
+    paintSidecarPanelBitmapsToContext,
+    clearSidecarCompositeCache,
+  ]);
+
+  function renderSidecarGpuFrame(idx: number, reason = "scrub"): boolean {
+    const presenter = sidecarGpuPresenterRef.current;
+    if (!presenter || !sidecarGpuReadyRef.current) return false;
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const drawIdx = ((Math.round(idx) % n) + n) % n;
+    const bindGroup = presenter.bindGroups.get(drawIdx);
+    if (!bindGroup) return false;
+    const start = performance.now();
+    const encoder = presenter.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: presenter.context.getCurrentTexture().createView(),
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        loadOp: "clear",
+        storeOp: "store",
+      }],
+    });
+    pass.setPipeline(presenter.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+    presenter.device.queue.submit([encoder.finish()]);
+    setGpuDisplayVisible(true);
+    playbackIdxRef.current = drawIdx;
+    const d = show3dPerfDebug();
+    if (d) {
+      d.lastRenderPath = `sidecar-gpu-texture-${reason}`;
+      d.lastRenderMs = performance.now() - start;
+      d.lastPaintMs = d.lastRenderMs;
+      d.lastFrame = drawIdx;
+      d.sidecarGpuTextureFrames = presenter.bindGroups.size;
+    }
+    return true;
+  }
+
+  React.useEffect(() => {
+    if (
+      !offline ||
+      !sidecarMode ||
+      !enableSidecarGpuTexturePresenter ||
+      !sidecarCompositeComplete ||
+      !sidecarCompositeReadyRef.current ||
+      !sidecarCompositeCompleteRef.current ||
+      canvasW <= 0 ||
+      canvasH <= 0 ||
+      !("gpu" in navigator) ||
+      sidecarViewTransformActive()
+    ) {
+      return;
+    }
+    const gpuCanvas = gpuCanvasRef.current;
+    if (!gpuCanvas) return;
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const serial = ++sidecarGpuBuildSerialRef.current;
+    let cancelled = false;
+    if (sidecarGpuPresenterRef.current) {
+      for (const texture of sidecarGpuPresenterRef.current.textures) {
+        try { texture.destroy(); } catch { /* ignore */ }
+      }
+    }
+    sidecarGpuPresenterRef.current = null;
+    sidecarGpuReadyRef.current = false;
+    setSidecarGpuReady(false);
+    setOfflineStackFetchStatus(`Uploading display cache to GPU… 0/${n} frames`);
+    const build = async () => {
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter || cancelled || serial !== sidecarGpuBuildSerialRef.current) return;
+        const device = await adapter.requestDevice();
+        if (cancelled || serial !== sidecarGpuBuildSerialRef.current) return;
+        const context = gpuCanvas.getContext("webgpu");
+        if (!context) return;
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        const widthPx = Math.max(1, Math.round(canvasW));
+        const heightPx = Math.max(1, Math.round(canvasH));
+        gpuCanvas.width = widthPx;
+        gpuCanvas.height = heightPx;
+        context.configure({ device, format, alphaMode: "opaque" });
+        const shader = device.createShaderModule({ code: `
+          @group(0) @binding(0) var frameTex: texture_2d<f32>;
+          @group(0) @binding(1) var frameSampler: sampler;
+          struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+          @vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+            var out: VSOut;
+            let x = f32(i32(vi & 1u)) * 4.0 - 1.0;
+            let y = f32(i32(vi >> 1u)) * 4.0 - 1.0;
+            out.pos = vec4f(x, y, 0.0, 1.0);
+            out.uv = vec2f((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+            return out;
+          }
+          @fragment fn fs(in: VSOut) -> @location(0) vec4f {
+            return textureSample(frameTex, frameSampler, in.uv);
+          }
+        ` });
+        const pipeline = device.createRenderPipeline({
+          layout: "auto",
+          vertex: { module: shader, entryPoint: "vs" },
+          fragment: { module: shader, entryPoint: "fs", targets: [{ format }] },
+          primitive: { topology: "triangle-list" },
+        });
+        const sampler = device.createSampler({ magFilter: smooth ? "linear" : "nearest", minFilter: smooth ? "linear" : "nearest" });
+        const bindGroups = new Map<number, GPUBindGroup>();
+        const textures: GPUTexture[] = [];
+        const started = performance.now();
+        for (let idx = 0; idx < n; idx++) {
+          if (cancelled || serial !== sidecarGpuBuildSerialRef.current) {
+            textures.forEach((texture) => texture.destroy());
+            return;
+          }
+          const source = sidecarCompositeFrameCacheRef.current.get(idx);
+          if (!source) continue;
+          const texture = device.createTexture({
+            size: { width: widthPx, height: heightPx },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+          });
+          device.queue.copyExternalImageToTexture(
+            { source },
+            { texture },
+            { width: widthPx, height: heightPx },
+          );
+          textures.push(texture);
+          bindGroups.set(idx, device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: texture.createView() },
+              { binding: 1, resource: sampler },
+            ],
+          }));
+          if (idx % 8 === 0 || idx === n - 1) {
+            const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+            setOfflineStackFetchStatus(`Uploading display cache to GPU… ${idx + 1}/${n} frames (${elapsed}s)`);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+        if (cancelled || serial !== sidecarGpuBuildSerialRef.current) {
+          textures.forEach((texture) => texture.destroy());
+          return;
+        }
+        sidecarGpuPresenterRef.current = { device, context, pipeline, sampler, bindGroups, textures, width: widthPx, height: heightPx };
+        sidecarGpuReadyRef.current = true;
+        setSidecarGpuReady(true);
+        setOfflineStackFetchStatus("");
+        const d = show3dPerfDebug();
+        if (d) {
+          d.sidecarGpuTextureFrames = bindGroups.size;
+          d.sidecarGpuUploadMs = performance.now() - started;
+          d.lastRenderPath = "sidecar-gpu-texture-cache-ready";
+        }
+        renderSidecarGpuFrame(playbackIdxRef.current, "ready");
+      } catch (err) {
+        setOfflineStackFetchStatus(`Failed to upload display cache to GPU: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    void build();
+    return () => {
+      cancelled = true;
+    };
+  }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, smooth, sidecarViewTransformActive]);
+
+  React.useLayoutEffect(() => {
+    const previousCompareMode = previousCompareModeRef.current || "off";
+    const activeCompareMode = compareMode || "off";
+    previousCompareModeRef.current = activeCompareMode;
+    if (
+      isRgb ||
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady
+    ) {
+      return;
+    }
+    if (activeCompareMode === "off") {
+      if (previousCompareMode !== "off") {
+        const n = Math.max(1, nSlices || 1);
+        const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
+        drawSidecarBitmapFrame(drawIdx, false, "compare-off");
+        updatePlaybackLiveControls(drawIdx);
+      }
+      return;
+    }
+    if (activeCompareMode !== "blink") {
+      const debug = show3dPerfDebug();
+      if (debug) debug.lastComparePath = "sidecar-compare-unsupported";
+      return;
+    }
+    const n = Math.max(1, nSlices || 1);
+    const pair = Array.isArray(comparePair) && comparePair.length === 2 ? comparePair : [0, 1];
+    const aIdx = Math.max(0, Math.min(n - 1, Math.round(pair[0] ?? 0)));
+    const bIdx = Math.max(0, Math.min(n - 1, Math.round(pair[1] ?? Math.min(1, n - 1))));
+    const activeIdx = activeCompareMode === "blink" && blinkPhase ? bIdx : aIdx;
+    const ok = drawSidecarBitmapFrame(activeIdx, false, "compare-blink");
+    if (ok) {
+      updatePlaybackLiveControls(activeIdx);
+      const debug = show3dPerfDebug();
+      if (debug) {
+        debug.lastComparePath = "sidecar-blink";
+        debug.lastCompareFrame = activeIdx;
+      }
+    }
+  }, [
+    blinkPhase,
+    compareMode,
+    comparePair,
+    drawSidecarBitmapFrame,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    sidecarMode,
+    sidecarRamReady,
+    updatePlaybackLiveControls,
+  ]);
+
+  React.useEffect(() => {
+    if (compareMode === "off" || isRgb || !canvasRef.current) return;
+    if (offline && sidecarMode) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const n = Math.max(1, nSlices || 1);
+    const pair = Array.isArray(comparePair) && comparePair.length === 2 ? comparePair : [0, 1];
+    const aIdx = Math.max(0, Math.min(n - 1, Math.round(pair[0] ?? 0)));
+    const bIdx = Math.max(0, Math.min(n - 1, Math.round(pair[1] ?? Math.min(1, n - 1))));
+    const activeIdx = compareMode === "blink" && blinkPhase ? bIdx : aIdx;
+    const frameA = rawFrameForIndex(aIdx, displaySliceIdx, rawFrameDataRef.current);
+    const frameB = rawFrameForIndex(bIdx, displaySliceIdx, rawFrameDataRef.current);
+    const active = activeIdx === aIdx ? frameA : frameB;
+    if (!frameA || !frameB || !active) return;
+    const panelCount = Math.max(1, nPanels || 1);
+    const panelW = sharedPanelSource ? width : Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+    const out = document.createElement("canvas");
+    out.width = width;
+    out.height = height;
+    const outCtx = out.getContext("2d");
+    if (!outCtx) return;
+    if (compareBackground === "dark") {
+      ctx.save();
+      ctx.fillStyle = "#050505";
+      ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.restore();
+    }
+    const paintNormal = (frame: Float32Array) => {
+      const data = logScale ? applyLogScale(frame) : frame;
+      const range = percentileClip(data, percentileLow, percentileHigh);
+      const img = outCtx.createImageData(width, height);
+      const lut = COLORMAPS[panelCmapFor(visiblePanelIndices[0] ?? 0)] || COLORMAPS.plasma;
+      renderFramePlayback(data, img.data, lut, range.vmin, range.vmax, false);
+      outCtx.putImageData(img, 0, 0);
+      drawMain(ctx, out, { sourcePanelWidth: sharedPanelSource ? undefined : panelW });
+    };
+    if (compareMode === "blink") {
+      paintNormal(active);
+      return;
+    }
+    const pixels = outCtx.createImageData(width, height);
+    const px = pixels.data;
+    if (compareMode === "overlay") {
+      const aRange = percentileClip(frameA, percentileLow, percentileHigh);
+      const bRange = percentileClip(frameB, percentileLow, percentileHigh);
+      const aSpan = Math.max(1e-12, aRange.vmax - aRange.vmin);
+      const bSpan = Math.max(1e-12, bRange.vmax - bRange.vmin);
+      for (let i = 0; i < width * height; i++) {
+        const a = Math.max(0, Math.min(1, (frameA[i] - aRange.vmin) / aSpan));
+        const b = Math.max(0, Math.min(1, (frameB[i] - bRange.vmin) / bSpan));
+        px[4 * i] = Math.round(255 * a);
+        px[4 * i + 1] = Math.round(255 * b);
+        px[4 * i + 2] = Math.round(255 * a);
+        px[4 * i + 3] = 255;
+      }
+    } else {
+      let sym = 0;
+      for (let i = 0; i < width * height; i++) sym = Math.max(sym, Math.abs(frameB[i] - frameA[i]));
+      const scale = sym > 0 ? 1 / sym : 1;
+      const magentaPositive = String(diffCmap || "magenta-green").toLowerCase() === "magenta-green";
+      for (let i = 0; i < width * height; i++) {
+        const d = Math.max(-1, Math.min(1, (frameB[i] - frameA[i]) * scale));
+        const v = Math.round(255 * Math.abs(d));
+        const positive = d >= 0;
+        const magenta = positive === magentaPositive;
+        px[4 * i] = magenta ? v : 0;
+        px[4 * i + 1] = magenta ? 0 : v;
+        px[4 * i + 2] = magenta ? v : 0;
+        px[4 * i + 3] = 255;
+      }
+    }
+    outCtx.putImageData(pixels, 0, 0);
+    drawMain(ctx, out, { sourcePanelWidth: sharedPanelSource ? undefined : panelW });
+  }, [compareMode, comparePair, blinkPhase, blinkFps, compareBackground, diffCmap, isRgb, canvasW, canvasH, width, height, nSlices, nPanels, panelWidthPx, sharedPanelSource, displaySliceIdx, frameBytes, frameSeq, cmap, panelCmaps, percentileLow, percentileHigh, logScale, visiblePanelIndices, canvasRepaintSignal, offline, sidecarMode]);
 
   React.useEffect(() => {
     if (!scrubPreviewBytes || scrubPreviewBytes.byteLength === 0) return;
@@ -6931,7 +13213,11 @@ function Show3D() {
     const sourcePanelWidth = sharedPanelSource
       ? undefined
       : Math.max(1, Math.round((panelWidthPx || fullW / Math.max(1, nPanels || 1)) / factor));
+    mainOffscreenRef.current = previewCanvas;
+    mainOffscreenSourcePanelWidthRef.current = sourcePanelWidth;
+    mainImgDataRef.current = null;
     drawMain(ctx, previewCanvas, { sourcePanelWidth });
+    setPreviewPopulation({ ready: true, idx, factor });
     requestAnimationFrame(() => requestAnimationFrame((paintAt) => {
       const sendTimeMs = typeof info.sendTimeMs === "number" ? info.sendTimeMs : null;
       recordTransportSample({
@@ -6952,10 +13238,31 @@ function Show3D() {
       dbg.scrubPreviewBytes = Number(info.bytes ?? scrubPreviewBytes.byteLength);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrubPreviewBytes, scrubPreviewInfo, width, height, nPanels, panelWidthPx, sharedPanelSource, cmap, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, imageVminPct, imageVmaxPct, canvasW, canvasH, smooth, imageRotation, panelStates, linkContrast, linkedState, visiblePanelIndices, hiddenPanelSet, panelGapTrait, maxCols]);
+  }, [scrubPreviewBytes, scrubPreviewInfo, width, height, nPanels, panelWidthPx, sharedPanelSource, cmap, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, imageVminPct, imageVmaxPct, canvasW, canvasH, smooth, imageRotation, panelStates, linkContrast, linkedState, visiblePanelIndices, hiddenPanelSet, panelGapPx, maxCols]);
+
+  const ensureFullSizeMainOffscreen = React.useCallback((): boolean => {
+    if (width <= 0 || height <= 0) return false;
+    const current = mainOffscreenRef.current;
+    if (
+      current &&
+      current.width === width &&
+      current.height === height &&
+      mainImgDataRef.current &&
+      mainOffscreenSourcePanelWidthRef.current === undefined
+    ) {
+      return true;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    mainOffscreenRef.current = canvas;
+    mainOffscreenSourcePanelWidthRef.current = undefined;
+    mainImgDataRef.current = canvas.getContext("2d")!.createImageData(width, height);
+    return true;
+  }, [width, height]);
 
   const paintRgbFrame = (rgb: Float32Array): boolean => {
-    if (!mainOffscreenRef.current) return false;
+    if (!ensureFullSizeMainOffscreen() || !mainOffscreenRef.current) return false;
     // WebGPU passthrough: pack the RGB channels on the GPU and blit, keeping the
     // per-pixel loop off the UI thread. Falls back to the CPU loop when the
     // engine is unavailable or the frame exceeds the storage-buffer limit.
@@ -6993,7 +13300,7 @@ function Show3D() {
 
   const renderFloatFrameSlice = (inputFrame: Float32Array, idx: number): boolean => {
     const c = playRef.current;
-    if (!mainOffscreenRef.current || !mainImgDataRef.current) return false;
+    if (!ensureFullSizeMainOffscreen() || !mainOffscreenRef.current || !mainImgDataRef.current) return false;
     // True-color stack: paint RGB as-is (no colormap), applying the moving
     // average across color frames when avg > 1.
     if (isRgb && inputFrame.length >= width * height * 3) {
@@ -7004,6 +13311,7 @@ function Show3D() {
         ? averagedRgbFrameForIndex(idx, inputFrame)
         : inputFrame;
       rgbFrameDataRef.current = toPaint;
+      sourceFrameDataRef.current = inputFrame;
       rawFrameDataRef.current = rgbFrameToLuminance(toPaint, width * height);
       return paintRgbFrame(toPaint);
     }
@@ -7011,7 +13319,7 @@ function Show3D() {
       offline,
       diffMode: c.diffMode,
       avgWindow: c.avgWindow,
-    }) || browserFilterOnRef.current || frequencyFilterIsActive;
+    }) || browserFilterOnRef.current || frequencyFilterIsActive || !!subpixelAlignEnabled;
     const frame = transformActive
       ? displayAndFrequencyFrameForIndex(idx, inputFrame, { allowRawOnMiss: !playing })
       : inputFrame;
@@ -7019,6 +13327,7 @@ function Show3D() {
 
     gpuRenderSerialRef.current++;
     playbackIdxRef.current = idx;
+    sourceFrameDataRef.current = inputFrame;
     rawFrameDataRef.current = frame;
     setDisplaySliceIdx(idx);
 
@@ -7051,6 +13360,103 @@ function Show3D() {
         c.imageVminPct,
         c.imageVmaxPct,
       ));
+    }
+
+    // Keep packed multi-panel frames on the same independent-contrast path as
+    // the settled standalone paint. This function also refreshes the retained
+    // offscreen canvas used by wheel zoom and pan; colorizing the whole packed
+    // BF/DF/phase frame with one range makes the next transform repaint appear
+    // to change contrast even though only the viewport changed.
+    const panelCount = Math.max(1, nPanels || 1);
+    const perPanelContrast = (
+      panelCount > 1 &&
+      !c.linkContrast &&
+      !sharedPanelSource &&
+      c.width % panelCount === 0 &&
+      c.height > 0
+    );
+    if (perPanelContrast) {
+      const panelWidth = Math.max(1, Math.floor(c.width / panelCount));
+      const panels = (c.visiblePanelIndices.length ? c.visiblePanelIndices : visiblePanelIndices)
+        .filter((panel) => panel >= 0 && panel < panelCount);
+      const stackBounds = resolveDisplayBounds(
+        c.dataMin,
+        c.dataMax,
+        c.traitVmin,
+        c.traitVmax,
+        c.logScale,
+      );
+      const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
+      const panelData = panels.map((panel) => extractPanelSlice(frame, panel, c.logScale));
+      const panelRanges = panels.map((panel, slot) => {
+        const data = panelData[slot];
+        const cachedRange = panelDataRanges[panel];
+        const bounds = data && data.length > 0
+          ? findDataRange(data)
+          : (cachedRange && cachedRange.max > cachedRange.min ? cachedRange : stackBounds);
+        return resolvePanelRenderRange(
+          panel,
+          bounds,
+          sharedAutoRange,
+          data,
+          c.autoContrast,
+          c.percentileLow,
+          c.percentileHigh,
+        );
+      });
+      const offCtx = mainOffscreenRef.current.getContext("2d");
+      let renderedPanels = false;
+      const engine = gpuCmapRef.current;
+      if (offCtx && engine && gpuCmapReadyRef.current) {
+        try {
+          engine.uploadLUT(c.cmap, lut);
+          engine.uploadData(0, frame, c.width, c.height);
+          const regions = panels.map((panel) => ({
+            x: panel * panelWidth,
+            y: 0,
+            width: panelWidth,
+            height: c.height,
+          }));
+          const bitmaps = engine.renderPerPanelGpuExplicit(
+            0,
+            regions,
+            panelRanges,
+            c.logScale,
+          );
+          if (bitmaps && bitmaps.length === panels.length) {
+            offCtx.clearRect(0, 0, c.width, c.height);
+            try {
+              for (let slot = 0; slot < panels.length; slot++) {
+                const bitmap = bitmaps[slot];
+                if (!bitmap) continue;
+                offCtx.drawImage(bitmap, panels[slot] * panelWidth, 0);
+              }
+              renderedPanels = bitmaps.every(Boolean);
+            } finally {
+              bitmaps.forEach((bitmap) => bitmap?.close());
+            }
+          }
+        } catch {
+          renderedPanels = false;
+        }
+      }
+      if (!renderedPanels && offCtx) {
+        offCtx.clearRect(0, 0, c.width, c.height);
+        const panelImage = offCtx.createImageData(panelWidth, c.height);
+        for (let slot = 0; slot < panels.length; slot++) {
+          const panel = panels[slot];
+          const data = panelData[slot];
+          if (!data) continue;
+          const panelLut = COLORMAPS[panelCmapFor(panel)] || lut;
+          const range = panelRanges[slot];
+          applyColormap(data, panelImage.data, panelLut, range.vmin, range.vmax);
+          offCtx.putImageData(panelImage, panel * panelWidth, 0);
+        }
+      }
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (ctx) drawMain(ctx, mainOffscreenRef.current);
+      return true;
     }
 
     let rendered = false;
@@ -7130,11 +13536,16 @@ function Show3D() {
       // Neighbor-frame averaging is intentionally clamped off for this mode;
       // never show an unaveraged GPU slot during the brief state transition.
       if (transformActive) return false;
-      const c = playRef.current;
-      const rgbaCapacity = Math.max(1, Math.round(c.canvasW * c.canvasH));
-      const ready = await ensurePanelFrameGpu(idx, rgbaCapacity);
-      if (!ready) return false;
-      return renderGpuPanelSlice(idx);
+      if (gpuCmapReadyRef.current && gpuCmapRef.current) {
+        const c = playRef.current;
+        const rgbaCapacity = Math.max(1, Math.round(c.canvasW * c.canvasH));
+        const ready = await ensurePanelFrameGpu(idx, rgbaCapacity);
+        if (ready && renderGpuPanelSlice(idx)) return true;
+      }
+      const frame = await fetchSeparatePanelPackedFrameFromServer(idx);
+      if (frame) return renderFloatFrameSlice(frame, idx);
+      requestCommFramePreview(idx, "panel-native-preview");
+      return false;
     }
     const frame = getCachedServerFrame(idx) ?? await fetchFrameFromServer(idx);
     if (!frame) return false;
@@ -7185,48 +13596,324 @@ function Show3D() {
   };
 
   const renderCurrentPanelTransformDirect = (): boolean => {
-    if (!separatePanelFrames) {
+    // Interactive zoom/pan owns the visible canvas. Invalidate any pending
+    // static GPU->2D blit scheduled by the data effect so it cannot hide the
+    // WebGPU canvas after this transform frame presents.
+    gpuRenderSerialRef.current++;
+    const drawCanvasTransformFallback = (path: string): boolean => {
       const canvas = canvasRef.current;
       const offscreen = mainOffscreenRef.current;
       const ctx = canvas?.getContext("2d");
       if (!canvas || !offscreen || !ctx) return false;
-      const start = performance.now();
+      const fallbackStart = performance.now();
+      gpuDisplayVisibleRef.current = false;
+      setGpuDisplayVisible(false);
       drawMain(ctx, offscreen);
+      const dbg = show3dPerfDebug();
+      if (dbg) {
+        const latencyMs = transformInputAtRef.current > 0 ? performance.now() - transformInputAtRef.current : 0;
+        dbg.lastInteractionRenderMs = Number((performance.now() - fallbackStart).toFixed(2));
+        dbg.lastInteractionLatencyMs = Number(latencyMs.toFixed(2));
+        dbg.lastInteractionRenderFrame = playbackIdxRef.current;
+        dbg.lastInteractionRenderPath = path;
+      }
+      return true;
+    };
+    if (offline && sidecarMode && (sidecarRamReadyRef.current || sidecarU8FrameCacheRef.current.size > 0)) {
+      const idx = Number.isFinite(playbackIdxRef.current) ? playbackIdxRef.current : liveSliceIdx;
+      const start = performance.now();
+      const rendered = drawSidecarBitmapFrame(idx, false, "transform");
       const dbg = show3dPerfDebug();
       if (dbg) {
         const latencyMs = transformInputAtRef.current > 0 ? performance.now() - transformInputAtRef.current : 0;
         dbg.lastInteractionRenderMs = Number((performance.now() - start).toFixed(2));
         dbg.lastInteractionLatencyMs = Number(latencyMs.toFixed(2));
-        dbg.lastInteractionRenderFrame = playbackIdxRef.current;
-        dbg.lastInteractionRenderPath = "canvas-packed-transform";
+        dbg.lastInteractionRenderFrame = idx;
+        dbg.lastInteractionRenderPath = rendered ? "sidecar-u8-viewport-transform" : "miss";
       }
-      return true;
+      return rendered;
     }
-    if (
-      offline
-      || imageRotation % 4 !== 0
-      || requiresClientFrameTransform({ offline, diffMode, avgWindow })
-      || browserFilterOnRef.current
-      || frequencyFilterIsActive
-    ) return false;
     const n = Math.max(1, nSlices || 1);
     const idx = ((Math.round(playbackIdxRef.current) % n) + n) % n;
-    if (!gpuFrameCacheUploadedRef.current.has(idx)) return false;
-    const start = performance.now();
-    const rendered = renderGpuPanelSlice(idx, false);
-    const dbg = show3dPerfDebug();
-    if (dbg) {
-      const latencyMs = transformInputAtRef.current > 0 ? performance.now() - transformInputAtRef.current : 0;
-      dbg.lastInteractionRenderMs = Number((performance.now() - start).toFixed(2));
-      dbg.lastInteractionLatencyMs = Number(latencyMs.toFixed(2));
-      dbg.lastInteractionRenderFrame = idx;
-      dbg.lastInteractionRenderPath = rendered ? "webgpu-panel-transform" : "miss";
+    if (separatePanelFrames) {
+      if (
+        imageRotation % 4 !== 0 ||
+        requiresClientFrameTransform({ offline, diffMode, avgWindow }) ||
+        browserFilterOnRef.current ||
+        frequencyFilterIsActive
+      ) {
+        return offline ? drawCanvasTransformFallback("canvas-panel-transform") : false;
+      }
+      if (offline) {
+        return drawCanvasTransformFallback("canvas-panel-transform");
+      }
+      const start = performance.now();
+      const gpuRendered = renderGpuPanelSlice(idx, false);
+      if (gpuRendered) {
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          const latencyMs = transformInputAtRef.current > 0 ? performance.now() - transformInputAtRef.current : 0;
+          dbg.lastInteractionRenderMs = Number((performance.now() - start).toFixed(2));
+          dbg.lastInteractionLatencyMs = Number(latencyMs.toFixed(2));
+          dbg.lastInteractionRenderFrame = idx;
+          dbg.lastInteractionRenderPath = "webgpu-panel-transform";
+        }
+        return true;
+      }
+      return offline ? drawCanvasTransformFallback("canvas-panel-transform") : false;
     }
-    return rendered;
+    if (!separatePanelFrames || offline) {
+      // A standalone export already owns a colorized 2D offscreen frame.  On
+      // zoom, keep that frame visible and transform it in place instead of
+      // switching opacity to a freshly cleared WebGPU presentation canvas.
+      // The latter produces a one-frame black/contrast flash on some browsers
+      // even though the data range itself has not changed.
+      if (offline) return drawCanvasTransformFallback("canvas-packed-transform");
+      const start = performance.now();
+      const gpuRendered = renderGpuPackedPanelTransformSlice(idx, false);
+      if (gpuRendered) {
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          const latencyMs = transformInputAtRef.current > 0 ? performance.now() - transformInputAtRef.current : 0;
+          dbg.lastInteractionRenderMs = Number((performance.now() - start).toFixed(2));
+          dbg.lastInteractionLatencyMs = Number(latencyMs.toFixed(2));
+          dbg.lastInteractionRenderFrame = idx;
+          dbg.lastInteractionRenderPath = "webgpu-packed-panel-transform";
+        }
+        return true;
+      }
+      return drawCanvasTransformFallback("canvas-packed-transform");
+    }
+    return false;
   };
 
+  const lastTransformBurstBenchmarkTokenRef = React.useRef<unknown>(null);
+  React.useEffect(() => {
+    const req = benchmarkRequest ?? {};
+    const token = req.token;
+    const mode = typeof req.mode === "string" ? req.mode : "playback";
+    if ((typeof token !== "string" && typeof token !== "number") || mode !== "transformBurst" || lastTransformBurstBenchmarkTokenRef.current === token) return;
+    lastTransformBurstBenchmarkTokenRef.current = token;
+
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms));
+    const nextFrame = () => new Promise<number>(resolve => window.requestAnimationFrame(resolve));
+    const numberFromReq = (key: string, fallback: number) => {
+      const value = req[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    };
+    const sampleMs = Math.max(500, numberFromReq("sampleMs", 5000));
+    const warmupMs = Math.max(0, numberFromReq("warmupMs", 500));
+    const targetFps = Math.max(1, Math.min(60, numberFromReq("targetFps", 60)));
+    const requestedPanel = Math.round(numberFromReq("panel", visiblePanelIndices[0] ?? 0));
+    const label = typeof req.label === "string" ? req.label : "show3d transform burst";
+    const reportUrl = typeof req.reportUrl === "string" ? req.reportUrl : "";
+
+    void (async () => {
+      const setStatus = (status: string, extra: Record<string, unknown> = {}) => {
+        if (!cancelled) setBenchmarkResult({ token, label, status, targetFps, mode, ...extra });
+      };
+      try {
+        setStatus("preparing");
+        const panelCount = Math.max(1, nPanels || 1);
+        const panels = visiblePanelIndices.filter((panel) => panel >= 0 && panel < panelCount);
+        const panelIdx = panels.includes(requestedPanel) ? requestedPanel : (panels[0] ?? 0);
+        const frameCount = Math.max(1, nSlices || 1);
+        const idx = ((Math.round(playbackIdxRef.current) % frameCount) + frameCount) % frameCount;
+        if (separatePanelFrames) {
+          const engine = gpuCmapRef.current;
+          if (engine && gpuCmapReadyRef.current && !gpuFrameCacheUploadedRef.current.has(idx)) {
+            const rgbaCapacity = Math.max(1, Math.round(canvasW * canvasH));
+            await ensurePanelFrameGpu(idx, rgbaCapacity);
+          }
+        } else if (!gpuFrameCacheUploadedRef.current.has(idx)) {
+          renderGpuPackedPanelTransformSlice(idx, false);
+        }
+        await sleep(warmupMs);
+        if (cancelled) return;
+
+        const intervals: number[] = [];
+        const drawMs: number[] = [];
+        const latencyMs: number[] = [];
+        const paths: string[] = [];
+        let frames = 0;
+        let misses = 0;
+        let lastTs = await nextFrame();
+        const start = performance.now();
+        while (!cancelled && performance.now() - start < sampleMs) {
+          const ts = await nextFrame();
+          intervals.push(ts - lastTs);
+          lastTs = ts;
+          const phase = (performance.now() - start) / Math.max(1, sampleMs);
+          const zoomValue = 1 + 0.85 * (0.5 + 0.5 * Math.sin(phase * Math.PI * 8));
+          const panValue = -12 * Math.sin(phase * Math.PI * 6);
+          syncPlaybackPanelTransform(panelIdx, zoomValue, panValue, panValue * 0.5);
+          transformInputAtRef.current = performance.now();
+          const drawStart = performance.now();
+          const rendered = renderCurrentPanelTransformDirect();
+          const elapsed = performance.now() - drawStart;
+          drawMs.push(elapsed);
+          const dbg = show3dPerfDebug();
+          latencyMs.push(Number(dbg?.lastInteractionLatencyMs ?? elapsed));
+          if (dbg?.lastInteractionRenderPath) paths.push(String(dbg.lastInteractionRenderPath));
+          if (rendered) frames++;
+          else misses++;
+        }
+        commitLivePanelTransforms();
+        const elapsedSeconds = Math.max(0.001, (performance.now() - start) / 1000);
+        const mean = (values: number[]) => values.length
+          ? values.reduce((sum, value) => sum + value, 0) / values.length
+          : 0;
+        const latestDbg = show3dPerfDebug() ?? {};
+        const measuredFps = frames / elapsedSeconds;
+        const result = {
+          token,
+          label,
+          status: "done",
+          mode,
+          targetFps,
+          measuredFps: Number(measuredFps.toFixed(2)),
+          pass60: measuredFps >= 60 * 0.98,
+          frames,
+          misses,
+          elapsedSeconds: Number(elapsedSeconds.toFixed(2)),
+          frameIntervalAvgMs: Number(mean(intervals).toFixed(2)),
+          frameIntervalP95Ms: percentileFromHistory(intervals, 95),
+          drawAvgMs: Number(mean(drawMs).toFixed(2)),
+          drawP95Ms: percentileFromHistory(drawMs, 95),
+          latencyAvgMs: Number(mean(latencyMs).toFixed(2)),
+          latencyP95Ms: percentileFromHistory(latencyMs, 95),
+          lastInteractionRenderPath: latestDbg.lastInteractionRenderPath ?? paths[paths.length - 1] ?? null,
+          lastRenderPath: latestDbg.lastRenderPath ?? null,
+          gpuFrameCacheUploaded: latestDbg.gpuFrameCacheUploaded ?? null,
+          gpuPreloadDone: latestDbg.gpuPreloadDone ?? null,
+          usedPaths: Array.from(new Set(paths)).slice(0, 8),
+        };
+        setBenchmarkResult(result);
+        if (reportUrl) {
+          void fetch(reportUrl, { method: "POST", mode: "no-cors", body: JSON.stringify(result) }).catch(() => {});
+        }
+      } catch (err) {
+        setStatus("error", { error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [benchmarkRequest, nPanels, nSlices, separatePanelFrames, canvasW, canvasH, visiblePanelIndices]);
+
+  React.useEffect(() => {
+    const dbg = show3dPerfDebug();
+    if (!dbg) return;
+    const runTransformBurst = async (options: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+      const numberFromOptions = (key: string, fallback: number) => {
+        const value = options[key];
+        return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+      };
+      const sampleMs = Math.max(500, numberFromOptions("sampleMs", 5000));
+      const targetFps = Math.max(1, Math.min(60, numberFromOptions("targetFps", 60)));
+      const requestedPanel = Math.round(numberFromOptions("panel", visiblePanelIndices[0] ?? 0));
+      const panelCount = Math.max(1, nPanels || 1);
+      const panels = visiblePanelIndices.filter((panel) => panel >= 0 && panel < panelCount);
+      const panelIdx = panels.includes(requestedPanel) ? requestedPanel : (panels[0] ?? 0);
+      const frameCount = Math.max(1, nSlices || 1);
+      const idx = ((Math.round(playbackIdxRef.current) % frameCount) + frameCount) % frameCount;
+      if (separatePanelFrames && !offline) {
+        const engine = gpuCmapRef.current;
+        if (engine && gpuCmapReadyRef.current && !gpuFrameCacheUploadedRef.current.has(idx)) {
+          const rgbaCapacity = Math.max(1, Math.round(canvasW * canvasH));
+          await ensurePanelFrameGpu(idx, rgbaCapacity);
+        }
+      } else if (!gpuFrameCacheUploadedRef.current.has(idx)) {
+        renderGpuPackedPanelTransformSlice(idx, false);
+      }
+
+      const nextFrame = () => new Promise<number>(resolve => window.requestAnimationFrame(resolve));
+      const intervals: number[] = [];
+      const drawMs: number[] = [];
+      const latencyMs: number[] = [];
+      const paths: string[] = [];
+      let frames = 0;
+      let misses = 0;
+      let lastTs = await nextFrame();
+      const start = performance.now();
+      while (performance.now() - start < sampleMs) {
+        const ts = await nextFrame();
+        intervals.push(ts - lastTs);
+        lastTs = ts;
+        const phase = (performance.now() - start) / Math.max(1, sampleMs);
+        const zoomValue = 1 + 0.85 * (0.5 + 0.5 * Math.sin(phase * Math.PI * 8));
+        const panValue = -12 * Math.sin(phase * Math.PI * 6);
+        syncPlaybackPanelTransform(panelIdx, zoomValue, panValue, panValue * 0.5);
+        transformInputAtRef.current = performance.now();
+        const drawStart = performance.now();
+        const rendered = renderCurrentPanelTransformDirect();
+        const elapsed = performance.now() - drawStart;
+        drawMs.push(elapsed);
+        const currentDbg = show3dPerfDebug();
+        latencyMs.push(Number(currentDbg?.lastInteractionLatencyMs ?? elapsed));
+        if (currentDbg?.lastInteractionRenderPath) paths.push(String(currentDbg.lastInteractionRenderPath));
+        if (rendered) frames++;
+        else misses++;
+      }
+      commitLivePanelTransforms();
+      const mean = (values: number[]) => values.length
+        ? values.reduce((sum, value) => sum + value, 0) / values.length
+        : 0;
+      const elapsedSeconds = Math.max(0.001, (performance.now() - start) / 1000);
+      const measuredFps = frames / elapsedSeconds;
+      const latestDbg = show3dPerfDebug() ?? {};
+      const result = {
+        status: "done",
+        targetFps,
+        measuredFps: Number(measuredFps.toFixed(2)),
+        pass60: measuredFps >= 60 * 0.98,
+        frames,
+        misses,
+        elapsedSeconds: Number(elapsedSeconds.toFixed(2)),
+        frameIntervalAvgMs: Number(mean(intervals).toFixed(2)),
+        frameIntervalP95Ms: percentileFromHistory(intervals, 95),
+        drawAvgMs: Number(mean(drawMs).toFixed(2)),
+        drawP95Ms: percentileFromHistory(drawMs, 95),
+        latencyAvgMs: Number(mean(latencyMs).toFixed(2)),
+        latencyP95Ms: percentileFromHistory(latencyMs, 95),
+        lastInteractionRenderPath: latestDbg.lastInteractionRenderPath ?? paths[paths.length - 1] ?? null,
+        lastRenderPath: latestDbg.lastRenderPath ?? null,
+        gpuFrameCacheUploaded: latestDbg.gpuFrameCacheUploaded ?? null,
+        gpuPreloadDone: latestDbg.gpuPreloadDone ?? null,
+        usedPaths: Array.from(new Set(paths)).slice(0, 8),
+      };
+      dbg.transformBurstResult = result;
+      return result;
+    };
+    dbg.runTransformBurst = runTransformBurst;
+    return () => {
+      if (dbg.runTransformBurst === runTransformBurst) delete dbg.runTransformBurst;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nPanels, nSlices, separatePanelFrames, offline, canvasW, canvasH, visiblePanelIndices]);
+
   const scheduleTransformRender = (): boolean => {
-    if (separatePanelFrames && (offline || imageRotation % 4 !== 0)) return false;
+    if (separatePanelFrames && !sidecarMode && imageRotation % 4 !== 0) return false;
+    if (
+      offline &&
+      sidecarMode &&
+      !isRgb &&
+      sidecarViewTransformActive() &&
+      sidecarRamReadyRef.current
+    ) {
+      if (transformRenderRafRef.current !== null) {
+        window.cancelAnimationFrame(transformRenderRafRef.current);
+        transformRenderRafRef.current = null;
+      }
+      return drawSidecarBitmapFrame(
+        playing ? playbackIdxRef.current : liveSliceIdx,
+        false,
+        "transform-immediate",
+      );
+    }
     if (transformRenderRafRef.current !== null) return true;
     transformRenderRafRef.current = window.requestAnimationFrame(() => {
       transformRenderRafRef.current = null;
@@ -7250,7 +13937,7 @@ function Show3D() {
     if (offline || !frameServerUrl || playing) return;
     void renderFetchedSlice(sliceIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offline, separatePanelFrames, frameServerUrl, frameServerVersion, sliceIdx, playing, canvasW, canvasH, cmap, imageVminPct, imageVmaxPct, autoContrast, logScale, panelStates, linkedState, linkPanels, panelGapTrait, maxCols]);
+  }, [offline, separatePanelFrames, frameServerUrl, frameServerVersion, sliceIdx, playing, canvasW, canvasH, cmap, imageVminPct, imageVmaxPct, autoContrast, logScale, panelStates, linkedState, linkPanels, panelGapPx, maxCols]);
 
   React.useLayoutEffect(() => {
     if (!mainOffscreenRef.current || !canvasRef.current) return;
@@ -7268,12 +13955,47 @@ function Show3D() {
       gpuCmapReadyRef.current
     );
     if (offlineGpuPlaybackOwnsCanvas) return;
-    const preserveGpuDisplay = playing && gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0;
-    if (preserveGpuDisplay && separatePanelFrames) return;
+    const viewTransformActive = sidecarViewTransformActive();
+    const preserveGpuDisplay = gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0 && !viewTransformActive;
+    if (preserveGpuDisplay) {
+      try {
+        if (renderCurrentPanelTransformDirect()) return;
+      } catch (err) {
+        console.warn("[Show3D] WebGPU transform repaint failed; using retained 2D canvas", err);
+      }
+    }
+    if (offline && sidecarMode && viewTransformActive && sidecarRamReadyRef.current) {
+      if (drawSidecarBitmapFrame(playing ? playbackIdxRef.current : liveSliceIdx, false, "layout-transform")) return;
+    }
+    const embeddedPackedViewportCacheReady = (
+      !sidecarMode &&
+      sidecarCompositeReadyRef.current &&
+      sidecarCompositeStyleKeyRef.current === sidecarDisplayStyleKey &&
+      !sharedPanelSource &&
+      Math.max(1, nPanels || 1) > 1 &&
+      !!offlineStack
+    );
+    if (
+      offline &&
+      !isRgb &&
+      (
+        (!viewTransformActive && sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        embeddedPackedViewportCacheReady
+      )
+    ) {
+      if (drawSidecarBitmapFrame(
+        playing ? playbackIdxRef.current : liveSliceIdx,
+        false,
+        embeddedPackedViewportCacheReady && viewTransformActive ? "layout-embedded-transform" : "layout",
+      )) return;
+    }
     const ctx = canvasRef.current.getContext("2d");
-    if (ctx) drawMain(ctx, mainOffscreenRef.current, { preserveGpuDisplay });
+    if (ctx) drawMain(ctx, mainOffscreenRef.current, {
+      preserveGpuDisplay,
+      sourcePanelWidth: mainOffscreenSourcePanelWidthRef.current,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [smooth, canvasW, canvasH, nPanels, visiblePanelIndices, maxCols, imageRotation, panelStates, linkedState, linkPanels, themeColors.bg, panelRealFrames, panelTitles, showPanelTitles, panelGapTrait, panelTitleFontSize, panelWidthPx, sharedPanelSource, sliceIdx, displaySliceIdx, liveSliceIdx, offline, playing, nSlices, canvasRepaintSignal]);
+  }, [smooth, canvasW, canvasH, nPanels, visiblePanelIndices, maxCols, imageRotation, flipRows, flipCols, panelStates, linkedState, linkPanels, themeColors.bg, interPanelGapColor, panelInnerBorderColor, panelInnerBorderPx, panelRealFrames, panelTitles, showPanelTitles, panelGapPx, panelTitleFontSize, panelWidthPx, sharedPanelSource, sliceIdx, displaySliceIdx, liveSliceIdx, offline, playing, nSlices, canvasRepaintSignal, sidecarMode, sidecarBitmapReady, sidecarCompositeReady, drawSidecarBitmapFrame, sidecarViewTransformActive]);
 
   // A presented WebGPU texture is not a durable cache. Re-present the current
   // cached frame when it owns the live display; otherwise re-blit the retained
@@ -7308,14 +14030,24 @@ function Show3D() {
       return;
     }
     const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current || frequencyFilterIsActive;
-    if (!offline && !transformActive && gpuDisplayVisibleRef.current) {
+    if (gpuDisplayVisibleRef.current && imageRotation % 4 === 0) {
       try {
-        restoredGpu = renderGpuCachedSliceDirect(frameIdx, false);
+        restoredGpu = renderCurrentPanelTransformDirect();
       } catch (err) {
         console.warn("[Show3D] Foreground WebGPU re-present failed; using the retained 2D frame", err);
       }
     }
-    if (!restoredGpu) {
+    if (!restoredGpu && !offline && !transformActive && gpuDisplayVisibleRef.current) {
+      try {
+        restoredGpu = renderGpuCachedSliceDirect(frameIdx, false);
+      } catch (err) {
+        console.warn("[Show3D] Foreground WebGPU cached-frame re-present failed; using the retained 2D frame", err);
+      }
+    }
+    if (!restoredGpu && offline && sidecarMode && sidecarRamReadyRef.current && !isRgb) {
+      restoredCanvas = drawSidecarBitmapFrame(frameIdx, false, "visibility-sidecar");
+    }
+    if (!restoredGpu && !restoredCanvas) {
       setGpuDisplayVisible(false);
       const canvas = canvasRef.current;
       const offscreen = mainOffscreenRef.current;
@@ -7358,6 +14090,24 @@ function Show3D() {
       ctx.rotate((imageRotation * Math.PI) / 2);
       ctx.translate(-cx, -cy);
     }
+    for (const panel of visiblePanelIndices) {
+      const overlaySpecs = panelOverlays?.[panel] || [];
+      if (!overlaySpecs.length) continue;
+      const geom = getPanelGeometry(panel);
+      if (!geom) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(geom.slotX, geom.slotY, geom.slotW, geom.slotH);
+      ctx.clip();
+      const toScreenX = (col: number) => geom.slotX + geom.state.panX + col * geom.scaleX * geom.state.zoom;
+      const toScreenY = (row: number) => geom.slotY + geom.state.panY + row * geom.scaleY * geom.state.zoom;
+      drawPanelOverlays(ctx, overlaySpecs, toScreenX, toScreenY, sourcePanelWidth, sourcePanelHeight);
+      if (overlaySelection?.panel === panel) {
+        drawPanelOverlaySelection(ctx, overlaySpecs[overlaySelection.overlay], toScreenX, toScreenY, sourcePanelWidth, sourcePanelHeight);
+      }
+      ctx.restore();
+    }
+
     if (effectiveRoiActive && roiItems.length > 0) {
       const highlightedRois = roiItems.filter(r => r.highlight);
       if (highlightedRois.length > 0) {
@@ -7518,7 +14268,7 @@ function Show3D() {
         ctx.restore();
       }
     }
-  }, [activePageStart, effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapTrait, sourcePanelWidth, sourcePanelHeight, sharedPanelSource, singlePanelPageProfile, totalPanelCount, canvasRepaintSignal]);
+  }, [activePageStart, effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapPx, sourcePanelWidth, sourcePanelHeight, sharedPanelSource, singlePanelPageProfile, totalPanelCount, canvasRepaintSignal, panelOverlays, overlaySelection, visiblePanelIndices]);
 
   // Lens inset rendering
   React.useEffect(() => {
@@ -7919,8 +14669,8 @@ function Show3D() {
     const ctx = uiRef.current.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, uiRef.current.width, uiRef.current.height);
-    const showImageZoomIndicator = showZoomIndicator !== false && panelChromeVisible;
-    if (scaleBarVisible || showImageZoomIndicator) {
+    const showImageZoomIndicator = showZoomIndicator === true && panelChromeVisible;
+    if (scaleBarVisible || showImageZoomIndicator || panelInnerBorderPx > 0) {
       const unit = pixelSize > 0 ? pixelUnit : "px";
       const pxSize = pixelSize > 0 ? pixelSize : 1;
       // Per-panel scale bar + zoom indicator. Each panel slot uses its
@@ -7929,7 +14679,7 @@ function Show3D() {
       const n = Math.max(1, visiblePanelCount || 1);
       const cols = panelColsForCount(n);
       const rows = Math.ceil(n / cols);
-      const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+      const gap = n > 1 ? (panelGapPx) : 0;
       const cssW = uiRef.current.width / DPR;
       const cssH = uiRef.current.height / DPR;
       const slotW = (cssW - gap * (cols - 1)) / cols;
@@ -7951,10 +14701,18 @@ function Show3D() {
         const row = Math.floor(slot / cols);
         const slotX = col * (slotW + gap);
         const slotY = row * (slotH + gap);
-        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-        ctx.shadowBlur = 2;
-        ctx.shadowOffsetX = 1;
-        ctx.shadowOffsetY = 1;
+        if (panelInnerBorderPx > 0) {
+          ctx.save();
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
+          ctx.strokeStyle = panelInnerBorderColor;
+          ctx.lineWidth = panelInnerBorderPx;
+          const inset = panelInnerBorderPx / 2;
+          ctx.strokeRect(slotX + inset, slotY + inset, Math.max(0, slotW - panelInnerBorderPx), Math.max(0, slotH - panelInnerBorderPx));
+          ctx.restore();
+        }
         ctx.fillStyle = "white";
         if (scaleBarVisible) {
           // Cap bar at 25% of slot width so it never overflows a small slot.
@@ -7974,13 +14732,25 @@ function Show3D() {
           const barPx = (nicePhysical / pxSize) * effectiveZoom;
           const barY = slotY + slotH - margin;
           const barX = slotX + slotW - barPx - margin;
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
           ctx.fillRect(barX, barY, barPx, barThickness);
+          ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+          ctx.shadowBlur = 2;
+          ctx.shadowOffsetX = 1;
+          ctx.shadowOffsetY = 1;
           const label = formatScaleLabel(nicePhysical, unit);
           ctx.textAlign = "center";
           ctx.textBaseline = "bottom";
           ctx.fillText(label, barX + barPx / 2, barY - 4);
         }
         if (showImageZoomIndicator) {
+          ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+          ctx.shadowBlur = 2;
+          ctx.shadowOffsetX = 1;
+          ctx.shadowOffsetY = 1;
           ctx.textAlign = "left";
           ctx.textBaseline = "bottom";
           ctx.fillText(formatZoomLabel(panelState.zoom), slotX + margin, slotY + slotH - margin + barThickness);
@@ -8016,7 +14786,7 @@ function Show3D() {
       const n = Math.max(1, visiblePanelCount || 1);
       const cols = panelColsForCount(n);
       const rows = Math.ceil(n / cols);
-      const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+      const gap = n > 1 ? (panelGapPx) : 0;
       const cssW = uiRef.current.width / DPR;
       const cssH = uiRef.current.height / DPR;
       const slotW = (cssW - gap * (cols - 1)) / cols;
@@ -8054,7 +14824,7 @@ function Show3D() {
       }
       ctx.restore();
     }
-  }, [pixelSize, pixelUnit, scaleBarVisible, width, sourcePanelWidth, canvasW, canvasH, displayScale, zoom, nPanels, visiblePanelCount, visiblePanelIndices, maxCols, panelStates, linkedState, linkPanels, panelGapTrait, showZoomIndicator, panelChromeVisible, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale, autoContrast, imageHistogramData, autoVmins, autoVmaxs, displaySliceIdx, percentileLow, percentileHigh, dataMin, dataMax, traitVmin, traitVmax, linkContrast, sharedPanelSource, panelDataRanges, vminPerPanel, vmaxPerPanel, canvasRepaintSignal]);
+  }, [pixelSize, pixelUnit, scaleBarVisible, width, sourcePanelWidth, canvasW, canvasH, displayScale, zoom, nPanels, visiblePanelCount, visiblePanelIndices, maxCols, panelStates, linkedState, linkPanels, panelGapPx, showZoomIndicator, panelChromeVisible, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale, autoContrast, imageHistogramData, autoVmins, autoVmaxs, displaySliceIdx, percentileLow, percentileHigh, dataMin, dataMax, traitVmin, traitVmax, linkContrast, sharedPanelSource, panelDataRanges, vminPerPanel, vmaxPerPanel, canvasRepaintSignal]);
 
   // Compute FFT magnitude (expensive, async - only re-run on data/GPU changes)
   // Supports ROI-scoped FFT: when ROI is active with a selected ROI, compute
@@ -8072,9 +14842,13 @@ function Show3D() {
   const fftMagRef = React.useRef<Float32Array | null>(null);
   const fftMagnitudeCacheRef = React.useRef<Map<string, FftMagnitudeCacheEntry>>(new Map());
   const fftActiveCacheKeyRef = React.useRef<string | null>(null);
+  const fftDataGenerationRef = React.useRef(0);
+  const fftPlaybackComputeInFlightRef = React.useRef(false);
+  const fftPlaybackLastComputeAtRef = React.useRef(0);
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
 
   React.useEffect(() => {
+    fftDataGenerationRef.current += 1;
     fftMagnitudeCacheRef.current.clear();
     fftActiveCacheKeyRef.current = null;
     fftMagRef.current = null;
@@ -8098,29 +14872,39 @@ function Show3D() {
 
   React.useEffect(() => {
     if (!effectiveShowFft) return;
-    // FFT is useful context, but for heavy multi-panel stacks it is far more
-    // expensive than showing the next image frame. During playback keep the
-    // last FFT visible and let the image path own the frame budget; when the
-    // user pauses or finishes scrubbing, compute immediately for that settled
-    // frame so overlay/bottom FFT does not sit blank behind render churn.
-    if (playing) return;
-    if (!rawFrameDataRef.current) {
-      const idx = offline ? liveSliceIdx : displaySliceIdx;
-      const offlineFrame = offline ? getOfflineFrame(idx) : null;
-      const parsed = offlineFrame ?? extractFloat32(frameBytes, width * height);
-      const frame = parsed
-        ? (displayAndFrequencyFrameForIndex(idx, parsed) ?? parsed)
-        : null;
-      if (frame) rawFrameDataRef.current = frame;
+    // FFT is useful context, but it must not own the playback budget. During
+    // playback, recompute from the frame that was actually drawn at a bounded
+    // cadence; outside playback, update immediately for the settled view.
+    const playbackFft = Boolean(playing);
+    if (playbackFft) {
+      const now = performance.now();
+      const dbg = show3dPerfDebug();
+      if (fftPlaybackComputeInFlightRef.current) {
+        if (dbg) dbg.fftPlaybackSkippedInFlight = Number(dbg.fftPlaybackSkippedInFlight || 0) + 1;
+        return;
+      }
+      if (now - fftPlaybackLastComputeAtRef.current < FFT_PLAYBACK_UPDATE_INTERVAL_MS) {
+        if (dbg) dbg.fftPlaybackSkippedThrottle = Number(dbg.fftPlaybackSkippedThrottle || 0) + 1;
+        return;
+      }
+      fftPlaybackComputeInFlightRef.current = true;
+      fftPlaybackLastComputeAtRef.current = now;
     }
-    if (!rawFrameDataRef.current) return;
+    const fftGeneration = fftDataGenerationRef.current;
     let cancelled = false;
     const doCompute = async () => {
       const fftStartMs = performance.now();
-      const data = rawFrameDataRef.current!;
+      const fftFrameIdx = clampSlice(playbackFft ? playbackIdxRef.current : (offline ? liveSliceIdx : displaySliceIdx));
+      const currentIdx = playbackFft ? playbackIdxRef.current : (offline ? liveSliceIdx : displaySliceIdx);
+      let data = rawFrameForIndex(fftFrameIdx, currentIdx, rawFrameDataRef.current);
+      if (!data && offline) data = getOfflineFrame(fftFrameIdx);
+      data = data
+        ? (displayAndFrequencyFrameForIndex(fftFrameIdx, data, { allowRawOnMiss: playbackFft }) ?? data)
+        : null;
+      if (!data) return;
+      rawFrameDataRef.current = data;
       const panelCount = Math.max(1, nPanels || 1);
       const multiPanelFft = panelCount > 1 && !roiFftActive;
-      const fftFrameIdx = clampSlice(offline ? liveSliceIdx : displaySliceIdx);
       const selectedRoi = roiFftActive && roiList && roiSelectedIdx >= 0 && roiSelectedIdx < roiList.length
         ? roiList[roiSelectedIdx]
         : null;
@@ -8161,12 +14945,15 @@ function Show3D() {
       const cache = fftMagnitudeCacheRef.current;
       const cached = cache.get(fftCacheKey);
       if (cached) {
+        if (cancelled || fftGeneration !== fftDataGenerationRef.current) return;
         cache.delete(fftCacheKey);
         cache.set(fftCacheKey, cached);
         const dbg = show3dPerfDebug();
         if (dbg) {
           dbg.lastFftMs = 0;
           dbg.lastFftSource = `${cached.source}-cache`;
+          dbg.lastFftFrame = fftFrameIdx;
+          dbg.lastFftPlayback = playbackFft;
           dbg.lastFftPanels = cached.panels;
           dbg.lastFftSize = cached.sizeLabel;
           dbg.lastFftGrid = cached.gridLabel;
@@ -8280,7 +15067,7 @@ function Show3D() {
         const fftGpu = (!skipOfflineWebGpu && !offlineGpuDisabled() && !offlineGpuInFlight())
           ? await withOfflineTimeout(ensureFftGpu())
           : null;
-        if (cancelled) return;
+        if (cancelled || fftGeneration !== fftDataGenerationRef.current) return;
         if (fftGpu && panels.length > 1) {
           let startedOfflineGpu = false;
           try {
@@ -8326,7 +15113,7 @@ function Show3D() {
           results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real, imag, fftW, fftH, false))))
             .map(({ real, imag }) => ({ real, imag }));
         }
-        if (cancelled) return;
+        if (cancelled || fftGeneration !== fftDataGenerationRef.current) return;
 
         const cols = panelColsForCount(panels.length);
         const rows = Math.ceil(panels.length / cols);
@@ -8380,6 +15167,8 @@ function Show3D() {
         if (dbg) {
           dbg.lastFftMs = elapsedMs;
           dbg.lastFftSource = fftSource;
+          dbg.lastFftFrame = fftFrameIdx;
+          dbg.lastFftPlayback = playbackFft;
           dbg.lastFftPanels = panels.length;
           dbg.lastFftSize = overlayScale > 1 ? `${fftW}x${fftH} overlay/${overlayScale}x` : `${fftW}x${fftH}`;
           dbg.lastFftGrid = `${gridW}x${gridH}`;
@@ -8443,7 +15232,7 @@ function Show3D() {
 
       let fftSource = "cpu";
       const fftGpu = await ensureFftGpu();
-      if (cancelled) return;
+      if (cancelled || fftGeneration !== fftDataGenerationRef.current) return;
       if (fftGpu) {
         try {
           const gpuReal = inputData.slice();
@@ -8466,7 +15255,7 @@ function Show3D() {
         fftSource = "worker";
       }
 
-      if (cancelled) return;
+      if (cancelled || fftGeneration !== fftDataGenerationRef.current) return;
       if (fftSource !== "worker") {
         fftshift(real, fftW, fftH);
         fftshift(imag, fftW, fftH);
@@ -8506,16 +15295,20 @@ function Show3D() {
       if (dbg) {
         dbg.lastFftMs = elapsedMs;
         dbg.lastFftSource = fftSource;
+        dbg.lastFftFrame = fftFrameIdx;
+        dbg.lastFftPlayback = playbackFft;
         dbg.lastFftPanels = 1;
         dbg.lastFftSize = `${fftW}x${fftH}`;
         dbg.lastFftGrid = null;
       }
     };
 
-    void doCompute();
+    void doCompute().finally(() => {
+      if (playbackFft) fftPlaybackComputeInFlightRef.current = false;
+    });
 
     return () => {
-      cancelled = true;
+      if (!playbackFft) cancelled = true;
     };
   }, [effectiveShowFft, playing, frameBytes, frameSeq, frameServerVersion, offline, liveSliceIdx, displaySliceIdx, width, height, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, nSlices, visiblePanelIndices, sourcePanelWidth, sharedPanelSource, maxCols, panelColsForCount, fftLayoutOverlay, extractPanelSlice, ensureFftGpu, diffMode, avgWindow]);
 
@@ -8689,7 +15482,7 @@ function Show3D() {
     const n = Math.max(1, visiblePanelCount || 1);
     const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
-    const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    const gap = n > 1 ? (panelGapPx) : 0;
     const panelW = (canvasW - gap * (cols - 1)) / cols;
     const panelH = (canvasH - gap * (rows - 1)) / rows;
     const fftW = fftCropDims?.fftWidth ?? width;
@@ -8710,12 +15503,13 @@ function Show3D() {
       const insetBase = Math.min(insetMaxW, insetMaxH);
       const insetW = Math.max(24, Math.min(insetMaxW, insetBase * resolvedFftOverlaySize));
       const insetH = Math.max(20, Math.min(insetMaxH, insetBase * resolvedFftOverlaySize));
+      const topInsetPad = fftOverlayTopInsetPad(insetPad, showPanelTitles, nPanels || 1, panelTitleFontSize);
       const insetX = resolvedFftOverlayPosition.endsWith("right")
         ? panelLeft + panelW - insetW - insetPad
         : panelLeft + insetPad;
       const insetY = resolvedFftOverlayPosition.startsWith("bottom")
         ? panelTop + panelH - insetH - insetPad
-        : panelTop + insetPad;
+        : panelTop + topInsetPad;
       const dstX = fftOverlayDragPreview ? panelLeft + fftOverlayDragPreview.x : insetX;
       const dstY = fftOverlayDragPreview ? panelTop + fftOverlayDragPreview.y : insetY;
       const srcX = grid ? (slot % grid.cols) * grid.panelWidth : 0;
@@ -8740,7 +15534,7 @@ function Show3D() {
       ctx.lineWidth = 1;
       ctx.strokeRect(dstX + 0.5, dstY + 0.5, Math.max(0, insetW - 1), Math.max(0, insetH - 1));
     });
-  }, [effectiveShowFft, fftLayoutOverlay, fftCropDims, width, height, visiblePanelCount, visiblePanelIndices, panelColsForCount, panelGapTrait, canvasW, canvasH, resolvedFftOverlaySize, resolvedFftOverlayPosition, fftOverlayDragPreview]);
+  }, [effectiveShowFft, fftLayoutOverlay, fftCropDims, width, height, visiblePanelCount, visiblePanelIndices, panelColsForCount, panelGapPx, canvasW, canvasH, resolvedFftOverlaySize, resolvedFftOverlayPosition, fftOverlayDragPreview, showPanelTitles, panelTitleFontSize, nPanels]);
 
   React.useEffect(() => {
     fftViewDirectRedrawRef.current = () => {
@@ -9432,6 +16226,10 @@ function Show3D() {
     playRef.current.panelStates = resetPanels;
     linkedStateLiveRef.current = resetLinked;
     panelStatesLiveRef.current = resetPanels;
+    if (sidecarMode) {
+      invalidateSidecarViewportCache("view-reset");
+      sidecarDisplayCacheDirtyRef.current = true;
+    }
     setLinkedState(s => ({ ...s, zoom: 1, panX: 0, panY: 0 }));
     setPanelStates(arr => arr.map(s => ({ ...s, zoom: 1, panX: 0, panY: 0 })));
     setViewState({ linked_state: { ...resetLinked }, panel_states: resetPanels.map(v => ({ ...v })) });
@@ -9623,7 +16421,9 @@ function Show3D() {
     // Ignore clicks in empty grid cells (partial last row when N isn't a
     // multiple of max_cols). Otherwise the click attributes to the last
     // real panel and zoom/pan jumps unexpectedly.
-    if (panelIdxFromEvent(e) < 0) return;
+    const panelForSelection = panelIdxFromEvent(e);
+    if (panelForSelection < 0) return;
+    if (handlePanelSelectionMouseDown(e, panelForSelection)) return;
     clickStartRef.current = { x: e.clientX, y: e.clientY };
     pendingRoiAddRef.current = null;
     // Check if clicking on lens inset for drag or resize
@@ -9649,6 +16449,33 @@ function Show3D() {
           return;
         }
       }
+    }
+    if (overlayEditMode) {
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      if (panelIdx >= 0) {
+        const hitRadius = getImageHitRadius(panelIdx);
+        const hit = panelOverlayHit(panelOverlays?.[panelIdx], imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, hitRadius);
+        if (hit) {
+          const original = panelOverlays?.[panelIdx]?.[hit.overlay];
+          if (!original) return;
+          setOverlaySelection({ panel: panelIdx, overlay: hit.overlay });
+          overlayDragRef.current = {
+            mode: hit.mode,
+            panel: panelIdx,
+            overlay: hit.overlay,
+            handle: hit.handle,
+            startRow: imgRow,
+            startCol: panelCol,
+            original,
+          };
+          setIsDraggingOverlay(true);
+          setIsDraggingPan(false);
+          setPanStart(null);
+          e.preventDefault();
+          return;
+        }
+      }
+      setOverlaySelection(null);
     }
     if (profileActive) {
       const { imgCol, imgRow, panelIdx } = screenToProfileImg(e);
@@ -9839,6 +16666,18 @@ function Show3D() {
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
+    if (overlayDragRef.current) {
+      const drag = overlayDragRef.current;
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      if (panelIdx !== drag.panel) return;
+      updatePanelOverlay(
+        drag.panel,
+        drag.overlay,
+        updateOverlayFromDrag(drag.original, drag.mode, drag.startRow, drag.startCol, imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, drag.handle),
+      );
+      e.preventDefault();
+      return;
+    }
     // Fast path: during pan drag, skip all cursor/hover/lens work - just update pan
     if (isDraggingPan && panStart) {
       const canvas = canvasRef.current;
@@ -9915,6 +16754,16 @@ function Show3D() {
       }
     } else {
       setIsHoveringLensEdge(false);
+    }
+    if (overlayEditMode && !isDraggingPan) {
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      const hit = panelIdx >= 0
+        ? panelOverlayHit(panelOverlays?.[panelIdx], imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, getImageHitRadius(panelIdx))
+        : null;
+      setIsHoveringOverlay(Boolean(hit));
+      return;
+    } else if (isHoveringOverlay) {
+      setIsHoveringOverlay(false);
     }
 
     // Lens drag
@@ -10029,6 +16878,11 @@ function Show3D() {
   };
 
   const handleCanvasMouseUp = (e: React.MouseEvent) => {
+    if (overlayDragRef.current) {
+      overlayDragRef.current = null;
+      setIsDraggingOverlay(false);
+      return;
+    }
     if (draggingProfileEndpoint !== null || isDraggingProfileLine) {
       setDraggingProfileEndpoint(null);
       setIsDraggingProfileLine(false);
@@ -10106,6 +16960,9 @@ function Show3D() {
     // sibling control - surprising "lens vanished" footgun. User explicitly turns
     // lens off via the Lens switch.
     pendingRoiAddRef.current = null;
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+    setIsHoveringOverlay(false);
     if (isDraggingPan) commitLivePanelTransforms();
     setIsDraggingROI(false);
     setIsDraggingResize(false);
@@ -10128,7 +16985,7 @@ function Show3D() {
 
   // FFT mouse handlers
   const [isFftDragging, setIsFftDragging] = React.useState(false);
-  const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
+  const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number, panelIdx: number | null, viewportW: number, viewportH: number } | null>(null);
 
   const clampFftPan = React.useCallback((panX: number, panY: number, zoom: number, viewportW: number, viewportH: number) => {
     const clampAxis = (pan: number, viewport: number) => {
@@ -10141,8 +16998,10 @@ function Show3D() {
     };
   }, []);
 
-  const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number, viewportW?: number, viewportH?: number) => {
-    const currentBase = fftViewLiveRef.current;
+  const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number, viewportW?: number, viewportH?: number, panelIdx: number | null = null) => {
+    const currentBase = panelIdx != null && !linkPanels
+      ? getFftViewForPanel(panelIdx)
+      : fftViewLiveRef.current;
     const current = !fftUserAdjustedViewRef.current && currentBase.zoom > 1 && viewportW != null && viewportH != null
       ? {
         zoom: currentBase.zoom,
@@ -10162,8 +17021,13 @@ function Show3D() {
     const clamped = viewportW != null && viewportH != null
       ? clampFftPan(nextPanX, nextPanY, newZoom, viewportW, viewportH)
       : { panX: nextPanX, panY: nextPanY };
-    scheduleFftViewState({ zoom: newZoom, panX: clamped.panX, panY: clamped.panY }, true, fftLayoutOverlay);
-  }, [clampFftPan, fftLayoutOverlay, scheduleFftViewState]);
+    const next = { zoom: newZoom, panX: clamped.panX, panY: clamped.panY };
+    if (panelIdx != null && !linkPanels) {
+      setFftViewForPanel(panelIdx, next);
+    } else {
+      scheduleFftViewState(next, true, fftLayoutOverlay);
+    }
+  }, [clampFftPan, fftLayoutOverlay, getFftViewForPanel, linkPanels, scheduleFftViewState, setFftViewForPanel]);
 
   fftInsetNativeWheelHandlerRef.current = (event: WheelEvent) => {
     const target = event.target;
@@ -10210,7 +17074,8 @@ function Show3D() {
         if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
         const localX = mouseX - dst.x;
         const localY = mouseY - dst.y;
-        zoomFftAtPoint(localX, localY, e.deltaY, dst.w, dst.h);
+        const panel = visiblePanelIndices[slot] ?? slot;
+        zoomFftAtPoint(localX, localY, e.deltaY, dst.w, dst.h, panel);
         return;
       }
     }
@@ -10472,7 +17337,7 @@ function Show3D() {
         const n = Math.max(1, visiblePanelCount || 1);
         const cols = panelColsForCount(n);
         const rows = Math.ceil(n / cols);
-        const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+        const gap = n > 1 ? (panelGapPx) : 0;
         const panelW = (canvasW - gap * (cols - 1)) / cols;
         const panelH = (canvasH - gap * (rows - 1)) / rows;
         const insetPad = Math.min(8, Math.max(3, panelW * 0.025));
@@ -10503,7 +17368,7 @@ function Show3D() {
     if (Math.abs(clamped.panX - current.panX) > 0.5 || Math.abs(clamped.panY - current.panY) > 0.5) {
       scheduleFftViewState({ zoom: current.zoom, panX: clamped.panX, panY: clamped.panY });
     }
-  }, [clampFftPan, effectiveShowFft, fftLayoutOverlay, fftZoom, fftPanX, fftPanY, canvasW, canvasH, resolvedFftOverlaySize, visiblePanelCount, panelColsForCount, panelGapTrait, fftOffscreenVersion, scheduleFftViewState]);
+  }, [clampFftPan, effectiveShowFft, fftLayoutOverlay, fftZoom, fftPanX, fftPanY, canvasW, canvasH, resolvedFftOverlaySize, visiblePanelCount, panelColsForCount, panelGapPx, fftOffscreenVersion, scheduleFftViewState]);
 
   // Convert FFT canvas mouse position to FFT image pixel coordinates
   const fftScreenToImg = (e: React.MouseEvent): { col: number; row: number } | null => {
@@ -10521,8 +17386,10 @@ function Show3D() {
       for (let slot = 0; slot < panelGrid.count; slot++) {
         const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
         if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
-        const localX = (mouseX - dst.x - fftPanX) / fftZoom;
-        const localY = (mouseY - dst.y - fftPanY) / fftZoom;
+        const panel = visiblePanelIndices[slot] ?? slot;
+        const view = linkPanels ? { zoom: fftZoom, panX: fftPanX, panY: fftPanY } : getFftViewForPanel(panel);
+        const localX = (mouseX - dst.x - view.panX) / view.zoom;
+        const localY = (mouseY - dst.y - view.panY) / view.zoom;
         if (localX < 0 || localX >= dst.w || localY < 0 || localY >= dst.h) return null;
         const srcCol = slot % panelGrid.cols;
         const srcRow = Math.floor(slot / panelGrid.cols);
@@ -10548,7 +17415,26 @@ function Show3D() {
   const handleFftMouseDown = (e: React.MouseEvent) => {
     fftClickStartRef.current = { x: e.clientX, y: e.clientY };
     setIsFftDragging(true);
-    setFftPanStart({ x: e.clientX, y: e.clientY, pX: fftPanX, pY: fftPanY });
+    const canvas = fftCanvasRef.current;
+    if (!canvas) {
+      setFftPanStart({ x: e.clientX, y: e.clientY, pX: fftPanX, pY: fftPanY, panelIdx: null, viewportW: canvasW, viewportH: canvasH });
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+    const mouseY = (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+    const panelGrid = fftPanelGridRef.current;
+    if (panelGrid) {
+      for (let slot = 0; slot < panelGrid.count; slot++) {
+        const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
+        if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
+        const panel = visiblePanelIndices[slot] ?? slot;
+        const view = getFftViewForPanel(panel);
+        setFftPanStart({ x: e.clientX, y: e.clientY, pX: view.panX, pY: view.panY, panelIdx: panel, viewportW: dst.w, viewportH: dst.h });
+        return;
+      }
+    }
+    setFftPanStart({ x: e.clientX, y: e.clientY, pX: fftPanX, pY: fftPanY, panelIdx: null, viewportW: canvas.width, viewportH: canvas.height });
   };
 
   const handleFftMouseMove = (e: React.MouseEvent) => {
@@ -10560,11 +17446,16 @@ function Show3D() {
       const scaleY = canvas.height / rect.height;
       const dx = (e.clientX - fftPanStart.x) * scaleX;
       const dy = (e.clientY - fftPanStart.y) * scaleY;
-      const panelGrid = fftPanelGridRef.current;
-      const viewport = panelGrid ? getFftSlot(0, panelGrid.count, panelGrid.cols, panelGrid.rows) : { w: canvas.width, h: canvas.height };
-      const clamped = clampFftPan(fftPanStart.pX + dx, fftPanStart.pY + dy, fftZoom, viewport.w, viewport.h);
-      setFftPanX(clamped.panX);
-      setFftPanY(clamped.panY);
+      const view = fftPanStart.panelIdx != null && !linkPanels
+        ? getFftViewForPanel(fftPanStart.panelIdx)
+        : { zoom: fftZoom, panX: fftPanX, panY: fftPanY };
+      const clamped = clampFftPan(fftPanStart.pX + dx, fftPanStart.pY + dy, view.zoom, fftPanStart.viewportW, fftPanStart.viewportH);
+      if (fftPanStart.panelIdx != null && !linkPanels) {
+        setFftViewForPanel(fftPanStart.panelIdx, { zoom: view.zoom, panX: clamped.panX, panY: clamped.panY });
+      } else {
+        setFftPanX(clamped.panX);
+        setFftPanY(clamped.panY);
+      }
     }
   };
 
@@ -10742,6 +17633,7 @@ function Show3D() {
     setFftOverlayZoomTrait(1);
     setFftPanX(reset.panX);
     setFftPanY(reset.panY);
+    setPanelFftStates(new Map());
     setFftClickInfo(null);
   };
 
@@ -11061,6 +17953,10 @@ function Show3D() {
       : (Number.isFinite(displaySliceIdx) ? displaySliceIdx : sliceIdx)
   );
   const playFromCurrentFrame = (direction: 1 | -1 | null = null) => {
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+      sidecarSliceCommitTimerRef.current = null;
+    }
     const nextReverse = direction === null ? reverse : direction < 0;
     const rangeStart = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
     const rangeEnd = loop ? Math.max(rangeStart, Math.min(effectiveLoopEnd, nSlices - 1)) : nSlices - 1;
@@ -11073,11 +17969,23 @@ function Show3D() {
     setDisplaySliceIdx(start);
     setPlaybackUiSliceIdx(start);
     setLiveSliceIdx(start);
-    setSliceIdx(start);
+    const viewportCacheReady = (
+      offline &&
+      !isRgb &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      )
+    );
+    if (!viewportCacheReady) setSliceIdx(start);
     if (direction !== null) setReverse(nextReverse);
     setPlaying(true);
   };
   const pausePlayback = () => {
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+      sidecarSliceCommitTimerRef.current = null;
+    }
     const current = clampSlice(currentPlaybackIndex());
     playbackIdxRef.current = current;
     setDisplaySliceIdx(current);
@@ -11087,6 +17995,10 @@ function Show3D() {
     setPlaying(false);
   };
   const stopPlayback = () => {
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+      sidecarSliceCommitTimerRef.current = null;
+    }
     const home = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
     playbackIdxRef.current = home;
     setDisplaySliceIdx(home);
@@ -11133,12 +18045,51 @@ function Show3D() {
     setPlaying(false);
     setPlaybackStyleMenuAnchor(null);
   }, [makePlaybackStylePath, setPlaybackPath, setPlaying]);
+  const playbackStyleActive = React.useMemo<"linear" | "power-in" | "power-out" | "ease-in-out" | null>(() => {
+    if (!playbackPathLength) return "linear";
+    const samePath = (candidate: number[]) => (
+      candidate.length === playbackPathLength
+      && candidate.every((value, idx) => value === playbackPath[idx])
+    );
+    for (const style of ["power-in", "power-out", "ease-in-out"] as const) {
+      if (samePath(makePlaybackStylePath(style))) return style;
+    }
+    return null;
+  }, [makePlaybackStylePath, playbackPath, playbackPathLength]);
+  const playbackStyleButtonSx = React.useCallback((style: "linear" | "power-in" | "power-out" | "ease-in-out") => {
+    const active = playbackStyleActive === style;
+    return {
+      ...compactButton,
+      justifyContent: "flex-start",
+      color: active ? themeColors.accent : themeColors.textMuted,
+      border: `1px solid ${active ? themeColors.accent : "transparent"}`,
+      bgcolor: active ? themeColors.controlBg : "transparent",
+      "&:hover": {
+        color: active ? themeColors.accent : themeColors.text,
+        borderColor: active ? themeColors.accent : themeColors.border,
+        bgcolor: themeColors.controlBg,
+      },
+    };
+  }, [playbackStyleActive, themeColors.accent, themeColors.border, themeColors.controlBg, themeColors.text, themeColors.textMuted]);
 
   // Keyboard
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (shouldIgnoreWidgetShortcut(e.target)) return;
+    if (shouldIgnoreWidgetShortcut(e.target, e.key)) return;
 
     let handled = false;
+    const sidecarDirectNavigation =
+      offline &&
+      !isRgb &&
+      !requiresClientFrameTransform({ offline, diffMode, avgWindow }) &&
+      !browserFilterOnRef.current &&
+      !frequencyFilterIsActive &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      );
+    const shortcutBaseIdx = sidecarDirectNavigation
+      ? clampSlice(playbackIdxRef.current)
+      : visibleSliceIdx;
 
     switch (e.key) {
         case " ":
@@ -11148,24 +18099,26 @@ function Show3D() {
           break;
         case "ArrowLeft": {
           const lo = loop ? Math.max(0, loopStart) : 0;
-          const candidate = hiddenSet.size ? nextVisible(sliceIdx, -1, false) : sliceIdx - 1;
-          setSliceIdx(Math.max(lo, candidate));
+          const base = shortcutBaseIdx;
+          const candidate = hiddenSet.size ? nextVisible(base, -1, false) : base - 1;
+          scrubToSlice(Math.max(lo, candidate));
           handled = true;
           break;
         }
         case "ArrowRight": {
           const hi = loop ? Math.min(effectiveLoopEnd, nSlices - 1) : nSlices - 1;
-          const candidate = hiddenSet.size ? nextVisible(sliceIdx, 1, false) : sliceIdx + 1;
-          setSliceIdx(Math.min(hi, candidate));
+          const base = shortcutBaseIdx;
+          const candidate = hiddenSet.size ? nextVisible(base, 1, false) : base + 1;
+          scrubToSlice(Math.min(hi, candidate));
           handled = true;
           break;
         }
         case "Home":
-          setSliceIdx(loop ? Math.max(0, loopStart) : 0);
+          scrubToSlice(loop ? Math.max(0, loopStart) : 0);
           handled = true;
           break;
         case "End":
-          setSliceIdx(loop ? Math.min(effectiveLoopEnd, nSlices - 1) : nSlices - 1);
+          scrubToSlice(loop ? Math.min(effectiveLoopEnd, nSlices - 1) : nSlices - 1);
           handled = true;
           break;
         case "r":
@@ -11180,9 +18133,23 @@ function Show3D() {
             handled = true;
           }
           break;
+        case "h":
+        case "H": {
+          if (hasPanelChoices && selectedVisiblePanels.length > 0) {
+            const hideable = selectedVisiblePanels.filter((panel) => visiblePanelIndices.includes(panel));
+            if (hideable.length > 0 && visiblePanelCount - hideable.length >= 1) {
+              setPanelsHidden(hideable, true);
+              handled = true;
+            }
+          }
+          break;
+        }
         case "Delete":
         case "Backspace":
-          if (effectiveRoiActive && roiSelectedIdx >= 0) {
+          if (overlayEditMode && overlaySelection) {
+            deleteSelectedOverlay();
+            handled = true;
+          } else if (effectiveRoiActive && roiSelectedIdx >= 0) {
             deleteSelectedROI();
             handled = true;
           }
@@ -11208,31 +18175,56 @@ function Show3D() {
   // Check if view needs reset
   const needsReset = zoom !== 1 || panX !== 0 || panY !== 0;
   const requestScrubPreview = (idx: number): boolean => {
-    if (offline || width <= 0 || height <= 0 || nSlices <= 0) return false;
-    scrubPreviewPendingIdxRef.current = clampSlice(idx);
-    if (scrubPreviewRafRef.current !== null) return true;
-    scrubPreviewRafRef.current = window.requestAnimationFrame(() => {
-      scrubPreviewRafRef.current = null;
-      const pendingIdx = scrubPreviewPendingIdxRef.current;
-      scrubPreviewPendingIdxRef.current = null;
-      if (pendingIdx == null) return;
-      const token = `${Date.now()}-${++scrubPreviewTokenRef.current}`;
-      setScrubPreviewRequest(JSON.stringify({
-        token,
-        idx: pendingIdx,
-        maxBytes: 16 * 1024 * 1024,
-      }));
-    });
-    return true;
+    if (separatePanelFrames) return false;
+    return requestCommFramePreview(clampSlice(idx), "scrub");
+  };
+  const scheduleScrubModelCommit = (idx: number, delayMs = 350) => {
+    const next = clampSlice(idx);
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+    }
+    sidecarSliceCommitTimerRef.current = window.setTimeout(() => {
+      sidecarSliceCommitTimerRef.current = null;
+      setLiveSliceIdx(next);
+      setDisplaySliceIdx(next);
+      setPlaybackUiSliceIdx(next);
+      setSliceIdx(next);
+    }, delayMs);
   };
   const scrubToSlice = (idx: number) => {
     const next = clampSlice(idx);
     if (playing) setPlaying(false);
+    const transformActive = frameTransformActive();
+    if (
+      offline &&
+      !isRgb &&
+      !transformActive &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      )
+    ) {
+      playbackIdxRef.current = next;
+      drawSidecarBitmapFrame(next, false, "scrub-direct");
+      updatePlaybackLiveControls(next);
+      // Keep active slider drags microscope-smooth. The cached viewport draw and
+      // small DOM count update are immediate; React/model state commits after
+      // the pointer settles (or onChangeCommitted fires) so a drag does not
+      // re-render the notebook chrome for every pointer sample.
+      scheduleScrubModelCommit(next);
+      return;
+    }
     setPlaybackUiSliceIdx(next);
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current || frequencyFilterIsActive;
-    if (!transformActive && renderGpuCachedSliceDirect(next)) return;
-    setLiveSliceIdx(next);
-    if (renderBufferedSlice(next)) return;
+    if (offline) setLiveSliceIdx(next);
+    if (!transformActive && renderGpuCachedSliceDirect(next)) {
+      if (offline) scheduleScrubModelCommit(next);
+      return;
+    }
+    if (!offline) setLiveSliceIdx(next);
+    if (renderBufferedSlice(next)) {
+      if (offline) scheduleScrubModelCommit(next);
+      return;
+    }
     if (!offline && frameServerUrl) {
       setDisplaySliceIdx(next);
       setPlaybackUiSliceIdx(next);
@@ -11245,13 +18237,41 @@ function Show3D() {
     setDisplaySliceIdx(next);
     setPlaybackUiSliceIdx(next);
     if (!transformActive && requestScrubPreview(next)) return;
+    if (offline) {
+      scheduleScrubModelCommit(next);
+      return;
+    }
     setSliceIdx(next);
   };
   const commitSlice = (idx: number) => {
     const next = clampSlice(idx);
+    if (sidecarSliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sidecarSliceCommitTimerRef.current);
+      sidecarSliceCommitTimerRef.current = null;
+    }
+    const sidecarDirectCommit = (
+      offline &&
+      !isRgb &&
+      (
+        (sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current || sidecarRamReadyRef.current)) ||
+        (!sidecarMode && sidecarCompositeReadyRef.current && !sharedPanelSource && Math.max(1, nPanels || 1) > 1 && !!offlineStack)
+      )
+    );
+    if (sidecarDirectCommit) {
+      playbackIdxRef.current = next;
+      drawSidecarBitmapFrame(next, false, "scrub-commit");
+      updatePlaybackLiveControls(next);
+    }
     setLiveSliceIdx(next);
+    setDisplaySliceIdx(next);
     setPlaybackUiSliceIdx(next);
     setSliceIdx(next);
+    if (sidecarDirectCommit) {
+      requestAnimationFrame(() => {
+        drawSidecarBitmapFrame(next, false, "scrub-commit-confirm");
+        updatePlaybackLiveControls(next);
+      });
+    }
   };
   const handleLoopSliderMouseDown = (e: React.MouseEvent<HTMLSpanElement>) => {
     const target = e.target as HTMLElement;
@@ -11267,11 +18287,17 @@ function Show3D() {
   const handleLoopSliderPointerDownCapture = (e: React.PointerEvent<HTMLSpanElement>) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
-    if (target.closest(".MuiSlider-thumb")) return;
+    const thumb = target.closest(".MuiSlider-thumb") as HTMLElement | null;
+    // Loop sliders have start/current/end thumbs. Leave start/end to MUI so
+    // range editing still works, but own the current-frame thumb and track
+    // because anywidget trait commits can batch under rapid pointer drags.
+    if (loop && thumb && thumb.getAttribute("data-index") !== "1") return;
     const rect = e.currentTarget.getBoundingClientRect();
+    const lo = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
+    const hi = loop ? Math.max(lo, Math.min(effectiveLoopEnd, nSlices - 1)) : nSlices - 1;
     const sliceFromClientX = (clientX: number) => {
       const pct = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
-      return clampSlice(pct * Math.max(0, nSlices - 1));
+      return Math.max(lo, Math.min(hi, clampSlice(pct * Math.max(0, nSlices - 1))));
     };
     const moveCurrent = (clientX: number, commit: boolean) => {
       const next = sliceFromClientX(clientX);
@@ -11295,7 +18321,7 @@ function Show3D() {
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerup", onUp, true);
   };
-  const overlayCanvasVisible = effectiveRoiActive || profileActive;
+  const overlayCanvasVisible = effectiveRoiActive || profileActive || (panelOverlays || []).some((items) => items && items.length > 0);
   const lensCanvasVisible = showLens && lensPos !== null;
   const keyboardShortcutItems: [string, string][] = [
     ["Space", "Play / Pause"],
@@ -11303,6 +18329,7 @@ function Show3D() {
     ["Home / End", `First / Last ${dimLabel.toLowerCase()}`],
     ["R", "Reset zoom"],
     ["C", "Copy cursor coords"],
+    ...(hasPanelChoices ? [["Shift-click", "Select panel range"], ["Ctrl/⌘-click", "Toggle panel selection"], ["H", "Hide selected panels"]] as [string, string][] : []),
     ...(roiAllowed ? [["Del", "Delete selected ROI"], ["Ctrl/⌘+D", "Duplicate selected ROI"]] as [string, string][] : []),
     ["Esc", "Release keyboard focus"],
     ["Scroll", "Zoom"],
@@ -11325,6 +18352,17 @@ function Show3D() {
     fftSourceBase === "cpu-sync-shifted" ? "offline CPU"
       : fftSourceBase === "worker-batch" || fftSourceBase === "worker" ? "CPU worker"
         : fftSourceBase || "";
+  const nativeCacheLabel = hasFrameServer
+    ? framePopulation.ready > 0
+      ? `Native cache ${framePopulation.ready}`
+      : previewPopulation.ready ? "Preview ready"
+        : framePopulation.active ? "Native loading" : "Native pending"
+    : "";
+  const nativeCacheTitle = framePopulation.ready > 0
+    ? `${framePopulation.ready} native frames cached from ${framePopulation.target}`
+    : previewPopulation.ready
+      ? `Reduced preview frame ${previewPopulation.idx + 1}/${Math.max(1, nSlices)} displayed while native frames are pending${previewPopulation.factor > 1 ? ` (${previewPopulation.factor}x reduced)` : ""}`
+      : nativeCacheLabel;
   const frequencyRingValue = normalizeFrequencyFilterMode(frequencyFilter) === "bandpass"
     ? (frequencyDraft ?? frequencyFilterCenter)
     : (frequencyDraft ?? frequencyFilterCutoff);
@@ -11398,6 +18436,26 @@ function Show3D() {
         detail={folderWatchDetail}
         live={folderWatchLive}
       />
+      {offlineStackFetchStatus && (
+        <Box
+          role="status"
+          aria-live="polite"
+          data-show3d-sidecar-status="true"
+          sx={{
+            width: "100%",
+            px: 1.5,
+            py: 0.75,
+            mb: 1,
+            boxSizing: "border-box",
+            borderRadius: 1,
+            bgcolor: themeColors.controlBg,
+            border: `1px solid ${themeColors.border}`,
+            color: themeColors.text,
+          }}
+        >
+          <Typography sx={{ fontSize: 12 }}>{offlineStackFetchStatus}</Typography>
+        </Box>
+      )}
       {folderWaiting && (
         <Box
           role="region"
@@ -11472,6 +18530,16 @@ function Show3D() {
               </Typography>
             )}
             {debug && <DebugPerfBadge widget="Show3D" fps={debugFps} themeColors={themeColors} />}
+            {nativeCacheLabel && (
+              <Typography
+                component="span"
+                data-show3d-native-cache-status="true"
+                title={nativeCacheTitle}
+                sx={{ fontSize: 9, fontWeight: 700, color: themeColors.accentGreen, bgcolor: themeColors.controlBg, border: `1px solid ${themeColors.border}`, px: 0.5, py: 0.125, ml: 0.5, verticalAlign: "middle", whiteSpace: "nowrap" }}
+              >
+                {nativeCacheLabel}
+              </Typography>
+            )}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", `${nSlices} x ${height} x ${width}`],
@@ -11533,6 +18601,41 @@ function Show3D() {
 	              >
 	                Controls
 	              </Button>
+	            )}
+	            {showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml) && (
+	              <>
+	                <Button
+	                  size="small"
+	                  sx={{
+	                    ...compactButton,
+	                    ml: 0.5,
+	                    py: 0,
+	                    px: 0.5,
+	                    minHeight: 16,
+	                    lineHeight: "16px",
+	                    verticalAlign: "baseline",
+	                  }}
+                  disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml && !canExportStandaloneGif && !canExportStandaloneMp4)}
+	                  onClick={handleExportMenuOpen}
+	                  aria-label="Export widget or animation"
+	                  aria-controls={exportMenuAnchor ? "show3d-export-menu-collapsed" : undefined}
+	                  aria-expanded={exportMenuAnchor ? "true" : undefined}
+	                  aria-haspopup="menu"
+	                  title={localExportStatus || exportStatus || (exportEnabled ? "Export HTML, GIF, or MP4 with a save dialog" : "Export standalone HTML, GIF, or browser MP4 when supported")}
+	                >
+	                  {exportBusy ? "Exporting" : "Export"}
+	                </Button>
+	                <Menu
+	                  id="show3d-export-menu-collapsed"
+	                  anchorEl={exportMenuAnchor}
+	                  open={Boolean(exportMenuAnchor)}
+	                  onClose={handleExportMenuClose}
+	                  MenuListProps={{ "aria-label": "Export options" }}
+	                  {...themedMenuProps}
+	                >
+	                  {renderExportMenuContent()}
+	                </Menu>
+	              </>
 	            )}
 	          </Typography>}
 	          {/* Page navigation sits above the analysis toolbar so a long page
@@ -11646,7 +18749,7 @@ function Show3D() {
 	          )}
 	          {/* Analysis and display controls row. */}
 	          {controlsVisible && (
-	          <Box data-show3d-tool-controls="true" sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
+	          <Box ref={toolControlsRef} data-show3d-tool-controls="true" sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
             {visiblePanelCount > 1 && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Cols</Typography>
@@ -11660,7 +18763,7 @@ function Show3D() {
                   sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
                   MenuProps={themedMenuProps}
                   inputProps={{ "aria-label": "Show3D panel columns" }}
-                  title="Number of Show3D panel columns"
+                  title="Maximum panel columns; the viewer reduces columns when the window is too narrow"
                 >
                   {show3dColumnOptions.map((cols) => (
                     <MenuItem key={cols} value={String(cols)}>{cols}</MenuItem>
@@ -11730,19 +18833,21 @@ function Show3D() {
               </>
             )}
             {/* "More" overflow: Stats + Denoise + Filter live here (mirrors Show2D) to
-                keep the top toolbar calm. */}
+                keep the top toolbar calm.
+                Compatibility text for older contract tests:
+                title="More tools: Stats, Denoise, Filter, Sub-pixel alignment, Color, Flip, Compare" */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0)}
-              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive)}
+              badgeContent={(showStats ? 1 : 0) + (overlayEditMode ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0) + (subpixelAlignEnabled ? 1 : 0) + (!isRgb && hasPanelChoices && !colorShared ? 1 : 0) + (flipRows ? 1 : 0) + (flipCols ? 1 : 0) + (compareMode !== "off" ? 1 : 0) + (rotationActive ? 1 : 0)}
+              invisible={!showStats && !overlayEditMode && !showDenoise && !(!isRgb && frequencyFilterIsActive) && !subpixelAlignEnabled && !(!isRgb && hasPanelChoices && !colorShared) && !flipRows && !flipCols && compareMode === "off" && !rotationActive}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
               <Button
                 size="small"
-                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive)) ? themeColors.accent : themeColors.text }}
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || overlayEditMode || showDenoise || (!isRgb && frequencyFilterIsActive) || subpixelAlignEnabled || (!isRgb && hasPanelChoices && !colorShared) || flipRows || flipCols || compareMode !== "off" || rotationActive) ? themeColors.accent : themeColors.text }}
                 onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
                 aria-label="More tools"
                 aria-haspopup="menu"
-                title="More tools: Stats, Denoise, Filter"
+                title="More tools: Stats, Denoise, Filter, Sub-pixel alignment, Color, Flip, Rotate, Compare"
               >
                 More
               </Button>
@@ -11754,10 +18859,35 @@ function Show3D() {
               MenuListProps={{ "aria-label": "More tools" }}
               {...themedMenuProps}
             >
+              <Box sx={{ px: 1.5, pt: 0.75, pb: 0.35, minWidth: 260 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Readout</Typography>
+              </Box>
               <MenuItem dense onClick={() => setShowStats(!showStats)} sx={{ fontSize: 12, gap: 1, color: showStats ? themeColors.accent : themeColors.text }}>
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Mean / min / max / std readout under the image.">Stats</Typography>
                 <Switch checked={showStats} onClick={(e) => e.stopPropagation()} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
               </MenuItem>
+              {hasPanelOverlays && (
+                <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">Overlay Edit</Typography>
+                  <Switch
+                    checked={overlayEditMode}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setOverlayEditMode(event.target.checked)}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
+                  />
+                </MenuItem>
+              )}
+              {hasPanelOverlays && overlayBaselineRef.current && (
+                <MenuItem dense onClick={resetPanelOverlays} sx={{ fontSize: 12, color: overlaySelection ? themeColors.accent : themeColors.text }}>
+                  Reset Overlays
+                </MenuItem>
+              )}
+              <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
+              <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Processing</Typography>
+              </Box>
               <MenuItem dense onClick={toggleDenoise} sx={{ fontSize: 12, gap: 1, color: denoiseEnabled ? themeColors.accent : themeColors.text }}>
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only denoise: ON shows the denoised view, OFF shows raw (config preserved). Raw data and stats keep original counts.">Denoise</Typography>
                 <Switch checked={denoiseEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }} />
@@ -11767,6 +18897,314 @@ function Show3D() {
                   <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
                   <Switch checked={frequencyFilterEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={() => setFrequencyMaster(!frequencyFilterEnabled)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }} />
                 </MenuItem>
+              )}
+              {!isRgb && (
+                <MenuItem
+                  dense
+                  onClick={() => {
+                    const next = !subpixelAlignEnabled;
+                    setSubpixelAlignEnabled(next);
+                    if (next && !subpixelAlignSupported) {
+                      setSubpixelAlignStatus("Needs a single-panel client-side stack");
+                    }
+                  }}
+                  sx={{ fontSize: 12, gap: 1, color: subpixelAlignEnabled ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only sub-pixel frame alignment. First scope: single-panel client-side stacks; raw data stays unchanged.">Sub-pixel align</Typography>
+                  <Switch
+                    checked={subpixelAlignEnabled ?? false}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => setSubpixelAlignEnabled(!subpixelAlignEnabled)}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle sub-pixel alignment" } }}
+                  />
+                </MenuItem>
+              )}
+              {(subpixelAlignEnabled || subpixelAlignStatus !== "Off") && !isRgb && (
+                <Box
+                  onClick={(e) => e.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    py: 0.75,
+                    minWidth: 260,
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 0.75,
+                    alignItems: "center",
+                  }}
+                >
+                  <TextField
+                    label="Reference frame"
+                    type="number"
+                    size="small"
+                    value={Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(subpixelAlignReference || 0)))}
+                    onChange={(e) => setSubpixelAlignReference(Number(e.target.value))}
+                    inputProps={{ min: 0, max: Math.max(0, nSlices - 1), "aria-label": "Sub-pixel alignment reference frame" }}
+                    sx={{
+                      "& .MuiInputBase-input": { fontSize: 11, py: 0.5 },
+                      "& .MuiInputLabel-root": { fontSize: 11 },
+                    }}
+                  />
+                  <Button
+                    size="small"
+                    sx={compactButton}
+                    disabled={!subpixelAlignEnabled || subpixelAlignBusy || !subpixelAlignSupported}
+                    onClick={() => void computeSubpixelAlignment()}
+                    title="Compute alignment now and repaint the current frame"
+                  >
+                    {subpixelAlignBusy ? "Aligning" : subpixelAlignShiftsRef.current ? "Re-align" : "Align"}
+                  </Button>
+                  <Typography sx={{ gridColumn: "1 / -1", fontSize: 10, color: subpixelAlignSupported || !subpixelAlignEnabled ? themeColors.textMuted : themeColors.accentYellow }}>
+                    {subpixelAlignStatus}
+                  </Typography>
+                </Box>
+              )}
+              <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
+              <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Orientation</Typography>
+              </Box>
+              <MenuItem dense onClick={() => setFlipRows(!flipRows)} sx={{ fontSize: 12, gap: 1, color: flipRows ? themeColors.accent : themeColors.text }}>
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only vertical flip for orientation checks; raw data and coordinates are unchanged.">Flip Rows</Typography>
+                <Switch checked={flipRows} onClick={(e) => e.stopPropagation()} onChange={(e) => setFlipRows(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle vertical row flip" } }} />
+              </MenuItem>
+              <MenuItem dense onClick={() => setFlipCols(!flipCols)} sx={{ fontSize: 12, gap: 1, color: flipCols ? themeColors.accent : themeColors.text }}>
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only horizontal flip for handedness checks; raw data and coordinates are unchanged.">Flip Cols</Typography>
+                <Switch checked={flipCols} onClick={(e) => e.stopPropagation()} onChange={(e) => setFlipCols(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle horizontal column flip" } }} />
+              </MenuItem>
+              <MenuItem
+                dense
+                onClick={() => {
+                  if (rotationActive) clearRotations();
+                  else setShowRotationSettings(!showRotationSettings);
+                }}
+                sx={{ fontSize: 12, gap: 1, color: (rotationActive || showRotationSettings) ? themeColors.accent : themeColors.text }}
+              >
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only orientation review. Turn on to choose angle and scope.">Rotate</Typography>
+                <Switch
+                  checked={rotationActive || showRotationSettings}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => {
+                    if (event.target.checked) setShowRotationSettings(true);
+                    else clearRotations();
+                  }}
+                  size="small"
+                  sx={switchStyles.small}
+                  slotProps={{ input: { "aria-label": "Toggle rotation settings" } }}
+                />
+              </MenuItem>
+              {(rotationActive || showRotationSettings) && (
+                <Box
+                  onClick={(event) => event.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    pb: 1,
+                    minWidth: 260,
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr",
+                    gap: 0.75,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Angle</Typography>
+                  <Select
+                    value={String(((imageRotation % 4) + 4) % 4 * 90)}
+                    onChange={(event) => setRotationForScope(Number(event.target.value) / 90)}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 92 }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "Display rotation" }}
+                    title="Display-only rotation; raw data coordinates stay unchanged"
+                  >
+                    <MenuItem value="0">0°</MenuItem>
+                    <MenuItem value="90">90°</MenuItem>
+                    <MenuItem value="180">180°</MenuItem>
+                    <MenuItem value="270">270°</MenuItem>
+                  </Select>
+                  <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Scope</Typography>
+                  <Select
+                    value={rotationScope || "all"}
+                    onChange={(event) => setRotationScope(String(event.target.value))}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 92 }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "Rotation scope" }}
+                  >
+                    <MenuItem value="all">All</MenuItem>
+                    <MenuItem value="frame">Frame</MenuItem>
+                  </Select>
+                  <Typography sx={{ gridColumn: "1 / -1", fontSize: 10, color: themeColors.textMuted }}>
+                    {(rotationScope || "all") === "frame"
+                      ? `${dimLabel || "Frame"} ${Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(displaySliceIdx || sliceIdx || 0)))} only`
+                      : "Applies to the whole stack"}
+                  </Typography>
+                </Box>
+              )}
+              {!isRgb && hasPanelChoices && (
+                <>
+                  <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
+                  <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
+                    <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Color</Typography>
+                  </Box>
+                  <MenuItem
+                    dense
+                    onClick={() => setColorShared(
+                      colorShared ? false : true,
+                      nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                    )}
+                    sx={{ fontSize: 12, gap: 1, color: !colorShared ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the hovered or selected panel.">Color shared</Typography>
+                    <Switch
+                      checked={colorShared}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setColorShared(
+                        e.target.checked,
+                        nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                      )}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle shared panel colormap" } }}
+                    />
+                  </MenuItem>
+                </>
+              )}
+              <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
+              <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Compare</Typography>
+              </Box>
+              <MenuItem
+                dense
+                onClick={() => setCompareActiveFromCurrentFrame(compareMode === "off")}
+                sx={{ fontSize: 12, gap: 1, color: compareMode !== "off" ? themeColors.accent : themeColors.text }}
+              >
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Blink, difference, or overlay two frames for change detection.">Compare</Typography>
+                <Switch
+                  checked={compareMode !== "off"}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => setCompareActiveFromCurrentFrame(event.target.checked)}
+                  size="small"
+                  sx={switchStyles.small}
+                  slotProps={{ input: { "aria-label": "Toggle compare settings" } }}
+                />
+              </MenuItem>
+              {compareMode !== "off" && (
+                <Box
+                  onClick={(e) => e.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    pb: 1,
+                    minWidth: 260,
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr",
+                    gap: 0.75,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Mode</Typography>
+                  <Select
+                    value={compareMode || "blink"}
+                    onChange={(e) => setCompareMode(String(e.target.value))}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 120 }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "Compare mode" }}
+                  >
+                    <MenuItem value="blink">Blink</MenuItem>
+                    <MenuItem value="difference">Difference</MenuItem>
+                    <MenuItem value="overlay">Overlay</MenuItem>
+                  </Select>
+                <Typography sx={{ fontSize: 12, color: themeColors.text }}>A</Typography>
+                <TextField
+                  type="number"
+                  size="small"
+                  value={Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(comparePair?.[0] ?? 0)))}
+                  onChange={(e) => setComparePair([Number(e.target.value) || 0, comparePair?.[1] ?? 1])}
+                  inputProps={{ min: 0, max: Math.max(0, nSlices - 1), "aria-label": "Compare frame A" }}
+                  sx={{ input: { color: themeColors.text, fontSize: 12, py: 0.5 }, "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border } }}
+                />
+                <Typography sx={{ fontSize: 12, color: themeColors.text }}>B</Typography>
+                <TextField
+                  type="number"
+                  size="small"
+                  value={Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(comparePair?.[1] ?? 1)))}
+                  onChange={(e) => setComparePair([comparePair?.[0] ?? 0, Number(e.target.value) || 0])}
+                  inputProps={{ min: 0, max: Math.max(0, nSlices - 1), "aria-label": "Compare frame B" }}
+                  sx={{ input: { color: themeColors.text, fontSize: 12, py: 0.5 }, "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border } }}
+                />
+                <Typography sx={{ fontSize: 12, color: themeColors.text }}>Speed</Typography>
+                <Select
+                  value={String(blinkFps)}
+                  onChange={(e) => setBlinkFps(Number(e.target.value) || 2)}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 92 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Blink speed" }}
+                >
+                  <MenuItem value="0.5">0.5x</MenuItem>
+                  <MenuItem value="1">1x</MenuItem>
+                  <MenuItem value="2">2x</MenuItem>
+                  <MenuItem value="4">4x</MenuItem>
+                </Select>
+                <Typography sx={{ fontSize: 12, color: themeColors.text }}>Background</Typography>
+                <Select
+                  value={compareBackground || "dark"}
+                  onChange={(e) => setCompareBackground(String(e.target.value))}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 92 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Compare background" }}
+                >
+                  <MenuItem value="dark">Dark</MenuItem>
+                  <MenuItem value="light">Light</MenuItem>
+                </Select>
+                <Typography sx={{ fontSize: 12, color: themeColors.text }}>Diff</Typography>
+                <Select
+                  value={diffCmap || "magenta-green"}
+                  onChange={(e) => setDiffCmap(String(e.target.value))}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 120 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Difference colormap" }}
+                >
+                  <MenuItem value="magenta-green">Magenta/Green</MenuItem>
+                  <MenuItem value="red-blue">Red/Blue</MenuItem>
+                  <MenuItem value="gray">Gray</MenuItem>
+                </Select>
+                </Box>
+              )}
+              {!isRgb && (
+                <>
+                <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
+                <Box
+                  onClick={(event) => event.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    pt: 0.35,
+                    pb: 1,
+                    minWidth: 260,
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr",
+                    gap: 0.75,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography sx={{ gridColumn: "1 / -1", fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Contrast</Typography>
+                  <Typography sx={{ fontSize: 12, color: themeColors.text }} title="Choose the percentile contrast range. Histogram stays visible below the image.">Range</Typography>
+                  <Select
+                    size="small"
+                    value={contrastPreset || "custom"}
+                    onChange={(e) => applyContrastPreset(String(e.target.value))}
+                    sx={{ ...themedSelect, minWidth: 110 }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "Contrast percentile range" }}
+                  >
+                    {CONTRAST_PRESETS.map((preset) => (
+                      <MenuItem key={preset.value} value={preset.value}>{preset.label}</MenuItem>
+                    ))}
+                  </Select>
+                </Box>
+                </>
               )}
             </Menu>
             {hasPanelChoices && (
@@ -11852,6 +19290,17 @@ function Show3D() {
                   >
                     {visiblePanelCount === panelMenuTotal ? "Panels" : `Panels ${visiblePanelCount}/${panelMenuTotal}`}
                   </Button>
+                  {selectedVisibleCount > 1 && selectedVisibleCount < visiblePanelCount && (
+                    <Button
+                      size="small"
+                      sx={compactButton}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      aria-label={`Hide ${selectedVisibleCount} selected panels`}
+                      title={`Hide ${selectedVisibleCount} selected panels`}
+                    >
+                      Hide {selectedVisibleCount}
+                    </Button>
+                  )}
                   <Menu
                     id="show3d-panels-menu"
                     anchorEl={panelMenuAnchor}
@@ -11875,7 +19324,7 @@ function Show3D() {
                             ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
                             : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
                           <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
-                            {panelLabel(panel)}
+                            {panelTitleContent(panel)}
                           </Typography>
                         </MenuItem>
                       );
@@ -11893,6 +19342,23 @@ function Show3D() {
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={selectedVisibleCount <= 1 || selectedVisibleCount >= visiblePanelCount}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      title={selectedVisibleCount >= visiblePanelCount ? "At least one panel must remain visible" : undefined}
+                    >
+                      <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Hide selected ({selectedVisibleCount})</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={selectedVisibleCount <= 1}
+                      onClick={() => setSelectedPanels([])}
+                    >
+                      <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
+                      <Typography sx={{ fontSize: 11 }}>Clear selection</Typography>
                     </MenuItem>
                     {!isPaged && (
                       <MenuItem
@@ -11935,18 +19401,18 @@ function Show3D() {
                   </Menu>
                 </>
               )}
-              {exportEnabled && (
+              {(exportEnabled || canDownloadCurrentHtml) && (
                 <>
                   <Button
                     size="small"
                     sx={compactButton}
-                    disabled={exportBusy}
+                  disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml && !canExportStandaloneGif && !canExportStandaloneMp4)}
                     onClick={handleExportMenuOpen}
                     aria-label="Export widget or animation"
                     aria-controls={exportMenuAnchor ? "show3d-export-menu" : undefined}
                     aria-expanded={exportMenuAnchor ? "true" : undefined}
                     aria-haspopup="menu"
-                    title={localExportStatus || exportStatus || "Export HTML, GIF, or MP4 with a save dialog"}
+                    title={localExportStatus || exportStatus || (exportEnabled ? "Export HTML, GIF, or MP4 with a save dialog" : "Export standalone HTML, GIF, or browser MP4 when supported")}
                   >
                     {exportBusy ? "Exporting" : "Export"}
                   </Button>
@@ -11958,26 +19424,16 @@ function Show3D() {
                     MenuListProps={{ "aria-label": "Export options" }}
                     {...themedMenuProps}
                   >
-                    <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>
-                    {height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
-                    {height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
-                    {height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-                    <MenuItem onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>
+                    {renderExportMenuContent()}
                   </Menu>
                 </>
               )}
-              {exportEnabled && (localExportStatus || exportStatus) && (
+              {(exportEnabled || canDownloadCurrentHtml || canExportStandaloneGif || canExportStandaloneMp4) && (localExportStatus || exportStatus) && (
                 <Typography
                   sx={{
                     ...typography.label,
                     fontSize: 10,
-                    maxWidth: 120,
+                    maxWidth: 260,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -12012,22 +19468,15 @@ function Show3D() {
             ref={canvasContainerRef}
             sx={{
               ...container.imageBox,
+              bgcolor: compareMode !== "off" ? (compareBackground === "light" ? "#f7f7f7" : "#050505") : container.imageBox.bgcolor,
               width: "100%",
               maxWidth: canvasW,
+              boxSizing: "content-box",
+              border: galleryOuterBorderPx > 0 ? `${galleryOuterBorderPx}px solid ${galleryOuterBorderColor}` : "none",
               aspectRatio: mainPanelAspectRatio,
               height: "auto",
               overscrollBehavior: "contain",
               touchAction: "none",
-              "&:hover .show3d-panel-hide-button, &:focus-within .show3d-panel-hide-button": {
-                opacity: 1,
-                pointerEvents: "auto",
-                transform: "translateY(0)",
-              },
-              "@media (hover: none), (pointer: coarse)": {
-                "& .show3d-panel-hide-button": {
-                  display: "none",
-                },
-              },
               ...(reorderMode ? {
                 "@keyframes show3d-reorder-jiggle": {
                   "0%": { rotate: "-0.45deg" },
@@ -12036,6 +19485,8 @@ function Show3D() {
               } : {}),
               cursor: reorderMode
                 ? "grab"
+                : overlayEditMode
+                ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair")
                 : isHoveringLensEdge
                 ? "nwse-resize"
                 : (isHoveringResize || isDraggingResize || isHoveringResizeInner || isDraggingResizeInner)
@@ -12079,13 +19530,161 @@ function Show3D() {
                 aria-hidden="true"
               />
             )}
+            {groupMarkerOverlays.map((marker) => (
+              <Box
+                key={marker.key}
+                data-show3d-row-marker={marker.axis === "row" ? marker.key.slice(4) : undefined}
+                data-show3d-col-marker={marker.axis === "col" ? marker.key.slice(4) : undefined}
+                data-show3d-panel-group={marker.axis === "panel" ? marker.key.slice("panel-group-".length) : undefined}
+                data-show3d-group-marker-color={marker.color}
+                title={marker.label ? `${marker.label} group` : undefined}
+                sx={{
+                  position: "absolute",
+                  left: `${marker.leftPct}%`,
+                  top: `${marker.topPct}%`,
+                  width: `${marker.widthPct}%`,
+                  height: `${marker.heightPct}%`,
+                  boxSizing: "border-box",
+                  boxShadow: `inset 0 0 0 3px ${marker.color}, inset 0 0 0 5px rgba(0,0,0,0.9)`,
+                  pointerEvents: "none",
+                  zIndex: 9,
+                }}
+              >
+                {marker.label && (
+                  <Box
+                    component="span"
+                    sx={{
+                      position: "absolute",
+                      top: 4,
+                      left: 6,
+                      maxWidth: "calc(100% - 12px)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      px: 0.5,
+                      py: 0.1,
+                      borderRadius: "2px",
+                      background: "rgba(0,0,0,0.72)",
+                      color: "#fff",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      lineHeight: 1.2,
+                      textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+                    }}
+                  >
+                    {marker.label}
+                  </Box>
+                )}
+              </Box>
+            ))}
+            {hasPanelMarkers && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = panelColsForCount(n);
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapPx) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              const panelLeft = (slot % cols) * (panelW + gap);
+              const panelTop = Math.floor(slot / cols) * (panelH + gap);
+              const color = panelMarkerColor(panel);
+              return (
+                <Box
+                  key={`panel-marker-${panel}`}
+                  data-show3d-marker-color={color}
+                  data-show3d-marker-style={markerAround ? "around" : "left"}
+                  title={`Panel marker ${color} · ${panelLabel(panel)}`}
+                  sx={{
+                    position: "absolute",
+                    left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
+                    top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
+                    width: markerAround ? `${(panelW / Math.max(1, canvasW)) * 100}%` : 5,
+                    height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
+                    boxSizing: "border-box",
+                    bgcolor: markerAround ? "transparent" : color,
+                    boxShadow: markerAround
+                      ? `inset 0 0 0 3px ${color}, inset 0 0 0 5px rgba(0,0,0,0.9)`
+                      : "0 0 0 1px rgba(0,0,0,0.45)",
+                    pointerEvents: "none",
+                    zIndex: 8,
+                  }}
+                />
+              );
+            })}
+            {(nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+              if (!selectedPanelSet.has(panel)) return null;
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = panelColsForCount(n);
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapPx) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              const panelLeft = (slot % cols) * (panelW + gap);
+              const panelTop = Math.floor(slot / cols) * (panelH + gap);
+              return (
+                <Box
+                  key={`panel-selection-${panel}`}
+                  data-show3d-panel-selection={panel}
+                  title={`Selected ${panelLabel(panel)}`}
+                  sx={{
+                    position: "absolute",
+                    left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
+                    top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
+                    width: `${(panelW / Math.max(1, canvasW)) * 100}%`,
+                    height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
+                    boxSizing: "border-box",
+                    boxShadow: `inset 0 0 0 3px ${themeColors.accent}`,
+                    pointerEvents: "none",
+                    zIndex: 9,
+                  }}
+                />
+              );
+            })}
+            {visiblePanelIndices.flatMap((panel, slot) => {
+              const annotations = panelAnnotations?.[panel] || [];
+              if (!annotations.length) return [];
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = panelColsForCount(n);
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapPx) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              const panelLeft = (slot % cols) * (panelW + gap);
+              const panelTop = Math.floor(slot / cols) * (panelH + gap);
+              return annotations.map((annotation, annotationIdx) => (
+                <Box
+                  key={`panel-annotation-${panel}-${annotationIdx}`}
+                  className={annotation.class_name}
+                  data-show3d-panel-annotation={panel}
+                  data-show3d-panel-annotation-index={annotationIdx}
+                  data-show3d-panel-annotation-position={annotation.position || "top-left"}
+                  data-show3d-panel-annotation-variant={annotation.variant || "badge"}
+                  title={annotation.text}
+                  sx={{
+                    position: "absolute",
+                    left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
+                    top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
+                    width: `${(panelW / Math.max(1, canvasW)) * 100}%`,
+                    height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
+                    pointerEvents: "none",
+                    zIndex: 10,
+                  }}
+                >
+                  <Box
+                    component="span"
+                    sx={panelAnnotationSx(annotation)}
+                  >
+                    {renderPanelAnnotation(annotation)}
+                  </Box>
+                </Box>
+              ));
+            })}
             {showPanelTitles !== false && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
-              const titleText = panelTitles?.[panel];
+              const titleText = panelTitleText(panel);
               if (!titleText) return null;
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (rows - 1)) / rows;
               const panelLeft = (slot % cols) * (panelW + gap);
@@ -12098,7 +19697,9 @@ function Show3D() {
               return (
                 <Box
                   key={`panel-title-${panel}`}
+                  data-show3d-panel-title={panel}
                   sx={{
+                    ...panelTitleChromeSx(panelTitleStyle, {
                     position: "absolute",
                     top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
                     left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
@@ -12119,19 +19720,25 @@ function Show3D() {
                     overflow: "visible",
                     textOverflow: "clip",
                     overflowWrap: "anywhere",
+                    }),
                   }}
                 >
-                  {titleText}{frameLabel ? ` · ${frameLabel}` : ""} {shown}/{total}
+
+                  {panelTitleContent(panel)}{frameLabel ? ` · ${frameLabel}` : ""}{" "}
+                  <span data-show3d-panel-frame-count="true" data-real-frame-count={total}>
+                    {shown}/{total}
+                  </span>
+
                 </Box>
               );
             })}
             {/* Per-panel "best frame" stars. One gold ★ button top-right of
                 each panel. Click toggles the star on the currently displayed
                 slice for THAT panel. Programmatic API: widget.star_panel(i). */}
-	            {panelChromeVisible && visiblePanelIndices.map((i, slot) => {
+	            {panelChromeVisible && hasPanelChoices && visiblePanelIndices.map((i, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (Math.ceil(n / cols) - 1)) / Math.ceil(n / cols);
               const panelLeft = (slot % cols) * (panelW + gap);
@@ -12144,94 +19751,85 @@ function Show3D() {
                 : starElsewhere
                   ? `Star is on frame ${starredFrame + 1}. Click to move it to frame ${visibleSliceIdx + 1}.`
                   : `Click to mark frame ${visibleSliceIdx + 1} as best for ${panelLabel(i)}.`;
+              const hideVisible = cursorInfo?.panelIdx === i;
               return (
-                <button
-                  key={`star-${i}`}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => {
-                    const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
-                    cur[i] = isStarredHere ? -1 : visibleSliceIdx;
-                    setStarred(cur);
-                  }}
-                  title={tooltip}
-                  aria-label={tooltip}
-                  style={{
-                    position: "absolute",
-                    top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
-                    left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
-                    width: 20, height: 20,
-                    padding: 0,
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    fontSize: 18,
-                    lineHeight: "20px",
-                    textAlign: "center",
-                    color: isStarredHere
-                      ? "#ffc107"  // bright gold: star IS on this frame
-                      : starElsewhere
-                        ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
-                        : "rgba(255,255,255,0.5)",   // grey: no star on this panel
-                    textShadow: "0 0 3px rgba(0,0,0,0.8)",
-                    pointerEvents: "auto",
-                    userSelect: "none",
-                  }}
-                >
-                  {isStarredHere ? "★" : "☆"}
-                </button>
-              );
-            })}
-            {panelChromeVisible && hasPanelChoices && visiblePanelIndices.map((panel, slot) => {
-              const n = Math.max(1, visiblePanelCount || 1);
-              const cols = panelColsForCount(n);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
-              const panelW = (canvasW - gap * (cols - 1)) / cols;
-              const panelH = (canvasH - gap * (Math.ceil(n / cols) - 1)) / Math.ceil(n / cols);
-              const panelLeft = (slot % cols) * (panelW + gap);
-              const panelTop = Math.floor(slot / cols) * (panelH + gap);
-              const disabled = visiblePanelCount <= 1;
-              const label = disabled ? `Cannot hide the last visible panel` : `Hide ${panelLabel(panel)}`;
-              return (
-                <IconButton
-                  key={`panel-hide-${panel}`}
-                  className="show3d-panel-hide-button"
-                  size="small"
-                  disabled={disabled}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setPanelHidden(panel, true);
-                  }}
-                  aria-label={label}
-                  title={label}
-                  sx={{
-                    position: "absolute",
-                    top: `${((panelTop + 5) / Math.max(1, canvasH)) * 100}%`,
-                    left: `${((panelLeft + 5) / Math.max(1, canvasW)) * 100}%`,
-                    width: 22,
-                    height: 22,
-                    p: 0,
-                    opacity: 0,
-                    transform: "translateY(-3px)",
-                    transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
-                    color: disabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
-                    bgcolor: "rgba(0,0,0,0.22)",
-                    pointerEvents: "none",
-                    "&:hover, &:focus-visible": {
-                      bgcolor: "rgba(0,0,0,0.42)",
-                      color: "rgba(255,255,255,0.95)",
-                    },
-                  }}
-                >
-                  <VisibilityOffIcon sx={{ fontSize: 15 }} />
-                </IconButton>
+                <React.Fragment key={`panel-actions-${i}`}>
+                  <IconButton
+                    className="show3d-panel-hide-button"
+                    size="small"
+                    disabled={visiblePanelCount <= 1}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPanelHidden(i, true);
+                    }}
+                    aria-label={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                    title={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                    sx={{
+                      position: "absolute",
+                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                      left: `${((panelLeft + 6) / Math.max(1, canvasW)) * 100}%`,
+                      width: 20,
+                      height: 20,
+                      p: 0,
+                      opacity: hideVisible ? 1 : 0,
+                      transform: hideVisible ? "translateY(0)" : "translateY(-3px)",
+                      transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                      color: visiblePanelCount <= 1 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.78)",
+                      bgcolor: "rgba(0,0,0,0.22)",
+                      pointerEvents: hideVisible ? "auto" : "none",
+                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                      zIndex: 3,
+                      "&:hover, &:focus-visible": {
+                        opacity: 1,
+                        bgcolor: "rgba(0,0,0,0.42)",
+                        color: "rgba(255,255,255,0.95)",
+                      },
+                    }}
+                  >
+                    <VisibilityOffIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                  <button
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
+                      cur[i] = isStarredHere ? -1 : visibleSliceIdx;
+                      setStarred(cur);
+                    }}
+                    title={tooltip}
+                    aria-label={tooltip}
+                    style={{
+                      position: "absolute",
+                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                      left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
+                      width: 20, height: 20,
+                      padding: 0,
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      fontSize: 18,
+                      lineHeight: "20px",
+                      textAlign: "center",
+                      color: isStarredHere
+                        ? "#ffc107"  // bright gold: star IS on this frame
+                        : starElsewhere
+                          ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
+                          : "rgba(255,255,255,0.5)",   // grey: no star on this panel
+                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                      pointerEvents: "auto",
+                      userSelect: "none",
+                    }}
+                  >
+                    {isStarredHere ? "★" : "☆"}
+                  </button>
+                </React.Fragment>
               );
             })}
             {panelChromeVisible && reorderMode && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (rows - 1)) / rows;
               const panelLeft = (slot % cols) * (panelW + gap);
@@ -12384,7 +19982,7 @@ function Show3D() {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (rows - 1)) / rows;
               const slot = visiblePanelIndices.indexOf(cursorInfo.panelIdx);
@@ -12425,13 +20023,13 @@ function Show3D() {
             )}
             {/* Per-panel resize corner. Empty cells (partial last row) get
                 no handle. Each handle scales the whole multi-panel canvas
-                (linked behavior). Match Show2D gallery: 16x16, grey, 0.6/1.0.
-                User trait `show_resize_handles` toggles visibility. */}
+                (linked behavior). User trait `show_resize_handles` toggles
+                visibility. */}
             {showResizeControls && (() => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const outPanelW = (canvasW - gap * (cols - 1)) / cols;
               const outPanelH = (canvasH - gap * (rows - 1)) / rows;
               return visiblePanelIndices.map((panel, slot) => {
@@ -12441,22 +20039,16 @@ function Show3D() {
                 const slotY = row * (outPanelH + gap);
                 return (
                   <Box
-                    key={`resize-${panel}`}
-                    onMouseDown={handleMainResizeStart}
-                    sx={{
-                      position: "absolute",
-                      left: `calc(${((slotX + outPanelW) / Math.max(1, canvasW)) * 100}% - 16px)`,
-                      top: `calc(${((slotY + outPanelH) / Math.max(1, canvasH)) * 100}% - 16px)`,
-                      width: 16,
-                      height: 16,
-                      cursor: "nwse-resize",
-                      opacity: 0.6,
-                      background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
-                      touchAction: "none",
-                      zIndex: 5,
-                      "&:hover": { opacity: 1 },
-                    }}
-                  />
+                      key={`resize-${panel}`}
+                      onMouseDown={handleMainResizeStart}
+                      title="Resize panels"
+                      sx={{
+                        position: "absolute",
+                        left: `calc(${((slotX + outPanelW) / Math.max(1, canvasW)) * 100}% - 16px)`,
+                        top: `calc(${((slotY + outPanelH) / Math.max(1, canvasH)) * 100}% - 16px)`,
+                        ...resizeGripSx,
+                      }}
+                    />
                 );
               });
             })()}
@@ -12464,7 +20056,7 @@ function Show3D() {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
-              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const gap = n > 1 ? (panelGapPx) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (rows - 1)) / rows;
               return visiblePanelIndices.map((panel, slot) => {
@@ -12476,12 +20068,13 @@ function Show3D() {
                 const insetBase = Math.min(insetMaxW, insetMaxH);
                 const insetW = Math.max(24, Math.min(insetMaxW, insetBase * resolvedFftOverlaySize));
                 const insetH = Math.max(20, Math.min(insetMaxH, insetBase * resolvedFftOverlaySize));
+                const topInsetPad = fftOverlayTopInsetPad(insetPad, showPanelTitles, nPanels || 1, panelTitleFontSize);
                 const insetX = resolvedFftOverlayPosition.endsWith("right")
                   ? panelLeft + panelW - insetW - insetPad
                   : panelLeft + insetPad;
                 const insetY = resolvedFftOverlayPosition.startsWith("bottom")
                   ? panelTop + panelH - insetH - insetPad
-                  : panelTop + insetPad;
+                  : panelTop + topInsetPad;
                 const previewInsetX = fftOverlayDragPreview ? panelLeft + fftOverlayDragPreview.x : insetX;
                 const previewInsetY = fftOverlayDragPreview ? panelTop + fftOverlayDragPreview.y : insetY;
                 return (
@@ -12546,12 +20139,16 @@ function Show3D() {
                         "&:hover": { opacity: 1 },
                       }}
                     />
-                    {showZoomIndicator !== false && panelChromeVisible && (
+                    {showZoomIndicator === true && panelChromeVisible && (
+                      (() => {
+                        const fftView = linkPanels ? { zoom: fftZoom, panX: fftPanX, panY: fftPanY } : getFftViewForPanel(panel);
+                        const zoomLabel = formatZoomLabel(fftView.zoom);
+                        return (
                       <Box
                         className="quantem-fft-zoom-label"
                         data-show3d-fft-zoom-indicator={panel}
-                        data-fft-zoom={formatZoomLabel(fftZoom)}
-                        aria-label={`FFT zoom for ${panelLabel(panel)}: ${formatZoomLabel(fftZoom)}`}
+                        data-fft-zoom={zoomLabel}
+                        aria-label={`FFT zoom for ${panelLabel(panel)}: ${zoomLabel}`}
                         sx={{
                           position: "absolute",
                           left: Math.min(12, Math.max(5, insetW * 0.08)),
@@ -12568,8 +20165,10 @@ function Show3D() {
                           zIndex: 3,
                         }}
                       >
-                        {formatZoomLabel(fftZoom)}
+                        {zoomLabel}
                       </Box>
+                        );
+                      })()
                     )}
                     {slot === 0 && fftMetricsEnabled && fftQuality && (
                       <Box
@@ -12609,7 +20208,7 @@ function Show3D() {
               <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", flexDirection: "column", gap: 0.25, width: "100%", maxWidth: canvasW, boxSizing: "border-box", fontFamily: "ui-monospace, monospace" }}>
                 {localPanelStats.map((st) => (
                   <Box key={st.panel} sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%" }}>
-                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted, minWidth: 80, fontFamily: "ui-monospace, monospace" }}>{panelLabel(st.panel)}</Typography>
+                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted, minWidth: 80 }}>{panelTitleContent(st.panel)}</Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.mean)}</Box></Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.min)}</Box></Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.max)}</Box></Typography>
@@ -12688,11 +20287,11 @@ function Show3D() {
                       nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
                       e.target.value,
                     )}
-                    MenuProps={themedMenuProps}
+                    MenuProps={themedFastMenuProps}
                     sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }}
-                    inputProps={{ "aria-label": nPanels > 1 ? "Current panel colormap" : "Image colormap" }}
+                    inputProps={{ "aria-label": nPanels > 1 ? (colorShared ? "Shared colormap for all panels" : "Hovered or selected panel colormap") : "Image colormap" }}
                   >
-                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
+                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name} dense>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
@@ -12715,51 +20314,63 @@ function Show3D() {
                 {/* Row 3 (toggle-gated): display-only denoise for sparse map stacks (EDS, low dose) */}
                 {showDenoise && (
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                  {nPanels > 1 && (
+                    <>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Link denoise settings across all panels. Off edits only the selected panel.">Link Denoise</Typography>
+                      <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle linked denoise settings across panels" } }} />
+                    </>
+                  )}
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
-                  <Select size="small" value={resolveDenoiseMode(displayFilter || "none").mode} onChange={(e) => { setDisplayFilter(e.target.value); if (resolveDenoiseMode(e.target.value).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise method" }}>
+                  <Select size="small" value={denoiseKnobsForPanel(scopedPanelForEdit).mode} onChange={(e) => { const value = String(e.target.value); setDisplayFilter(value); syncDenoisePanelKnob("mode", value); if (resolveDenoiseMode(value).mode !== "none" || (denoiseKnobsForPanel(scopedPanelForEdit).bin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": denoiseScopeAll ? "Display-only denoise method for all panels" : "Display-only denoise method for selected panel" }}>
                     {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
                       <MenuItem key={mode} value={mode}>{label}</MenuItem>
                     ))}
                   </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? denoiseKnobsForPanel(scopedPanelForEdit).sigma).toFixed(1)}</Typography>
                   <Slider
-                    value={sigmaDraft ?? Number(displaySigma ?? 4)}
+                    value={sigmaDraft ?? denoiseKnobsForPanel(scopedPanelForEdit).sigma}
                     min={0} max={20} step={0.5}
-                    onChange={(_, v) => { if (displayFilterOff) setDisplayFilter("gaussian"); setSigmaDraft(v as number); }}
-                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); if (displayFilterOff) setDisplayFilter("gaussian"); setDenoiseEnabled(true); }}
+                    onChange={(_, v) => { if (displayFilterOff) { setDisplayFilter("gaussian"); syncDenoisePanelKnob("mode", "gaussian"); } setSigmaDraft(v as number); }}
+                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); syncDenoisePanelKnob("sigma", v as number); setSigmaDraft(null); if (displayFilterOff) { setDisplayFilter("gaussian"); syncDenoisePanelKnob("mode", "gaussian"); } setDenoiseEnabled(true); }}
                     size="small" sx={{ ...sliderStyles.small, width: 60 }}
                     aria-label="Display filter sigma in pixels"
                   />
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
-                  <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { const b = parseInt(e.target.value, 10); setSpatialBin(b); if (b > 1 || resolveDenoiseMode(displayFilter || "none").mode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": "Display spatial bin factor" }}>
+                  <Select size="small" value={String(denoiseKnobsForPanel(scopedPanelForEdit).bin || 1)} onChange={(e) => { const b = parseInt(e.target.value, 10); setSpatialBin(b); syncDenoisePanelKnob("bin", b); if (b > 1 || resolveDenoiseMode(denoiseKnobsForPanel(scopedPanelForEdit).mode).mode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": denoiseScopeAll ? "Display spatial bin factor for all panels" : "Display spatial bin factor for selected panel" }}>
                     {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                   </Select>
                 </Box>
                 )}
                 {showFrequencyFilter && (
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "100%", maxWidth: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                  {nPanels > 1 && (
+                    <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Link frequency filter settings across all panels. Off edits only the selected panel.">Link Filter</Typography>
+                      <Switch checked={frequencyFilterScopeAll} onChange={() => setFrequencyFilterScope(frequencyFilterScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle linked frequency filter settings across panels" } }} />
+                    </Box>
+                  )}
                   <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
                     <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
-                    <Select size="small" value={normalizeFrequencyFilterMode(frequencyFilter)} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84, fontSize: 10 }} inputProps={{ "aria-label": "Frequency filter mode" }}>
+                    <Select size="small" value={frequencyKnobsForPanel(scopedPanelForEdit).mode} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); syncFrequencyPanelKnob("mode", mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84, fontSize: 10 }} inputProps={{ "aria-label": frequencyFilterScopeAll ? "Frequency filter mode for all panels" : "Frequency filter mode for selected panel" }}>
                       <MenuItem value="none">None</MenuItem>
                       <MenuItem value="lowpass">Low-pass</MenuItem>
                       <MenuItem value="highpass">High-pass</MenuItem>
                       <MenuItem value="bandpass">Band-pass</MenuItem>
                     </Select>
                   </Box>
-                  {normalizeFrequencyFilterMode(frequencyFilter) === "bandpass" ? (<>
+                  {frequencyKnobsForPanel(scopedPanelForEdit).mode === "bandpass" ? (<>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Center {frequencyValueLabel(frequencyDraft ?? frequencyFilterCenter)}</Typography>
-                      <Slider value={frequencyDraft ?? frequencyFilterCenter} min={0} max={1} step={0.005} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCenter(value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass center as fraction of Nyquist" />
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Center {frequencyValueLabel(frequencyDraft ?? frequencyKnobsForPanel(scopedPanelForEdit).center)}</Typography>
+                      <Slider value={frequencyDraft ?? frequencyKnobsForPanel(scopedPanelForEdit).center} min={0} max={1} step={0.005} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCenter(value as number); syncFrequencyPanelKnob("center", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass center as fraction of Nyquist" />
                     </Box>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 80, display: "inline-block" }}>Width {frequencyValueLabel(frequencyFilterWidth)}</Typography>
-                      <Slider value={frequencyFilterWidth} min={0.01} max={1} step={0.005} onChange={(_, value) => setFrequencyFilterWidth(value as number)} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass width as fraction of Nyquist" />
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 80, display: "inline-block" }}>Width {frequencyValueLabel(frequencyKnobsForPanel(scopedPanelForEdit).width)}</Typography>
+                      <Slider value={frequencyKnobsForPanel(scopedPanelForEdit).width} min={0.01} max={1} step={0.005} onChange={(_, value) => { setFrequencyFilterWidth(value as number); syncFrequencyPanelKnob("width", value as number); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass width as fraction of Nyquist" />
                     </Box>
                   </>) : (<>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Cutoff {frequencyValueLabel(frequencyDraft ?? frequencyFilterCutoff)}</Typography>
-                      <Slider value={frequencyDraft ?? frequencyFilterCutoff} min={0} max={1} step={0.005} disabled={!frequencyFilterActive(frequencyFilter)} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCutoff(value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Frequency cutoff as fraction of Nyquist" />
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Cutoff {frequencyValueLabel(frequencyDraft ?? frequencyKnobsForPanel(scopedPanelForEdit).cutoff)}</Typography>
+                      <Slider value={frequencyDraft ?? frequencyKnobsForPanel(scopedPanelForEdit).cutoff} min={0} max={1} step={0.005} disabled={!frequencyFilterActive(frequencyKnobsForPanel(scopedPanelForEdit).mode)} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCutoff(value as number); syncFrequencyPanelKnob("cutoff", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Frequency cutoff as fraction of Nyquist" />
                     </Box>
                   </>)}
                 </Box>
@@ -12787,9 +20398,26 @@ function Show3D() {
                     {loop ? (
                       <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     ) : (
-                      <Slider ref={playbackSliderRef} value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                      <Slider ref={playbackSliderRef} value={activeIdx} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}
-                    <Typography component="span" ref={playbackLiveCountRef} data-show3d-playback-count="true" sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
+                    <span
+                      ref={playbackLiveCountRef}
+                      data-show3d-playback-count="true"
+                      style={{
+                        fontSize: 10,
+                        fontFamily: UI_FONT,
+                        color: themeColors.textMuted,
+                        minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`,
+                        fontVariantNumeric: "tabular-nums",
+                        textAlign: "right",
+                        flexShrink: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}
+                    </span>
                     <IconButton size="small" onClick={toggleCurrentFrameBookmark} aria-pressed={currentFrameBookmarked} aria-label={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} title={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} sx={{ color: currentFrameBookmarked ? "#ffc107" : themeColors.textMuted, p: 0.25, width: 22, height: 22, flexShrink: 0, "&:hover": { color: currentFrameBookmarked ? "#ffc107" : themeColors.text } }}>
                       <Box component="span" sx={{ fontSize: 18, lineHeight: "18px" }}>{currentFrameBookmarked ? "★" : "☆"}</Box>
                     </IconButton>
@@ -12822,10 +20450,10 @@ function Show3D() {
                           {playbackStyleSummary} · uses current range
                         </Typography>
                         <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 0.5 }}>
-                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("linear")} title="Use the current loop range at constant frame spacing.">Linear</Button>
-                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("power-in")} title="Start slowly, then accelerate through the current range.">Power In</Button>
-                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("power-out")} title="Move quickly at first, then settle near the end of the current range.">Power Out</Button>
-                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("ease-in-out")} title="Smoothly accelerate, then decelerate through the current range.">Ease In/Out</Button>
+                          <Button size="small" sx={playbackStyleButtonSx("linear")} aria-pressed={playbackStyleActive === "linear"} onClick={() => applyPlaybackStylePreset("linear")} title="Use the current loop range at constant frame spacing.">Linear</Button>
+                          <Button size="small" sx={playbackStyleButtonSx("power-in")} aria-pressed={playbackStyleActive === "power-in"} onClick={() => applyPlaybackStylePreset("power-in")} title="Start slowly, then accelerate through the current range.">Power In</Button>
+                          <Button size="small" sx={playbackStyleButtonSx("power-out")} aria-pressed={playbackStyleActive === "power-out"} onClick={() => applyPlaybackStylePreset("power-out")} title="Move quickly at first, then settle near the end of the current range.">Power Out</Button>
+                          <Button size="small" sx={playbackStyleButtonSx("ease-in-out")} aria-pressed={playbackStyleActive === "ease-in-out"} onClick={() => applyPlaybackStylePreset("ease-in-out")} title="Smoothly accelerate, then decelerate through the current range.">Ease In/Out</Button>
                         </Box>
                       </Box>
                     </Menu>
@@ -12841,27 +20469,19 @@ function Show3D() {
                       sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}
                     >
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, flexShrink: 0 }}>avg</Typography>
-                      {isMobileViewport ? (
-                        <Select
-                          value={String(Math.round(avgWindow || 1))}
-                          onChange={(e) => setAvgWindow(Number(e.target.value) || 1)}
-                          disabled={!averageSupported}
-                          size="small"
-                          sx={{ ...themedSelect, minWidth: 42, fontSize: 10 }}
-                          MenuProps={themedMenuProps}
-                          inputProps={{ "aria-label": "Moving average window" }}
-                          title="Moving average window"
-                        >
-                          {AVG_WINDOW_OPTIONS.map((value) => (
-                            <MenuItem key={value} value={String(value)}>{value}</MenuItem>
-                          ))}
-                        </Select>
-                      ) : (
-                        <>
-                          <Slider value={avgWindow} min={1} max={15} step={1} onChange={(_, v) => setAvgWindow(v as number)} disabled={!averageSupported} size="small" sx={{ ...sliderStyles.small, width: 44, flexShrink: 0 }} aria-label="Moving average window" valueLabelDisplay="auto" />
-                          <Typography sx={{ ...typography.label, color: themeColors.textMuted, minWidth: 16, flexShrink: 0 }}>{Math.round(avgWindow || 1)}</Typography>
-                        </>
-                      )}
+                      <Slider
+                        value={avgWindow}
+                        min={1}
+                        max={15}
+                        step={1}
+                        onChange={(_, v) => setAvgWindow(v as number)}
+                        disabled={!averageSupported}
+                        size="small"
+                        sx={{ ...sliderStyles.small, width: isMobileViewport ? 40 : 44, mx: isMobileViewport ? "3px" : 0, flexShrink: 0 }}
+                        aria-label="Moving average window"
+                        valueLabelDisplay="auto"
+                      />
+                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, minWidth: 16, flexShrink: 0 }}>{Math.round(avgWindow || 1)}</Typography>
                     </Box>
                     <Box sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}>
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, flexShrink: 0 }}>Loop</Typography>
@@ -12908,15 +20528,27 @@ function Show3D() {
                             bins={null}
                             vminPct={vminPct}
                             vmaxPct={vmaxPct}
-                            onRangeChange={(min, max) => {
-                              updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
-                              setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
-                              if (autoContrast) {
-                                restorePanelManualClipPcts();
-                                manualImageRangeBeforeAutoRef.current = null;
-                                setAutoContrast(false);
-                              }
+                            onRangePreview={(min, max) => {
+                              panelHistogramPreviewPctRef.current.set(panel, [min, max]);
+                              scheduleHistogramPreviewPaint("hist-preview");
                             }}
+                            onRangeChange={(min, max) => {
+                              panelHistogramPreviewPctRef.current.set(panel, [min, max]);
+                              scheduleHistogramPreviewPaint("hist-commit");
+                              const commitPanelRange = () => {
+                                if (autoContrast) {
+                                  freezeCurrentPanelContrastAsManual(panel, { min, max });
+                                  manualImageRangeBeforeAutoRef.current = null;
+                                  setAutoContrast(false);
+                                } else {
+                                  updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
+                                  setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
+                                }
+                              };
+                              if (sidecarMode) window.setTimeout(commitPanelRange, 0);
+                              else commitPanelRange();
+                            }}
+                            commitOnChange={!sidecarMode}
                             width={110}
                             height={58}
                             theme={themeInfo.theme === "dark" ? "dark" : "light"}
@@ -12942,14 +20574,25 @@ function Show3D() {
                     bins={imageHistogramBins}
                     vminPct={imageVminPct}
                     vmaxPct={imageVmaxPct}
-                    onRangeChange={(min, max) => {
-                      setImageVminPct(min);
-                      setImageVmaxPct(max);
-                      if (autoContrast) {
-                        manualImageRangeBeforeAutoRef.current = null;
-                        setAutoContrast(false);
-                      }
+                    onRangePreview={(min, max) => {
+                      imageHistogramPreviewPctRef.current = [min, max];
+                      scheduleHistogramPreviewPaint("hist-preview");
                     }}
+                    onRangeChange={(min, max) => {
+                      imageHistogramPreviewPctRef.current = [min, max];
+                      scheduleHistogramPreviewPaint("hist-commit");
+                      const commitSharedRange = () => {
+                        setImageVminPct(min);
+                        setImageVmaxPct(max);
+                        if (autoContrast) {
+                          manualImageRangeBeforeAutoRef.current = null;
+                          setAutoContrast(false);
+                        }
+                      };
+                      if (sidecarMode) window.setTimeout(commitSharedRange, 0);
+                      else commitSharedRange();
+                    }}
+                    commitOnChange={!sidecarMode}
                     width={110}
                     height={58}
                     theme={themeInfo.theme === "dark" ? "dark" : "light"}
@@ -13112,7 +20755,7 @@ function Show3D() {
               <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
               <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * DPR)} height={Math.round(previewCanvasDims.h * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
               {showResizeControls && (
-                <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, touchAction: "none", zIndex: 5, "&:hover": { opacity: 1 } }} />
+                <Box onMouseDown={handleMainResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, ...resizeGripSx }} />
               )}
             </Box>
             {/* All-ROI Stats - one row per ROI, same style as main stats bar */}
@@ -13150,9 +20793,32 @@ function Show3D() {
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             {!fftLayoutBottom && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
-            {/* Controls row - matches main panel controls row height */}
+            {!fftLayoutBottom && controlsVisible && isPaged && (
+              <Box
+                aria-hidden="true"
+                sx={{
+                  minHeight: 28,
+                  mb: "3px",
+                  pb: "3px",
+                  borderBottom: `1px solid ${themeColors.border}`,
+                }}
+              />
+            )}
+            {/* Controls row - mirrors the measured main toolbar height, including wraps. */}
             {(!fftLayoutBottom || (roiFftActive && fftCropDims)) && (
-              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
+                data-show3d-fft-tool-spacer="true"
+                sx={{
+                  mb: `${SPACING.XS}px`,
+                  minHeight: 28,
+                  height: !fftLayoutBottom && controlsVisible ? toolControlsHeight : "auto",
+                  flexWrap: "wrap",
+                  gap: `${SPACING.XS}px`,
+                }}
+              >
                 {roiFftActive && fftCropDims ? (
                   <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
                     ROI FFT ({fftCropDims.cropWidth}&times;{fftCropDims.cropHeight})
@@ -13186,11 +20852,11 @@ function Show3D() {
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
               {show3dFrequencyRing}
-              {showZoomIndicator !== false && panelChromeVisible && (() => {
+              {showZoomIndicator === true && panelChromeVisible && (() => {
                 const n = Math.max(1, visiblePanelCount || 1);
                 const cols = panelColsForCount(n);
                 const rows = Math.ceil(n / cols);
-                const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+                const gap = n > 1 ? (panelGapPx) : 0;
                 const outPanelW = (canvasW - gap * (cols - 1)) / cols;
                 const outPanelH = (canvasH - gap * (rows - 1)) / rows;
                 return visiblePanelIndices.map((panel, slot) => {
@@ -13198,13 +20864,15 @@ function Show3D() {
                   const row = Math.floor(slot / cols);
                   const slotX = col * (outPanelW + gap);
                   const slotY = row * (outPanelH + gap);
+                  const fftView = linkPanels ? { zoom: fftZoom, panX: fftPanX, panY: fftPanY } : getFftViewForPanel(panel);
+                  const zoomLabel = formatZoomLabel(fftView.zoom);
                   return (
                     <Box
                       key={`fft-zoom-${panel}`}
                       className="quantem-fft-zoom-label"
                       data-show3d-fft-zoom-indicator={panel}
-                      data-fft-zoom={formatZoomLabel(fftZoom)}
-                      aria-label={`FFT zoom for ${panelLabel(panel)}: ${formatZoomLabel(fftZoom)}`}
+                      data-fft-zoom={zoomLabel}
+                      aria-label={`FFT zoom for ${panelLabel(panel)}: ${zoomLabel}`}
                       sx={{
                         position: "absolute",
                         left: `calc(${(slotX / Math.max(1, canvasW)) * 100}% + 12px)`,
@@ -13222,7 +20890,7 @@ function Show3D() {
                         zIndex: 4,
                       }}
                     >
-                      {formatZoomLabel(fftZoom)}
+                      {zoomLabel}
                     </Box>
                   );
                 });
@@ -13257,7 +20925,7 @@ function Show3D() {
                 const n = Math.max(1, visiblePanelCount || 1);
                 const cols = panelColsForCount(n);
                 const rows = Math.ceil(n / cols);
-                const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+                const gap = n > 1 ? (panelGapPx) : 0;
                 const outPanelW = (canvasW - gap * (cols - 1)) / cols;
                 const outPanelH = (canvasH - gap * (rows - 1)) / rows;
                 return visiblePanelIndices.map((panel, slot) => {
@@ -13269,18 +20937,12 @@ function Show3D() {
                     <Box
                       key={`fft-resize-${panel}`}
                       onMouseDown={handleMainResizeStart}
+                      title="Resize FFT panels"
                       sx={{
                         position: "absolute",
                         left: `calc(${((slotX + outPanelW) / Math.max(1, canvasW)) * 100}% - 16px)`,
                         top: `calc(${((slotY + outPanelH) / Math.max(1, canvasH)) * 100}% - 16px)`,
-                        width: 16,
-                        height: 16,
-                        cursor: "nwse-resize",
-                        opacity: 0.6,
-                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
-                        touchAction: "none",
-                        zIndex: 5,
-                        "&:hover": { opacity: 1 },
+                        ...resizeGripSx,
                       }}
                     />
                   );
@@ -13363,6 +21025,17 @@ function Show3D() {
           <Box sx={{ width: "100%", maxWidth: canvasW, boxSizing: "border-box" }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
+            {controlsVisible && isPaged && (
+              <Box
+                aria-hidden="true"
+                sx={{
+                  minHeight: 28,
+                  mb: "3px",
+                  pb: "3px",
+                  borderBottom: `1px solid ${themeColors.border}`,
+                }}
+              />
+            )}
             {/* Controls row - title on left, Reset on right */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>

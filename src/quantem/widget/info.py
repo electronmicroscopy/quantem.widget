@@ -27,8 +27,9 @@ def _mac_chip_mem():
 def device_info(verbose: bool = True) -> dict:
     """Return (and by default print) version + backend + hardware for this machine."""
     import quantem.widget
-    from quantem.widget.io import detect_backend
-    backend = detect_backend()
+    from quantem.gpu.device import detect
+
+    backend = detect()
     info = {
         "widget_version": quantem.widget.__version__,
         "date": str(datetime.date.today()),
@@ -43,8 +44,6 @@ def device_info(verbose: bool = True) -> dict:
             info["device"] = f"CUDA - {torch.cuda.get_device_name(0)}"
         except Exception:
             info["device"] = "CUDA"
-    else:
-        info["device"] = "CPU"
     if verbose:
         print(f"quantem.widget {info['widget_version']}   |   {info['date']}")
         print(f"compute: {info['device']}")

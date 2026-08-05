@@ -6,8 +6,8 @@ import numpy as np
 from PIL import Image
 
 import quantem.widget as qw
+from quantem.gpu import movie as gpu_movie
 from quantem.widget import movie
-from quantem.widget.render import gif as gif_utils
 
 
 def _stack(offset: float = 0.0) -> np.ndarray:
@@ -51,7 +51,7 @@ def test_save_movie_dispatches_by_suffix(tmp_path: Path, monkeypatch) -> None:
         path.write_bytes(b"mp4")
         return path
 
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
 
     out = movie.save_movie(_stack(), tmp_path / "movie.mp4", fps=7, crf=21, backend="cpu")
 
@@ -68,7 +68,7 @@ def test_save_mp4_accepts_rendered_pil_frames(tmp_path: Path, monkeypatch) -> No
         path.write_bytes(b"mp4")
         return path
 
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
     frames = [Image.new("RGB", (11, 9), (idx, idx, idx)) for idx in range(2)]
 
     out = movie.save_mp4(frames, tmp_path / "frames.mp4", fps=12)
@@ -87,7 +87,7 @@ def test_save_mp4_rejects_unknown_backend(tmp_path: Path) -> None:
 
 
 def test_save_mp4_auto_uses_cuda_backend_when_available(tmp_path: Path, monkeypatch) -> None:
-    from quantem.widget.kernels import cuda_mp4
+    from quantem.gpu.movie import cuda_mp4
 
     captured = {}
 
@@ -102,14 +102,15 @@ def test_save_mp4_auto_uses_cuda_backend_when_available(tmp_path: Path, monkeypa
     monkeypatch.setattr(cuda_mp4, "is_available", lambda: True)
     monkeypatch.setattr(cuda_mp4, "save_mp4", fake_cuda_writer)
 
-    out = movie.save_mp4(_stack(), tmp_path / "auto.mp4", labels=["raw"], crf=22)
+    data = np.zeros((3, 300, 300), dtype=np.float32)
+    out = movie.save_mp4(data, tmp_path / "auto.mp4", labels=["raw"], crf=22)
 
     assert out.read_bytes() == b"cuda"
-    assert captured == {"shape": (3, 10, 12), "labels": ["raw"], "qp": 22}
+    assert captured == {"shape": (3, 300, 300), "labels": ["raw"], "qp": 22}
 
 
 def test_save_mp4_auto_falls_back_when_cuda_unavailable(tmp_path: Path, monkeypatch) -> None:
-    from quantem.widget.kernels import cuda_mp4
+    from quantem.gpu.movie import cuda_mp4
 
     captured = {}
 
@@ -120,12 +121,81 @@ def test_save_mp4_auto_falls_back_when_cuda_unavailable(tmp_path: Path, monkeypa
         return path
 
     monkeypatch.setattr(cuda_mp4, "is_available", lambda: False)
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
 
     out = movie.save_mp4(_stack(), tmp_path / "fallback.mp4")
 
     assert out.read_bytes() == b"cpu"
     assert captured == {"frames": 3}
+
+
+def test_save_mp4_auto_skips_cuda_for_tiny_movie(tmp_path: Path, monkeypatch) -> None:
+    from quantem.gpu.movie import cuda_mp4
+
+    captured = {"cuda_calls": 0}
+
+    def fake_cuda_writer(_stacks, _path, **_kwargs):
+        captured["cuda_calls"] += 1
+        raise RuntimeError("NVENC init failed for this frame size")
+
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        captured["frames"] = len(frames)
+        captured["fps"] = fps
+        path = Path(path)
+        path.write_bytes(b"cpu")
+        return path
+
+    monkeypatch.setattr(cuda_mp4, "is_available", lambda: True)
+    monkeypatch.setattr(cuda_mp4, "save_mp4", fake_cuda_writer)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
+
+    out = movie.save_mp4(_stack(), tmp_path / "fallback_after_cuda_error.mp4", fps=11)
+
+    assert out.read_bytes() == b"cpu"
+    assert captured == {"cuda_calls": 0, "frames": 3, "fps": 11.0}
+
+
+def test_save_mp4_auto_falls_back_when_cuda_writer_fails(tmp_path: Path, monkeypatch) -> None:
+    from quantem.gpu.movie import cuda_mp4
+
+    captured = {}
+
+    def fake_cuda_writer(_stacks, _path, **_kwargs):
+        captured["cuda_called"] = True
+        raise RuntimeError("NVENC init failed after encoder probe")
+
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        captured["frames"] = len(frames)
+        path = Path(path)
+        path.write_bytes(b"cpu")
+        return path
+
+    monkeypatch.setattr(cuda_mp4, "is_available", lambda: True)
+    monkeypatch.setattr(cuda_mp4, "save_mp4", fake_cuda_writer)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
+
+    data = np.zeros((3, 300, 300), dtype=np.float32)
+    out = movie.save_mp4(data, tmp_path / "fallback_after_large_cuda_error.mp4")
+
+    assert out.read_bytes() == b"cpu"
+    assert captured == {"cuda_called": True, "frames": 3}
+
+
+def test_save_mp4_cuda_backend_keeps_cuda_writer_errors(tmp_path: Path, monkeypatch) -> None:
+    from quantem.gpu.movie import cuda_mp4
+
+    def fake_cuda_writer(_stacks, _path, **_kwargs):
+        raise RuntimeError("NVENC init failed for this frame size")
+
+    monkeypatch.setattr(cuda_mp4, "is_available", lambda: True)
+    monkeypatch.setattr(cuda_mp4, "save_mp4", fake_cuda_writer)
+
+    try:
+        movie.save_mp4(_stack(), tmp_path / "cuda_error.mp4", backend="cuda")
+    except RuntimeError as exc:
+        assert "NVENC init failed" in str(exc)
+    else:
+        raise AssertionError("backend='cuda' should expose CUDA writer failures")
 
 
 def test_cuda_backend_rejects_rendered_frames(tmp_path: Path) -> None:

@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import quantem.gpu.io as gpu_io
+import quantem.widget.io.data_transfer as transfer
+
+
+def _inspection(predicate):
+    return lambda path, **kwargs: SimpleNamespace(ready=bool(predicate(path)))
 
 
 def _write(path: Path, size: int) -> Path:
@@ -23,11 +30,10 @@ def test_collect_data_transfer_groups_keeps_master_and_sidecars_together(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import collect_data_transfer_groups
 
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "nvme0n1")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "nvme0n1")
 
     _master(tmp_path, "scan_000", 10, 3)
 
@@ -49,7 +55,6 @@ def test_collect_data_transfer_groups_keeps_master_and_sidecars_together(
 
 
 def test_plan_data_transfer_balances_groups_by_size(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import plan_data_transfer
 
     source = tmp_path / "source"
@@ -62,14 +67,14 @@ def test_plan_data_transfer_balances_groups_by_size(monkeypatch, tmp_path: Path)
     _master(source, "small", 50, 5)
 
     def fake_disk(path: str) -> str:
-        if "nvme_a" in path:
+        if "nvme_a" in str(path):
             return "nvme0n1"
-        if "nvme_b" in path:
+        if "nvme_b" in str(path):
             return "nvme1n1"
         return "source_disk"
 
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
-    monkeypatch.setattr(hdf5, "disk_of", fake_disk)
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
+    monkeypatch.setattr(transfer, "_disk_of_existing", fake_disk)
 
     plan = plan_data_transfer(source, [target_a, target_b], logical_name="timeseries")
 
@@ -95,7 +100,6 @@ def test_plan_data_transfer_balances_groups_by_size(monkeypatch, tmp_path: Path)
 
 
 def test_plan_data_transfer_can_skip_not_ready_masters(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import plan_data_transfer
 
     good = _master(tmp_path / "source", "good", 10)
@@ -103,8 +107,8 @@ def test_plan_data_transfer_can_skip_not_ready_masters(monkeypatch, tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: str(path) == str(good))
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: str(path) == str(good)))
 
     plan = plan_data_transfer(tmp_path / "source", [target], require_ready=True)
 
@@ -113,7 +117,6 @@ def test_plan_data_transfer_can_skip_not_ready_masters(monkeypatch, tmp_path: Pa
 
 
 def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import (
         copy_data_transfer,
         data_transfer_load_warnings,
@@ -130,8 +133,8 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
     target = tmp_path / "target"
     _master(source, "scan_000", 10, 5)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target])
     dry = copy_data_transfer(plan)
@@ -175,7 +178,6 @@ def test_data_transfer_load_warnings_report_single_disk_multi_gpu(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import data_transfer_load_warnings, plan_data_transfer
 
     source = tmp_path / "source"
@@ -186,8 +188,8 @@ def test_data_transfer_load_warnings_report_single_disk_multi_gpu(
     _master(source, "scan_000", 10)
     _master(source, "scan_001", 20)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "same-disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "same-disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target_a, target_b])
     warnings = data_transfer_load_warnings(plan, devices=[0, 1])
@@ -201,7 +203,6 @@ def test_update_data_transfer_plan_appends_without_moving_existing_targets(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import plan_data_transfer, update_data_transfer_plan
 
     source = tmp_path / "source"
@@ -210,8 +211,8 @@ def test_update_data_transfer_plan_appends_without_moving_existing_targets(
     target_b.mkdir(parents=True)
     _master(source, "scan_000", 10)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target_a, target_b], strategy="round-robin")
     original_target = plan.entries[0].target_root
@@ -226,7 +227,6 @@ def test_update_data_transfer_plan_appends_without_moving_existing_targets(
 
 
 def test_data_transfer_core_can_copy_only_pending(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import (
         copy_data_transfer,
         filter_data_transfer_plan,
@@ -239,8 +239,8 @@ def test_data_transfer_core_can_copy_only_pending(monkeypatch, tmp_path: Path) -
     _master(source, "scan_000", 10, 5)
     _master(source, "scan_001", 8, 4)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target])
     first_entry = plan.entries[0]
@@ -284,7 +284,6 @@ def test_data_transfer_core_rescans_without_widget(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import plan_data_transfer, update_data_transfer_plan
 
     source = tmp_path / "source"
@@ -294,8 +293,8 @@ def test_data_transfer_core_rescans_without_widget(
     target_b.mkdir()
     _master(source, "scan_000", 10)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target_a, target_b], strategy="round-robin")
     _master(source, "scan_001", 20)
@@ -308,7 +307,6 @@ def test_data_transfer_core_rescans_without_widget(
 
 
 def test_copy_data_transfer_refuses_different_existing_target(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import copy_data_transfer, plan_data_transfer
 
     source = tmp_path / "source"
@@ -316,8 +314,8 @@ def test_copy_data_transfer_refuses_different_existing_target(monkeypatch, tmp_p
     _master(source, "scan_000", 10)
     _write(target / "scan_000_master.h5", 3)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target])
 
@@ -326,7 +324,6 @@ def test_copy_data_transfer_refuses_different_existing_target(monkeypatch, tmp_p
 
 
 def test_hash_verification_catches_same_size_target(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import copy_data_transfer, inspect_data_transfer, plan_data_transfer
 
     source = tmp_path / "source"
@@ -338,8 +335,8 @@ def test_hash_verification_catches_same_size_target(monkeypatch, tmp_path: Path)
     source_file = source / "scan_000_master.h5"
     source_file.write_bytes(b"wxyz")
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target], hash_algorithm="sha256")
 
@@ -353,7 +350,6 @@ def test_inspect_data_transfer_reports_partial_and_mismatch(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import inspect_data_transfer, plan_data_transfer
 
     source = tmp_path / "source"
@@ -362,8 +358,8 @@ def test_inspect_data_transfer_reports_partial_and_mismatch(
     _write(target / "scan_000_master.h5.partial", 2)
     _write(target / "scan_000_data_000001.h5", 1)
 
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(transfer, "_disk_of_existing", lambda path: "disk")
+    monkeypatch.setattr(gpu_io, "inspect", _inspection(lambda path: True))
 
     plan = plan_data_transfer(source, [target])
     states = {

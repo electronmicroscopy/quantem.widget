@@ -42,6 +42,9 @@ figure layout.
 - Change columns through 1, 2, 3, 4, 6, 8, and 12.
 - Verify the menu does not offer impractical counts above 12.
 - Verify labels, scale bars, stats, histograms, and borders remain aligned.
+- Hover unselected panels after each reflow and verify the floating cursor
+  readout plus bottom stats strip follow the hovered panel without changing the
+  selected panel used by controls.
 - Verify the current zoom center and contrast do not jump during reflow.
 - Enable Reorder, drag panels into a non-source order, and verify
   `panel_order`, keyboard navigation, hidden-panel export, and `to_show3d()`
@@ -61,6 +64,9 @@ panels while preserving the scientific state of the remaining panels.
 - Hide one panel, multiple panels, and all-but-one panel.
 - Verify layout, labels, stats, histograms, keyboard selection, export, and
   saved state ignore hidden panels.
+- Use labels and title spans containing symbols and inline math such as
+  `\lambda=0.03 raw` and `$\\chi^2$/pixel`; verify the panel menu, stats row,
+  and panel titles render symbols/math and never show raw markup.
 - Restore panels and verify original order and panel state return.
 
 ### S2D-04: Inspect Native Pixels From A Fast Preview
@@ -82,6 +88,9 @@ structure.
   after the view changes.
 - Verify cursor readout reports native ``(row, col)`` and labels value source
   as preview, detail, or native.
+- In a gallery, hover a non-selected preview/detail panel and verify the
+  readout and stats belong to the hovered panel while controls remain scoped to
+  the clicked/selected panel.
 
 ### S2D-05: Adjust Contrast On Noisy Data
 
@@ -119,9 +128,13 @@ reversible.
 - Disable each link mode; verify independent panel state works.
 - Pass ``cmap=["gray", "inferno", "RdBu", ...]`` for a multi-panel gallery and
   verify each panel keeps its requested colormap in the live UI, saved state,
-  static notebook preview, and standalone HTML export. Select each panel and
-  change Color from the UI; verify only that panel changes unless the user has
-  explicitly chosen a linked/all-panel operation.
+  static notebook preview, and standalone HTML export. By default, verify the
+  Color dropdown is linked across panels. Then open More, turn off
+  ``Link Color``, select each panel, and change Color from the UI; verify
+  only that panel changes and no extra Link Color text appears in the main
+  toolbar. Turn ``Link Color`` back on, then off again; verify the previous
+  individual panel colormaps return instead of being replaced by the shared
+  colormap.
 - In the View menu, set Padding to 10%, choose Median fill, and verify the
   canvas and histogram update while the stored raw arrays remain unchanged.
 - In a drift-correction gallery, toggle Padding from All to selected-panel
@@ -199,6 +212,8 @@ say exactly what they will save and produce files that reopen correctly.
 - Open Export in live Jupyter and standalone HTML.
 - Verify the single-HTML choices distinguish `encoding="full"` from
   `encoding="uint8"` and show approximate sizes when known.
+- Collapse controls for presentation-style viewing and verify Export remains
+  reachable from the title chrome in live and standalone HTML.
 - Export single HTML with both encodings where supported.
 - [x] **EX-2**: Export a denoised view and a frequency-filtered view, then
   open each standalone page without touching a control. The first canvas must
@@ -308,6 +323,9 @@ ptychography workflow. Test at least 30 panels for routine signoff; use 45 and
   stay correct.
 - Pan, zoom, histogram-drag, and resize repeatedly; record the interaction FPS
   method and result.
+- Sweep the pointer across at least four visible panels without clicking.
+  Verify each panel reports its own hover coordinate/value and stats, including
+  after a previous panel remains selected for controls.
 - Verify zooming into one panel streams or displays the highest-resolution
   available tile for that panel, while the rest of the gallery remains
   responsive.
@@ -579,7 +597,83 @@ slice and total count.
   slider latency, and canvas repaint rate. Confirm the final canvas, not only
   the slider label, reaches every requested slice.
 
-### S2D-20: Page A Growing Folder Gallery Automatically
+### S2D-20: Mark Panels, Preset Contrast, And Flip Orientation During Review
+
+**User story**: As a scientist comparing several related 2-D maps, I want to
+tag panels with simple colors, choose a shared percentile contrast preset, and
+temporarily flip one panel from the UI so I can tell collaborators and agents
+which map to inspect without rewriting the notebook.
+
+**Primary widgets**: Show2D.
+
+**Acceptance checks**:
+
+- Start from a minimal multi-panel `Show2D([...])` when possible, then use the
+  UI to open More and change the Contrast preset.
+- Verify `marker_colors` / `identity_colors` paint durable panel strips and
+  survive saved state plus standalone HTML export.
+- Verify `1-99`, `2-98`, and `3-97` contrast presets update all visible panels
+  while the histogram stays visible below the image.
+- Flip one panel horizontally and vertically from More; verify only the display
+  changes, stored data and ROI coordinates remain in the original `(row, col)`
+  convention, and neighboring panels stay unchanged.
+- Use More → Rotate with Scope = All, then Scope = Panel. Verify 90°, 180°,
+  and 270° rotations survive saved state and standalone HTML export, and that
+  scale bars, FFT labels, ROI overlays, and right-side ROI crops remain legible.
+- Verify the More menu opens compactly: Rotate should appear as a simple switch
+  first, and Angle/Scope controls should appear only after the user turns
+  Rotate on or when an orientation is already active.
+- Verify rotation state never edits the scientific title or panel label. The
+  live viewer may show only a compact direction glyph such as `↺90°` or
+  `↻90°`, preferably over the image chrome, not as another text label above or
+  below the panel.
+- Drive FFT, ROI, pan/zoom, denoise/filter, saved states, and export after the
+  flip/contrast changes so the feature is tested as a real review session.
+
+### S2D-20B: Embed Calibration Inset Plots In Image Panels
+
+**User story**: As a scientist tuning denoise or reconstruction parameters, I
+want each Show2D panel to carry a compact scientific inset plot, such as ACF
+versus `R`, so the image and the calibration evidence stay together in the same
+review figure without another notebook cell.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: a 3 × 3 panel set with different calibration curves per panel.
+Use a real denoise/reconstruction calibration sweep for release signoff; a
+synthetic lattice is acceptable for fast API and hover regression checks.
+
+**Acceptance checks**:
+
+- Construct from `Show2D(..., inset_plots=[...])` with one dictionary per panel.
+  Verify each panel gets a different curve, point marker, legend, annotation,
+  and color.
+- Start from the human API first: `position`, `margin`, `size`, and `height`.
+  Test `bottom-right`, `top-right`, `top-left`, `bottom-center`, and `center`.
+  Use exact `box=[left, top, width, height]` only for the publication-layout
+  control case.
+- Test visual style controls: `line_width`, `background_alpha`,
+  `border_width=0`, nonzero `border_width`, `border_color`, `text_color`, and
+  `tick_color`. Verify no-border and subtle-border cases remain readable on
+  noisy images.
+- Turn on `show_ticks` with explicit `xticks` and `yticks`. Verify tick labels,
+  axis labels, legend, and annotation remain inside the inset and do not cover
+  the selected image feature.
+- Hover over the live inset plot. Verify the tooltip reports the nearest plotted
+  coordinate using axis labels, for example `R 0.465 · ACF 0.48`, and does not
+  clip at panel edges.
+- Move the scale bar with `scale_bar_position="bottom-left"` and hide
+  `show_zoom_indicator` when the inset uses the lower-right corner. Verify the
+  scale bar, inset, panel title, star, hide button, and resize handle do not
+  collide.
+- Verify `state_dict()`, saved notebook static PNG fallback, `export_html()`,
+  panel hide/reorder, responsive wrapping, and linked zoom/contrast preserve the
+  inset plots.
+- On touch/mobile, verify the hover-only readout has an acceptable fallback
+  before claiming iPhone signoff. If not implemented, record it as missing
+  rather than relying on desktop hover evidence.
+
+### S2D-21: Page A Growing Folder Gallery Automatically
 
 **User story**: As a microscopist whose acquisition or reconstruction folder
 may grow to hundreds of independent images, I want Show2D to show a bounded
@@ -635,3 +729,65 @@ browser signoff.
   the full gallery; do not claim bounded Python/browser memory until an
   active-page transport, cache, and generation-safe prefetch path is separately
   implemented and verified.
+
+### S2D-22: Stress post-session 4k galleries
+
+**User story**: As a microscopist after a session, I often have 30-40
+independent 4096x4096 images to compare at once. I want Show2D to load them
+from a notebook, export an exact standalone HTML review, and remain smooth
+while I zoom, pan, hide, recolor, inspect FFTs, and export figure assets without
+silently reducing the source images.
+
+**Primary widgets**: Show2D for the main gallery; Show3D is covered by sibling
+stress stories when the same data become a time or slice stack.
+
+**Data to use**: real or real-derived microscope images. For local agent
+signoff, prefer a private ignored fixture discovered through
+`QUANTEM_WIDGET_STRESS_DATA` or the repository-local `.widget-stress-data`
+symlink. The fixture manifest must record shape, dtype, provenance, and whether
+panels are independent acquisitions or deterministic stress variants. Never
+commit the data, generated HTML, screenshots, or benchmark outputs.
+
+**Stress coverage map**:
+
+- Main Show2D many-panel stress: 30-40 native 4096x4096 images. Covers the
+  actual post-microscope review workflow: notebook construction, exact HTML
+  export, first paint, canvas redraw, controls, panel visibility, FFT, zoom,
+  pan, contrast, labels, scale bars, and figure-export state.
+- Show2D small-gallery exact stress: 4 native 4096x4096 images. Covers fast
+  agent iteration and catches accidental `display_bin="auto"` preview exports.
+  The exported widget state must report `height=4096`, `width=4096`, and
+  `_display_bin_factor=1`.
+- Show2D EMD-derived gallery stress: 20-30 same-shape EMD-derived image
+  outputs. Covers IO provenance, mixed session naming, and realistic drift or
+  reconstruction products. Keep this separate from native 4k gold fixtures when
+  the source images are 2048x2048.
+- Show3D folder stress: large frame stacks exported in folder mode. Covers
+  range loading, first paint, frame playback, FFT overlays, hidden panels,
+  panel gaps/borders, and browser memory without requiring a Python backend
+  after export.
+- Show3D exact single stress: smaller representative stacks in a single HTML
+  file. Covers exact reopen behavior, GIF/MP4 export state, PowerPoint-bound
+  animation assets, and parity with what the user saw in the widget.
+
+**Acceptance checks**:
+
+- Run the main test through a generated or hand-written notebook first. The
+  notebook must load the local fixture, construct the widget, and call
+  `export_html(...)`; do not skip straight to a prewritten HTML file when the
+  claim is notebook workflow readiness.
+- Open the standalone HTML export with no backend server. Verify the widget
+  state, not just the fitted canvas size: source shape, exported `height`,
+  exported `width`, `_display_bin_factor`, panel count, encoding, and file size.
+- Drive the exported HTML as a user: zoom, pan, change contrast, hide/restore a
+  panel, open FFT, inspect labels and scale bars, resize/reflow the window, and
+  capture screenshots for the tutorial report.
+- For the 4-image exact stress, `display_bin=1` is mandatory. For 30-40 image
+  stress, run both exact mode when hardware allows and `display_bin="auto"` when
+  evaluating preview/detail-stream behavior; report which path was used.
+- Treat a 512x512, 1024x1024, or automatically binned preview as a smoke test
+  only. It cannot satisfy the main post-session 4k gallery story.
+- The report must include a user-facing walkthrough, a PASS/FAIL table,
+  screenshots, notebook timing, export timing, first-paint timing, FPS/latency,
+  browser console errors, and direct links to the notebook, HTML export, and
+  profile metrics.

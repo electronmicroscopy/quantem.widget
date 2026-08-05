@@ -1,8 +1,9 @@
-"""WGSL/WebGPU compute parity: the widget's browser BF/DF/CoM kernels vs a numpy reference.
+"""WGSL/WebGPU compute parity: browser BF/DF/CoM/DPC kernels vs a numpy reference.
 
-The widget owns the entire WebGPU compute layer (js/engine/compute.ts: maskedSum -> virtual
-image, maskedCoM -> CoM/DPC). The Python torch path is covered by test_dpc_virtual_parity.py;
-this is the missing leg - it proves the WGSL output matches numpy on a deterministic fixture.
+quantem.gpu owns the canonical WebGPU compute sources; quantem.widget syncs them
+into js/engine before bundling. The Python torch path is covered by
+test_dpc_virtual_parity.py; this is the missing leg - it proves the WGSL output
+matches numpy on a deterministic fixture.
 
 WGSL only runs on a real GPU in a browser, so this drives a headed Chrome over CDP and calls
 the web app's `window.__wgslParity(scanCount, detRows, detCols)` hook. The fixture is a pure
@@ -41,7 +42,7 @@ SCAN, DET_ROWS, DET_COLS = 64, 32, 32
 
 
 def _numpy_reference():
-    """The SAME deterministic stack + BF mask the JS hook builds, plus numpy BF sum & CoM.
+    """The SAME deterministic stack + BF mask the JS hook builds, plus numpy BF sum, CoM, and DPC.
 
     value(s, d) = (s*31 + d*17) % 251 with d the row-major detector index; this is a pure
     function of indices so JS and numpy produce byte-identical input - any mismatch is a real
@@ -60,7 +61,9 @@ def _numpy_reference():
     denom = intensity.sum(axis=(1, 2))
     com_y = (intensity * rows).sum(axis=(1, 2)) / denom
     com_x = (intensity * cols).sum(axis=(1, 2)) / denom
-    return virtual, com_y, com_x
+    dpc_y = com_y - com_y.mean()
+    dpc_x = com_x - com_x.mean()
+    return virtual, com_y, com_x, dpc_y, dpc_x
 
 
 def _free_port():
@@ -144,7 +147,7 @@ def test_wgsl_masked_sum_matches_numpy(wgsl_result):
     """Virtual image (BF mask sum) - integer sum, must be effectively exact in f32."""
     if not isinstance(wgsl_result, dict) or wgsl_result.get("error"):
         pytest.skip("WebGPU unavailable")
-    virtual_ref, _, _ = _numpy_reference()
+    virtual_ref, _, _, _, _ = _numpy_reference()
     virtual_wgsl = np.array(wgsl_result["virtual"], dtype=np.float64)
     np.testing.assert_allclose(virtual_wgsl, virtual_ref, rtol=1e-5, atol=1.0)
 
@@ -153,8 +156,19 @@ def test_wgsl_com_matches_numpy(wgsl_result):
     """CoM (intensity-weighted centroid in detector px) - f32 division, tight tolerance."""
     if not isinstance(wgsl_result, dict) or wgsl_result.get("error"):
         pytest.skip("WebGPU unavailable")
-    _, com_y_ref, com_x_ref = _numpy_reference()
+    _, com_y_ref, com_x_ref, _, _ = _numpy_reference()
     com_y = np.array(wgsl_result["comY"], dtype=np.float64)
     com_x = np.array(wgsl_result["comX"], dtype=np.float64)
     np.testing.assert_allclose(com_y, com_y_ref, atol=1e-3)
     np.testing.assert_allclose(com_x, com_x_ref, atol=1e-3)
+
+
+def test_wgsl_dpc_matches_numpy(wgsl_result):
+    """DPC row/col output: centered CoM components from the GPU reducer."""
+    if not isinstance(wgsl_result, dict) or wgsl_result.get("error"):
+        pytest.skip("WebGPU unavailable")
+    _, _, _, dpc_y_ref, dpc_x_ref = _numpy_reference()
+    dpc_y = np.array(wgsl_result["dpcY"], dtype=np.float64)
+    dpc_x = np.array(wgsl_result["dpcX"], dtype=np.float64)
+    np.testing.assert_allclose(dpc_y, dpc_y_ref, atol=1e-3)
+    np.testing.assert_allclose(dpc_x, dpc_x_ref, atol=1e-3)

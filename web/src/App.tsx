@@ -87,7 +87,7 @@ export default function App() {
     // compute stays correct (the Python torch path already has test_dpc_virtual_parity.py).
     (window as unknown as { __wgslParity: (sc: number, dr: number, dc: number) => Promise<unknown> }).__wgslParity =
       async (scanCount: number, detRows: number, detCols: number) => {
-        const { Show4DSTEMCompute } = await import("./engine/compute");
+        const { DetectorCompute } = await import("../../js/.generated/engine/detector/compute/webgpu/backend");
         const detSize = detRows * detCols;
         const stack = new Uint8Array(scanCount * detSize);
         for (let s = 0; s < scanCount; s++) for (let d = 0; d < detSize; d++) stack[s * detSize + d] = (s * 31 + d * 17) % 251;
@@ -96,17 +96,28 @@ export default function App() {
         for (let row = 0; row < detRows; row++) for (let col = 0; col < detCols; col++) {
           const dy = row - cy, dx = col - cx; mask[row * detCols + col] = dy * dy + dx * dx <= radius * radius ? 1 : 0;
         }
-        const compute = await Show4DSTEMCompute.create(stack, scanCount, detSize);
+        const compute = await DetectorCompute.create(stack, scanCount, detSize);
         if (!compute) return { error: "no WebGPU device" };
         const vi = await compute.maskedSum(mask);
         const com = await compute.maskedCoM(mask, detCols);
-        return { virtual: Array.from(vi), comY: Array.from(com.comY), comX: Array.from(com.comX), scanCount, detRows, detCols };
+        const dpcY = await compute.maskedDpc(mask, detCols, "row");
+        const dpcX = await compute.maskedDpc(mask, detCols, "col");
+        return {
+          virtual: Array.from(vi),
+          comY: Array.from(com.comY),
+          comX: Array.from(com.comX),
+          dpcY: Array.from(dpcY),
+          dpcX: Array.from(dpcX),
+          scanCount,
+          detRows,
+          detCols,
+        };
       };
     // bslz4 Strategy-D parity + kernel-time verify hook.
     (window as unknown as { __verifyD: (url: string) => Promise<unknown> }).__verifyD =
       async (url: string) => {
-        const { readH5Volume } = await import("./engine/h5reader");
-        const { verifyFusedD } = await import("./engine/bslz4");
+        const { readH5Volume } = await import("../../js/.generated/engine/io/backends/webgpu/h5reader");
+        const { verifyFusedD } = await import("../../js/.generated/engine/io/backends/webgpu/bslz4");
         const buf = await (await fetch(url)).arrayBuffer();
         const vol = readH5Volume(buf, url.split("/").pop()!);
         if (vol.srcDtype === "uint8") return { error: "uint8 source has no fused-D path" };

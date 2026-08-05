@@ -3,7 +3,7 @@
 // thread to ~2.3 GB/s, but a pool of these workers reads in parallel at ~10 GB/s (the file
 // delivery + ArrayBuffer allocation parallelize across threads). Each worker also runs the
 // fast jsfive B-tree parse, then transfers the file buffer + blockMeta back (zero-copy).
-import { readH5Volume } from "../engine/h5reader";
+import { readH5Volume } from "../../../js/.generated/engine/io/backends/webgpu/h5reader";
 
 interface ReadRequest { id: number; name: string; file?: File; handle?: FileSystemFileHandle; }
 

@@ -10,7 +10,7 @@ rules, in order of importance:
 - **present = known**: a field is written only when known; absent means
   "unknown, resolve it yourself". Never a guessed default.
 
-Field names match quantem ptycho ``config.json`` / ``dataset.yaml`` exactly, and
+Field names match ShowPtycho ``config.json`` / ``dataset.yaml`` exactly, and
 unit suffixes follow the unit symbol's official capitalization (``voltage_kV``,
 ``semiangle_mrad``, ``scan_sampling_A``, ``pixel_size_nm``).
 
@@ -72,12 +72,12 @@ def build_4dstem_meta(master_path, **fields) -> dict:
     ``semiangle_mrad`` from a ``<N>mrad`` filename token; ``fields`` supplies the
     rest (``voltage_kV``, ``sample``, ``source``, ``date``, and any known optionals).
     """
-    from quantem.live import io  # noqa: PLC0415
-    header = io.get_metadata(str(master_path))
+    from quantem.gpu import io  # noqa: PLC0415
+    header = io.inspect(str(master_path))
     meta = {
         "modality": "4dstem",
-        "scan_shape": [int(s) for s in header.get("scan_shape", ())],
-        "det_shape": [int(d) for d in header.get("detector_shape", ())],
+        "scan_shape": [int(s) for s in header.scan_shape],
+        "det_shape": [int(d) for d in header.detector_shape],
         "dtype": "uint16",
     }
     token = re.search(r"(\d+)\s*mrad", Path(master_path).name)

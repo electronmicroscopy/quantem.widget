@@ -46,7 +46,8 @@ def _notebook_source():
         full = os.environ.get("QT_WEBGPU_LIVE_FULL") == "1"
         return f"""
 import numpy as np
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 master = {master!r}
 res = load(master, det_bin={det_bin}, dtype={dtype!r}, verbose=True)
 data = res.data
@@ -61,7 +62,7 @@ w = Show4DSTEM(
     data,
     frame_dim_label="Dataset" if data.ndim == 5 else None,
     frame_labels=["first", "second"] if data.ndim == 5 and data.shape[0] == 2 else None,
-    backend="web",
+    backend="webgpu",
     title="Live WebGPU Jupyter smoke",
     precompute_virtual_images=False,
     show_fft=True,
@@ -89,7 +90,7 @@ w = Show4DSTEM(
     data,
     frame_dim_label="Dataset",
     frame_labels=["first", "second"],
-    backend="web",
+    backend="webgpu",
     title="Live WebGPU Jupyter smoke",
     precompute_virtual_images=False,
     show_fft=True,
@@ -180,10 +181,18 @@ def _move_dataset_slider(page, require=True):
     if slider is None:
         assert not require, "Dataset/frame slider was not found"
         return False
-    rect = slider["rect"]
-    page.mouse.move(rect["x"] + 2, rect["y"] + rect["h"] / 2)
+    slider_root = page.locator(".MuiSlider-root").nth(int(slider["i"]))
+    slider_root.scroll_into_view_if_needed()
+    page.wait_for_timeout(250)
+    rect = slider_root.bounding_box()
+    assert rect is not None
+    page.mouse.move(rect["x"] + 2, rect["y"] + rect["height"] / 2)
     page.mouse.down()
-    page.mouse.move(rect["x"] + rect["w"] - 2, rect["y"] + rect["h"] / 2, steps=10)
+    page.mouse.move(
+        rect["x"] + rect["width"] - 2,
+        rect["y"] + rect["height"] / 2,
+        steps=10,
+    )
     page.mouse.up()
     page.wait_for_timeout(800)
     return True
@@ -193,7 +202,7 @@ def _toggle_fft(page):
     clicked = page.evaluate(
         """() => {
           const nodes = [...document.querySelectorAll('p,span,label,div')];
-          const label = nodes.find(n => n.textContent && n.textContent.trim() === 'FFT:');
+          const label = nodes.find(n => /^FFT:?$/i.test((n.textContent || '').trim()));
           if (!label) return false;
           let root = label.parentElement;
           for (let depth = 0; root && depth < 5; depth++, root = root.parentElement) {
@@ -245,6 +254,36 @@ def _click_copy_buttons(page):
         assert "image/png" in types
         copied.append(types)
     return copied
+
+
+def _exercise_dpc_backend(page):
+    page.wait_for_function(
+        "window.__sh4d && typeof window.__sh4d.recomputeVI === 'function' && document.body.innerText.includes('DPC')",
+        timeout=60_000,
+    )
+    results = []
+    for source in ("DPC_row", "DPC_col"):
+        results.append(
+            page.evaluate(
+                """async (source) => {
+                  const api = window.__sh4d;
+                  const rows = Number(api.model.get("shape_rows") || 0);
+                  const cols = Number(api.model.get("shape_cols") || 0);
+                  api.model.set("vi_source", source);
+                  await api.recomputeVI();
+                  const view = api.model.get("virtual_image_bytes");
+                  const arr = new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4);
+                  let sum = 0;
+                  for (let i = 0; i < arr.length; i++) sum += arr[i];
+                  return { source: api.model.get("vi_source"), length: arr.length, expected: rows * cols, sum };
+                }""",
+                source,
+            )
+        )
+    for result in results:
+        assert result["source"] in {"DPC_row", "DPC_col"}
+        assert result["length"] == result["expected"]
+    return results
 
 
 @pytest.mark.skipif(
@@ -309,6 +348,7 @@ def test_live_jupyter_webgpu_widget_interaction(tmp_path):
                     require=os.environ.get("QT_WEBGPU_REQUIRE_FRAME_SLIDER", "1") != "0",
                 )
                 _toggle_fft(page)
+                dpc_results = _exercise_dpc_backend(page)
                 copied_types = _click_copy_buttons(page)
                 after = page.screenshot(full_page=False)
                 screenshot_changed = hashlib.sha256(before).hexdigest() != hashlib.sha256(after).hexdigest()
@@ -322,6 +362,7 @@ def test_live_jupyter_webgpu_widget_interaction(tmp_path):
                             "canvas_count": len(canvases),
                             "frame_slider_moved": frame_slider_moved,
                             "fft_toggled": True,
+                            "dpc_checked": [r["source"] for r in dpc_results],
                             "copy_png_buttons": len(copied_types),
                             "screenshot_changed": screenshot_changed,
                             "fps": fps,

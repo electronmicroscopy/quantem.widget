@@ -29,7 +29,7 @@
 //                       stabilized = 2*sqrt(counts + 3/8), gaussian with
 //                       max(1, sigma*0.85), inverse, * scale/30.
 
-import { getGPUDevice, getGPUInfo, isSoftwareGPUAdapter } from "./engine/device";
+import { getGPUDevice, getGPUInfo, isSoftwareGPUAdapter } from "./.generated/engine/device/webgpu";
 
 /** Filter modes the browser can evaluate; mirrors BROWSER_DISPLAY_FILTER_MODES in Python. */
 export const BROWSER_FILTER_MODES = new Set([
@@ -114,16 +114,46 @@ export function pythonRound(x: number): number {
   return floor % 2 === 0 ? floor : floor + 1;
 }
 
-/** numpy.percentile(data, q) with the default linear interpolation. */
+/** In-place Hoare quickselect: exact k-th order statistic, O(n) average. */
+function selectKth(a: Float32Array, k: number): number {
+  let lo = 0;
+  let hi = a.length - 1;
+  while (lo < hi) {
+    const pivot = a[(lo + hi) >> 1];
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return a[k];
+}
+
+/**
+ * numpy.percentile(..., method="linear"), but selection instead of a full
+ * sort: the same value bit-for-bit, O(n) instead of O(n log n). At 2048^2 the
+ * sort cost about 370 ms on the main thread and ran on every filter call, which
+ * is what made the denoise knobs feel slow even with the GPU doing the blur.
+ */
 export function percentileLinear(data: Float32Array, q: number): number {
   const n = data.length;
   if (n === 0) return 0;
-  const sorted = Float32Array.from(data).sort();
+  const scratch = Float32Array.from(data);
   const rank = (q / 100) * (n - 1);
   const lo = Math.floor(rank);
   const frac = rank - lo;
-  if (lo + 1 >= n) return sorted[n - 1];
-  return sorted[lo] + (sorted[lo + 1] - sorted[lo]) * frac;
+  const vlo = selectKth(scratch, lo);
+  if (lo + 1 >= n) return vlo;
+  // selectKth leaves everything > index lo in the right partition, so the next
+  // order statistic is that partition's minimum.
+  let vhi = Infinity;
+  for (let i = lo + 1; i < n; i++) if (scratch[i] < vhi) vhi = scratch[i];
+  return vlo + (vhi - vlo) * frac;
 }
 
 // scipy 'reflect' boundary: (d c b a | a b c d | d c b a), applied repeatedly.
@@ -135,29 +165,47 @@ function reflectIndex(i: number, n: number): number {
   return m < n ? m : period - 1 - m;
 }
 
+function reflectLookup(n: number, radius: number, stride: number): Int32Array {
+  const out = new Int32Array(n * (2 * radius + 1));
+  for (let i = 0; i < n; i++) {
+    const base = i * (2 * radius + 1);
+    for (let k = -radius; k <= radius; k++) {
+      out[base + k + radius] = reflectIndex(i + k, n) * stride;
+    }
+  }
+  return out;
+}
+
 /** Separable gaussian, rows axis first then cols axis, matching scipy's axis order. */
 export function gaussianBlurCPU(data: Float32Array, width: number, height: number, sigma: number): Float32Array {
   const kernel = gaussianKernel1d(sigma);
   const radius = (kernel.length - 1) / 2;
   if (radius === 0) return Float32Array.from(data);
   const mid = new Float32Array(data.length);
-  for (let col = 0; col < width; col++) {
-    for (let row = 0; row < height; row++) {
+  const rowOffsets = reflectLookup(height, radius, width);
+  const colOffsets = reflectLookup(width, radius, 1);
+  const kernelSize = kernel.length;
+  for (let row = 0; row < height; row++) {
+    const lookupOffset = row * kernelSize;
+    const outOffset = row * width;
+    for (let col = 0; col < width; col++) {
       let acc = 0;
-      for (let k = -radius; k <= radius; k++) {
-        acc += kernel[k + radius] * data[reflectIndex(row + k, height) * width + col];
+      for (let ki = 0; ki < kernelSize; ki++) {
+        acc += kernel[ki] * data[rowOffsets[lookupOffset + ki] + col];
       }
-      mid[row * width + col] = acc;
+      mid[outOffset + col] = acc;
     }
   }
   const out = new Float32Array(data.length);
   for (let row = 0; row < height; row++) {
+    const rowOffset = row * width;
     for (let col = 0; col < width; col++) {
       let acc = 0;
-      for (let k = -radius; k <= radius; k++) {
-        acc += kernel[k + radius] * mid[row * width + reflectIndex(col + k, width)];
+      const lookupOffset = col * kernelSize;
+      for (let ki = 0; ki < kernelSize; ki++) {
+        acc += kernel[ki] * mid[rowOffset + colOffsets[lookupOffset + ki]];
       }
-      out[row * width + col] = acc;
+      out[rowOffset + col] = acc;
     }
   }
   return out;
@@ -368,18 +416,55 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  */
 export type GPUPlane = { buffer: GPUBuffer; width: number; height: number };
 
+type CachedSourcePlane = {
+  source: Float32Array;
+  plane: GPUPlane;
+  generation: number;
+};
+
 /**
  * WGSL port of the display filter chain. One instance per page (shares the
  * engine's GPU device). Stage outputs are transient storage buffers tracked
  * per engine and destroyed by releasePlanes(), so idle cost is four pipelines.
  */
 export class GPUDisplayFilterEngine {
+  /**
+   * Source-frame cache. Dragging sigma over the same scientific frame should
+   * not upload 16 MB again on every tick. The source Float32Array already owns
+   * the frame identity in Show2D/Show3D, so keep its GPU storage buffer attached
+   * and reuse it until a new frame object arrives. Cap the strong LRU so a
+   * scientist scrubbing many Show3D frames does not quietly pin every frame on
+   * the GPU.
+   */
+  private sourcePlaneCache = new WeakMap<Float32Array, CachedSourcePlane>();
+  private sourcePlaneLru: CachedSourcePlane[] = [];
+  private sourcePlaneGeneration = 0;
+  private readonly maxSourcePlanes = 16;
+
+  /**
+   * Anscombe scale cache. The 99.5th percentile depends only on the frame and
+   * the bin factor, never on sigma or mode, so dragging the sigma slider must
+   * not recompute it. Keyed weakly on the source frame so freed frames drop out.
+   */
+  private scaleCache = new WeakMap<Float32Array, Map<number, number>>();
+
+  private cachedScale(source: Float32Array, bin: number): number | undefined {
+    return this.scaleCache.get(source)?.get(bin);
+  }
+
+  private storeScale(source: Float32Array, bin: number, scale: number): void {
+    let perBin = this.scaleCache.get(source);
+    if (!perBin) { perBin = new Map(); this.scaleCache.set(source, perBin); }
+    perBin.set(bin, scale);
+  }
+
   private device: GPUDevice;
   private gaussPipeline: GPUComputePipeline;
   private resamplePipeline: GPUComputePipeline;
   private anscombePipeline: GPUComputePipeline;
   private stretchPipeline: GPUComputePipeline;
   private transient: GPUBuffer[] = [];
+  private filterQueue: Promise<void> = Promise.resolve();
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -440,6 +525,46 @@ export class GPUDisplayFilterEngine {
     this.transient.push(buffer);
     this.device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
     return { buffer, width, height };
+  }
+
+  /** Cached upload for source frames reused across live denoise knob drags. */
+  uploadSourcePlane(data: Float32Array, width: number, height: number): GPUPlane {
+    const cached = this.sourcePlaneCache.get(data);
+    if (cached && cached.plane.width === width && cached.plane.height === height) {
+      cached.generation = ++this.sourcePlaneGeneration;
+      return cached.plane;
+    }
+    if (cached) {
+      cached.plane.buffer.destroy();
+      cached.generation = -1;
+      this.sourcePlaneCache.delete(data);
+    }
+    const buffer = this.device.createBuffer({
+      size: data.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+    const plane = { buffer, width, height };
+    const entry = { source: data, plane, generation: ++this.sourcePlaneGeneration };
+    this.sourcePlaneCache.set(data, entry);
+    this.sourcePlaneLru.push(entry);
+    this.pruneSourcePlaneCache();
+    return plane;
+  }
+
+  private pruneSourcePlaneCache(): void {
+    this.sourcePlaneLru = this.sourcePlaneLru.filter((entry) => entry.generation >= 0);
+    if (this.sourcePlaneLru.length <= this.maxSourcePlanes) return;
+    this.sourcePlaneLru.sort((a, b) => a.generation - b.generation);
+    while (this.sourcePlaneLru.length > this.maxSourcePlanes) {
+      const evicted = this.sourcePlaneLru.shift();
+      if (!evicted || evicted.generation < 0) continue;
+      if (this.sourcePlaneCache.get(evicted.source) === evicted) {
+        this.sourcePlaneCache.delete(evicted.source);
+      }
+      evicted.generation = -1;
+      evicted.plane.buffer.destroy();
+    }
   }
 
   /** Destroy every transient stage buffer created since the last release. */
@@ -579,12 +704,18 @@ export class GPUDisplayFilterEngine {
   }
 
   /** Anscombe stage: variance stabilize, gaussian(max(1, sigma*0.85)), inverse. */
-  async stageAnscombeGauss(plane: GPUPlane, sigma: number, cpuShadow: Float32Array | null = null): Promise<GPUPlane> {
-    // The Anscombe scale is the 99.5th percentile of THIS stage's input; a
-    // sort-based percentile on the GPU buys nothing at these sizes, so read
-    // the (bin-reduced) plane back when a bin pass already ran on the GPU.
-    const values = cpuShadow ?? await this.readPlane(plane);
-    const scale = percentileLinear(values, 99.5) + 1e-9;
+  async stageAnscombeGauss(
+    plane: GPUPlane, sigma: number, cpuShadow: Float32Array | null = null,
+    cacheKey: { source: Float32Array; bin: number } | null = null,
+  ): Promise<GPUPlane> {
+    // The Anscombe scale is the 99.5th percentile of THIS stage's input. It is
+    // independent of sigma, so a cache hit makes sigma edits pure GPU work.
+    let scale = cacheKey ? this.cachedScale(cacheKey.source, cacheKey.bin) : undefined;
+    if (scale === undefined) {
+      const values = cpuShadow ?? await this.readPlane(plane);
+      scale = percentileLinear(values, 99.5) + 1e-9;
+      if (cacheKey) this.storeScale(cacheKey.source, cacheKey.bin, scale);
+    }
     const stabilized = this.anscombePointwise(plane, 0, scale);
     const smoothed = this.stageGaussian(stabilized, Math.max(1.0, sigma * 0.85));
     return this.anscombePointwise(smoothed, 1, scale);
@@ -595,12 +726,21 @@ export class GPUDisplayFilterEngine {
     data: Float32Array, width: number, height: number,
     mode: string, sigma: number, spatialBin = 1,
   ): Promise<Float32Array> {
+    // The engine reuses a shared transient buffer list for stage outputs. A
+    // real Show2D/Show3D widget may ask for another filter while an earlier
+    // readback is still mapping; serialize calls so one cleanup cannot destroy
+    // another call's staging buffer and force a slow CPU fallback.
+    const previous = this.filterQueue;
+    let releaseQueue: () => void = () => {};
+    this.filterQueue = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    await previous;
     const resolved = resolveDenoiseMode(mode, spatialBin);
     if (!BROWSER_FILTER_MODES.has(resolved.mode)) {
+      releaseQueue();
       throw new Error(`display filter mode not supported in the browser: ${mode}`);
     }
     try {
-      let plane: GPUPlane = this.uploadPlane(data, width, height);
+      let plane: GPUPlane = this.uploadSourcePlane(data, width, height);
       if (resolved.mode === "gaussian") {
         // Binned gaussian = the reference _bin2 semantics (light smooth on
         // the binned grid); plain separable gaussian otherwise.
@@ -614,7 +754,7 @@ export class GPUDisplayFilterEngine {
         if (resolved.bin >= 2) { plane = this.stageBin2(plane, null); cpuShadow = null; }
         if (resolved.bin === 4) { plane = this.stageBin2(plane, null); }
         const binnedSigma = resolved.bin >= 2 ? Math.max(2.0, sigma * 0.75) : sigma;
-        plane = await this.stageAnscombeGauss(plane, binnedSigma, cpuShadow);
+        plane = await this.stageAnscombeGauss(plane, binnedSigma, cpuShadow, { source: data, bin: resolved.bin });
       } else if (resolved.bin >= 2) {
         plane = this.stageBin2(plane, null);
         if (resolved.bin === 4) plane = this.stageBin2(plane, null);
@@ -626,6 +766,7 @@ export class GPUDisplayFilterEngine {
       return await this.readPlane(plane);
     } finally {
       this.releasePlanes();
+      releaseQueue();
     }
   }
 }

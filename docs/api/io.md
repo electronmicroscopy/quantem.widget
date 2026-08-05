@@ -17,8 +17,10 @@ If you don't have a 4D-STEM master.h5 on disk yet, use one of the reference
 datasets on Hugging Face — the whole flow is four lines:
 
 ```python
-from quantem.widget import ShowFolder, load, Show4DSTEM
-from quantem.widget.io import list_datasets, download, discover_masters
+from quantem.gpu.io import load
+from quantem.widget import ShowFolder, Show4DSTEM
+from quantem.gpu.io import discover
+from quantem.widget.io import list_datasets, download
 
 # 1. See what's available (returns names like '4dstem/gold_512' with prefix)
 list_datasets()
@@ -31,9 +33,9 @@ path = download("gold_512")
 ShowFolder(path)
 
 # 4. Discover the master.h5 files + load the first + open the viewer
-masters = discover_masters(path)     # sorted list of Path
-data = load(masters[0], det_bin=4)   # fast browse preset (see next section)
-Show4DSTEM(data)
+masters = discover(path)             # sorted list of Path
+result = load(masters[0])            # native detector sampling when it fits
+Show4DSTEM(result)
 ```
 
 **Gotcha**: `list_datasets()` returns `4dstem/gold_512` (with prefix) but
@@ -60,32 +62,59 @@ folder = ShowFolder("/data/session")
 folder.paths("image")  # selected files after you star panels
 ```
 
-For 4D-STEM master files, use `discover_masters` to return sorted master paths
-for a scripted load. Then inspect one file with `get_metadata` or load it with
+For 4D-STEM master files, use `quantem.gpu.io.discover` to return sorted master paths
+for a scripted load. Then inspect one file with `quantem.gpu.io.inspect` or load it with
 the memory-reduction options shown below.
 
-Prefer `discover_masters` when you just want the sorted paths back for a
+Prefer `discover` when you just want the sorted paths back for a
 scripted load:
 
 ```python
-from quantem.widget.io import discover_masters
+from quantem.gpu.io import discover
 
-masters = discover_masters("/data/session")               # all
-masters = discover_masters("/data/session", scan_shape=(512, 512))  # filter by scan size
+masters = discover("/data/session")               # all
+masters = discover("/data/session", scan_shape=(512, 512))  # filter by scan size
 ```
 
-Prefer `get_metadata` when you want raw HDF5 attributes of ONE file without
-loading it — returns a dict of HDF5 tree paths plus the widget-friendly keys
-`scan_shape`, `detector_shape`, `n_frames`, `dwell_time_us`, `saturation`,
-`detector_name`:
+Use `inspect` when you want readiness, shape, dtype, and calibration metadata
+without loading detector frames:
 
 ```python
-from quantem.widget.io import get_metadata
+from quantem.gpu.io import inspect
 
-meta = get_metadata("/data/session/scan_00_master.h5")
-print(meta["scan_shape"], meta["detector_shape"])
+report = inspect("/data/session/scan_00_master.h5")
+print(report.scan_shape, report.detector_shape, report.dtype)
 # e.g. (512, 512) (192, 192)
 ```
+
+## How do I load only a scan ROI without loading the full frame first?
+
+Use `load(..., scan_region=...)` for reconstruction or denoise workflows that
+need a scan patch plus halo instead of the full scan plane. It reads only the
+selected HDF5 detector-frame chunks and returns a local CuPy patch:
+
+```python
+from quantem.gpu.io import load
+
+result = load(
+    "/data/session/scan_00_master.h5",
+    scan_region=(160, 293, 234, 367),
+)
+patch = result.data
+print(patch.shape)  # (133, 133, 192, 192)
+```
+
+This is for analysis pipelines, not first-pass full-field browsing. For a
+drift-corrected time series, derive `scan_region` from the shared specimen ROI,
+the frame shift, and a small scan halo, then sample the final ROI from the
+local patch. The detector counts remain raw; drift stays as scan-position
+metadata.
+
+On a native-detector ROI loader timing check, loading ten full frames
+before cropping took `9.66 s` and used an `18.0 GiB` temporary per frame.
+Loading the needed `133 x 133` patch took `2.44 s` and used a `1.215 GiB`
+temporary per frame. The current region loader is CUDA-only; use
+`load()` for Apple Metal/MPS until the region path is ported there.
 
 ## Lightweight visual thumbnails
 
@@ -152,10 +181,11 @@ domain file format when you want data that another analysis step will consume.
 ## I'm on a Linux workstation with an NVIDIA RTX GPU. How do I load a scan?
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
-data = load("scan_master.h5")
-Show4DSTEM(data)
+result = load("scan_master.h5")
+Show4DSTEM(result)
 ```
 
 `load` auto-detects CUDA and decompresses straight onto the GPU (zero-copy
@@ -177,10 +207,11 @@ GPU: RTX PRO 6000 Blackwell (96 GB), L40S / A100 (48 GB), RTX 4090 / A6000
 Same one-liner as CUDA:
 
 ```python
-from quantem.widget import load, Show4DSTEM
+from quantem.gpu.io import load
+from quantem.widget import Show4DSTEM
 
-data = load("scan_master.h5")
-Show4DSTEM(data)
+result = load("scan_master.h5")
+Show4DSTEM(result)
 ```
 
 `load` auto-detects Apple Metal (MPS) and uses a zero-copy **raw-Metal**
@@ -211,8 +242,8 @@ Yes, after the 2026-07-02 `mean_dp` fix. Full-res uint16 no-bin peak = ~21 GB
 (data + widget). Fits 24 GB with ~2.5 GB headroom.
 
 ```python
-data = load("scan_master.h5")   # dtype defaults to uint16, no bin
-Show4DSTEM(data)                # ~21 GB VRAM peak
+result = load("scan_master.h5")   # dtype defaults to uint16, no bin
+Show4DSTEM(result)                # ~21 GB VRAM peak
 ```
 
 If you need more headroom for downstream compute (reconstruction, SSB), bin
@@ -248,10 +279,11 @@ data = load("scan_master.h5")
 Show4DSTEM(data)
 ```
 
-## I want to browse fast without caring about full detector detail.
+## I want a smaller preview and do not need full detector detail.
 
-Bin harder + drop to uint8. Great for scrolling through a session to find good
-scans; not for reconstruction.
+Bin deliberately and drop to uint8. This is useful for scrolling through a
+session on constrained hardware; it is not a reconstruction or count-preserving
+path.
 
 ```python
 data = load("scan_master.h5", det_bin=4, dtype="u8")
@@ -272,7 +304,7 @@ masters = [
     "/data/session/file_002_master.h5",
     "/data/session/file_003_master.h5",
 ]
-data = load(masters, det_bin=4, dtype="u8")
+data = load(masters, det_bin=1, dtype="u8")
 Show4DSTEM(data)
 ```
 
@@ -290,7 +322,8 @@ Show4DSTEM(data)
 `dtype="u8"` is the fast browse contract. It decodes directly into uint8 before
 stacking or sharding, so the loader does not build a full uint16 stack first.
 Values above 255 clip, so use uint16/no-bin when detector counts are the
-scientific result.
+scientific result. Add `det_bin=2` or `4` only when you intentionally want a
+detector-reduced preview.
 
 The sharded path is disk-aware. If masters live on independent NVMe devices,
 `load(..., devices=[0, 1])` interleaves files by physical disk and GPU. If every
@@ -383,15 +416,17 @@ Use explicit discovery plus `load(...)` when the file list is fixed and you want
 to control exactly what enters the stack:
 
 ```python
-from quantem.widget import load, discover_masters, Show4DSTEM
+from quantem.gpu.io import discover, load
+from quantem.widget import Show4DSTEM
 
-masters = discover_masters("/data/session")   # sorted, filters to *_master.h5
-data = load(masters, det_bin=4)
+masters = discover("/data/session")   # sorted, filters to *_master.h5
+data = load(masters, det_bin=1)
 Show4DSTEM(data)
 ```
 
-`discover_masters` also accepts a `scan_shape=(512, 512)` filter to keep only
-matching acquisitions when a folder mixes scan sizes.
+`discover` also accepts a `scan_shape=(512, 512)` filter to keep only
+matching acquisitions when a folder mixes scan sizes. Add `det_bin=2` or `4`
+only when you intentionally want a detector-reduced preview.
 
 ## Before loading anything, how do I check what's in a folder?
 
@@ -402,16 +437,16 @@ folder = ShowFolder("/data/session")  # thumbnails, metadata, selection, cache
 ```
 
 Use the embedded selection panel to open starred images as Show2D or Show3D.
-For 4D-STEM master files, pair this with `discover_masters` and `get_metadata`
+For 4D-STEM master files, pair this with `discover` and `inspect`
 before calling `load`.
 
 ## How do I inspect a single master's calibration + metadata without loading it?
 
 ```python
-from quantem.widget.io import get_metadata
+from quantem.gpu.io import inspect
 
-meta = get_metadata("scan_master.h5")
-print(meta)   # voltage_kV, semiangle_mrad, scan_sampling_A, det_shape, ...
+report = inspect("scan_master.h5")
+print(report.metadata)  # voltage, semiangle, sampling, and source metadata
 ```
 
 ## I have HAADF or a 2D image (Velox EMD, TIFF, PNG). How do I load that?
@@ -445,7 +480,7 @@ data = load(path)
 ## I want to save a `LoadResult` back to disk (e.g. after binning).
 
 ```python
-from quantem.widget.io import save
+from quantem.gpu.io import save
 
 save(data, "binned_out.h5")   # compressed, matches original chunk shape
 ```
@@ -500,7 +535,7 @@ CUDA_VISIBLE_DEVICES=0 jupyter lab --no-browser --ip=0.0.0.0
 ```
 
 Use `1`, `2`, etc. for another physical GPU. This is a CUDA/NVIDIA control; it
-is not used for Apple Silicon or CPU-only machines.
+is not used for Apple Silicon machines.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 jupyter lab --no-browser --ip=0.0.0.0
@@ -576,7 +611,7 @@ upload protocol is three steps:
    ```
 
    No write access to the shared repo? Either open an issue on
-   [quantem.widget](https://github.com/bobleesj/quantem.widget/issues) to get
+   [quantem.widget](https://github.com/electronmicroscopy/quantem.widget/issues) to get
    added, or pass `repo="you/your-data"` to use your own HF dataset repo with
    the same layout — every download helper accepts the same `repo=` override.
 
@@ -599,16 +634,16 @@ the right to share.
 ## Function reference
 
 ```{eval-rst}
-.. autofunction:: quantem.widget.io.hdf5.load
+.. autofunction:: quantem.gpu.io.load
 ```
 
 ### Discover + inspect
 
 ```{eval-rst}
-.. autofunction:: quantem.widget.io.hdf5.discover_masters
+.. autofunction:: quantem.gpu.io.discover
 ```
 ```{eval-rst}
-.. autofunction:: quantem.widget.io.hdf5.get_metadata
+.. autofunction:: quantem.gpu.io.inspect
 ```
 
 ### Images (2D / 3D)
@@ -618,12 +653,6 @@ the right to share.
 ```
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.image.read_image_stack
-```
-
-### Detector binning
-
-```{eval-rst}
-.. autofunction:: quantem.widget.io.hdf5.bin
 ```
 
 ### Hugging Face datasets
@@ -647,5 +676,5 @@ the right to share.
 ### Save
 
 ```{eval-rst}
-.. autofunction:: quantem.widget.io.save.save
+.. autofunction:: quantem.gpu.io.save
 ```

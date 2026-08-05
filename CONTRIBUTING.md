@@ -79,12 +79,36 @@ widgets in the browser:
 scripts/widget_agent_signoff.sh --quick
 ```
 
+## Tutorial Notebooks
+
+Canonical notebooks under `docs/tutorials/` remain interactive source
+notebooks. Do not commit baked widget state (`metadata.widgets`) or re-execute
+them merely to store outputs; run `scripts/check_notebook_sizes.py` before a
+docs PR. Documentation CI executes the notebooks and sets
+`QUANTEM_WIDGET_STATIC_FALLBACK=0`, so each widget cell renders one live widget
+instead of a duplicate static preview. Do not change the docs build to notebook
+cache mode, which drops saved widget state.
+
+Keep Colab bootstrap plumbing in its own cell, tagged `remove-cell`, with the
+installation command strictly inside the successful `google.colab` import
+branch. Do not mix that bootstrap with tutorial code.
+
+Use vectorized NumPy or Torch operations for tutorial data generation rather
+than large Python loops. Collapse bulky synthetic-data construction when it is
+not the teaching point, and keep the rendered scientific result as the focus.
+If Torch is not otherwise required, import it locally and retain a NumPy path.
+
 ## Performance Expectations
 
 For interactive widget changes, verify performance in the actual user path, not
 only with unit tests. Open the affected notebook or exported HTML, drive the
 changed controls, and check the widget debug HUD or another direct timing signal
 when available.
+
+Include at least one organic user path: begin with a minimal call such as
+`Show2D(data)` or `Show3D(stack)` and enable the behavior through the UI. A
+constructor configured with many test-only options is useful for a focused
+regression, but does not replace the normal scientist workflow.
 
 Report load, render, and interaction timings in the PR or handoff. At minimum,
 name the data shape, dtype, raw size, backend, loader time, widget construction
@@ -132,7 +156,7 @@ Commit durable source, tests, and public documentation:
 - `js/**` when it is production frontend code or a real test
 - `tests/**` when the files are tests, not local screenshots
 - `docs/api/**`, `docs/tutorials/**`, and `docs/maintainer/**`
-- `README.md`, `CONTRIBUTING.md`, and `AGENTS.md`
+- `README.md` and `CONTRIBUTING.md`
 
 Do not commit local or generated files:
 

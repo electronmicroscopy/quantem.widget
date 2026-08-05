@@ -74,6 +74,11 @@ mkdir -p "$artifact_dir"
 artifact_dir="$(cd "$artifact_dir" && pwd)"
 branch="$(git branch --show-current 2>/dev/null || echo unknown)"
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [[ -n "${PYTHONPATH:-}" ]]; then
+  signoff_pythonpath="src:.:${PYTHONPATH}"
+else
+  signoff_pythonpath="src:."
+fi
 
 write_dashboard() {
   local status="$1"
@@ -113,7 +118,7 @@ manifest = {
 }
 path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 PY
-  PYTHONPATH=src:. python scripts/widget_signoff_dashboard.py --artifact-dir "$artifact_dir" >/dev/null || true
+  PYTHONPATH="$signoff_pythonpath" python scripts/widget_signoff_dashboard.py --artifact-dir "$artifact_dir" >/dev/null || true
 }
 
 finalize() {
@@ -149,20 +154,20 @@ npm run build
 
 if [[ "$mode" == "quick" ]]; then
   echo "== focused pytest =="
-  PYTHONPATH=src:. pytest -q \
+  PYTHONPATH="$signoff_pythonpath" pytest -q \
     tests/test_html_export_protocol.py \
     tests/test_showfolder.py \
     tests/test_automation_scripts.py
 else
   echo "== full pytest =="
-  PYTHONPATH=src:. pytest -q
+  PYTHONPATH="$signoff_pythonpath" pytest -q
 fi
 
 echo "== HTML export smoke matrix =="
-PYTHONPATH=src:. python scripts/widget_html_smoke.py --artifact-dir "$artifact_dir/html-smoke"
+PYTHONPATH="$signoff_pythonpath" python scripts/widget_html_smoke.py --artifact-dir "$artifact_dir/html-smoke"
 
 echo "== ShowFolder live-folder smoke =="
-PYTHONPATH=src:. python scripts/widget_showfolder_live_smoke.py --artifact-dir "$artifact_dir/showfolder-live"
+PYTHONPATH="$signoff_pythonpath" python scripts/widget_showfolder_live_smoke.py --artifact-dir "$artifact_dir/showfolder-live"
 
 if [[ "$browser" -eq 1 ]]; then
   echo "== browser-drive HTML smoke =="
@@ -170,7 +175,7 @@ if [[ "$browser" -eq 1 ]]; then
   if [[ "$mobile" -eq 1 ]]; then
     browser_args+=(--mobile)
   fi
-  PYTHONPATH=src:. python scripts/widget_browser_smoke.py "${browser_args[@]}"
+  PYTHONPATH="$signoff_pythonpath" python scripts/widget_browser_smoke.py "${browser_args[@]}"
 
   echo "== post-browser artifact cleanup =="
   python scripts/cleanup_browser_artifacts.py
@@ -178,7 +183,7 @@ fi
 
 if [[ "$performance" -eq 1 ]]; then
   echo "== real-data performance smoke =="
-  PYTHONPATH=src:. python scripts/widget_performance_smoke.py --artifact-dir "$artifact_dir/performance"
+  PYTHONPATH="$signoff_pythonpath" python scripts/widget_performance_smoke.py --artifact-dir "$artifact_dir/performance"
 
   if [[ "$browser" -eq 1 ]]; then
     echo "== browser-drive real-data performance smoke =="
@@ -186,7 +191,7 @@ if [[ "$performance" -eq 1 ]]; then
     if [[ "$mobile" -eq 1 ]]; then
       perf_browser_args+=(--mobile)
     fi
-    PYTHONPATH=src:. python scripts/widget_browser_smoke.py "${perf_browser_args[@]}"
+    PYTHONPATH="$signoff_pythonpath" python scripts/widget_browser_smoke.py "${perf_browser_args[@]}"
   fi
 
   echo "== post-performance browser artifact cleanup =="

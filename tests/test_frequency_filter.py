@@ -117,6 +117,77 @@ def test_show3d_frequency_filter_state_round_trip():
     np.testing.assert_array_equal(widget._data, data)
 
 
+def test_show3d_frequency_filter_accepts_per_panel_settings():
+    panels = [
+        np.ones((3, 8, 8), dtype=np.float32),
+        np.eye(8, dtype=np.float32)[None, ...].repeat(3, axis=0),
+    ]
+    widget = Show3D(
+        *panels,
+        frequency_filter=["highpass", "bandpass"],
+        frequency_filter_cutoff=[0.08, 0.2],
+        frequency_filter_center=[0.3, 0.45],
+        frequency_filter_width=[0.1, 0.06],
+        verbose=False,
+    )
+
+    assert widget.frequency_filter_scope == "panel"
+    assert widget.frequency_filter_modes == ["highpass", "bandpass"]
+    assert widget.frequency_filter_cutoffs == pytest.approx([0.08, 0.2])
+    assert widget.frequency_filter_centers == pytest.approx([0.3, 0.45])
+    assert widget.frequency_filter_widths == pytest.approx([0.1, 0.06])
+    state = widget.state_dict()
+    assert state["frequency_filter_scope"] == "panel"
+    assert state["frequency_filter_modes"] == ["highpass", "bandpass"]
+
+
+def test_show3d_denoise_accepts_per_panel_settings():
+    # C10: raw/denoised/residual stack, expect each panel to keep its own view filter.
+    panels = [
+        np.ones((3, 8, 8), dtype=np.float32),
+        np.eye(8, dtype=np.float32)[None, ...].repeat(3, axis=0),
+    ]
+    widget = Show3D(
+        *panels,
+        denoise=["none", "gaussian"],
+        denoise_sigma=[1.0, 3.0],
+        denoise_bin=[1, 2],
+        verbose=False,
+    )
+
+    assert widget.denoise_scope == "panel"
+    assert widget.denoise_modes == ["none", "gaussian"]
+    assert widget.denoise_sigmas == pytest.approx([1.0, 3.0])
+    assert widget.denoise_bins == [1, 2]
+    state = widget.state_dict()
+    assert state["denoise_scope"] == "panel"
+    assert state["denoise_modes"] == ["none", "gaussian"]
+
+
+def test_show3d_rejects_per_panel_settings_with_all_scope():
+    # C11: contradictory API, expect corrective error instead of silent broadcast.
+    panels = [
+        np.ones((3, 8, 8), dtype=np.float32),
+        np.eye(8, dtype=np.float32)[None, ...].repeat(3, axis=0),
+    ]
+
+    with pytest.raises(ValueError, match="denoise_scope='all'"):
+        Show3D(
+            *panels,
+            denoise=["none", "gaussian"],
+            denoise_scope="all",
+            verbose=False,
+        )
+
+    with pytest.raises(ValueError, match="frequency_filter_scope='all'"):
+        Show3D(
+            *panels,
+            frequency_filter=["lowpass", "highpass"],
+            frequency_filter_scope="all",
+            verbose=False,
+        )
+
+
 @pytest.mark.parametrize("viewer", [Show2D, Show3D])
 def test_frequency_filter_rejects_invalid_normalized_cutoff(viewer):
     # C8: cutoff outside normalized Nyquist, expect a corrective error.

@@ -438,7 +438,7 @@ export async function clearMasterCache(): Promise<{ cleared: number } | null> {
 /** Fetch current free GPU 0 bytes from the global ``/api/gpu`` endpoint.
  *  Used by ``pickAutoBin`` + the per-folder VRAM chip. The endpoint returns
  *  per-GPU dicts with ``mem_used_mb`` / ``mem_total_mb`` — we read GPU 0
- *  (the dashboard's pinned device per CLAUDE.md). */
+ *  (the dashboard's pinned device). */
 export async function fetchGpuFreeBytes(): Promise<number> {
   return store.freeVramBytes();
 }

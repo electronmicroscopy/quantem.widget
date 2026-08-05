@@ -9,8 +9,8 @@ wrong, how to recognize the pattern, and what to do instead.
 2026-07-05 Show4DSTEM loader work:
 
 - Exact `uint16` no-bin loading is already on the same fast path as browse
-  `uint8` for a single real 512 x 512 x 192 x 192 Arina master. On the private
-  MJGOAT workstation, the new benchmark script measured `uint16` at 0.634 s
+  `uint8` for a single real 512 x 512 x 192 x 192 Arina master. On a private
+  reference CUDA workstation, the benchmark script measured `uint16` at 0.634 s
   cold / 0.405 s hot and `uint8` at 0.591 s cold / 0.392 s hot on the freer GPU.
 - Multi-GPU loading now uses disk-aware scheduling. `load(masters,
   devices=[0, 1])` interleaves files by physical disk before assigning work to
@@ -23,19 +23,34 @@ wrong, how to recognize the pattern, and what to do instead.
 - Keep real benchmark outputs under `/tmp/quantem-widget-load-bench/`. Do not
   commit private paths, raw data, generated benchmark payloads, screenshots, or
   large reports.
-- Current MJGOAT sampled masters resolve to one physical disk (`nvme2n1`), so
+- The sampled masters resolve to one physical NVMe disk, so
   the smoke validates the sharded code path and report harness, not an actual
   two-disk bandwidth gain. Prove the disk speedup on a host where
   `group_by_disk(masters)` reports at least two real disks.
-- 2026-07-06 U8 follow-up on real private BTOSTO masters:
+- 2026-07-06 U8 follow-up on real private reference masters:
   `load(master, dtype="u8", det_bin=1)` measured 0.850 s cold / 0.385 s hot
   for one 512 x 512 x 192 x 192 master with parity enabled. Sharded
   `dtype="u8"`, two no-bin masters across `devices=[0, 1]`, measured
   1.428 s cold / 0.641 s hot with one 9.0 GiB U8 file resident on each GPU.
   The single-master browse path meets the <0.5 s hot-load target; the two-master
   sharded reload is close but not below target yet. The full remote
-  Show4DSTEM browser signoff was blocked in that MJGOAT environment by a
+  Show4DSTEM browser signoff was blocked in that workstation environment by a
   neighboring `quantem.core` circular import during `import quantem.widget`.
+- 2026-07-25 Show4DSTEM WebGPU seven-tilt browser signoff:
+  seven full audited U8-masked `512 x 512 x 192 x 192` HDF5 tilt families
+  loaded through Chrome WebGPU on the Apple Metal adapter. The visible
+  `Show4DSTEM.command` bundle used audited `h5_uint8_lossless=True`, low8
+  bitshuffle/LZ4 decode, fetch/parse/decode queueing, and
+  `compare_max_panels=7` with `compare_group_mode="all"`. A CDP-driven
+  2-second detector drag measured live compare virtual-image GPU slot updates
+  for all seven panels: `paintFps=21`, `lastPaintedPanels=7`,
+  `lastAdoptedPanels=7`, and `lastComputeMs=0.8`. The first broken attempt
+  showed `computeFps>0` but `paintFps=0`; the fix was to upload the colormap LUT
+  before compare-grid GPU paints and render each live compare panel through a
+  visible WebGPU canvas with `renderSlotDirectWithGpuRangeToCanvas`, matching
+  the single-tilt VI path. The browser-local proof object is
+  `window.__sh4dLiveViStats`; it intentionally does not sync high-frequency
+  samples to Python traits.
 
 ## Timing protocol for every widget
 
@@ -113,7 +128,7 @@ one common metric plus widget-specific metrics:
 - **Common**: UI FPS, dropped frames, pointer-to-preview latency.
 - **Show2D**: image decode/draw, histogram draw, FFT prep/worker/GPU/post time,
   ROI/profile time, page scrub latency, and panel cache state.
-- **Show3D**: frame fetch/decode, frame cache hit/miss, prewarm status, play
+- **Show3D**: frame fetch/decode, numerical source/FFT cache hit/miss, play
   FPS, frame scrub latency, remote Comm/tunnel receive latency,
   scrub-preview factor/bytes when active, FFT/FFT-metric time, and panel/page
   cache state.
@@ -138,7 +153,7 @@ evidence.
 | --- | --- | --- | --- |
 | Show1D | Inspect scalar traces, losses, spectra, or per-iteration diagnostics while deciding which image view to open. | Cursor/readout movement, snapshot selection, and handoff to Show2D. | Lightweight state tests plus browser story when handoff or snapshot rendering changes. |
 | Show2D | Compare one image or many related images, often 4K microscopy outputs, with zoom, pan, histogram, FFT, profile, pages, and export. | Zoom/pan, histogram controls, page slider/play, hidden panels, FFT redraws after first compute, and HTML reopen. | `scripts/widget_browser_smoke.py` for exported HTML; `scripts/widget_heavy_perf_signoff.py` for 4K real-data panels. |
-| Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, remote-tunnel drag preview with native restoration, page slider/play, hidden panels, frame cache/prewarm, FFT return-scrub cache, FFT metric labels, GIF/MP4/HTML export. | `scripts/widget_heavy_perf_signoff.py`; [S3D-20](storyboard-show3d.md#s3d-20-scrub-full-resolution-movies-over-a-remote-jupyter-tunnel) live Jupyter tunnel proof; exported HTML profile for existing reports; animation smoke for GIF/MP4. |
+| Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, remote-tunnel drag preview with native restoration, page slider/play, hidden panels, independent panel contrast, FFT return-scrub cache, FFT metric labels, GIF/MP4/HTML export. | `scripts/widget_heavy_perf_signoff.py`; [S3D-20](storyboard-show3d.md#s3d-20-scrub-full-resolution-movies-over-a-remote-jupyter-tunnel) live Jupyter tunnel proof; exported HTML profile for existing reports; animation smoke for GIF/MP4. |
 | Show3DSlices | Browse volume slices and orthogonal views with synchronized crosshair/plane controls. | Slice sliders, crosshair movement, oblique line endpoint/body drags, side-plane redraw, oblique FFT redraw during line drag, FFT return-scrub cache hits for slice/oblique sliders, histogram controls, FFT/log/smooth toggles, and export reopen. | Browser smoke plus focused visual story when slice/crosshair/oblique-line behavior changes. |
 | Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, cache-backed folder reopen, lazy folder sessions, and export reopen. | `scripts/widget_show4dstem_heavy_signoff.py` covers direct backend/export interaction only. S4D-19 additionally requires a recorded fresh-process folder-paging/cache runner and browser report; do not infer that signoff from the heavy script. Lightweight CI checks only the protocol. |
 | ShowEDS | Explore spectral maps, ROIs, energy bands, element lines, and sparse/folder-backed EDS cubes. | Band dragging, map/spectrum sync, ROI changes, periodic table selection, sparse lookup/cache, and export reopen. | Browser story plus EDS-specific real-data smoke when backend or map/spectrum logic changes. |
@@ -156,6 +171,45 @@ an append path, not as a periodic full rebuild.
 Remote Jupyter is a first-class production path for Show3D: the browser may be
 on a laptop while the kernel, data, CUDA device, and any Python frame server
 live on a workstation reached through `ssh -L`.
+
+## Show3D direct-display no-blank contract
+
+The Show3D canvas is rendered directly from the selected frame and the selected
+panel's state. Do not introduce a browser-side prebuilt canvas/composite display
+cache or a second display-state machine: those paths have repeatedly let page,
+frame, contrast, and zoom disagree. Decoded source frames and numerical FFT
+results may be cached when their keys are scientific inputs, but a numerical
+cache must never independently decide which pixels, contrast, or transform are
+shown.
+
+Page play, frame autoplay, keyboard steps, Page slider changes, manual
+frame-slider drag, and release can each use different handlers. A fix that
+covers autoplay does not prove manual scrubbing is safe. Keep these rules:
+
+- One renderer owns every panel paint from the current frame plus that panel's
+  current display state.
+- Retain the last complete scientific pixels until the next direct paint is
+  ready. Do not `clearRect`, hide the GPU canvas, or fill the viewport with an
+  inter-panel color unless replacement scientific pixels are painted in the
+  same task.
+- Preserve zoom/pan across a page change, without recomputing or copying a
+  different panel's contrast, colormap, Smooth state, or selection.
+- With linking off, a histogram edit writes only the addressed panel state;
+  with linking on, the propagation is explicit and testable.
+
+Browser signoff must include transition-time screenshots or equivalent pixel
+sampling during manual lower-slider drag/release, Page slider scrub, Page play,
+and frame autoplay. Scan for both white and black spikes in the scientific
+canvas area; a final nonblank screenshot is not enough.
+
+### Mistake log: do not reintroduce the display cache casually
+
+The retired display-cache path combined prebuilt frame canvases, asynchronous
+page preparation, and independent contrast/zoom state. Under normal scientist
+actions it produced stale frames, blinking contrast, cross-panel edits, and
+blank canvases. Any proposal to reintroduce it requires a dedicated issue,
+one rendering owner, live-Jupyter plus fresh-export visual proof, and the
+independence/no-blank checks in S3D-05A.
 
 A kernel-local frame server on `127.0.0.1` is only fast if the browser can reach
 that exact endpoint. Across an SSH tunnel, the browser's localhost is the
@@ -294,7 +348,7 @@ needs its own signoff.
 
 ### Show2D local-panel stack signoff (2026-07-09)
 
-Private real-data signoff used one Dasol Velox EDS acquisition with a
+Private real-data signoff used one collaborator Velox EDS acquisition with a
 `131 x 234 x 237` uint16 HAADF stack and four `234 x 237` elemental maps. The
 source stayed outside git. Standalone artifacts were served over local HTTP and
 driven with headless Playwright Chromium because in-app browser control was not
@@ -470,12 +524,13 @@ On MacBook/Apple Silicon, the raw Metal/MPS path is preferred for large
 first-pass 4D-STEM browsing because it gives tighter control over chunking,
 detector binning, dtype, and transient memory than a generic Torch-MPS tensor
 path. Torch-MPS can still be valid for specific tensor workflows, but reports
-must say which path was used and whether any operation fell back to CPU.
+path. Scientific detector compute must fail clearly instead of falling back to
+CPU.
 
-Multi-master `load([masters])` differs by backend: CUDA and CPU eager-stack
-all masters into one resident 5D array, while MPS decodes dataset 0
+Multi-master `load([masters])` differs by backend: CUDA eager-stacks masters
+into one resident 5D array, while MPS decodes dataset 0
 synchronously, shows the viewer immediately, and fills datasets 1..N-1 from a
-single background GPU worker (`multidataset_mps.py`). Performance reports for
+single background GPU worker owned by `quantem.gpu.io`. Performance reports for
 multi-master sessions must say which of the two paths ran.
 
 GPU memory belongs to the backend data object and Python session, not the
@@ -525,7 +580,7 @@ about 18 GiB resident, so 20-30 masters no-bin is a capacity stress, not a
 reasonable default expectation on every two-GPU machine.
 
 2026-07-05 CUDA no-bin result on a private NVIDIA lab workstation: two RTX PRO
-6000 GPUs (about 96 GiB each) loaded real PE-5 masters at `det_bin=1`. A
+6000 GPUs (about 96 GiB each) loaded real experimental masters at `det_bin=1`. A
 four-master stack (4 x 512 x 512 x 192 x 192 uint16, about 72 GiB resident)
 passed the browser-enabled signoff: first master load was about 0.8 s, widget
 build about 0.6 s, stack growth to four masters about 1.5 s, and browser
@@ -572,7 +627,7 @@ by `os.pathsep` (`:` on Linux/macOS). Use that form when a folder was split
 across multiple NVMe mounts, for example:
 
 ```bash
-export QUANTEM_WIDGET_BENCH_MASTERS_GLOB='/mnt/nvme0/run/*_master.h5:/mnt/nvme1/run/*_master.h5'
+export QUANTEM_WIDGET_BENCH_MASTERS_GLOB='/path/to/disk0/*_master.h5:/path/to/disk1/*_master.h5'
 ```
 
 The scripts write Markdown tables under `/tmp/quantem-widget-load-bench/` by
@@ -596,7 +651,7 @@ Loader policy:
   inside the load timer; a full uint64 sum over tens of GiB is a correctness
   check, not load latency.
 
-Current private MJGOAT measurement, single real 512 x 512 x 192 x 192 Arina
+Current private reference-workstation measurement, single real 512 x 512 x 192 x 192 Arina
 master, no detector binning, parity checked against the full tensor:
 
 | path | first measured load | hot repeated load | resident size | note |
@@ -622,7 +677,7 @@ confirmed that the entrypoints run end to end. This smoke used
 | sharded, two masters, `dtype="u8"`, no-bin, `devices=[0, 1]` | 1.428 s | 0.641 s | 18.0 GiB total | one 9.0 GiB U8 master per GPU; close, not yet <0.5 s |
 | matrix, `dtype="u16"`, no-bin, single master | ERR | - | - | current GPU memory was not clean enough for the exact-count allocation |
 
-The current MJGOAT sample resolved to one physical disk (`nvme2n1`) for the
+The current sample resolved to one physical NVMe disk for the
 available real masters, so the smoke validates sharded GPU placement and the
 benchmark harness, not a real multi-disk bandwidth gain. To prove the disk
 speedup, run `widget_load_bench_sharded.py` on a host where
@@ -654,7 +709,7 @@ IO review and next optimization targets:
   split-disk cold/warm timing with the same master count, dtype, and detector
   binning. Use `quantem data-transfer plan/copy/masters/show4dstem` to create
   and record that split layout; keep the manifest path and timing report local
-  when it contains private MJGOAT paths.
+  when it contains private workstation paths.
 - Do not run two GPU-heavy loader benchmarks concurrently on the same GPUs.
   Parallel benchmark processes create artificial OOMs and hide the true loader
   behavior. Run U8/U16 and sharded/single cases serially unless the goal is an

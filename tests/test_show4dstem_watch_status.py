@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
+import hdf5plugin
 import numpy as np
 import pytest
 import torch
 import traitlets
 
 from quantem.widget.data import Dataset5dstem
-from quantem.widget.io import MasterReadiness
 from quantem.widget.show4dstem import Show4DSTEM
 
 
@@ -33,8 +34,8 @@ def _report(
     action: str = "Ready to open with Show4DSTEM.",
     actual_frames: int | None = 1,
     expected_frames: int | None = 1,
-) -> MasterReadiness:
-    return MasterReadiness(
+) -> SimpleNamespace:
+    return SimpleNamespace(
         ready=ready,
         reason=reason,
         action=action,
@@ -103,6 +104,8 @@ def _write_external_master(folder: Path, index: int) -> Path:
         handle.create_dataset(
             "entry/data/data",
             data=np.full((16, 8, 8), index + 1, dtype=np.uint16),
+            chunks=(1, 8, 8),
+            **hdf5plugin.Bitshuffle(nelems=0, cname="lz4"),
         )
     with h5py.File(master, "w") as handle:
         group = handle.require_group("entry/data")
@@ -122,7 +125,7 @@ def test_show4dstem_watch_requires_stable_ready_signature(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, materialized, _ = _folder_widget(tmp_path)
     arriving = tmp_path / "scan_01_master.h5"
@@ -140,7 +143,7 @@ def test_show4dstem_watch_requires_stable_ready_signature(
 
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: list(discovered),
     )
 
@@ -148,7 +151,7 @@ def test_show4dstem_watch_requires_stable_ready_signature(
         scan_shapes.append(scan_shape)
         return current["report"]
 
-    monkeypatch.setattr(widget_io, "inspect_master_readiness", inspect)
+    monkeypatch.setattr(widget_io, "inspect", inspect)
     transitions: list[str] = []
     widget.observe(
         lambda change: transitions.append(change["new"]),
@@ -204,7 +207,7 @@ def test_show4dstem_bad_candidate_does_not_block_later_compatible(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, materialized, incompatible = _folder_widget(tmp_path)
     bad = tmp_path / "scan_01_master.h5"
@@ -216,12 +219,12 @@ def test_show4dstem_bad_candidate_does_not_block_later_compatible(
     }
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: [str(initial), str(bad), str(good)],
     )
     monkeypatch.setattr(
         widget_io,
-        "inspect_master_readiness",
+        "inspect",
         lambda master, **kwargs: reports[str(master)],
     )
     widget.watch_folder(interval=60)
@@ -257,7 +260,7 @@ def test_show4dstem_watch_error_restart_stop_and_close_lifecycle(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, _, _ = _folder_widget(tmp_path)
     failing = {"value": True}
@@ -267,7 +270,7 @@ def test_show4dstem_watch_error_restart_stop_and_close_lifecycle(
             raise RuntimeError(f"acquisition mount unavailable at {tmp_path}")
         return [str(initial)]
 
-    monkeypatch.setattr(widget_io, "discover_masters", discover)
+    monkeypatch.setattr(widget_io, "discover", discover)
     first = None
     second = None
     try:
@@ -316,12 +319,12 @@ def test_show4dstem_fixed_folder_snapshot_keeps_watch_status_hidden(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, _, _ = _folder_widget(tmp_path)
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: [str(initial)],
     )
     try:
@@ -340,7 +343,7 @@ def test_show4dstem_live_append_paints_active_partial_page_before_green(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, materialized, _ = _folder_widget(
         tmp_path,
@@ -349,12 +352,12 @@ def test_show4dstem_live_append_paints_active_partial_page_before_green(
     arriving = tmp_path / "scan_01_master.h5"
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: [str(initial), str(arriving)],
     )
     monkeypatch.setattr(
         widget_io,
-        "inspect_master_readiness",
+        "inspect",
         lambda master, **kwargs: _report(ready=True, revision="stable"),
     )
     transitions: list[str] = []
@@ -393,7 +396,7 @@ def test_show4dstem_mounted_watch_waits_for_fresh_browser_paint_ack(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
 
     widget, initial, materialized, _ = _folder_widget(
         tmp_path,
@@ -402,16 +405,28 @@ def test_show4dstem_mounted_watch_waits_for_fresh_browser_paint_ack(
     arriving = tmp_path / "scan_01_master.h5"
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: [str(initial), str(arriving)],
     )
     monkeypatch.setattr(
         widget_io,
-        "inspect_master_readiness",
+        "inspect",
         lambda master, **kwargs: _report(ready=True, revision="stable"),
     )
     widget.watch_folder(interval=60)
     try:
+        widget._handle_compare_page_paint_msg(
+            widget,
+            {
+                "type": "compare_page_paint_capability",
+                "version": 1,
+                "active": True,
+            },
+            [],
+        )
+        assert widget._compare_page_paint_clients == set()
+        assert widget._compare_page_paint_ack_enabled is False
+
         # C0: two notebook views can share one widget model, expect one view
         # unmounting not to disable paint proof for the remaining mounted view.
         for client_id in ("view-a", "view-b"):
@@ -547,12 +562,17 @@ def test_show4dstem_mounted_watch_waits_for_fresh_browser_paint_ack(
 def test_public_show4dstem_from_folder_paints_real_external_arrival(
     tmp_path: Path,
 ) -> None:
+    from quantem.gpu.device import detect
     from quantem.widget import Show4DSTEM as PublicShow4DSTEM
+
+    try:
+        detect()
+    except RuntimeError as exc:
+        pytest.skip(f"native GPU integration requires CUDA or MPS: {exc}")
 
     _write_external_master(tmp_path, 0)
     widget = PublicShow4DSTEM.from_folder(
         tmp_path,
-        backend="cpu",
         scan_size=4,
         det_bin=1,
         dtype="u8",

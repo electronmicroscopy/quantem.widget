@@ -11,6 +11,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "quantem>=0.1.8",
+    "quantem.gpu[movie]>=0.0.1rc6",
     "anywidget>=0.11.0",
     # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
     "jupyterlab_widgets>=3.0.10",
@@ -44,13 +45,15 @@ test = [
     "nbconvert>=7",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [project.scripts]
 quantem = "quantem.widget.cli:main"
-qw = "quantem.widget.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantem"]
-artifacts = ["src/quantem/widget/static/**"]
+artifacts = ["src/quantem/widget/static/**", "src/quantem/widget/vendor/**"]
 
 [tool.hatch.build.targets.sdist]
-artifacts = ["src/quantem/widget/static/**"]
+artifacts = ["src/quantem/widget/static/**", "src/quantem/widget/vendor/**"]

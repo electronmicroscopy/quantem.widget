@@ -9,23 +9,20 @@ the invisible visible.
 Public API
 ----------
 gpu_info : Print a snapshot of GPU VRAM and CuPy pool usage.
-free_gpu : Free all CuPy memory pool blocks to release GPU VRAM.
+vram_status : Return a compact CUDA memory-status string for live error paths.
 
 Examples
 --------
->>> from quantem.widget.utils.gpu_info import gpu_info, free_gpu
+>>> from quantem.widget import gpu_info
 >>> gpu_info()
 NVIDIA RTX PRO 6000 (95.0 GB)
   VRAM: 82.6 GB available of 95.0 GB
   CuPy pool: 8.2 GB in use, 3.1 GB cached
->>> free_gpu()
->>> gpu_info()
-  CuPy pool: 0 bytes in use, 0 bytes cached
+
+Use :func:`quantem.widget.free_gpu` for cross-backend cache release.
 """
 
-import gc
-
-# cupy imported lazily inside gpu_info/free_gpu so a widget install without a
+# CuPy is imported lazily inside gpu_info so a widget install without a
 # CUDA runtime (e.g. Mac, or a lightweight CI env) doesn't fail at import time.
 
 
@@ -80,43 +77,17 @@ def gpu_info(device_id: int | None = None) -> None:
           f"{_format_bytes(pool_cached)} cached")
 
 
-def free_gpu() -> None:
-    """Free all CuPy memory pool blocks to release GPU VRAM.
-
-    Clears Python references, CuPy FFT plan cache, IO decompressor buffers,
-    and both device and pinned memory pools.
-    """
-    import cupy as cp
-    gc.collect()
-    # Clear CuPy FFT plan cache (holds GPU workspace buffers)
-    try:
-        cp.fft.config.get_plan_cache().clear()
-    except (AttributeError, RuntimeError):
-        pass
-    # Clear IO decompressor GPU buffers
-    try:
-        from quantem.live.io import _clear_memory
-        _clear_memory()
-    except (AttributeError, RuntimeError):
-        pass
-    gc.collect()
-    cp.get_default_memory_pool().free_all_blocks()
-    cp.get_default_pinned_memory_pool().free_all_blocks()
-
-
 def vram_status() -> str:
-    """Human-readable VRAM state for the current CuPy device.
-
-    Used by the live batch loop after a failure to surface whether cleanup
-    actually recovered memory - previously cleanup warnings scrolled off and
-    the next file OOM'd with no context (#130).
-    """
-    import cupy as cp
+    """Return a compact VRAM status for the current CUDA device."""
     try:
-        free_b, total_b = cp.cuda.runtime.memGetInfo()
-        used_b = total_b - free_b
-        return (f"GPU {cp.cuda.runtime.getDevice()}: "
-                f"{_format_bytes(used_b)} used / {_format_bytes(free_b)} free "
-                f"(of {_format_bytes(total_b)})")
-    except (RuntimeError, AttributeError, ImportError) as e:
-        return f"GPU status unavailable: {e}"
+        import cupy as cp
+
+        free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+        used_bytes = total_bytes - free_bytes
+        return (
+            f"GPU {cp.cuda.runtime.getDevice()}: "
+            f"{_format_bytes(used_bytes)} used / {_format_bytes(free_bytes)} free "
+            f"(of {_format_bytes(total_bytes)})"
+        )
+    except (RuntimeError, AttributeError, ImportError) as exc:
+        return f"GPU status unavailable: {exc}"

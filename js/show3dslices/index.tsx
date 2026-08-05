@@ -346,57 +346,6 @@ function sampleVolumeBilinear(
   return (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty;
 }
 
-function sampleVolumeBilinearNearest(
-  vol: Float32Array,
-  nx: number,
-  ny: number,
-  nz: number,
-  z: number,
-  x: number,
-  y: number,
-): number {
-  const xClamped = clampNumber(x, 0, Math.max(0, nx - 1));
-  const yClamped = clampNumber(y, 0, Math.max(0, ny - 1));
-  return sampleVolumeBilinear(vol, nx, ny, nz, z, xClamped, yClamped);
-}
-
-function applyGlobalSliceAlignment(
-  vol: Float32Array | null,
-  nx: number,
-  ny: number,
-  nz: number,
-  rowShiftPxPerSlice: number,
-  colShiftPxPerSlice: number,
-): Float32Array | null {
-  if (!vol || vol.length === 0) return vol;
-  const rowSlope = Number.isFinite(rowShiftPxPerSlice) ? rowShiftPxPerSlice : 0;
-  const colSlope = Number.isFinite(colShiftPxPerSlice) ? colShiftPxPerSlice : 0;
-  if (Math.abs(rowSlope) < 1e-12 && Math.abs(colSlope) < 1e-12) return vol;
-  const expected = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
-  if (vol.length < expected || expected === 0) return vol;
-  const out = new Float32Array(expected);
-  const center = (Math.max(1, nz) - 1) / 2;
-  for (let z = 0; z < nz; z++) {
-    const rowShift = (z - center) * rowSlope;
-    const colShift = (z - center) * colSlope;
-    const base = z * ny * nx;
-    for (let row = 0; row < ny; row++) {
-      for (let col = 0; col < nx; col++) {
-        out[base + row * nx + col] = sampleVolumeBilinearNearest(
-          vol,
-          nx,
-          ny,
-          nz,
-          z,
-          col - colShift,
-          row - rowShift,
-        );
-      }
-    }
-  }
-  return out;
-}
-
 function extractOblique(
   vol: Float32Array,
   nx: number,
@@ -853,6 +802,81 @@ const LiveNumberSlider = React.memo(function LiveNumberSlider({
   );
 });
 
+interface NumberCommitInputProps {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onLiveChange?: (value: number) => void;
+  onCommit: (value: number) => void;
+  ariaLabel: string;
+}
+
+function formatNumberInput(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) >= 100) return value.toFixed(1);
+  if (Math.abs(value) >= 10) return value.toFixed(2);
+  return value.toFixed(3);
+}
+
+const NumberCommitInput = React.memo(function NumberCommitInput({
+  value, min, max, step = 0.05, onLiveChange, onCommit, ariaLabel,
+}: NumberCommitInputProps) {
+  const [draft, setDraft] = React.useState(formatNumberInput(value));
+  React.useEffect(() => { setDraft(formatNumberInput(value)); }, [value]);
+  const commitDraft = () => {
+    const rawNext = Number(draft);
+    if (!Number.isFinite(rawNext)) {
+      setDraft(formatNumberInput(value));
+      return;
+    }
+    const next = clampNumber(rawNext, min, max);
+    setDraft(formatNumberInput(next));
+    onCommit(next);
+  };
+  return (
+    <Box
+      component="input"
+      type="number"
+      value={draft}
+      min={min}
+      max={max}
+      step={step}
+      aria-label={ariaLabel}
+      onChange={(event) => {
+        const nextDraft = event.currentTarget.value;
+        setDraft(nextDraft);
+        const next = Number(nextDraft);
+        if (Number.isFinite(next)) onLiveChange?.(clampNumber(next, min, max));
+      }}
+      onBlur={commitDraft}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.currentTarget.blur();
+        } else if (event.key === "Escape") {
+          setDraft(formatNumberInput(value));
+          event.currentTarget.blur();
+        }
+      }}
+      sx={{
+        width: 48,
+        height: 20,
+        boxSizing: "border-box",
+        px: 0.5,
+        border: "1px solid",
+        borderColor: "divider",
+        borderRadius: 0.5,
+        bgcolor: "background.paper",
+        color: "text.primary",
+        fontSize: 10,
+        fontFamily: "monospace",
+        textAlign: "right",
+        "&:focus": { outline: "1px solid", outlineColor: "primary.main" },
+      }}
+    />
+  );
+});
+
 const controlLabel = { ...typography.label, ...typographyLabel };
 const clickableControlLabel = {
   ...controlLabel,
@@ -892,6 +916,8 @@ const upwardMenuProps = {
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, nextPow2, computeMagnitude, autoEnhanceFFT, applyHannWindow2D } from "../fft";
+import { getGPUDevice } from "../fft";
+import { estimateSliceAlignment } from "../sliceAlignment";
 
 // ============================================================================
 // Zoom constants (matching Show3D)
@@ -1333,6 +1359,7 @@ function Show3DSlices() {
     imageVminPct: number; imageVmaxPct: number; imageDataRange: { min: number; max: number };
     traitVmin: number | null; traitVmax: number | null;
     zooms: { zoom: number; panX: number; panY: number }[]; canvasSizes: { w: number; h: number }[]; smooth: boolean;
+    alignment?: { rowShift: number; colShift: number; segment: { start: { x: number; y: number }; stop: { x: number; y: number } } };
   } | null>(null);
   const fftComputeGenerationRef = React.useRef(0);
   const [gpuReady, setGpuReady] = React.useState(false);
@@ -1487,6 +1514,16 @@ function Show3DSlices() {
   const [localAlignmentStatus, setLocalAlignmentStatus] = React.useState("");
   const [liveRowShift, setLiveRowShift] = React.useState(rowShiftPxPerSlice || 0);
   const [liveColShift, setLiveColShift] = React.useState(colShiftPxPerSlice || 0);
+  const pendingAlignmentRef = React.useRef<{ rowShift: number; colShift: number } | null>(null);
+  const alignmentRafRef = React.useRef<number | null>(null);
+  const alignmentPreviewRef = React.useRef<((rowShift: number, colShift: number) => void) | null>(null);
+  const sliceAlignmentModeRef = React.useRef(sliceAlignment || "off");
+  const sliceAlignmentCachedRef = React.useRef(!!sliceAlignmentCached);
+  const autoAlignmentRef = React.useRef({
+    cached: !!sliceAlignmentCached || Math.abs(rowShiftPxPerSlice || 0) >= 1e-12 || Math.abs(colShiftPxPerSlice || 0) >= 1e-12,
+    rowShift: rowShiftPxPerSlice || 0,
+    colShift: colShiftPxPerSlice || 0,
+  });
   const pendingExportRef = React.useRef<{
     id: string;
     filename: string;
@@ -1512,7 +1549,30 @@ function Show3DSlices() {
     setLiveColShift(colShiftPxPerSlice || 0);
   }, [colShiftPxPerSlice]);
   React.useEffect(() => {
-    if (sliceAlignmentStatus) setLocalAlignmentStatus(sliceAlignmentStatus);
+    sliceAlignmentModeRef.current = sliceAlignment || "off";
+  }, [sliceAlignment]);
+  React.useEffect(() => {
+    sliceAlignmentCachedRef.current = !!sliceAlignmentCached;
+  }, [sliceAlignmentCached]);
+  React.useEffect(() => {
+    if (sliceAlignment === "auto" && sliceAlignmentCached) {
+      autoAlignmentRef.current = {
+        cached: true,
+        rowShift: rowShiftPxPerSlice || 0,
+        colShift: colShiftPxPerSlice || 0,
+      };
+    }
+  }, [sliceAlignment, sliceAlignmentCached, rowShiftPxPerSlice, colShiftPxPerSlice]);
+  React.useEffect(() => () => {
+    if (alignmentRafRef.current != null) cancelAnimationFrame(alignmentRafRef.current);
+  }, []);
+  React.useEffect(() => {
+    if (!sliceAlignmentStatus) return;
+    if (/^(Aligned|Cached) row/.test(sliceAlignmentStatus)) {
+      setLocalAlignmentStatus("");
+      return;
+    }
+    setLocalAlignmentStatus(sliceAlignmentStatus);
   }, [sliceAlignmentStatus]);
 
   // Cursor readout state
@@ -1566,52 +1626,7 @@ function Show3DSlices() {
       lastAlignmentModeRef.current = alignmentMode;
     }
   }, [alignmentMode]);
-  const alignedFloatsCacheRef = React.useRef<{
-    raw: Float32Array;
-    nx: number;
-    ny: number;
-    nz: number;
-    rowShift: number;
-    colShift: number;
-    aligned: Float32Array;
-  } | null>(null);
-  const allFloats = React.useMemo(
-    () => {
-      if (!alignmentActive || !rawFloats) return rawFloats;
-      const cached = alignedFloatsCacheRef.current;
-      if (
-        cached
-        && cached.raw === rawFloats
-        && cached.nx === nx
-        && cached.ny === ny
-        && cached.nz === nz
-        && cached.rowShift === rowShiftPxPerSlice
-        && cached.colShift === colShiftPxPerSlice
-      ) {
-        return cached.aligned;
-      }
-      const aligned = applyGlobalSliceAlignment(
-        rawFloats,
-        nx,
-        ny,
-        nz,
-        rowShiftPxPerSlice,
-        colShiftPxPerSlice,
-      );
-      if (!aligned) return rawFloats;
-      alignedFloatsCacheRef.current = {
-        raw: rawFloats,
-        nx,
-        ny,
-        nz,
-        rowShift: rowShiftPxPerSlice,
-        colShift: colShiftPxPerSlice,
-        aligned,
-      };
-      return aligned;
-    },
-    [rawFloats, alignmentActive, nx, ny, nz, rowShiftPxPerSlice, colShiftPxPerSlice],
-  );
+  const allFloats = rawFloats;
   React.useEffect(() => {
     if (fftDataObjectRef.current === allFloats) return;
     fftDataObjectRef.current = allFloats;
@@ -1650,6 +1665,19 @@ function Show3DSlices() {
       explicit: false,
     };
   }, [obliqueProfileLine, nx, ny, sliceX, sliceY, obliqueAngle]);
+  // The oblique panel's geometry must reach the GPU slice shader on EVERY render,
+  // not only while alignment is on: the axis-3 shader walks from segment start to
+  // stop, so a missing segment collapses every output column onto voxel (0, 0, z)
+  // and the panel paints flat bands that ignore the angle and position sliders.
+  // Depth shifts stay zero unless alignment is active.
+  const gpuSliceParams = React.useMemo(
+    () => ({
+      rowShift: alignmentActive ? liveRowShift : 0,
+      colShift: alignmentActive ? liveColShift : 0,
+      segment: { start: obliqueSegment.start, stop: obliqueSegment.stop },
+    }),
+    [alignmentActive, liveRowShift, liveColShift, obliqueSegment],
+  );
   // SYNCHRONOUS data range (useMemo, not useState+effect). If this lands a frame
   // late, the first render uses the default {0,1} range so a value-based contrast
   // (vmin/vmax) converts to the wrong percent -> secondary planes paint with the
@@ -1704,42 +1732,165 @@ function Show3DSlices() {
     lastAlignmentModeRef.current = "auto";
     setSliceAlignmentRequest(JSON.stringify({ mode: "estimate", id, panel: safeActivePanel }));
   };
+  const alignmentEstimateBusyRef = React.useRef(false);
+  /**
+   * Fit the global row/col drift from the volume already loaded in the browser.
+   * Runs the same algorithm as the kernel estimator, so an exported HTML can
+   * align a stack with no Python attached; falls back to the kernel only when
+   * there is no volume in hand to fit.
+   */
+  const runBrowserSliceAlignmentEstimate = async () => {
+    if (alignmentEstimateBusyRef.current) return;
+    const floats = allFloats;
+    if (!floats || floats.length === 0 || nz < 2) {
+      if (!offline) requestSliceAlignmentEstimate();
+      return;
+    }
+    alignmentEstimateBusyRef.current = true;
+    lastAlignmentModeRef.current = "auto";
+    setLocalAlignmentStatus("Estimating slice alignment...");
+    try {
+      const planeCount = nx * ny * nz;
+      const panelOffset = safeActivePanel * planeCount;
+      const panelVolume = floats.subarray(panelOffset, panelOffset + planeCount);
+      const estimate = await estimateSliceAlignment(
+        panelVolume, nx, ny, nz, gpuFFTRef.current, await getGPUDevice(),
+      );
+      autoAlignmentRef.current = {
+        cached: true,
+        rowShift: estimate.rowShiftPxPerSlice,
+        colShift: estimate.colShiftPxPerSlice,
+      };
+      setLiveRowShift(estimate.rowShiftPxPerSlice);
+      setLiveColShift(estimate.colShiftPxPerSlice);
+      alignmentPreviewRef.current?.(estimate.rowShiftPxPerSlice, estimate.colShiftPxPerSlice);
+      setRowShiftPxPerSlice(estimate.rowShiftPxPerSlice);
+      setColShiftPxPerSlice(estimate.colShiftPxPerSlice);
+      setSliceAlignmentCached(true);
+      sliceAlignmentCachedRef.current = true;
+      sliceAlignmentModeRef.current = "auto";
+      // Name the backend: a silent CPU fallback is many times slower and would
+      // otherwise look identical to a WebGPU fit in the toolbar.
+      setLocalAlignmentStatus(
+        `Aligned row ${estimate.rowShiftPxPerSlice >= 0 ? "+" : ""}${estimate.rowShiftPxPerSlice.toFixed(3)} px/slice, `
+        + `col ${estimate.colShiftPxPerSlice >= 0 ? "+" : ""}${estimate.colShiftPxPerSlice.toFixed(3)} px/slice `
+        + `(${estimate.backend === "webgpu" ? "WebGPU" : "CPU fallback"})`,
+      );
+    } catch (err) {
+      setLocalAlignmentStatus(`Alignment estimate failed: ${err instanceof Error ? err.message : String(err)}`);
+      setSliceAlignment("off");
+    } finally {
+      alignmentEstimateBusyRef.current = false;
+    }
+  };
   const handleSliceAlignmentToggle = (on: boolean) => {
     if (!on) {
       setSliceAlignment("off");
       setLocalAlignmentStatus("");
       return;
     }
-    if (offline && !sliceAlignmentCached) {
-      setLocalAlignmentStatus("Estimate alignment in a live notebook before export.");
+    const auto = autoAlignmentRef.current;
+    if (auto.cached) {
+      setLiveRowShift(auto.rowShift);
+      setLiveColShift(auto.colShift);
+      alignmentPreviewRef.current?.(auto.rowShift, auto.colShift);
+      setRowShiftPxPerSlice(auto.rowShift);
+      setColShiftPxPerSlice(auto.colShift);
+      setSliceAlignmentCached(true);
+      setSliceAlignment("auto");
+      sliceAlignmentCachedRef.current = true;
+      sliceAlignmentModeRef.current = "auto";
+      lastAlignmentModeRef.current = "auto";
+      // Re-enabling reuses the fit instead of paying for it again, but say so:
+      // a blank toolbar reads as "nothing happened".
+      setLocalAlignmentStatus(
+        `Aligned row ${auto.rowShift >= 0 ? "+" : ""}${auto.rowShift.toFixed(3)} px/slice, `
+        + `col ${auto.colShift >= 0 ? "+" : ""}${auto.colShift.toFixed(3)} px/slice (cached)`,
+      );
       return;
     }
-    if (sliceAlignmentCached) {
-      setSliceAlignment(lastAlignmentModeRef.current);
-      setLocalAlignmentStatus("");
-    } else {
-      setSliceAlignment("auto");
-      requestSliceAlignmentEstimate();
-    }
+    setSliceAlignment("auto");
+    // Estimate in the browser. The volume is already here for slice rendering,
+    // so WebGPU can fit the drift without a kernel - which is the only option in
+    // an exported HTML, and saves a comm round-trip when a kernel IS attached.
+    runBrowserSliceAlignmentEstimate();
   };
   const commitManualSliceAlignment = (rowShift: number, colShift: number) => {
+    if (alignmentRafRef.current != null) {
+      cancelAnimationFrame(alignmentRafRef.current);
+      alignmentRafRef.current = null;
+    }
+    pendingAlignmentRef.current = null;
+    setLiveRowShift(rowShift);
+    setLiveColShift(colShift);
+    alignmentPreviewRef.current?.(rowShift, colShift);
     setRowShiftPxPerSlice(rowShift);
     setColShiftPxPerSlice(colShift);
     setSliceAlignmentCached(true);
     setSliceAlignment("manual");
+    sliceAlignmentCachedRef.current = true;
+    sliceAlignmentModeRef.current = "manual";
     lastAlignmentModeRef.current = "manual";
-    setLocalAlignmentStatus(`Manual row ${rowShift >= 0 ? "+" : ""}${rowShift.toFixed(3)}, col ${colShift >= 0 ? "+" : ""}${colShift.toFixed(3)} px/slice`);
+    setLocalAlignmentStatus("");
   };
+  const stageManualSliceAlignment = React.useCallback((rowShift: number, colShift: number) => {
+    pendingAlignmentRef.current = { rowShift, colShift };
+    if (sliceAlignmentModeRef.current !== "manual") {
+      sliceAlignmentModeRef.current = "manual";
+      setSliceAlignment("manual");
+    }
+    if (!sliceAlignmentCachedRef.current) {
+      sliceAlignmentCachedRef.current = true;
+      setSliceAlignmentCached(true);
+    }
+    lastAlignmentModeRef.current = "manual";
+    setLocalAlignmentStatus("");
+    if (alignmentRafRef.current != null) return;
+    alignmentRafRef.current = requestAnimationFrame(() => {
+      alignmentRafRef.current = null;
+      const pending = pendingAlignmentRef.current;
+      pendingAlignmentRef.current = null;
+      if (!pending) return;
+      React.startTransition(() => {
+        setLiveRowShift(pending.rowShift);
+        setLiveColShift(pending.colShift);
+      });
+      alignmentPreviewRef.current?.(pending.rowShift, pending.colShift);
+    });
+  }, [setSliceAlignment, setSliceAlignmentCached]);
   const resetSliceAlignment = () => {
+    if (alignmentRafRef.current != null) {
+      cancelAnimationFrame(alignmentRafRef.current);
+      alignmentRafRef.current = null;
+    }
+    pendingAlignmentRef.current = null;
+    if (autoAlignmentRef.current.cached) {
+      const auto = autoAlignmentRef.current;
+      setLiveRowShift(auto.rowShift);
+      setLiveColShift(auto.colShift);
+      alignmentPreviewRef.current?.(auto.rowShift, auto.colShift);
+      setRowShiftPxPerSlice(auto.rowShift);
+      setColShiftPxPerSlice(auto.colShift);
+      setSliceAlignmentCached(true);
+      setSliceAlignment("auto");
+      sliceAlignmentCachedRef.current = true;
+      sliceAlignmentModeRef.current = "auto";
+      lastAlignmentModeRef.current = "auto";
+      setLocalAlignmentStatus("");
+      return;
+    }
     setLiveRowShift(0);
     setLiveColShift(0);
+    alignmentPreviewRef.current?.(0, 0);
     setRowShiftPxPerSlice(0);
     setColShiftPxPerSlice(0);
     setSliceAlignmentCached(false);
     setSliceAlignment("off");
-    alignedFloatsCacheRef.current = null;
+    sliceAlignmentCachedRef.current = false;
+    sliceAlignmentModeRef.current = "off";
     lastAlignmentModeRef.current = "auto";
     setLocalAlignmentStatus("");
+    if (offline) return;
     setSliceAlignmentRequest(JSON.stringify({ mode: "reset", id: `${Date.now()}-${Math.random().toString(36).slice(2)}` }));
   };
 
@@ -2194,8 +2345,11 @@ function Show3DSlices() {
       // Surface the REAL reason - a swallowed error here used to show a generic
       // "WebGPU not available" even when the adapter was fine but the volume
       // pipeline/3D-texture init failed, making the bug undebuggable.
-      console.error("[Show3DSlices] 3D volume renderer init failed:", err);
-      setVolumeInitError(String(err?.message || err));
+      const message = String(err?.message || err);
+      const unavailable = /WebGPU not available|requestAdapter|navigator\.gpu/i.test(message);
+      const logger = unavailable ? console.warn : console.error;
+      logger("[Show3DSlices] 3D volume renderer init failed:", err);
+      setVolumeInitError(message);
       setWebgpuSupported(false);
     });
     return () => { disposed = true; volumeRendererRef.current?.dispose(); volumeRendererRef.current = null; };
@@ -2259,6 +2413,8 @@ function Show3DSlices() {
     obliqueStartY: obliqueSegment.start.y,
     obliqueEndX: obliqueSegment.stop.x,
     obliqueEndY: obliqueSegment.stop.y,
+    rowShiftPxPerSlice: gpuSliceParams.rowShift,
+    colShiftPxPerSlice: gpuSliceParams.colShift,
     vmin: volTexRange.vmin, vmax: volTexRange.vmax,
   });
   volumeRenderParamsRef.current = {
@@ -2269,6 +2425,8 @@ function Show3DSlices() {
     obliqueStartY: obliqueSegment.start.y,
     obliqueEndX: obliqueSegment.stop.x,
     obliqueEndY: obliqueSegment.stop.y,
+    rowShiftPxPerSlice: gpuSliceParams.rowShift,
+    colShiftPxPerSlice: gpuSliceParams.colShift,
     vmin: volTexRange.vmin, vmax: volTexRange.vmax,
   };
   const bgColorRef = React.useRef<[number, number, number]>([0, 0, 0]);
@@ -2285,7 +2443,7 @@ function Show3DSlices() {
     const renderer = volumeRendererRef.current;
     if (!renderer || !volumeFloats || volumeFloats.length === 0) return;
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current, undefined, undefined, zStretch, orthographic);
-  }, [volumeFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, zStretch, orthographic, flip]);
+  }, [volumeFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, zStretch, orthographic, flip, gpuSliceParams]);
 
   // First-frame paint guard: the very first synchronous render after the renderer
   // mounts can land before the canvas swapchain is ready (flush race) and commit a
@@ -2464,7 +2622,9 @@ function Show3DSlices() {
     setObliqueAngle(nextAngle);
     setObliqueProfileLine(profileLinePayload(start, stop));
     setObliquePositionBounds(null);
-    updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, nextAngle);
+    // Pass the freshly computed segment: the `obliqueSegment` default is a
+    // trait-derived memo that still holds the pre-drag geometry on this tick.
+    updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, nextAngle, { start, stop });
     scheduleLiveFft([1], { segment: { start, stop } });
     volumeRenderParamsRef.current = {
       ...volumeRenderParamsRef.current,
@@ -2660,18 +2820,29 @@ function Show3DSlices() {
     nx: number; ny: number; nz: number;
     traitVmin: number | null; traitVmax: number | null;
     flip: boolean;
-  }>({ sliceX: -1, sliceY: -1, sliceZ: -1, cmap: "", logScale: false, autoContrast: false, imageVminPct: -1, imageVmaxPct: -1, imageRangeMin: Number.NaN, imageRangeMax: Number.NaN, allFloats: null, nx: 0, ny: 0, nz: 0, traitVmin: null, traitVmax: null, flip: false });
+    alignRowShift: number; alignColShift: number;
+    alignStartX: number; alignStartY: number; alignStopX: number; alignStopY: number;
+  }>({ sliceX: -1, sliceY: -1, sliceZ: -1, cmap: "", logScale: false, autoContrast: false, imageVminPct: -1, imageVmaxPct: -1, imageRangeMin: Number.NaN, imageRangeMax: Number.NaN, allFloats: null, nx: 0, ny: 0, nz: 0, traitVmin: null, traitVmax: null, flip: false, alignRowShift: Number.NaN, alignColShift: Number.NaN, alignStartX: Number.NaN, alignStartY: Number.NaN, alignStopX: Number.NaN, alignStopY: Number.NaN });
 
   React.useLayoutEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
 
     const prev = prevCacheRef.current;
+    const alignRowShift = gpuSliceParams.rowShift;
+    const alignColShift = gpuSliceParams.colShift;
+    const alignStartX = gpuSliceParams.segment.start.x;
+    const alignStartY = gpuSliceParams.segment.start.y;
+    const alignStopX = gpuSliceParams.segment.stop.x;
+    const alignStopY = gpuSliceParams.segment.stop.y;
     const globalChanged = allFloats !== prev.allFloats || cmap !== prev.cmap ||
       logScale !== prev.logScale || autoContrast !== prev.autoContrast ||
       imageVminPct !== prev.imageVminPct || imageVmaxPct !== prev.imageVmaxPct ||
       displayDataRange.min !== prev.imageRangeMin || displayDataRange.max !== prev.imageRangeMax ||
       traitVmin !== prev.traitVmin || traitVmax !== prev.traitVmax ||
       flip !== prev.flip ||
+      alignRowShift !== prev.alignRowShift || alignColShift !== prev.alignColShift ||
+      alignStartX !== prev.alignStartX || alignStartY !== prev.alignStartY ||
+      alignStopX !== prev.alignStopX || alignStopY !== prev.alignStopY ||
       nx !== prev.nx || ny !== prev.ny || nz !== prev.nz;
     const axisChanged = [
       globalChanged || sliceZ !== prev.sliceZ,
@@ -2705,7 +2876,7 @@ function Show3DSlices() {
       const rMin = displayDataRange.min;
       const rMax = displayDataRange.max;
       let vmin: number, vmax: number;
-      if (gpuVolReady && engine && a === 0) {
+      if (gpuVolReady && engine) {
         // Stack-wide range on the GPU path: no per-slice CPU percentile scan, so
         // contrast stays consistent across slices and scrubbing never touches the CPU.
         if (imageVminPct > 0 || imageVmaxPct < 100) {
@@ -2717,7 +2888,17 @@ function Show3DSlices() {
         // Always cache the native slice raster. The displayed panel may be
         // smaller, but zoom/pan must reveal source pixels instead of magnifying
         // a display-resolution scrub proxy.
-        const bitmap = engine.renderVolumeSliceToImageBitmap(0, sliceZ, { vmin, vmax }, logScale, flip);
+        const gpuAxis = a === 0 ? 0 : 3;
+        const bitmap = engine.renderVolumeSliceToImageBitmap(
+          gpuAxis,
+          a === 0 ? sliceZ : 0,
+          { vmin, vmax },
+          logScale,
+          flip,
+          undefined,
+          undefined,
+          gpuSliceParams,
+        );
         if (bitmap) {
           let offscreen = sliceOffscreenRefs.current[a];
           if (!offscreen || offscreen.width !== bitmap.width || offscreen.height !== bitmap.height) {
@@ -2750,15 +2931,15 @@ function Show3DSlices() {
         sliceOffscreenRefs.current[a] = renderToOffscreen(processed, sliceW, sliceH, lut, vmin, vmax);
       }
     }
-    prevCacheRef.current = { sliceX, sliceY, sliceZ, cmap, logScale, autoContrast, imageVminPct, imageVmaxPct, imageRangeMin: displayDataRange.min, imageRangeMax: displayDataRange.max, allFloats, nx, ny, nz, traitVmin, traitVmax, flip };
-  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, logScale, autoContrast, sliceDims, imageVminPct, imageVmaxPct, displayDataRange, traitVmin, traitVmax, flip, cmapReady]);
+    prevCacheRef.current = { sliceX, sliceY, sliceZ, cmap, logScale, autoContrast, imageVminPct, imageVmaxPct, imageRangeMin: displayDataRange.min, imageRangeMax: displayDataRange.max, allFloats, nx, ny, nz, traitVmin, traitVmax, flip, alignRowShift, alignColShift, alignStartX, alignStartY, alignStopX, alignStopY };
+  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, logScale, autoContrast, sliceDims, imageVminPct, imageVmaxPct, displayDataRange, traitVmin, traitVmax, flip, cmapReady, gpuSliceParams]);
 
   // Snapshot of everything direct-paint needs, refreshed every render so the
   // slider handler (which fires faster than React commits) reads current values.
   React.useEffect(() => {
     paintParamsRef.current = {
       cmap, logScale, flip, autoContrast, imageVminPct, imageVmaxPct, imageDataRange: displayDataRange,
-      traitVmin, traitVmax, zooms, canvasSizes, smooth,
+      traitVmin, traitVmax, zooms, canvasSizes, smooth, alignment: gpuSliceParams,
     };
   });
 
@@ -2774,7 +2955,7 @@ function Show3DSlices() {
     const t0 = performance.now();
     const engine = gpuCmapRef.current;
     const p = paintParamsRef.current;
-    if (axis !== 0) return false;
+    if (axis !== 0 && axis !== 1) return false;
     if (!engine || !gpuVolReadyRef.current || !p) return false;
     const canvas = canvasRefs.current[axis];
     if (!canvas) return false;
@@ -2789,14 +2970,17 @@ function Show3DSlices() {
     ({ vmin, vmax } = p.flip ? { vmin: -vmax, vmax: -vmin } : { vmin, vmax });
     engine.uploadLUT(p.cmap, COLORMAPS[p.cmap] || COLORMAPS.inferno);
     const cw = cs.w, ch = cs.h;
+    const renderAxis = axis === 0 ? 0 : 3;
+    const renderIndex = axis === 0 ? idx : 0;
     const bitmap = engine.renderVolumeSliceToImageBitmap(
-      axis,
-      idx,
+      renderAxis,
+      renderIndex,
       { vmin, vmax },
       p.logScale,
       p.flip,
       undefined,
       { zoom: zs?.zoom || 1, panX: zs?.panX || 0, panY: zs?.panY || 0, canvasW: cw, canvasH: ch },
+      p.alignment,
     );
     if (!bitmap) return false;
     const ctx = canvas.getContext("2d");
@@ -2826,6 +3010,27 @@ function Show3DSlices() {
     );
     recordPerfRef.current(action, performance.now() - t0, -1, -1, true);
   }, [orthographic, volumeFloats]);
+
+  const previewSliceAlignment = React.useCallback((rowShift: number, colShift: number) => {
+    const current = paintParamsRef.current;
+    const alignment = {
+      rowShift,
+      colShift,
+      segment: { start: obliqueSegment.start, stop: obliqueSegment.stop },
+    };
+    if (current) paintParamsRef.current = { ...current, alignment };
+    volumeRenderParamsRef.current = {
+      ...volumeRenderParamsRef.current,
+      rowShiftPxPerSlice: rowShift,
+      colShiftPxPerSlice: colShift,
+    };
+    const slices = liveSliderRef.current;
+    directPaintPlane(0, slices[0], "alignment");
+    directPaintPlane(1, 0, "alignment");
+    renderVolumePlanesLive("alignment");
+  }, [directPaintPlane, obliqueSegment, renderVolumePlanesLive]);
+
+  alignmentPreviewRef.current = previewSliceAlignment;
 
   // -------------------------------------------------------------------------
   // Redraw slices with zoom/pan (cheap: just drawImage from cached offscreen)
@@ -2858,7 +3063,10 @@ function Show3DSlices() {
         ctx.drawImage(offscreen, 0, 0, srcW, srcH, 0, 0, cw, ch);
       }
     }
-  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, nx, ny, nz, cmap, logScale, autoContrast, zooms, sliceDims, canvasSizes, imageVminPct, imageVmaxPct, smooth, flip]);
+    // gpuSliceParams belongs here: toggling Align re-renders the offscreens with
+    // new depth shifts, but without this dependency the blit never re-runs and
+    // the visible canvases keep the previous alignment.
+  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, nx, ny, nz, cmap, logScale, autoContrast, zooms, sliceDims, canvasSizes, imageVminPct, imageVmaxPct, smooth, flip, gpuSliceParams]);
 
   // -------------------------------------------------------------------------
   // Render crosshair lines for the orthogonal slice intersections.
@@ -3559,6 +3767,19 @@ function Show3DSlices() {
       obliqueEndX: segment.stop.x,
       obliqueEndY: segment.stop.y,
     };
+    // Repaint the oblique panel straight from the resident GPU volume. The
+    // segment lives in anywidget model traits whose setters round-trip through
+    // the comm, and React batches those during a drag, so waiting for the render
+    // effect would only move the panel once the drag ENDS. Seeding the paint
+    // params with the segment we just computed keeps the panel live per frame.
+    const paint = paintParamsRef.current;
+    if (paint?.alignment) {
+      paintParamsRef.current = {
+        ...paint,
+        alignment: { ...paint.alignment, segment: { start: segment.start, stop: segment.stop } },
+      };
+    }
+    directPaintPlane(1, 0, "obliqueSegment");
     const renderer = volumeRendererRef.current;
     if (renderer && volumeFloats && volumeFloats.length > 0) {
       renderer.render(
@@ -4495,6 +4716,11 @@ function Show3DSlices() {
     window.addEventListener("pointerup", onUp, true);
   };
   const obliqueCurrentOffset = obliqueCenterOffset(nx, ny, obliqueAngle, obliqueSegment.start, obliqueSegment.stop);
+  // Plane center in image coordinates. Position measures along the plane normal,
+  // which turns with Angle, so its number moves on rotation even when the cut
+  // does not; the center is stated in fixed image pixels instead.
+  const obliqueCenterCol = (obliqueSegment.start.x + obliqueSegment.stop.x) / 2;
+  const obliqueCenterRow = (obliqueSegment.start.y + obliqueSegment.stop.y) / 2;
   const [obliqueDeltaMin, obliqueDeltaMax] = obliqueSegmentOffsetBounds(
     nx,
     ny,
@@ -4636,14 +4862,10 @@ function Show3DSlices() {
   };
   const alignmentShiftLimit = Math.max(
     2,
-    Math.ceil(Math.max(Math.abs(liveRowShift), Math.abs(liveColShift), 1) * 1.5),
+    Math.ceil(Math.max(nx, ny) / Math.max(1, nz - 1)),
   );
   const alignmentStatusText = localAlignmentStatus || (
-    sliceAlignmentCached
-      ? `${alignmentActive ? "Applied" : "Cached"} row ${rowShiftPxPerSlice >= 0 ? "+" : ""}${(rowShiftPxPerSlice || 0).toFixed(3)}, col ${colShiftPxPerSlice >= 0 ? "+" : ""}${(colShiftPxPerSlice || 0).toFixed(3)} px/slice`
-      : alignmentActive
-        ? "Estimating slice alignment..."
-        : offline ? "Estimate in a live notebook before export." : ""
+    !sliceAlignmentCached && alignmentActive ? "Estimating..." : ""
   );
   const topRightActions = (
     <Box sx={{
@@ -4842,7 +5064,8 @@ function Show3DSlices() {
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Colorbar displays a colorbar overlay on each slice canvas.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Loop repeats playback. Drag end markers on slider for loop range.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Bounce alternates forward and reverse playback.</Typography>
-            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes toggles the Top and angled vertical slice planes in the 3D volume view.</Typography>
+            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes toggles the Top and angled vertical slice planes, in the 3D volume view and as 2D panels.</Typography>
+            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Align corrects a global tilt through depth: it fits one straight row/col drift per slice by registering adjacent slices, then shifts deeper slices back by that slope. Use it when a reconstruction leans through the stack so vertical columns look sheared in the side view. It is display-only - the stored volume is never modified - and Row/Col let you override the fitted slope by hand.</Typography>
             <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
             <KeyboardShortcuts items={[["Space", "Play / Pause"], ["← / →", "Active axis -/+"], ["↑ / ↓", "Angle -/+"], ["Home / End", "First / Last on active axis"], ["R", "Reset zoom"], ["Click panel", "Jump to voxel"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
           </Box>} theme={themeInfo.theme} />
@@ -4995,7 +5218,13 @@ function Show3DSlices() {
           const { w: cw, h: ch, displayH: dh } = canvasSizes[a];
           const panelName = PANEL_NAMES[a] ?? "Slice";
           return (
-            <Box key={a} sx={{ minWidth: cw, gridArea: `a${a}` }}>
+            // Hidden with display:none rather than unmounted so the canvas refs
+            // and their painted contents survive - remounting would drop the
+            // direct-paint targets and force a full repaint on every toggle.
+            <Box
+              key={a}
+              sx={{ minWidth: cw, gridArea: `a${a}`, display: normalizedPlaneVisibility[a] ? undefined : "none" }}
+            >
               {/* Canvas with plane-colored border. dh = displayH (stretched for depth panels). */}
               <Box
                 ref={(el: HTMLDivElement | null) => { imageBoxRefs.current[a] = el; }}
@@ -5169,6 +5398,24 @@ function Show3DSlices() {
                         {boundedObliqueOffset}
                       </Typography>
                     </Box>
+                    {/* Position is measured along the plane normal, an axis that
+                        turns with Angle, so it shifts on rotation even when the cut
+                        has not moved. The center reports the same plane in fixed
+                        image pixels. It holds steady while a rotation leaves the
+                        chord inside the image; near an edge the endpoint clamp in
+                        handleObliqueAngleChange shortens the segment and does move
+                        the midpoint, so the center shifts there too. */}
+                    <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px`, minHeight: 14 }}>
+                      <Typography
+                        sx={{ ...controlLabel, color: tc.textMuted, flexShrink: 0, minWidth: 42 }}
+                        title="Plane center in image pixels. Steady under rotation unless the cut is clamped at an image edge."
+                      >
+                        Center
+                      </Typography>
+                      <Typography sx={{ ...typography.value, color: tc.textMuted, flexShrink: 0 }}>
+                        {`(${Math.round(obliqueCenterRow)}, ${Math.round(obliqueCenterCol)})`}
+                      </Typography>
+                    </Box>
                   </>
                 ) : (
                   <>
@@ -5305,14 +5552,13 @@ function Show3DSlices() {
               </Button>
             </Box>
             {advancedControlsOpen && <Box id="show3dslices-advanced-controls" sx={contentControlRow}>
-              <Typography sx={{ ...controlLabel }} title="Display-only global post-alignment through depth. Raw volume data is unchanged.">Slice alignment</Typography>
+              <Typography sx={{ ...controlLabel }} title="Display-only global post-alignment through depth. Raw volume data is unchanged.">Align</Typography>
               <Switch
                 checked={alignmentActive}
                 onChange={(e) => handleSliceAlignmentToggle(e.target.checked)}
-                disabled={offline && !sliceAlignmentCached}
                 size="small"
                 sx={switchStyles.small}
-                inputProps={{ "aria-label": "Enable automatic global slice alignment" }}
+                inputProps={{ "aria-label": "Align slices with automatic global slice alignment" }}
               />
               {alignmentActive && (
                 <>
@@ -5322,40 +5568,60 @@ function Show3DSlices() {
                     min={-alignmentShiftLimit}
                     max={alignmentShiftLimit}
                     step={0.05}
-                    onLiveChange={setLiveRowShift}
+                    onLiveChange={(value) => {
+                      stageManualSliceAlignment(value, liveColShift);
+                    }}
                     onCommit={(value) => commitManualSliceAlignment(value, liveColShift)}
                     sx={{ ...sliderStyles.small, width: 58, flexShrink: 0 }}
                     ariaLabel={`Row shift per slice ${liveRowShift.toFixed(3)} pixels`}
                   />
-                  <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 42, textAlign: "right" }}>
-                    {liveRowShift >= 0 ? "+" : ""}{liveRowShift.toFixed(2)}
-                  </Typography>
+                  <NumberCommitInput
+                    value={liveRowShift}
+                    min={-alignmentShiftLimit}
+                    max={alignmentShiftLimit}
+                    step={0.05}
+                    onLiveChange={(value) => {
+                      stageManualSliceAlignment(value, liveColShift);
+                    }}
+                    onCommit={(value) => commitManualSliceAlignment(value, liveColShift)}
+                    ariaLabel="Edit row shift per slice"
+                  />
                   <Typography sx={{ ...controlLabel, color: tc.textMuted }}>Col</Typography>
                   <LiveNumberSlider
                     value={liveColShift}
                     min={-alignmentShiftLimit}
                     max={alignmentShiftLimit}
                     step={0.05}
-                    onLiveChange={setLiveColShift}
+                    onLiveChange={(value) => {
+                      stageManualSliceAlignment(liveRowShift, value);
+                    }}
                     onCommit={(value) => commitManualSliceAlignment(liveRowShift, value)}
                     sx={{ ...sliderStyles.small, width: 58, flexShrink: 0 }}
                     ariaLabel={`Column shift per slice ${liveColShift.toFixed(3)} pixels`}
                   />
-                  <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 42, textAlign: "right" }}>
-                    {liveColShift >= 0 ? "+" : ""}{liveColShift.toFixed(2)}
-                  </Typography>
+                  <NumberCommitInput
+                    value={liveColShift}
+                    min={-alignmentShiftLimit}
+                    max={alignmentShiftLimit}
+                    step={0.05}
+                    onLiveChange={(value) => {
+                      stageManualSliceAlignment(liveRowShift, value);
+                    }}
+                    onCommit={(value) => commitManualSliceAlignment(liveRowShift, value)}
+                    ariaLabel="Edit column shift per slice"
+                  />
+                  <Button
+                    size="small"
+                    sx={{ ...compactButton, color: tc.accent }}
+                    disabled={!sliceAlignmentCached}
+                    onClick={resetSliceAlignment}
+                    aria-label="Reset slice alignment"
+                    title={offline ? "Restore the exported alignment estimate" : "Discard the cached alignment estimate"}
+                  >
+                    Reset
+                  </Button>
                 </>
               )}
-              <Button
-                size="small"
-                sx={compactButton}
-                disabled={!sliceAlignmentCached || offline}
-                onClick={resetSliceAlignment}
-                aria-label="Reset slice alignment"
-                title={offline ? "Reset cached alignment in the live notebook before export" : "Discard the cached alignment estimate"}
-              >
-                Reset
-              </Button>
               {alignmentStatusText && (
                 <Typography
                   sx={{

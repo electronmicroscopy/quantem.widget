@@ -49,6 +49,19 @@ def test_show3dslices_accepts_data_b_shortcut():
     np.testing.assert_array_equal(widget._data[1], b)
 
 
+def test_show3dslices_accepts_pixel_size_axes_tuple():
+    data = np.zeros((2, 3, 4), dtype=np.float32)
+
+    widget = Show3DSlices(
+        data,
+        pixel_size=(2.0, 0.5, 0.7),
+        show_controls=False,
+    )
+
+    assert widget.pixel_size == pytest.approx(0.6)
+    assert widget.pixel_size_axes == pytest.approx([2.0, 0.5, 0.7])
+
+
 def test_show3dslices_rejects_bad_panel_titles():
     data = np.zeros((2, 2, 3, 4), dtype=np.float32)
 

@@ -17,6 +17,8 @@ export interface ThemeInfo {
 }
 
 export interface ThemeColors {
+  // Optional drop-shadow color for draggable chrome (pin tiles etc.).
+  shadow?: string;
   bg: string;
   bgAlt: string;
   text: string;

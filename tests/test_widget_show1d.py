@@ -1013,7 +1013,12 @@ def test_show1d_html_export_configures_anywidget_requirejs(tmp_path: pathlib.Pat
     html = widget.export_html(tmp_path / "show1d.html").read_text(encoding="utf-8")
 
     assert 'id="quantem-widget-anywidget-requirejs"' in html
-    assert "anywidget@0.11.0/dist/index.min" in html
+    # Same URL html-manager's own resolver uses, so requirejs and the manager
+    # share one anywidget instance instead of racing two copies on a cold cache.
+    assert "anywidget@~0.11.*/dist/index" in html
+    # requirejs default 7s per-module timeout triggers a second-copy fallback on
+    # first-time (cold cache) loads; the export disables it.
+    assert "waitSeconds: 0" in html
 
 
 def test_show1d_html_export_downsamples_only_linked_images(tmp_path: pathlib.Path) -> None:

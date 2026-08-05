@@ -379,14 +379,14 @@ def _nvidia_snapshot() -> dict[str, Any]:
 
 def _select_real_masters(config: _Config) -> tuple[list[Path], Path, dict[str, Any]]:
     try:
-        from quantem.widget.io import discover_masters, inspect_master_readiness
+        from quantem.gpu.io import discover, inspect
     except ImportError as exc:
         _fail(
-            "quantem.widget I/O could not be imported from this checkout. Run with "
+            "quantem.gpu I/O could not be imported from this checkout. Run with "
             f"PYTHONPATH={_REPO_ROOT / 'src'}: {exc}"
         )
     try:
-        discovered = discover_masters(
+        discovered = discover(
             str(config.source),
             pattern=config.pattern,
             recursive=True,
@@ -400,7 +400,7 @@ def _select_real_masters(config: _Config) -> tuple[list[Path], Path, dict[str, A
     ready: list[Path] = []
     rejected: list[dict[str, str]] = []
     for value in discovered:
-        readiness = inspect_master_readiness(value)
+        readiness = inspect(value)
         if readiness.ready:
             ready.append(Path(value).absolute())
         elif len(rejected) < 10:

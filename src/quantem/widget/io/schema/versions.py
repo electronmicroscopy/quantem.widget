@@ -9,8 +9,7 @@ A future v2 reader can branch on the constant + a named migration hook
 """
 from __future__ import annotations
 
-#: ``<screen_root>/_calibrations.json`` (per-screening-folder library) and
-#: any other ``list[Calibration]`` library file.
+#: Any persisted ``list[Calibration]`` library file.
 CALIBRATIONS_SCHEMA_VERSION = 1
 
 #: ``~/quantem/calibrations.json`` (global registry, one entry per

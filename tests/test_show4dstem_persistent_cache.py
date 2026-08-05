@@ -6,12 +6,28 @@ import os
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
 from quantem.widget.show4dstem import Show4DSTEM
+
+
+@pytest.fixture(autouse=True)
+def _allow_cpu_reference_backend(monkeypatch):
+    """Keep synthetic cache tests on the explicit CPU reference path."""
+    import quantem.gpu.device as gpu_device
+
+    real_resolve = gpu_device.resolve
+
+    def resolve(name=None):
+        if name == "cpu":
+            return "cpu"
+        return real_resolve(name)
+
+    monkeypatch.setattr(gpu_device, "resolve", resolve)
 from quantem.widget.show4dstem_preview_cache import Show4DSTEMPreviewCache
 
 
@@ -25,6 +41,10 @@ PREVIEW_CONTRACT = {
     "normalization": "detector-mean-v1",
     "output_dtype": "<f4",
 }
+
+
+def _ready_inspection(path, **kwargs):
+    return SimpleNamespace(ready=True)
 
 
 def _source(path: Path, payload: bytes = b"master-v1") -> Path:
@@ -420,7 +440,7 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
     # C1: a fresh widget reopens three masters, expect cached tiles before raw
     # page completion.
     import quantem.widget as qw
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
     import quantem.widget.show4dstem_factory as factory
 
     masters = [
@@ -429,10 +449,10 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
     ]
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: list(masters),
     )
-    monkeypatch.setattr(widget_io, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(widget_io, "inspect", _ready_inspection)
     monkeypatch.setattr(
         factory,
         "_largest_compatible_master_group",
@@ -444,12 +464,16 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
         nonlocal calls
         calls += 1
         idx = masters.index(Path(path))
-        return torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16)
+        return SimpleNamespace(
+            data=torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16),
+            metadata={},
+        )
 
-    monkeypatch.setattr(qw, "load", load_first)
+    monkeypatch.setattr(widget_io, "load", load_first)
     cache_root = tmp_path / "cache"
     first = qw.Show4DSTEM.from_folder(
         tmp_path,
+        backend="cpu",
         watch=False,
         preload_all_if_fits=False,
         page_size=3,
@@ -480,11 +504,15 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
         nonlocal calls
         calls += 1
         idx = masters.index(Path(path))
-        return torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16)
+        return SimpleNamespace(
+            data=torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16),
+            metadata={},
+        )
 
-    monkeypatch.setattr(qw, "load", load_second)
+    monkeypatch.setattr(widget_io, "load", load_second)
     second = qw.Show4DSTEM.from_folder(
         tmp_path,
+        backend="cpu",
         watch=False,
         preload_all_if_fits=False,
         page_size=3,
@@ -520,17 +548,17 @@ def test_from_folder_rejects_conflicting_cuda_placement_options(
 ) -> None:
     # C1: public gpus and a private load device conflict, expect corrective
     # failure before decode.
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
     import quantem.widget.show4dstem_factory as factory
     import quantem.widget as qw
 
     master = _source(tmp_path / "scan_00_master.h5")
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: [master],
     )
-    monkeypatch.setattr(widget_io, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(widget_io, "inspect", _ready_inspection)
     monkeypatch.setattr(
         factory,
         "_largest_compatible_master_group",
@@ -553,7 +581,7 @@ def test_running_folder_reloads_replaced_master_instead_of_host_cache(
     # C1: a known source changes after a warm page, expect raw release/reload
     # and fresh pixels.
     import quantem.widget as qw
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io as widget_io
     import quantem.widget.show4dstem_factory as factory
 
     masters = [
@@ -562,10 +590,10 @@ def test_running_folder_reloads_replaced_master_instead_of_host_cache(
     ]
     monkeypatch.setattr(
         widget_io,
-        "discover_masters",
+        "discover",
         lambda *args, **kwargs: list(masters),
     )
-    monkeypatch.setattr(widget_io, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(widget_io, "inspect", _ready_inspection)
     monkeypatch.setattr(
         factory,
         "_largest_compatible_master_group",
@@ -577,11 +605,15 @@ def test_running_folder_reloads_replaced_master_instead_of_host_cache(
         source = Path(path)
         value = int(source.read_bytes()[0])
         calls.append((source.name, value))
-        return torch.full((3, 3, 8, 8), value, dtype=torch.uint16)
+        return SimpleNamespace(
+            data=torch.full((3, 3, 8, 8), value, dtype=torch.uint16),
+            metadata={},
+        )
 
-    monkeypatch.setattr(qw, "load", load_source)
+    monkeypatch.setattr(widget_io, "load", load_source)
     widget = qw.Show4DSTEM.from_folder(
         tmp_path,
+        backend="cpu",
         watch=False,
         preload_all_if_fits=False,
         page_size=2,

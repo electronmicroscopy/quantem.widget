@@ -5,7 +5,8 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowFolder, load
+from quantem.gpu.io import load
+from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowPtycho, ShowEDS, ShowDiffraction, ShowFolder
 ```
 
 ## Quickest start: no notebook needed
@@ -30,21 +31,23 @@ We serve two audiences first:
 - **Linux with NVIDIA CUDA** - workstations and HPC.
 
 **CUDA and MPS are the primary backends.** Work stays on the GPU as PyTorch
-tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
-runs through the same PyTorch path, just slower. For large datasets, bin the
-detector at load (`det_bin`) to cut memory and speed first paint - see
-[Load and I/O](api/io).
+tensors; we avoid NumPy on the hot path. Automatic scientific loading and
+compute never silently fall back to CPU: an unsupported machine fails with a
+corrective error. The explicit CPU reference exists for parity tests, while the
+viewers can still display ordinary NumPy arrays supplied by a user. For large
+datasets, bin the detector at load (`det_bin`) to cut memory and speed first
+paint - see [Load and I/O](api/io).
 
 ## Widgets
 
 | Widget | Use it for | Tutorial · API |
 |---|---|---|
-| `Show1D` | Interactive traces, live reconstruction metrics, line profiles, and linked image snapshots | [tutorial](tutorials/show1d) · [API](api/show1d) |
+| `Show1D` | Interactive traces, live reconstruction metrics, line profiles, and linked image snapshots | [API](api/show1d) |
 | `Show2D` | One or many 2D images: contrast, FFT, ROIs, line profiles, scale bars | [tutorial](tutorials/show2d) · [API](api/show2d) |
 | `Show3D` | A 3D volume scrubbed slice-by-slice (e.g. a ptychographic object) | [tutorial](tutorials/show3d) · [API](api/show3d) |
 | `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |
-| `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
-| `ShowEDS` | Experimental EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
+| `Show4DSTEM` | 4D-STEM: live virtual detectors, multi-master review, and WebGPU HTML export | [tutorial](tutorials/show4dstem) · [export](tutorials/show4dstem_export) · [API](api/show4dstem) |
+| `ShowPtycho` | Ptychography aberration review: phase, FFT, BF-count tradeoffs, and WebGPU folder export | [API](api/showptycho) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 | `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
@@ -54,8 +57,10 @@ portable. Real tutorial datasets are downloaded from public data hosting such as
 Hugging Face and cached locally; they are not committed to this repository or
 bundled into the Python wheel. That keeps clone size and microscope-PC installs
 small while still letting the rendered docs use realistic microscopy examples.
-The [ShowFolder tutorial](tutorials/showfolder) covers folder browsing workflows
-and how to [save and share widget exports](tutorials/widget_export). The
+The [Show4DSTEM export recipes](tutorials/show4dstem_export) show how to choose
+between compact report HTML, interactive raw-4D WebGPU HTML, and terminal
+exports. The [ShowFolder tutorial](tutorials/showfolder) covers folder browsing
+workflows and how to [save and share widget exports](tutorials/widget_export). The
 [API reference](api/index) documents every parameter, method, and interactive
 control (and doubles as a UI-test spec for automated agents). All example data
 here is synthetic or pulled from a public Hugging Face dataset - no private data
@@ -74,9 +79,10 @@ it looks identical). The canvas below each example stays fully
 interactive in this static page with no running kernel: scrub, zoom, change
 contrast, toggle the FFT - all in the browser. Show4DSTEM goes further: for a
 small dataset its virtual-detector math runs in **WebGPU**, so dragging the
-aperture recomputes the virtual image in the browser. The browser stack is
-uint8-clipped for transport, so it is exact for detector counts `<=255`; use the
-CUDA/MPS kernel path when full uint16 count fidelity matters.
+aperture recomputes the virtual image in the browser. Show4DSTEM exports make
+the dtype explicit: `uint8` is a compact browse payload, while `uint16` keeps the
+wider detector-count range at a larger size. See
+[Show4DSTEM export recipes](tutorials/show4dstem_export) for when to choose each.
 
 ShowEDS uses the same saved-widget model for synthetic and small cubes in single
 mode with exact data. For large native EDS/EELS files, the notebook keeps the
@@ -89,6 +95,6 @@ See [Installation](install) to get started.
 ## Getting help
 
 - **Questions or bugs:** open an issue at
-  [github.com/bobleesj/quantem.widget/issues](https://github.com/bobleesj/quantem.widget/issues).
+  [github.com/electronmicroscopy/quantem.widget/issues](https://github.com/electronmicroscopy/quantem.widget/issues).
 - **Maintained by** the Ophus group. Contributions and feedback are welcome via
   pull request or issue.

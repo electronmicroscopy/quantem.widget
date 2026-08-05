@@ -169,6 +169,26 @@ For dynamic labels inside dense toolbars:
 - Put detailed metadata in a tooltip, panel label, report table, or secondary
   line instead of making the primary toolbar grow with every dataset.
 
+## Hover inspection versus selection
+
+Hover is for inspection; click or an explicit control is for selection. In
+Show2D, Show3D, Show4DSTEM, and any future viewer with multiple scientific
+targets, a user must be able to move the pointer over any visible panel, scan
+position, diffraction region, ROI, or overlay and see that target's
+coordinates, value/readout, label, and stats without selecting it first.
+
+Do not tie hover readouts to `selectedIdx`, selected detector, selected panel,
+or focused toolbar state. Use the hovered target identity for transient
+inspection text, and keep the selected target identity for committed edits:
+contrast, colormap, hide/star, reorder, detector changes, ROI edits, exports,
+and linked-state operations. Moving the mouse should never silently retarget
+the controls a user is about to change.
+
+Browser signoff for hover/readout changes must drive at least two unselected
+targets. A passing check shows the readout and stats follow the hovered target,
+then confirms the active/selected controls still point to the originally
+selected target until the user clicks or chooses another target.
+
 ## Export labels
 
 Export menu labels should tell users what will be saved:

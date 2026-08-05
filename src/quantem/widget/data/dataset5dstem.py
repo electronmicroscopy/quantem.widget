@@ -1,16 +1,9 @@
-"""Standalone torch 5D-STEM series for quantem.live.
+"""Widget-owned torch 5D-STEM series for Show4DSTEM paging.
 
-TEMPORARY home. This belongs in quantem core (PR electronmicroscopy/quantem#231,
-on top of the torch-native Dataset work #228), but core PR review takes time and
-that torch stack is not on quantem core main yet (its ``Dataset4dstem`` is still
-array-backed). So this is a self-contained torch container - it does NOT depend
-on quantem core - and ships with quantem.live today.
-
-Migrate back to ``quantem.core.datastructures.Dataset5dstem`` once #228/#231
-merge: re-point the import in ``quantem.widget.io.hdf5`` and delete this file. The
-public surface (from_tensor / from_frames / shape / devices / summary / free /
-to / offload / numpy / frames / is_sharded / indexing) mirrors the core version to keep that
-swap mechanical. See the migration GitHub issue.
+``quantem.gpu.io`` owns source discovery and loading. This container owns the
+viewer-specific series residency policy: lazy per-dataset loading, multi-device
+placement, paging, offload, and release. It is intentionally not a scientific
+I/O backend.
 
 Model: a series (axis 0 = tilt / time / dose / focus / energy) of 4D-STEM
 acquisitions ``(N, scan_row, scan_col, k_row, k_col)``. Two backings, one logical

@@ -10,7 +10,6 @@ Files covered (one-line per format):
 - ``dataset.yaml``                      session layout (human-authored, reader-side check only)
 - ``<trial>/config.json``               ptycho trial config (writer in engine/ptycho/save.py)
 - ``<trial>/events.jsonl``              ptycho hot-loop events (writer in cli/ptycho_worker.py)
-- ``<acquisition>/config.json``         screener acquisition config (writer in screen.py)
 - ``~/quantem/calibrations.json``       calibration registry (writer in dashboard/calibration_registry.py)
 - ``calibration.json``                  single locked calibration (writer in calibration.py)
 
