@@ -1,7 +1,8 @@
 <!--
-This template mirrors the "Widget PR checklist" in README.md. If you edit one,
-update the other. Links are absolute because relative links do not resolve in
-PR descriptions.
+This is the canonical operational checklist for quantem.widget pull requests.
+It is intentionally thorough so humans and coding agents can select the right
+gates and leave reproducible, automation-friendly evidence. Links are absolute
+because relative links do not resolve in PR descriptions.
 
 How to use: keep the Core checklist, then expand and complete only the
 sections your change touches. Delete sections that do not apply — a reviewer
@@ -19,6 +20,21 @@ https://doi.org/10.1039/d6dd00121a
 ## Summary
 
 <!-- What does this PR change, and why? -->
+
+## Verification
+
+<!--
+Keep this concise and use "n/a" where a field does not apply. These structured
+fields help reviewers and coding agents reproduce the scientific workflow and
+select any missing gates without relying on private logs.
+
+- Checks run:
+- User workflow exercised:
+- Data: source category (public/synthetic/private), shape, dtype, raw size:
+- Backend and hardware:
+- Load/render/interaction timing:
+- Evidence artifacts or screenshots:
+-->
 
 ## Core checklist (every PR)
 
