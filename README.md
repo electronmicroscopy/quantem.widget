@@ -276,6 +276,15 @@ The source tutorial notebooks live in [`docs/tutorials`](docs/tutorials). They
 can be opened directly in Colab. To make a GitHub-readable preview copy, see
 [`docs/github-preview.md`](docs/github-preview.md).
 
+## Citing quantem.widget
+
+If the quantEM interactive framework—including `quantem.widget`, GPU-accelerated
+I/O, analysis, or reconstruction workflows on MPS or CUDA—contributed to your
+research, please consider citing Lee et al., *Interactive Framework for
+Real-Time 4DSTEM Analysis and Reconstruction*, *Microscopy and Microanalysis*
+32 (Supplement 1), ozag053.941 (2026),
+https://doi.org/10.1093/mam/ozag053.941.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export

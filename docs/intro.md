@@ -92,6 +92,15 @@ full-resolution data would be too large for public sharing.
 
 See [Installation](install) to get started.
 
+## Citing quantem.widget
+
+If the quantEM interactive framework—including `quantem.widget`, GPU-accelerated
+I/O, analysis, or reconstruction workflows on MPS or CUDA—contributed to your
+research, please consider citing Lee et al., *Interactive Framework for
+Real-Time 4DSTEM Analysis and Reconstruction*, *Microscopy and Microanalysis*
+32 (Supplement 1), ozag053.941 (2026),
+https://doi.org/10.1093/mam/ozag053.941.
+
 ## Getting help
 
 - **Questions or bugs:** open an issue at
