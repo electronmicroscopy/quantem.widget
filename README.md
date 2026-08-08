@@ -290,8 +290,8 @@ https://doi.org/10.1093/mam/ozag053.941.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
 expectations, agent signoff, and release-candidate guidance.
 
-This repository follows the
-[scikit-package](https://scikit-package.github.io/scikit-package/) standards
+Pull request workflows follow the
+[scikit-package](https://scikit-package.github.io/scikit-package/) procedures
 for reproducible scientific software: issue-first development (a PR closes a
 GitHub issue that states the problem), one small themed PR per issue,
 Conventional Commit-style messages, NumPy-style docstrings, self-reviewed
@@ -302,11 +302,7 @@ we squash-merge, so branch tidiness costs nothing). Human contributors
 and coding agents/LLMs alike should apply these standards when writing code,
 commits, issues, and PRs. This README is the canonical policy source; the
 [pull request template](.github/PULL_REQUEST_TEMPLATE.md) turns the policy
-into an operational checklist. Reference: S. Lee, C. Myers, A. Yang,
-T. Zhang, Y. Xiao, and
-S. J. L. Billinge, *Digital Discovery*, 2026,
-[doi:10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a). For Git/GitHub
-tutorials and workflow onboarding, see
+into an operational checklist. For Git/GitHub tutorials and workflow onboarding, see
 [ophusgroup/dev](https://github.com/ophusgroup/dev).
 
 ### Policy map
