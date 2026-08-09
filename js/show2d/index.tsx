@@ -3821,6 +3821,10 @@ function Show2D() {
         const visibleIndices = visibleImageIndicesRef.current.length > 0
           ? visibleImageIndicesRef.current
           : Array.from({ length: nImages }, (_, i) => i);
+        // Independent contrast is a panel-local interaction. Repainting the
+        // whole gallery here can momentarily apply stale/default ranges to
+        // untouched panels before React's settled render restores them.
+        const previewIndices = linkedContrast ? visibleIndices : [idx];
         const ls = logScaleRef.current ?? false;
         const hasAbsoluteRange = traitVmin != null && traitVmax != null;
         const baseRanges: { min: number; max: number }[] = [];
@@ -3861,14 +3865,14 @@ function Show2D() {
           }
         }
         panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
-        const bitmapRanges = visibleIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
-        const bitmaps = engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls);
+        const bitmapRanges = previewIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        const bitmaps = engine.renderSlotsToImageBitmap(previewIndices, bitmapRanges, ls);
         if (bitmaps && bitmaps[0]) {
           try {
             for (let k = 0; k < bitmaps.length; k++) {
               const bitmap = bitmaps[k];
               if (!bitmap) continue;
-              const panel = visibleIndices[k];
+              const panel = previewIndices[k];
               const offscreen = mainOffscreensRef.current[panel];
               if (offscreen) offscreen.getContext("2d")?.drawImage(bitmap, 0, 0);
             }
@@ -5935,6 +5939,12 @@ function Show2D() {
       const traitsAnchor = traitVmin != null && traitVmax != null;
       const hasPerImageTraits = traitVmins && traitVmaxs && traitVmins.some((v, i) => v != null && traitVmaxs[i] != null);
       if (!traitsAnchor && !hasPerImageTraits) {
+        // The slider preview bypasses React state for low-latency GPU paints.
+        // Mirror auto-derived panel windows into that ref before publishing
+        // state so the first manual drag starts from the visible ranges.
+        const nextPerImage = new Map(contrastRef.current.perImage);
+        for (const p of newPcts) nextPerImage.set(p.i, { vminPct: p.vminPct, vmaxPct: p.vmaxPct });
+        contrastRef.current.perImage = nextPerImage;
         // Write all panel pcts in a single state update.
         setContrastStates(prev => {
           const m = new Map(prev);
@@ -5948,7 +5958,9 @@ function Show2D() {
         if (linkedContrast && newPcts.length > 0) {
           const vminPct = Math.min(...newPcts.map(p => p.vminPct));
           const vmaxPct = Math.max(...newPcts.map(p => p.vmaxPct));
-          setLinkedContrastState({ vminPct, vmaxPct });
+          const state = { vminPct, vmaxPct };
+          contrastRef.current.linked = state;
+          setLinkedContrastState(state);
         }
       }
       console.log(`[Show2D] GPU auto-contrast: ${nImg} images, ${allBins.length} histograms`);
@@ -12125,7 +12137,7 @@ function Show2D() {
                               title={isRgbPanel(i) ? "RGB panel: contrast controls do not apply" : undefined}>
                               <Histogram data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
                                 onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
-                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                                onRangePreview={(min, max) => { const leavingAuto = autoContrast; if (leavingAuto) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, leavingAuto); }}
                                 onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
                                 width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
                                 dataMin={histRange?.min ?? imageDataRange.min}
@@ -12135,7 +12147,7 @@ function Show2D() {
                         })}
                       </Box>
                     ) : (
-                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { const leavingAuto = autoContrast; if (leavingAuto) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, leavingAuto); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
                     )}
                   </Box>
                 )}
