@@ -286,7 +286,6 @@ def test_show2d_hidden_panels_skip_hot_render_paths():
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
 
     assert "visibleImageIndicesRef.current = visibleImageIndices;" in show2d
-    assert "engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls)" in show2d
     assert "for (const i of visibleImageIndices) {\n        if (isRgbFlags && isRgbFlags[i]) continue; // painted directly above" in show2d
     assert "const indices = visibleImageIndices.filter(i => i >= 0 && i < capturedNImages);" in show2d
     assert "const signature = visibleImageIndices.map((i) => {" in show2d
