@@ -75,6 +75,12 @@ Visit the **[quantem.widget documentation](https://electronmicroscopy.github.io/
 for installation, tutorials, API references, command-line workflows, data I/O,
 HTML sharing, and WebGPU export guidance.
 
+`quantem.widget` bridges scientific data and computational algorithms. We
+recommend agent-assisted development so researchers can spend less time writing
+interface code and more time discovering scientific insight. Start with the copyable
+**[agent-assisted development prompts](https://electronmicroscopy.github.io/quantem.widget/agent-prompts.html)**
+for opening ARINA data, designing a widget, or preparing a pull request.
+
 ## Citing quantem.widget
 
 If the quantEM interactive framework—including `quantem.widget`, GPU-accelerated
