@@ -173,6 +173,28 @@ def test_noise_sigma_floor_is_tunable():
     assert near >= 2
 
 
+def test_detected_au_ratios_index_as_fcc():
+    from quantem.widget import library_phase
+
+    au = library_phase("Au")
+    k = 0.008
+    hkls = ("111", "200", "220", "311")
+    radii = [1.0 / (au.d_spacing(tuple(int(c) for c in h)) * k) for h in hkls]
+    dp, cen = _ring_dp(radii, amp=25.0, sigma=2.0)
+    counts = np.random.default_rng(6).poisson(dp * 0.5).astype(np.float32)
+
+    w = ShowDiffraction(counts, center=cen, bf_radius=15, verbose=False)
+    w.detect_rings(max_rings=4, exclude_radius=30)
+    w.calibrate_from_phase(au)
+    w.index_rings(au)
+
+    # detected radius ratios must land on the allowed fcc reflections
+    ordered = sorted(w.rings, key=lambda r: r["radius_px"])
+    assert [r["hkl"] for r in ordered] == list(hkls)
+    assert all(r["d_error"] < 0.01 for r in ordered)
+    assert abs(w.k_pixel_size - k) / k < 0.01
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)
