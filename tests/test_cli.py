@@ -494,12 +494,18 @@ def test_show4dstem_webgpu_cli_opens_generated_command(tmp_path, monkeypatch):
     assert seen["no_open"] is True
 
 
-def test_render_show4dstem_webgpu_h5_uses_anonymous_h5_urls(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("count", "view_mode", "dp_mode"),
+    [(1, "single", "average"), (2, "multiple", "selected"), (7, "multiple", "selected")],
+)
+def test_render_show4dstem_webgpu_h5_uses_anonymous_h5_urls(
+    tmp_path, monkeypatch, count, view_mode, dp_mode
+):
     """C6: WebGPU CLI export links source H5 masters instead of preprocessing them."""
     import quantem.widget as qw
 
     masters = []
-    for idx in range(2):
+    for idx in range(count):
         master = tmp_path / f"private_source_{idx}_master.h5"
         master.write_bytes(f"private-{idx}".encode())
         (tmp_path / f"private_source_{idx}_data_000001.h5").write_bytes(f"chunk-{idx}".encode())
@@ -536,20 +542,45 @@ def test_render_show4dstem_webgpu_h5_uses_anonymous_h5_urls(tmp_path, monkeypatc
 
     assert html == tmp_path / "out" / "private_folder_show4dstem_webgpu" / "index.html"
     assert "lazy_urls" not in seen["kwargs"]
-    assert seen["kwargs"]["h5_urls"] == ["../tilt_00_master.h5", "../tilt_01_master.h5"]
+    assert seen["kwargs"]["h5_urls"] == [
+        f"../data/dataset_{idx:02d}_master.h5" for idx in range(count)
+    ]
     assert seen["kwargs"]["backend"] == "webgpu"
     assert seen["kwargs"]["scan_shape"] == (4, 4)
     assert seen["kwargs"]["detector_shape"] == (8, 8)
-    assert seen["kwargs"]["view_mode"] == "multiple"
-    assert seen["kwargs"]["compare_max_panels"] == 2
+    assert seen["kwargs"]["view_mode"] == view_mode
+    assert seen["kwargs"]["compare_max_panels"] == count
     assert seen["kwargs"]["compare_group_mode"] == "all"
+    assert seen["kwargs"]["compare_dp_mode"] == dp_mode
     assert seen["bundle"]["h5_decode_dtype"] == "uint8"
     assert seen["bundle"]["out_dir"] == html.parent
-    assert (html.parent / "tilt_00_master.h5").is_symlink()
-    assert (html.parent / "tilt_00_master.h5").resolve() == pathlib.Path(masters[0])
-    assert (html.parent / "tilt_00_data_000001.h5").is_symlink()
-    assert (html.parent / "tilt_00_data_000001.h5").resolve() == tmp_path / "private_source_0_data_000001.h5"
-    assert not (html.parent / "tilt_00_lazy").exists()
+    assert (html.parent / "data" / "dataset_00_master.h5").is_symlink()
+    assert (html.parent / "data" / "dataset_00_master.h5").resolve() == pathlib.Path(masters[0])
+    assert (html.parent / "data" / "dataset_00_data_000001.h5").is_symlink()
+    assert (html.parent / "data" / "dataset_00_data_000001.h5").resolve() == tmp_path / "private_source_0_data_000001.h5"
+    assert not (html.parent / "data" / "dataset_00_lazy").exists()
+
+
+def test_show4dstem_generated_master_links_are_not_input_candidates(tmp_path):
+    """A rerun must ignore the anonymous links in its owned export folder."""
+    source = tmp_path / "scan_master.h5"
+    source.write_bytes(b"source")
+    generated = tmp_path / "scan_show4dstem_webgpu"
+    generated.mkdir()
+    link = generated / "dataset_00_master.h5"
+    link.symlink_to(source)
+
+    assert not cli._is_show4dstem_generated_master_link(source)
+    assert cli._is_show4dstem_generated_master_link(link)
+
+
+def test_show4dstem_dataset_label_uses_coordinates_when_available():
+    master = "experiment_-8.5x_14.72y_run_master.h5"
+    second_master = "experiment_17.0x_0.0y_run_master.h5"
+
+    assert cli._show4dstem_dataset_label(master, 2) == "Tilt (-8.5, +14.72)"
+    assert cli._show4dstem_dataset_label(second_master, 2) == "Tilt (+17.0, +0.0)"
+    assert cli._show4dstem_dataset_label("unknown_master.h5", 2) == "Dataset 3"
 
 
 def test_render_show4dstem_folder_notebook_records_backend_count_and_devices(tmp_path):

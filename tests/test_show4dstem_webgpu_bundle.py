@@ -100,6 +100,7 @@ def test_bundle_export_uses_low8_for_audited_uint8_h5(tmp_path):
     assert 'globalThis.__QT_H5_DECODE_DTYPE ??= "uint8"' in page
     assert "globalThis.__QT_H5_FORCE_LOW8 ??= true" in page
     assert "globalThis.__BSLZ4_LOW8_ONLY ??= true" in page
+    assert "globalThis.__QT_H5_MAX_RESIDENT ??= 1" not in page
 
 
 def test_h5_export_sets_file_protocol_local_file_guard(tmp_path):
