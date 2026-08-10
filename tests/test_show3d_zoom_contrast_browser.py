@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 import pytest
 
 pytest.importorskip("playwright.sync_api")
@@ -54,6 +56,26 @@ def _anchor_patch(page) -> dict[str, float | str | None]:
           };
         }"""
     )
+
+
+def _visible_panel_color_spread(page) -> list[float]:
+    canvas = page.locator("canvas").nth(0)
+    box = canvas.bounding_box()
+    assert box is not None
+    screenshot = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
+    left = round(box["x"])
+    top = round(box["y"])
+    right = round(box["x"] + box["width"])
+    bottom = round(box["y"] + box["height"])
+    pixels = np.asarray(screenshot.crop((left, top, right, bottom)), dtype=np.float32)
+    height, width, _ = pixels.shape
+    spreads: list[float] = []
+    for panel in range(3):
+        panel_left = round(panel * width / 3 + width * 0.015)
+        panel_right = round((panel + 1) * width / 3 - width * 0.015)
+        region = pixels[round(height * 0.08):round(height * 0.92), panel_left:panel_right]
+        spreads.append(float((region.max(axis=2) - region.min(axis=2)).mean()))
+    return spreads
 
 
 @pytest.mark.skipif(
@@ -137,5 +159,76 @@ def test_linked_zoom_preserves_unlinked_panel_auto_contrast(tmp_path):
         page.wait_for_function(
             "() => window.__quantemShow3DPerf?.embeddedPackedViewportPaint?.visibleCount === 3"
         )
+        assert page_errors == []
+        browser.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
+    reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
+)
+def test_scrub_commit_preserves_mixed_panel_colormaps(tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    from quantem.widget import Show3D
+
+    chrome = _chrome_executable()
+    if chrome is None:
+        pytest.skip("Chrome/Chromium executable not found")
+
+    bf, df, phase = _contrast_fixture()
+    widget = Show3D(
+        bf,
+        df,
+        phase,
+        panel_titles=["BF", "DF", "phase"],
+        cmap=["gray", "inferno", "viridis"],
+        link_contrast=False,
+        max_cols=3,
+        verbose=False,
+    )
+    html_path = tmp_path / "show3d-mixed-colormap-scrub.html"
+    widget.export_html(html_path, encoding="full")
+
+    page_errors: list[str] = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            executable_path=chrome,
+            headless=True,
+            args=["--enable-unsafe-swiftshader", "--enable-webgpu"],
+        )
+        page = browser.new_page(viewport={"width": 1200, "height": 900})
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(html_path.as_uri())
+        page.wait_for_timeout(2_500)
+
+        baseline = _visible_panel_color_spread(page)
+        sliders = page.locator('input[aria-label^="Loop range and current frame"]')
+        assert sliders.count() == 3
+        current_thumb = sliders.nth(1)
+        thumb_box = current_thumb.bounding_box()
+        slider_box = current_thumb.locator(
+            "xpath=ancestor::*[contains(@class, 'MuiSlider-root')]"
+        ).bounding_box()
+        assert thumb_box is not None and slider_box is not None
+        page.mouse.move(
+            thumb_box["x"] + thumb_box["width"] / 2,
+            thumb_box["y"] + thumb_box["height"] / 2,
+        )
+        page.mouse.down()
+        page.mouse.move(
+            slider_box["x"] + slider_box["width"] * 0.8,
+            slider_box["y"] + slider_box["height"] / 2,
+        )
+        page.wait_for_timeout(35)
+        during_drag = _visible_panel_color_spread(page)
+        page.mouse.up()
+        page.wait_for_timeout(50)
+        after_release = _visible_panel_color_spread(page)
+
+        for panel in (1, 2):
+            assert baseline[panel] > 20
+            assert during_drag[panel] >= baseline[panel] * 0.25
+            assert after_release[panel] >= baseline[panel] * 0.25
         assert page_errors == []
         browser.close()

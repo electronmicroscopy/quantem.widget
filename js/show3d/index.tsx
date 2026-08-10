@@ -9098,7 +9098,10 @@ function Show3D() {
 
   const renderGpuPanelSlice = (idx: number, updateDisplayState = true): boolean => {
     const normalized = ((Math.round(idx) % Math.max(1, nSlices)) + Math.max(1, nSlices)) % Math.max(1, nSlices);
-    if (!separatePanelFrames) return false;
+    // This presenter owns one LUT for the entire draw. Mixed panel colormaps
+    // must stay on the retained per-panel composite path; otherwise a scrub
+    // commit repaints every panel with the global (usually first-panel) map.
+    if (!separatePanelFrames || hasMixedPanelCmaps) return false;
     const engine = gpuCmapRef.current;
     if (!engine || !gpuCmapReadyRef.current) return false;
     const c = playRef.current;
