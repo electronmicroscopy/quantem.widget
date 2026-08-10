@@ -1880,13 +1880,11 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     spot_refine = traitlets.Bool(True).tag(sync=True)
 
-    # detection preprocessing; fits and measurements always use raw data
+    # Denoise
     detect_denoise = traitlets.Enum(
         ("auto", "none", "gaussian", "anscombe"), default_value="auto"
     ).tag(sync=True)
-    # display the denoised detection view instead of the raw frame
     show_detection_view = traitlets.Bool(False).tag(sync=True)
-    # display-only denoise for the shipped frame, stored data stays raw
     denoise = traitlets.Enum(
         ("none", "gaussian", "anscombe", "nlm", "tv"), default_value="none"
     ).tag(sync=True)
@@ -2285,7 +2283,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         return self._get_frame(self.frame_idx)
 
     def _detection_frame(self) -> np.ndarray:
-        # candidate finding only; measurements keep the raw frame
         frame = self._displayed_frame()
         mode = self._resolve_detect_denoise(frame)
         if mode == "none":
@@ -2302,16 +2299,17 @@ class ShowDiffraction(anywidget.AnyWidget):
         if positive.size == 0:
             return "none"
 
-        # counting data may carry a detector gain: values then sit on integer
-        # multiples of the smallest positive value
+        # Counting data
         counts = positive / float(positive.min())
         if np.allclose(counts, np.round(counts), atol=1e-3):
-            # typical pixels in the shot noise regime, not the beam
             return "anscombe" if float(np.median(counts)) <= 30.0 else "none"
 
-        noise = 1.4826 * float(np.median(np.abs(frame - ndimage.median_filter(frame, size=3))))
+        # Continuous data
+        residual = frame - ndimage.median_filter(frame, size=3)
+        noise = 1.4826 * float(np.median(np.abs(residual)))
         if noise <= 0.0:
             return "none"
+
         signal = float(np.percentile(frame, 99.5) - np.median(frame))
         return "gaussian" if signal < 50.0 * noise else "none"
 
@@ -2958,12 +2956,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         """
         if not self.k_calibrated:
             raise ValueError("recover_predicted_rings needs a k calibration")
-        from scipy.ndimage import gaussian_filter1d
 
         radii_px, intensity = self._radial_profile()
         y_log = np.log1p(np.clip(intensity - intensity.min(), 0.0, None))
-        detrended = y_log - gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
-        # successive differences ignore ring structure and detrending sidelobes
+        detrended = y_log - ndimage.gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
+        # Profile noise estimate
         steps = np.diff(detrended)
         noise = 1.4826 * float(np.median(np.abs(steps))) / np.sqrt(2.0)
         if noise <= 0.0:
@@ -2982,7 +2979,7 @@ class ShowDiffraction(anywidget.AnyWidget):
                 continue
             idx = np.flatnonzero(window)
             peak = idx[np.argmax(detrended[idx])]
-            # interior local maximum with real prominence, not a window edge
+            # Peak checks
             if peak in (0, len(detrended) - 1) or peak in (idx[0], idx[-1]):
                 continue
             if detrended[peak] < snr * noise:
@@ -3027,7 +3024,7 @@ class ShowDiffraction(anywidget.AnyWidget):
                 problems.append(f"calibration failed ({exc})")
                 phase = None
         if phase is not None and self.k_calibrated:
-            # rescue predicted reflections the detector under-detected
+            # Ring recovery
             if self.recover_predicted_rings(phase):
                 try:
                     self.fit_ring_profile()
