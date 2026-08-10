@@ -438,6 +438,8 @@ export function computeMagnitude(real: Float32Array, imag: Float32Array): Float3
 export function autoEnhanceFFT(
   mag: Float32Array, width: number, height: number,
 ): { min: number; max: number } {
+  const len = mag.length;
+  if (len === 0) return { min: 0, max: 0 };
   const centerIdx = Math.floor(height / 2) * width + Math.floor(width / 2);
   const neighbors = [
     mag[Math.max(0, centerIdx - 1)],
@@ -446,9 +448,10 @@ export function autoEnhanceFFT(
     mag[Math.min(mag.length - 1, centerIdx + width)],
   ];
   mag[centerIdx] = neighbors.reduce((a, b) => a + b, 0) / 4;
-  // Use O(n) histogram approach instead of O(n log n) sort
-  const len = mag.length;
-  if (len === 0) return { min: 0, max: 0 };
+  // Use two O(n) histogram passes instead of an O(n log n) sort. One linear
+  // histogram is not enough for microscopy FFTs: a 1e9 DC neighborhood can
+  // put every useful 1e3-1e6 value in bin zero, making the old fallback choose
+  // the absolute maximum and paint the spectrum black.
   let dMin = Infinity, dMax = -Infinity;
   for (let i = 0; i < len; i++) {
     const v = mag[i];
@@ -459,18 +462,55 @@ export function autoEnhanceFFT(
   const NUM_BINS = 1024;
   const bins = new Uint32Array(NUM_BINS);
   const range = dMax - dMin;
-  const scale = (NUM_BINS - 1) / range;
-  for (let i = 0; i < len; i++) bins[Math.floor((mag[i] - dMin) * scale)]++;
-  // Find 99.9th percentile
+  const binIndex = (value: number, lo: number, span: number) => Math.min(
+    NUM_BINS - 1,
+    Math.max(0, Math.floor(((value - lo) / span) * NUM_BINS)),
+  );
+  for (let i = 0; i < len; i++) bins[binIndex(mag[i], dMin, range)]++;
+  // Find the coarse bin containing the 99.9th percentile.
   const target = Math.ceil(len * 0.999);
   let cumSum = 0;
-  let pMax = dMax;
+  let coarseBin = NUM_BINS - 1;
+  let countBefore = 0;
   for (let i = 0; i < NUM_BINS; i++) {
     cumSum += bins[i];
-    if (cumSum >= target) { pMax = dMin + (i / (NUM_BINS - 1)) * range; break; }
+    if (cumSum >= target) {
+      coarseBin = i;
+      countBefore = cumSum - bins[i];
+      break;
+    }
   }
-  // If percentile collapsed to min (sparse spectra), fall back to actual max
-  if (pMax <= dMin) pMax = dMax;
+  const coarseMin = dMin + (coarseBin / NUM_BINS) * range;
+  const coarseMax = coarseBin === NUM_BINS - 1
+    ? dMax
+    : dMin + ((coarseBin + 1) / NUM_BINS) * range;
+  const coarseSpan = coarseMax - coarseMin;
+  if (!(coarseSpan > 0)) return { min: dMin, max: dMax };
+
+  // Re-bin only the selected coarse interval. This resolves the useful range
+  // even when the first interval spans several million intensity units.
+  const refinedBins = new Uint32Array(NUM_BINS);
+  for (let i = 0; i < len; i++) {
+    const value = mag[i];
+    const inCoarseBin = value >= coarseMin && (
+      coarseBin === NUM_BINS - 1 ? value <= coarseMax : value < coarseMax
+    );
+    if (inCoarseBin) refinedBins[binIndex(value, coarseMin, coarseSpan)]++;
+  }
+  const refinedTarget = Math.max(1, target - countBefore);
+  let refinedCumSum = 0;
+  let refinedBin = NUM_BINS - 1;
+  for (let i = 0; i < NUM_BINS; i++) {
+    refinedCumSum += refinedBins[i];
+    if (refinedCumSum >= refinedTarget) {
+      refinedBin = i;
+      break;
+    }
+  }
+  const pMax = Math.min(
+    dMax,
+    coarseMin + ((refinedBin + 1) / NUM_BINS) * coarseSpan,
+  );
   return { min: dMin, max: pMax };
 }
 

@@ -4418,6 +4418,116 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
         return export_path
 
+    def export_sidecar(
+        self,
+        out_dir: str | pathlib.Path,
+        *,
+        title: str | None = None,
+        stack_filename: str = "offline_stack.u8",
+        html_filename: str = "index.html",
+        manifest_filename: str = "manifest.json",
+    ) -> pathlib.Path:
+        """Write a thin HTML viewer + on-disk offline stack (no single-file embed).
+
+        Layout::
+
+            out_dir/
+              index.html          # small: widget shell only
+              offline_stack.u8    # raw uint8 stack bytes (sidecar)
+              manifest.json       # shape / titles / paths
+
+        Serve ``out_dir`` over HTTP (not ``file://``) so the browser can
+        ``fetch`` the sidecar. Full spatial resolution is preserved
+        (``display_bin`` of the live widget is used; no export downsample).
+        """
+        import json
+
+        if self._data is None:
+            raise ValueError("Cannot export sidecar after free(); rebuild the widget first.")
+
+        out_path = pathlib.Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        stack_name = str(stack_filename)
+        html_name = str(html_filename)
+        manifest_name = str(manifest_filename)
+        page_title = title or self.title or "Show3D"
+
+        # Clone with uint8 offline packing, no spatial downsample.
+        export_widget = self._clone_for_html_export(quantized=True, downsample=1)
+        try:
+            stack_bytes = bytes(export_widget._offline_stack or b"")
+            if not stack_bytes:
+                raise ValueError("Sidecar export produced an empty offline stack.")
+            stack_path = out_path / stack_name
+            stack_path.write_bytes(stack_bytes)
+
+            # Thin HTML: drop embedded stack, point the browser at the sidecar.
+            export_widget._offline_stack = b""
+            export_widget._offline_float_stack = b""
+            export_widget._offline_stack_url = stack_name
+            export_widget.offline = True
+            export_widget.export_enabled = False
+            # Folder uint8 packs keep raw display bytes plus per-panel source
+            # ranges. Preserve the scientist's contrast state in the HTML; the
+            # browser maps auto/manual/histogram ranges onto those bytes without
+            # rescanning full-resolution panels on each scrub.
+
+            html_path = out_path / html_name
+            from ipywidgets.embed import dependency_state, embed_minimal_html
+            from .export import ensure_mobile_viewport
+
+            state = dependency_state([export_widget], drop_defaults=False)
+            embed_minimal_html(
+                str(html_path),
+                views=[export_widget],
+                title=page_title,
+                drop_defaults=False,
+                state=state,
+            )
+            ensure_mobile_viewport(html_path)
+
+            manifest = {
+                "format": "quantem.show3d.sidecar.v1",
+                "title": page_title,
+                "html": html_name,
+                "offline_stack": stack_name,
+                "encoding": "uint8",
+                "display_bin": 1,
+                "downsample": 1,
+                "width": int(export_widget.width),
+                "height": int(export_widget.height),
+                "n_slices": int(export_widget.n_slices),
+                "n_panels": int(export_widget.n_panels),
+                "panel_width_px": int(export_widget.panel_width_px),
+                "panel_titles": list(export_widget.panel_titles or []),
+                "offline_min": float(export_widget._offline_min),
+                "offline_max": float(export_widget._offline_max),
+                "offline_mins": list(export_widget._offline_mins or []),
+                "offline_maxs": list(export_widget._offline_maxs or []),
+                "cmap": export_widget.cmap,
+                "panel_cmaps": list(export_widget.panel_cmaps or []),
+                "auto_contrast": bool(export_widget.auto_contrast),
+                "link_contrast": bool(export_widget.link_contrast),
+                "percentile_low": float(export_widget.percentile_low),
+                "percentile_high": float(export_widget.percentile_high),
+                "image_vmin_pct": float(export_widget.image_vmin_pct),
+                "image_vmax_pct": float(export_widget.image_vmax_pct),
+                "log_scale": bool(export_widget.log_scale),
+                "stack_bytes": int(stack_path.stat().st_size),
+                "html_bytes": int(html_path.stat().st_size),
+                "serve": "python scripts/serve_sidecar_range.py --dir . --port 8801 --bind 127.0.0.1",
+            }
+            (out_path / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
+            html_mb = html_path.stat().st_size / (1024 * 1024)
+            stack_mb = stack_path.stat().st_size / (1024 * 1024)
+            self.export_status = (
+                f"Exported sidecar {html_path.name} ({html_mb:.1f} MB) + "
+                f"{stack_name} ({stack_mb:.1f} MB)"
+            )
+            return html_path
+        finally:
+            export_widget.free()
+
     def _normalise_html_export_options(
         self,
         *,
@@ -4435,9 +4545,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             encoding = "uint8"
         if raw_mode != "single":
             raise ValueError(
-                "Show3D HTML export supports only mode='single'. "
-                "Use encoding='uint8' and downsample=2, 4, or 8 for a smaller "
-                "portable report."
+                "Show3D HTML export supports mode='single'. "
+                "For multi-GB viewers use export_sidecar() (thin HTML + offline_stack.u8)."
             )
         if downsample in (None, "", 0, "0"):
             downsample_factor = 1
