@@ -15,7 +15,7 @@ those with `identify_phase(database)` or the *candidates only* switch.
 have no candidates in mind; narrow it with an element filter.
 
 Reference data sources: every lattice parameter in the built-in phase library
-(`PHASE_LIBRARY` in `crystal.py`) is a room-temperature value taken from a
+(`PHASE_LIBRARY` in `showdiffraction.py`) is a room-temperature value taken from a
 license-clean source cited next to the entry — NIST SRM certificates and NBS
 circulars/monographs (US public domain), the Crystallography Open Database
 (CC0), or the primary literature. No values come from proprietary compilations

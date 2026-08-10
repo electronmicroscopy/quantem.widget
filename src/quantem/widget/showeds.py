@@ -178,8 +178,12 @@ def eds_line_hints(
         if allowed and line["element"] not in allowed:
             continue
         out.append(dict(line))
+    if len(out) > max_lines:
+        # cap by importance so major lines survive at every energy
+        out.sort(key=lambda item: (_line_priority(item["line"]), -float(item["intensity"] or 0.0)))
+        out = out[:max_lines]
     out.sort(key=lambda item: (float(item["energy_keV"]), item["element"], _line_priority(item["line"])))
-    return out[:max_lines]
+    return out
 
 
 MN_KA_KEV = 5.8988
