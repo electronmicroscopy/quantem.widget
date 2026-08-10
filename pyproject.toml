@@ -16,6 +16,7 @@ dependencies = [
     # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
     "jupyterlab_widgets>=3.0.10",
     "numpy>=2.0.0",
+    "scipy>=1.10.0",
     "traitlets>=5.0.0",
     "torch>=2.0.0",
     "matplotlib>=3.7.0",
