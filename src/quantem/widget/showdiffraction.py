@@ -2946,6 +2946,54 @@ class ShowDiffraction(anywidget.AnyWidget):
                 continue
         return phases
 
+    def recover_predicted_rings(
+        self, phase: Phase, *, tol_px: float = 4.0, snr: float = 3.0
+    ) -> list[float]:
+        """Add rings the detector missed at radii the calibrated phase predicts.
+
+        For each allowed reflection with no ring within ``tol_px``, the raw
+        radial profile is tested near the predicted radius; a local maximum
+        at least ``snr`` robust sigmas above the detrended profile noise
+        becomes a ring. Returns the added radii in pixels.
+        """
+        if not self.k_calibrated:
+            raise ValueError("recover_predicted_rings needs a k calibration")
+        from scipy.ndimage import gaussian_filter1d
+
+        radii_px, intensity = self._radial_profile()
+        y_log = np.log1p(np.clip(intensity - intensity.min(), 0.0, None))
+        detrended = y_log - gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
+        # successive differences ignore ring structure and detrending sidelobes
+        steps = np.diff(detrended)
+        noise = 1.4826 * float(np.median(np.abs(steps))) / np.sqrt(2.0)
+        if noise <= 0.0:
+            return []
+
+        existing = [r["radius_px"] for r in self.rings]
+        added = []
+        for ref in phase.reflections():
+            r_pred = 1.0 / (ref["d"] * self.k_pixel_size)
+            if r_pred <= self.bf_radius or r_pred >= float(radii_px[-1]):
+                continue
+            if any(abs(r_pred - r) <= tol_px for r in existing):
+                continue
+            window = np.abs(radii_px - r_pred) <= tol_px
+            if not window.any():
+                continue
+            idx = np.flatnonzero(window)
+            peak = idx[np.argmax(detrended[idx])]
+            # interior local maximum with real prominence, not a window edge
+            if peak in (0, len(detrended) - 1) or peak in (idx[0], idx[-1]):
+                continue
+            if detrended[peak] < snr * noise:
+                continue
+            if detrended[peak] <= detrended[peak - 1] or detrended[peak] <= detrended[peak + 1]:
+                continue
+            self.add_ring(float(radii_px[peak]))
+            existing.append(float(radii_px[peak]))
+            added.append(float(radii_px[peak]))
+        return added
+
     def run_auto(
         self,
         phase: Phase | None = None,
@@ -2979,6 +3027,12 @@ class ShowDiffraction(anywidget.AnyWidget):
                 problems.append(f"calibration failed ({exc})")
                 phase = None
         if phase is not None and self.k_calibrated:
+            # rescue predicted reflections the detector under-detected
+            if self.recover_predicted_rings(phase):
+                try:
+                    self.fit_ring_profile()
+                except (ValueError, ImportError):
+                    pass
             try:
                 self.index_rings(phase)
                 if not any(r.get("hkl") for r in self.rings):
