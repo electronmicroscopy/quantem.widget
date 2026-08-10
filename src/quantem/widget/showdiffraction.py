@@ -1704,14 +1704,17 @@ class ShowDiffraction(anywidget.AnyWidget):
         Search radius in pixels for snapping / Gaussian refinement.
     spot_refine : bool, default True
         Sub-pixel refine spots with a 2D Gaussian fit on add.
-    detect_denoise : {"auto", "none", "gaussian", "anscombe"}, default "auto"
+    detect_denoise : str, default "auto"
         Denoise applied to the frame before center refinement and spot/ring
-        detection. "auto" estimates the noise level and picks a mode; fits
-        and measurements always run on the raw data, so positions are not
-        biased by the smoothing. Set the ``show_detection_view`` trait to
-        display the denoised view instead of the raw frame, or the
-        ``denoise`` trait for a display-only filter (``"nlm"`` keeps spots
-        sharp) that touches neither detection nor measurements.
+        detection: "auto", "none", "gaussian", "anscombe", or the model-based
+        opt-ins "tv" (scikit-image) and "denova_tv" / "denova_tv12" (denova
+        package). "auto" estimates the noise level and picks between the
+        scipy modes. Fits and measurements always run on the raw data, so
+        positions are not biased by the smoothing. Set the
+        ``show_detection_view`` trait to display the denoised view instead
+        of the raw frame, or the ``denoise`` trait for a display-only
+        filter (``"nlm"`` keeps spots sharp) that touches neither detection
+        nor measurements.
     dp_scale_mode : str, default "log"
         Diffraction display scaling ("linear", "log", "sqrt").
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
@@ -1882,7 +1885,8 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     # Denoise
     detect_denoise = traitlets.Enum(
-        ("auto", "none", "gaussian", "anscombe"), default_value="auto"
+        ("auto", "none", "gaussian", "anscombe", "tv", "denova_tv", "denova_tv12"),
+        default_value="auto",
     ).tag(sync=True)
     show_detection_view = traitlets.Bool(False).tag(sync=True)
     denoise = traitlets.Enum(
