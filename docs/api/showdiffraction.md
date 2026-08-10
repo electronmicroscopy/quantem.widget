@@ -58,11 +58,11 @@ no console error, no NaN frame).
 | Contrast histogram (dual-thumb slider) | `dp_vmin_pct`, `dp_vmax_pct` | Drag either thumb (mouse or touch) for a live preview; traits update once on release |
 | Center mode dropdown | `center_mode` | `auto` re-detects the BF disk; `manual` enables click-to-set |
 | Click to set center (manual) | `center_row`, `center_col` | Crosshair moves; spot d-spacings recompute |
-| Detect spots | `_detect_spots_request`, `spots` | Auto-finds every isolated peak with contrast at least 10% of the strongest (`min_relative`); no count cap |
+| Detect spots | `_detect_spots_request`, `spots` | Auto-finds every isolated peak with contrast at least 10% of the strongest (`min_relative`); candidates come from the `detect_denoise` view, positions are refined on raw data; no count cap |
 | Add / remove spot (click) | `_spot_add_request`, `_spot_remove_request`, `spots` | Marker placed/removed; d-spacing updates |
 | Move spot (Move + drag) | `_spot_move_request`, `spots` | Re-picks the spot at the drop position; stale hkl clears |
 | Spot pick dropdown | `spot_refine`, `snap_enabled`, `snap_radius` | Clicked spots are Gaussian-fitted, snapped to the local maximum, or kept exactly as clicked |
-| Detect rings | `_detect_rings_request`, `rings` | Auto-finds all Debye–Scherrer rings above the profile prominence threshold; no count cap |
+| Detect rings | `_detect_rings_request`, `rings` | Auto-finds all Debye–Scherrer rings above the profile prominence threshold, on the `detect_denoise` view; ring fits stay on the raw profile; no count cap |
 | Add / remove ring | `_ring_add_request`, `_ring_remove_request`, `rings` | Ring overlay; ring d-spacing updates |
 | Calibrate from spot / ring | `_calibrate_from_spot_request`, `_calibrate_from_ring_request`, `k_pixel_size` | Sets k-space pixel size from a known d |
 | Auto button | `_auto_request`, `analysis_status` | Runs center, rings, calibration, fit, and indexing in one pass; status reports failed steps only |

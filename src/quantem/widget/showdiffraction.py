@@ -23,6 +23,7 @@ from scipy.signal.windows import tukey
 
 from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.array import to_numpy
+from quantem.widget.utils.display_filter import apply_display_filter
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
@@ -1703,6 +1704,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         Search radius in pixels for snapping / Gaussian refinement.
     spot_refine : bool, default True
         Sub-pixel refine spots with a 2D Gaussian fit on add.
+    detect_denoise : {"auto", "none", "gaussian", "anscombe"}, default "auto"
+        Denoise applied to the frame before center refinement and spot/ring
+        detection. "auto" estimates the noise level and picks a mode; fits
+        and measurements always run on the raw data, so positions are not
+        biased by the smoothing.
     dp_scale_mode : str, default "log"
         Diffraction display scaling ("linear", "log", "sqrt").
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
@@ -1763,6 +1769,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         "snap_enabled",
         "snap_radius",
         "spot_refine",
+        "detect_denoise",
         "center_mode",
         "calibration_source",
         "calibration_ref_d",
@@ -1867,6 +1874,11 @@ class ShowDiffraction(anywidget.AnyWidget):
     rings = traitlets.List(traitlets.Dict()).tag(sync=True)
 
     spot_refine = traitlets.Bool(True).tag(sync=True)
+
+    # detection preprocessing; fits and measurements always use raw data
+    detect_denoise = traitlets.Enum(
+        ("auto", "none", "gaussian", "anscombe"), default_value="auto"
+    ).tag(sync=True)
 
     # Indexing
     zone_axis = traitlets.Unicode("").tag(sync=True)
@@ -1978,6 +1990,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         snap_enabled: bool = False,
         snap_radius: int = 5,
         spot_refine: bool = True,
+        detect_denoise: str = "auto",
         dp_scale_mode: str = "log",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
@@ -2019,6 +2032,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.snap_enabled = snap_enabled
         self.snap_radius = snap_radius
         self.spot_refine = spot_refine
+        self.detect_denoise = detect_denoise
         ui = resolve_ui_mode(
             ui_mode,
             defaults={
@@ -2211,7 +2225,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError(f"unknown refine method {method!r}")
 
         picked = pick_center(
-            self._displayed_frame().astype(np.float64),
+            self._detection_frame().astype(np.float64),
             method=method,
             mask=self._analysis_mask(),
             guess=(self.center_row, self.center_col),
@@ -2255,6 +2269,34 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     def _displayed_frame(self) -> np.ndarray:
         return self._get_frame(self.frame_idx)
+
+    def _detection_frame(self) -> np.ndarray:
+        # candidate finding only; measurements keep the raw frame
+        frame = self._displayed_frame()
+        mode = self._resolve_detect_denoise(frame)
+        if mode == "none":
+            return frame
+        return apply_display_filter(frame, mode=mode, sigma=2.0)
+
+    def _resolve_detect_denoise(self, frame: np.ndarray) -> str:
+        mode = self.detect_denoise
+        if mode != "auto":
+            return mode
+
+        frame = np.asarray(frame, dtype=np.float64)
+        positive = frame[frame > 0]
+        if positive.size == 0:
+            return "none"
+
+        if np.array_equal(positive, np.round(positive)):
+            # counting data: typical pixels in the shot noise regime, not the beam
+            return "anscombe" if float(np.median(positive)) <= 30.0 else "none"
+
+        noise = 1.4826 * float(np.median(np.abs(frame - ndimage.median_filter(frame, size=3))))
+        if noise <= 0.0:
+            return "none"
+        signal = float(np.percentile(frame, 99.5) - np.median(frame))
+        return "gaussian" if signal < 50.0 * noise else "none"
 
     def _update_frame(self, change=None):
         frame = self._displayed_frame()
@@ -2356,7 +2398,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         replace: bool = True,
     ) -> Self:
         """Detect Bragg spots with contrast at least ``min_relative`` of the strongest peak."""
-        frame = self._displayed_frame().astype(np.float64)
+        frame = self._detection_frame().astype(np.float64)
         n_rows, n_cols = frame.shape
         if exclude_radius is None:
             exclude_radius = max(self.bf_radius, 2.0 * float(min_distance))
@@ -2424,7 +2466,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     ) -> Self:
         """Detect Debye-Scherrer rings from radial profile peaks (max_rings=None keeps all)."""
         try:
-            radii_px, intensity = self._radial_profile()
+            radii_px, intensity = self._radial_profile(frame=self._detection_frame())
         except Exception:
             return self
         y = np.asarray(intensity, dtype=np.float64)
@@ -3040,8 +3082,10 @@ class ShowDiffraction(anywidget.AnyWidget):
         center: tuple[float, float] | None = None,
         angular_range: tuple[float, float] | None = None,
         frame_idx: int | None = None,
+        frame: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        frame = self._displayed_frame() if frame_idx is None else self._get_frame(frame_idx)
+        if frame is None:
+            frame = self._displayed_frame() if frame_idx is None else self._get_frame(frame_idx)
         return radial_profile_px(
             frame,
             center=center or (self.center_row, self.center_col),

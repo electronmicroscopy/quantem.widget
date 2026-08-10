@@ -6,6 +6,11 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- ShowDiffraction detection denoise: center refinement and spot/ring detection
+  now run on a denoised view of the frame (`detect_denoise`, default `"auto"`:
+  Anscombe for sparse counting data, light Gaussian for moderate-SNR data,
+  identity when clean). All fits and measurements keep using the raw frame, so
+  positions and radii are never biased by the smoothing.
 - Add `ChooseLattice`, an interactive 2D selector for choosing an ordered
   origin, a1, and a2 and exposing their `(row, col)` coordinates and derived
   lattice vectors for downstream analysis.
