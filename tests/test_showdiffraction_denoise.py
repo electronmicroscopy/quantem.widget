@@ -114,6 +114,15 @@ def test_auto_is_noop_on_clean_data():
         assert s_raw["row"] == s_auto["row"] and s_raw["col"] == s_auto["col"]
 
 
+def test_gain_scaled_counts_use_anscombe():
+    dp, _ = _spot_dp()
+    counts = np.random.default_rng(5).poisson(dp * 0.05).astype(np.float32)
+    scaled = counts * 1.55e-5
+
+    w = ShowDiffraction(scaled, verbose=False)
+    assert w._resolve_detect_denoise(scaled) == "anscombe"
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)

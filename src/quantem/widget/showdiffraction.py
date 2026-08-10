@@ -2288,9 +2288,12 @@ class ShowDiffraction(anywidget.AnyWidget):
         if positive.size == 0:
             return "none"
 
-        if np.array_equal(positive, np.round(positive)):
-            # counting data: typical pixels in the shot noise regime, not the beam
-            return "anscombe" if float(np.median(positive)) <= 30.0 else "none"
+        # counting data may carry a detector gain: values then sit on integer
+        # multiples of the smallest positive value
+        counts = positive / float(positive.min())
+        if np.allclose(counts, np.round(counts), atol=1e-3):
+            # typical pixels in the shot noise regime, not the beam
+            return "anscombe" if float(np.median(counts)) <= 30.0 else "none"
 
         noise = 1.4826 * float(np.median(np.abs(frame - ndimage.median_filter(frame, size=3))))
         if noise <= 0.0:
