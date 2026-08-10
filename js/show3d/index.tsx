@@ -915,21 +915,10 @@ function samplePackedU8Viewport(
   y: number,
   minX: number,
   maxX: number,
-  smooth: boolean,
 ): number {
   const safeX = Math.max(minX, Math.min(maxX, x));
   const safeY = Math.max(0, Math.min(height - 1, y));
-  const x0 = Math.floor(safeX);
-  const y0 = Math.floor(safeY);
-  if (!smooth) return values[y0 * width + x0];
-
-  const x1 = Math.min(maxX, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const tx = safeX - x0;
-  const ty = safeY - y0;
-  const top = values[y0 * width + x0] * (1 - tx) + values[y0 * width + x1] * tx;
-  const bottom = values[y1 * width + x0] * (1 - tx) + values[y1 * width + x1] * tx;
-  return top * (1 - ty) + bottom * ty;
+  return values[Math.floor(safeY) * width + Math.floor(safeX)];
 }
 
 const WIDGET_SHORTCUT_IGNORE_SELECTOR = [
@@ -3111,7 +3100,7 @@ function Show3D() {
     pipeline: GPURenderPipeline;
     sampler: GPUSampler;
     bindGroups: Map<number, GPUBindGroup>;
-    textures: GPUTexture[];
+    textures: Map<number, GPUTexture>;
     width: number;
     height: number;
   } | null>(null);
@@ -3124,7 +3113,7 @@ function Show3D() {
   const [sidecarBitmapComplete, setSidecarBitmapComplete] = React.useState(false);
   const [sidecarCompositeReady, setSidecarCompositeReady] = React.useState(false);
   const [sidecarCompositeComplete, setSidecarCompositeComplete] = React.useState(false);
-  const [, setSidecarGpuReady] = React.useState(false);
+  const [sidecarGpuReady, setSidecarGpuReady] = React.useState(false);
   const [sidecarU8Frame, setSidecarU8Frame] = React.useState<{
     idx: number;
     u8: Uint8Array;
@@ -3156,7 +3145,7 @@ function Show3D() {
     setSidecarCompositeReady(false);
     setSidecarCompositeComplete(false);
     if (sidecarGpuPresenterRef.current) {
-      for (const texture of sidecarGpuPresenterRef.current.textures) {
+      for (const texture of sidecarGpuPresenterRef.current.textures.values()) {
         try { texture.destroy(); } catch { /* ignore */ }
       }
     }
@@ -3178,14 +3167,14 @@ function Show3D() {
     sidecarCompositeFrameCacheRef.current.clear();
     sidecarCompositeReadyRef.current = false;
     sidecarCompositeCompleteRef.current = false;
-    // A cache is only valid for the exact display style that generated it.
-    // Clear the key with the frames so a Smooth toggle cannot momentarily
-    // reuse a nearest-neighbour (or interpolated) composite while zooming.
+    // A cache is only valid for the data-dependent display style that
+    // generated it. Bilinear smoothing is presentation-only and deliberately
+    // does not participate in this key or invalidate the frame cache.
     sidecarCompositeStyleKeyRef.current = "";
     setSidecarCompositeReady(false);
     setSidecarCompositeComplete(false);
     if (sidecarGpuPresenterRef.current) {
-      for (const texture of sidecarGpuPresenterRef.current.textures) {
+      for (const texture of sidecarGpuPresenterRef.current.textures.values()) {
         try { texture.destroy(); } catch { /* ignore */ }
       }
     }
@@ -6194,7 +6183,6 @@ function Show3D() {
       : Array.from({ length: Math.max(1, nPanels || 1) }, (_, idx) => idx);
     return JSON.stringify({
       cmap,
-      smooth,
       autoContrast,
       logScale,
       percentileLow: Number(percentileLow || 0).toFixed(3),
@@ -6205,6 +6193,11 @@ function Show3D() {
       flipRows,
       flipCols,
       panelGapPx,
+      background: themeColors.bg,
+      gapColor: interPanelGapColor,
+      borderColor: panelInnerBorderColor,
+      borderPx: panelInnerBorderPx,
+      panelRealFrames,
       imageVminPct: Number(imageVminPct || 0).toFixed(3),
       imageVmaxPct: Number(imageVmaxPct || 100).toFixed(3),
       autoVmins: (autoVmins || []).map((value) => Number(value).toFixed(6)),
@@ -6227,7 +6220,6 @@ function Show3D() {
       }),
     });
   }, [
-    smooth,
     autoContrast,
     autoVmins,
     autoVmaxs,
@@ -6249,6 +6241,9 @@ function Show3D() {
     offlineMaxs,
     panelCmapFor,
     panelGapPx,
+    panelInnerBorderColor,
+    panelInnerBorderPx,
+    panelRealFrames,
     panelStates,
     packedViewportTransformRequiresRebuild,
     percentileLow,
@@ -6256,6 +6251,8 @@ function Show3D() {
     visiblePanelIndices,
     vminPerPanel,
     vmaxPerPanel,
+    themeColors.bg,
+    interPanelGapColor,
   ]);
   const syncPlaybackPanelTransform = (panelIdx: number, nextZoom: number, nextPanX: number, nextPanY: number) => {
     const clampAxis = (pan: number, viewport: number, zoomValue: number) => {
@@ -11575,8 +11572,10 @@ function Show3D() {
           }
           const srcY = Math.max(0, Math.min(height - 1, srcNormY * height));
           const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + srcNormX * sourcePanelW));
+          // Retained frames stay pixel-exact. Smooth is applied by the canvas
+          // compositor or WebGPU sampler when the cached frame is presented.
           const sample = samplePackedU8Viewport(
-            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax, smooth,
+            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax,
           );
           const v = Math.max(0, Math.min(255, Math.floor(((sample - loByte) / byteSpan) * 255)));
           const li = v * 3;
@@ -11850,8 +11849,10 @@ function Show3D() {
           }
           const srcY = Math.max(0, Math.min(height - 1, srcNormY * height));
           const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + srcNormX * sourcePanelW));
+          // Retained frames stay pixel-exact. Smooth is applied by the canvas
+          // compositor or WebGPU sampler when the cached frame is presented.
           const sample = samplePackedU8Viewport(
-            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax, smooth,
+            u8, width, height, srcX, srcY, srcPanelX, srcPanelXMax,
           );
           const v = clampByte(((sample - loByte) / byteSpan) * 255);
           const li = v * 3;
@@ -11933,6 +11934,14 @@ function Show3D() {
     panelInnerBorderPx,
     panelInnerBorderColor,
   ]);
+  const paintSidecarU8ViewportToContextRef = React.useRef(
+    paintSidecarU8ViewportToContext,
+  );
+  paintSidecarU8ViewportToContextRef.current = paintSidecarU8ViewportToContext;
+  const paintEmbeddedPackedViewportToContextRef = React.useRef(
+    paintEmbeddedPackedViewportToContext,
+  );
+  paintEmbeddedPackedViewportToContextRef.current = paintEmbeddedPackedViewportToContext;
 
   // Packed offline exports retain an untransformed composite for every frame.
   // Reusing that image while drawing per-panel viewport transforms keeps a
@@ -12236,6 +12245,8 @@ function Show3D() {
     paintSidecarU8ViewportToContext,
     paintEmbeddedPackedCompositeTransform,
   ]);
+  const drawSidecarBitmapFrameRef = React.useRef(drawSidecarBitmapFrame);
+  drawSidecarBitmapFrameRef.current = drawSidecarBitmapFrame;
 
   const previousSidecarPagePaintStartRef = React.useRef(activePageStart);
   React.useLayoutEffect(() => {
@@ -12445,17 +12456,26 @@ function Show3D() {
                   ? "missing-canvas"
                   : "view-transform";
       }
-    if (transformActive) {
-      invalidateSidecarViewportCache("view-transform");
-      setOfflineStackFetchStatus("");
-    } else {
-      clearSidecarCompositeCache();
+      // Embedded packed stacks share the retained-frame cache but own its
+      // lifecycle in the effect below. A sidecar-only dependency update must
+      // never clear that cache after the embedded builder has completed.
+      if (!sidecarMode) return;
+      if (transformActive) {
+        invalidateSidecarViewportCache("view-transform");
+        setOfflineStackFetchStatus("");
+      } else {
+        clearSidecarCompositeCache();
+      }
+      return;
     }
-    return;
-  }
-  if (d) d.sidecarViewportSkipReason = "";
+    if (d) d.sidecarViewportSkipReason = "";
     const n = Math.max(1, Math.round(nSlices || 1));
     const serial = ++sidecarCompositeBuildSerialRef.current;
+    const sidecarBuildDebug = show3dPerfDebug();
+    if (sidecarBuildDebug) {
+      sidecarBuildDebug.sidecarCompositeBuildCount =
+        Number(sidecarBuildDebug.sidecarCompositeBuildCount ?? 0) + 1;
+    }
     let cancelled = false;
     const build = async () => {
       clearSidecarCompositeCache();
@@ -12473,12 +12493,17 @@ function Show3D() {
         return;
       }
       const started = performance.now();
-      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || liveSliceIdx || 0, n);
+      // The current frame only prioritizes build order; it does not affect any
+      // cached pixels. Read the live ref so pausing on another frame cannot
+      // tear down and rebuild the whole stack.
+      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || 0, n);
       let builtFrames = 0;
       try {
         for (const idx of order) {
           if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
-          const ok = paintSidecarU8ViewportToContext(ctx, idx, scratch.width, scratch.height);
+          const ok = paintSidecarU8ViewportToContextRef.current(
+            ctx, idx, scratch.width, scratch.height,
+          );
           if (!ok) {
             const debug = show3dPerfDebug();
             if (debug) debug.sidecarViewportSkipReason = "unsupported-layout";
@@ -12503,7 +12528,7 @@ function Show3D() {
             sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
             setSidecarCompositeReady(true);
             if ((compareMode || "off") === "off") {
-              drawSidecarBitmapFrame(idx, false, "viewport-first");
+              drawSidecarBitmapFrameRef.current(idx, false, "viewport-first");
             }
           }
           if (builtFrames === 1 || builtFrames % 8 === 0 || builtFrames === n) {
@@ -12581,10 +12606,7 @@ function Show3D() {
     canvasW,
     canvasH,
     nSlices,
-    liveSliceIdx,
     prioritizedSidecarFrameOrder,
-    paintSidecarU8ViewportToContext,
-    drawSidecarBitmapFrame,
     clearSidecarCompositeCache,
     invalidateSidecarViewportCache,
     sidecarViewTransformActive,
@@ -12610,6 +12632,11 @@ function Show3D() {
     }
     const n = Math.max(1, Math.round(nSlices || 1));
     const serial = ++sidecarCompositeBuildSerialRef.current;
+    const embeddedBuildDebug = show3dPerfDebug();
+    if (embeddedBuildDebug) {
+      embeddedBuildDebug.embeddedPackedViewportCacheBuildCount =
+        Number(embeddedBuildDebug.embeddedPackedViewportCacheBuildCount ?? 0) + 1;
+    }
     let cancelled = false;
     const build = async () => {
       clearSidecarCompositeCache();
@@ -12623,12 +12650,17 @@ function Show3D() {
         return;
       }
       const started = performance.now();
-      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || liveSliceIdx || 0, n);
+      // The current frame only prioritizes build order; it does not affect any
+      // cached pixels. Read the live ref so pausing on another frame cannot
+      // tear down and rebuild the whole stack.
+      const order = prioritizedSidecarFrameOrder(playbackIdxRef.current || 0, n);
       let builtFrames = 0;
       try {
         for (const idx of order) {
           if (cancelled || serial !== sidecarCompositeBuildSerialRef.current) return;
-          const ok = paintEmbeddedPackedViewportToContext(ctx, idx, scratch.width, scratch.height);
+          const ok = paintEmbeddedPackedViewportToContextRef.current(
+            ctx, idx, scratch.width, scratch.height,
+          );
           if (!ok) {
             setOfflineStackFetchStatus("");
             return;
@@ -12644,11 +12676,10 @@ function Show3D() {
           if (!sidecarCompositeReadyRef.current) {
             sidecarCompositeReadyRef.current = true;
             // See the sidecar builder above: this enables the current-style
-            // cache immediately, while refusing a cache made with another
-            // Smooth setting during a zoom gesture.
+            // cache immediately. Smooth remains a presentation-only choice.
             sidecarCompositeStyleKeyRef.current = sidecarDisplayStyleKey;
             setSidecarCompositeReady(true);
-            drawSidecarBitmapFrame(idx, false, "embedded-viewport-first");
+            drawSidecarBitmapFrameRef.current(idx, false, "embedded-viewport-first");
           }
           if (builtFrames === 1 || builtFrames % 4 === 0 || builtFrames === n) {
             const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -12704,10 +12735,7 @@ function Show3D() {
     nSlices,
     canvasW,
     canvasH,
-    liveSliceIdx,
     prioritizedSidecarFrameOrder,
-    paintEmbeddedPackedViewportToContext,
-    drawSidecarBitmapFrame,
     clearSidecarCompositeCache,
     sidecarDisplayStyleKey,
   ]);
@@ -12910,7 +12938,7 @@ function Show3D() {
     const serial = ++sidecarGpuBuildSerialRef.current;
     let cancelled = false;
     if (sidecarGpuPresenterRef.current) {
-      for (const texture of sidecarGpuPresenterRef.current.textures) {
+      for (const texture of sidecarGpuPresenterRef.current.textures.values()) {
         try { texture.destroy(); } catch { /* ignore */ }
       }
     }
@@ -12956,7 +12984,7 @@ function Show3D() {
         });
         const sampler = device.createSampler({ magFilter: smooth ? "linear" : "nearest", minFilter: smooth ? "linear" : "nearest" });
         const bindGroups = new Map<number, GPUBindGroup>();
-        const textures: GPUTexture[] = [];
+        const textures = new Map<number, GPUTexture>();
         const started = performance.now();
         for (let idx = 0; idx < n; idx++) {
           if (cancelled || serial !== sidecarGpuBuildSerialRef.current) {
@@ -12975,7 +13003,7 @@ function Show3D() {
             { texture },
             { width: widthPx, height: heightPx },
           );
-          textures.push(texture);
+          textures.set(idx, texture);
           bindGroups.set(idx, device.createBindGroup({
             layout: pipeline.getBindGroupLayout(0),
             entries: [
@@ -13012,7 +13040,34 @@ function Show3D() {
     return () => {
       cancelled = true;
     };
-  }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, smooth, sidecarViewTransformActive]);
+  }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, sidecarViewTransformActive]);
+
+  // Smooth changes only the GPU sampler. Keep the uploaded frame textures and
+  // rebuild their tiny bind groups instead of uploading the whole movie again.
+  React.useEffect(() => {
+    const presenter = sidecarGpuPresenterRef.current;
+    if (!presenter || !sidecarGpuReadyRef.current) return;
+    const started = performance.now();
+    const sampler = presenter.device.createSampler({
+      magFilter: smooth ? "linear" : "nearest",
+      minFilter: smooth ? "linear" : "nearest",
+    });
+    const bindGroups = new Map<number, GPUBindGroup>();
+    for (const [idx, texture] of presenter.textures) {
+      bindGroups.set(idx, presenter.device.createBindGroup({
+        layout: presenter.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: texture.createView() },
+          { binding: 1, resource: sampler },
+        ],
+      }));
+    }
+    presenter.sampler = sampler;
+    presenter.bindGroups = bindGroups;
+    renderSidecarGpuFrame(playbackIdxRef.current, "smooth");
+    const debug = show3dPerfDebug();
+    if (debug) debug.sidecarGpuSamplerUpdateMs = performance.now() - started;
+  }, [smooth, sidecarGpuReady]);
 
   React.useLayoutEffect(() => {
     const previousCompareMode = previousCompareModeRef.current || "off";

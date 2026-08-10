@@ -121,6 +121,10 @@ def test_linked_zoom_preserves_unlinked_panel_auto_contrast(tmp_path):
         page.goto(html_path.as_uri())
         page.wait_for_timeout(2_500)
 
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf?.embeddedPackedViewportCacheFrames === 3"
+        )
+
         canvas = page.locator("canvas").nth(0)
         box = canvas.bounding_box()
         assert box is not None
@@ -159,6 +163,84 @@ def test_linked_zoom_preserves_unlinked_panel_auto_contrast(tmp_path):
         page.wait_for_function(
             "() => window.__quantemShow3DPerf?.embeddedPackedViewportPaint?.visibleCount === 3"
         )
+
+        assert page_errors == []
+        browser.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
+    reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
+)
+def test_smooth_toggle_keeps_playback_cache(tmp_path):
+    """Smooth and play/pause must reuse the already prepared frame cache."""
+    from playwright.sync_api import sync_playwright
+
+    from quantem.widget import Show3D
+
+    chrome = _chrome_executable()
+    if chrome is None:
+        pytest.skip("Chrome/Chromium executable not found")
+
+    bf, df, phase = _contrast_fixture()
+    widget = Show3D(
+        bf,
+        df,
+        phase,
+        panel_titles=["BF", "DF", "phase"],
+        link_contrast=False,
+        max_cols=2,
+        verbose=False,
+    )
+    html_path = tmp_path / "show3d-smooth-playback.html"
+    widget.export_html(html_path, encoding="uint8")
+
+    page_errors: list[str] = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            executable_path=chrome,
+            headless=True,
+            args=["--enable-unsafe-swiftshader", "--enable-webgpu"],
+        )
+        page = browser.new_page(viewport={"width": 1200, "height": 900})
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(html_path.as_uri())
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf?.embeddedPackedViewportCacheFrames === 3"
+        )
+        page.wait_for_timeout(100)
+
+        cache_before = page.evaluate(
+            """() => ({
+              frames: window.__quantemShow3DPerf.embeddedPackedViewportCacheFrames,
+              builds: window.__quantemShow3DPerf.embeddedPackedViewportCacheBuildCount,
+            })"""
+        )
+        assert cache_before["frames"] == 3
+        page.get_by_role("checkbox", name="Toggle bilinear smoothing").check()
+        page.wait_for_timeout(150)
+        cache_after_smooth = page.evaluate(
+            """() => ({
+              frames: window.__quantemShow3DPerf.embeddedPackedViewportCacheFrames,
+              builds: window.__quantemShow3DPerf.embeddedPackedViewportCacheBuildCount,
+              imageRendering: getComputedStyle(document.querySelector("canvas")).imageRendering,
+            })"""
+        )
+        assert cache_after_smooth["frames"] == cache_before["frames"]
+        assert cache_after_smooth["builds"] == cache_before["builds"]
+        assert cache_after_smooth["imageRendering"] == "auto"
+
+        page.get_by_role("button", name="Play forward").click()
+        page.wait_for_timeout(350)
+        page.get_by_role("button", name="Pause playback").click()
+        page.wait_for_timeout(150)
+        cache_after_playback = page.evaluate(
+            """() => ({
+              frames: window.__quantemShow3DPerf.embeddedPackedViewportCacheFrames,
+              builds: window.__quantemShow3DPerf.embeddedPackedViewportCacheBuildCount,
+            })"""
+        )
+        assert cache_after_playback == cache_before
         assert page_errors == []
         browser.close()
 

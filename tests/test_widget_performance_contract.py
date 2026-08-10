@@ -578,20 +578,27 @@ def test_show3d_many_panel_zoom_uses_correct_transform_path():
     assert "Restores 60 fps on the GPU-cached multi-panel path" in show3d
 
 
-def test_show3d_offline_viewport_honors_smooth_toggle():
-    """C1: a smooth offline zoom interpolates within, never across, panel strips."""
+def test_show3d_smooth_reuses_offline_cache_and_gpu_textures():
+    """C1: Smooth changes presentation without rebuilding the cached movie."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
 
     assert "function samplePackedU8Viewport(" in show3d
-    assert "const x1 = Math.min(maxX, x0 + 1);" in show3d
-    assert "if (!smooth) return values[y0 * width + x0];" in show3d
     assert show3d.count("const sample = samplePackedU8Viewport(") == 2
     assert "ctx.imageSmoothingEnabled = smooth;" in show3d
-    # C2: toggling Smooth invalidates the rendered composite rather than
-    # briefly applying the new zoom sampler to a cache made with old pixels.
-    assert 'smooth,' in show3d[show3d.index("const sidecarDisplayStyleKey"):show3d.index("const sidecarDisplayStyleKey") + 700]
+    style_key = show3d[
+        show3d.index("const sidecarDisplayStyleKey"):
+        show3d.index("const syncPlaybackPanelTransform")
+    ]
+    assert "smooth," not in style_key
     assert show3d.count("sidecarCompositeStyleKeyRef.current === sidecarDisplayStyleKey") == 2
     assert 'sidecarCompositeStyleKeyRef.current = "";' in show3d
+    assert "// Smooth changes only the GPU sampler." in show3d
+    sampler_update = show3d.split(
+        "// Smooth changes only the GPU sampler.",
+        1,
+    )[1].split("React.useLayoutEffect", 1)[0]
+    assert "presenter.textures" in sampler_update
+    assert "copyExternalImageToTexture" not in sampler_update
 
 
 def test_show3d_offline_zoom_keeps_retained_canvas_visible():
