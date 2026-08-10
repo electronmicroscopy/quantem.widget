@@ -298,6 +298,22 @@ def test_show4dstem_webgpu_h5_initial_load_uses_visible_loading_panels() -> None
     assert "showStats && !fftPanelLoading" in frontend
 
 
+def test_show4dstem_h5_preload_publishes_every_dataset_progressively() -> None:
+    """Every HDF5 dataset is visited even when native uint16 residency is one."""
+    repo = Path(__file__).resolve().parents[1]
+    frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const h5ResidentLimit = h5UsesNativeU16" in frontend
+    assert "const h5RequestedResidentLimit = show4DSTEMGlobalInt(" in frontend
+    assert "? 1\n        : h5RequestedResidentLimit" in frontend
+    assert "const maxPreload = Math.max(1, h5Urls.length);" in frontend
+    assert "const defaultPreload = h5Urls.length;" in frontend
+    assert "while (volCache.size > h5ResidentLimit)" in frontend
+    assert "if (getVol && !volIsResident(idx)) continue;" in frontend
+
+
 def test_show4dstem_h5_multiple_starts_with_loading_compare_state() -> None:
     from quantem.widget import Show4DSTEM
 
@@ -377,7 +393,7 @@ def test_show4dstem_multiple_detector_drag_uses_live_gpu_compare_slots() -> None
     assert "renderSlotDirectWithGpuRangeToCanvas" in frontend
     assert "renderSlotGpuRangeToOffscreen" not in frontend
     assert "let comparePersistentStack: Float32Array | null = null;" in frontend
-    assert "if (getVol && !volIsResident(idx) && (interactiveDrag || !h5VolumePreloadDone)) continue;" in frontend
+    assert "if (getVol && !volIsResident(idx)) continue;" in frontend
 
 
 def test_show4dstem_webgpu_fits_bf_disk_in_browser_for_h5_sources() -> None:

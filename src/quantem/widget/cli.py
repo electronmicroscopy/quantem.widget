@@ -862,6 +862,11 @@ def _show(args: argparse.Namespace) -> int:
         masters = [str(path)] if path.is_file() else discover(
             str(path), verbose=args.verbose
         )
+        masters = [
+            master
+            for master in masters
+            if not _is_show4dstem_generated_master_link(pathlib.Path(master))
+        ]
         if not masters:
             raise ValueError(f"no *_master.h5 found in {path}")
         masters = _select_show4dstem_masters(masters, args)
@@ -928,6 +933,34 @@ def _select_show4dstem_masters(masters: list[str], args: argparse.Namespace) -> 
             f"--count {count} requested but only {len(masters)} master(s) were found."
         )
     return list(masters[:count])
+
+
+def _is_show4dstem_generated_master_link(path: pathlib.Path) -> bool:
+    """Return whether *path* is a symlink created by a CLI WebGPU export.
+
+    Rerunning ``quantem show4dstem <source-folder> --out <source-folder>``
+    must select the original masters, not the anonymous ``dataset_XX``
+    links placed in its owned ``*_show4dstem_webgpu`` output folder.
+    """
+    return path.is_symlink() and path.parent.name.endswith("_show4dstem_webgpu")
+
+
+_TILT_COORDINATE_RE = re.compile(
+    r"_(?P<x>[+-]?\d+(?:\.\d+)?)x_(?P<y>[+-]?\d+(?:\.\d+)?)y_"
+)
+
+
+def _show4dstem_dataset_label(master: str, index: int) -> str:
+    """Return a useful dataset label, including coordinates when available."""
+    match = _TILT_COORDINATE_RE.search(pathlib.Path(master).name)
+    if match is None:
+        return f"Dataset {index + 1}"
+
+    def _format(value: str) -> str:
+        text = f"{float(value):+.2f}".rstrip("0").rstrip(".")
+        return text if "." in text else f"{text}.0"
+
+    return f"Tilt ({_format(match['x'])}, {_format(match['y'])})"
 
 
 def _normalise_show4dstem_backend(value: str | None) -> str | None:
@@ -2130,21 +2163,25 @@ def _render_4dstem_webgpu_h5(
     replaced = _prepare_show4dstem_webgpu_output_dir(out_dir)
     if replaced:
         print(f"replaced existing Show4DSTEM WebGPU export: {out_dir}")
-    labels = [f"tilt_{idx:02d}" for idx in range(len(masters))]
-    for master, tilt_label in zip(masters, labels, strict=True):
-        _link_show4dstem_h5_family(out_dir, pathlib.Path(master), tilt_label)
+    link_labels = [f"dataset_{idx:02d}" for idx in range(len(masters))]
+    frame_labels = [_show4dstem_dataset_label(master, idx) for idx, master in enumerate(masters)]
+    data_dir = out_dir / "data"
+    data_dir.mkdir()
+    for master, dataset_label in zip(masters, link_labels, strict=True):
+        _link_show4dstem_h5_family(data_dir, pathlib.Path(master), dataset_label)
 
     widget = Show4DSTEM(
         np.zeros((1, 1, 1, 1), dtype=np.uint8),
-        h5_urls=bundle_master_urls(out_dir),
+        h5_urls=bundle_master_urls(data_dir, viewer_prefix="../data"),
         backend="webgpu",
         scan_shape=expected["scan_shape"],
         detector_shape=expected["detector_shape"],
         frame_dim_label="Dataset",
-        frame_labels=labels,
+        frame_labels=frame_labels,
         view_mode="multiple" if len(masters) > 1 else "single",
         compare_max_panels=max(1, len(masters)),
         compare_group_mode="all",
+        compare_dp_mode="selected" if len(masters) > 1 else "average",
         title=args.title or label,
         verbose=bool(args.verbose),
         show_controls=True,
