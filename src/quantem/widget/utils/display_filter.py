@@ -28,6 +28,7 @@ DISPLAY_FILTER_MODES = (
     "anscombe",
     "bin2_anscombe",
     "bin4_anscombe",
+    "nlm",
     "tv",
     "denova",
     "denova_tv",
@@ -120,6 +121,33 @@ def _bin2(image: np.ndarray, sigma: float | None = None) -> np.ndarray:
     ).astype(np.float32)
 
 
+def _nlm(image: np.ndarray) -> np.ndarray:
+    """Poisson non-local means: variance-stabilize, patch-average, invert."""
+    try:
+        from skimage.restoration import denoise_nl_means
+    except ImportError as exc:
+        raise ImportError("display filter 'nlm' requires scikit-image") from exc
+
+    image = np.asarray(image, dtype=np.float32)
+    positive = image[image > 0]
+    if positive.size == 0:
+        return image.copy()
+
+    # true counts when the data is gain-quantized, pseudo counts otherwise
+    gain = float(positive.min())
+    ratio = positive / gain
+    if not np.allclose(ratio, np.round(ratio), atol=1e-3):
+        gain = float(np.percentile(positive, 99.5)) / 30.0
+
+    counts = np.clip(image, 0.0, None) / gain
+    stabilized = 2.0 * np.sqrt(counts + 3.0 / 8.0)  # noise std near 1
+    smoothed = denoise_nl_means(
+        stabilized, patch_size=5, patch_distance=6, h=0.8, sigma=1.0, fast_mode=True
+    )
+    inverse = np.clip((smoothed * 0.5) ** 2 - 3.0 / 8.0, 0.0, None)
+    return (inverse * gain).astype(np.float32)
+
+
 def _denova(image: np.ndarray, method: str = "tv") -> np.ndarray:
     """Lab denova denoiser (auto-lambda). Requires the denova package."""
     try:
@@ -162,6 +190,8 @@ def apply_display_filter(
         - ``"anscombe"``: Anscombe transform, Gaussian, inverse; respects
           Poisson statistics of count data. With ``spatial_bin`` >= 2 the
           smoothing width becomes ``max(2, sigma*0.75)`` on the binned map.
+        - ``"nlm"``: Poisson non-local means, variance-stabilized patch
+          averaging that keeps spots sharp (requires scikit-image).
         - ``"tv"``: total-variation denoise (requires scikit-image).
         - ``"denova"`` / ``"denova_tv"`` / ``"denova_tv12"``: lab denova
           denoiser when the optional package is installed.
@@ -235,6 +265,8 @@ def apply_display_filter(
         out = _bin2(out, None)
     if mode == "none":
         return out
+    if mode == "nlm":
+        return _nlm(out)
     if mode == "tv":
         try:
             from skimage.restoration import denoise_tv_chambolle
