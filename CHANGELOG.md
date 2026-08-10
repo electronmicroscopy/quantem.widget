@@ -6,6 +6,9 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Show4DSTEM `to_showdiffraction` hands the current or mean diffraction
+  pattern to a ShowDiffraction widget, transferring the 1/Å calibration and
+  passing constructor keyword arguments through.
 - Add `ChooseLattice`, an interactive 2D selector for choosing an ordered
   origin, a1, and a2 and exposing their `(row, col)` coordinates and derived
   lattice vectors for downstream analysis.

@@ -5708,6 +5708,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # avoiding 4 sync trait round-trips per scan-position click).
         self.frame_bytes = payload
 
+    def to_showdiffraction(self, source: str = "current", **kwargs):
+        from quantem.widget.showdiffraction import ShowDiffraction
+
+        if source == "current":
+            frame = self._diffraction_frame_as_numpy(
+                self._diffraction_frame_for_index(int(self.frame_idx))
+            )
+        elif source == "mean":
+            frame = np.asarray(self._compute.mean_dp(), dtype=np.float32)
+        else:
+            raise ValueError(f"source must be current or mean, got {source!r}")
+
+        if self.k_pixel_unit in ("1/Å", "1/A") and "k_pixel_size" not in kwargs:
+            kwargs["k_pixel_size"] = float(self.k_pixel_size)
+        kwargs.setdefault("title", self.title)
+        return ShowDiffraction(frame, **kwargs)
+
     def _diffraction_frame_for_index(self, frame_idx: int):
         """Return one diffraction pattern at the current scan position."""
         data_source = getattr(self, "_data", None)
