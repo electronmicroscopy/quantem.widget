@@ -138,6 +138,20 @@ def test_show_detection_view_ships_denoised_frame():
     assert w.frame_bytes == raw_bytes
 
 
+def test_display_denoise_is_view_only():
+    dp, _ = _spot_dp()
+    counts = np.random.default_rng(5).poisson(dp * 0.05).astype(np.float32)
+
+    w = ShowDiffraction(counts, verbose=False)
+    raw_bytes = w.frame_bytes
+    w.denoise = "nlm"
+    assert w.frame_bytes != raw_bytes
+    assert np.array_equal(w._displayed_frame(), counts)
+
+    w.denoise = "none"
+    assert w.frame_bytes == raw_bytes
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)
