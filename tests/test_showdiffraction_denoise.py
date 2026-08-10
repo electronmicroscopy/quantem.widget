@@ -215,6 +215,16 @@ def test_recover_predicted_rings_rescues_missed_reflection():
     w.index_rings(au)
     assert [x["hkl"] for x in sorted(w.rings, key=lambda y: y["radius_px"])] == list(hkls)
 
+@pytest.mark.parametrize("mode, dep", [("tv", "skimage"), ("denova_tv12", "denova")])
+def test_model_denoise_detection(mode, dep):
+    pytest.importorskip(dep)
+    dp, truth = _spot_dp()
+    counts = np.random.default_rng(7).poisson(dp * 0.05).astype(np.float32)
+
+    w = ShowDiffraction(counts, center=(64, 64), bf_radius=10, detect_denoise=mode, verbose=False)
+    w.detect_spots(max_spots=8)
+    assert _true_spots_found(w.spots, truth) == 4
+
 
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()

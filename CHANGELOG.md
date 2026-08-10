@@ -18,6 +18,10 @@ new `rcN` heading when that rc is published to TestPyPI.
   new Poisson non-local means `nlm` filter, which keeps spots sharp where the
   detection blur softens them) and a `show_detection_view` toggle that
   displays what detection saw; both leave stored data and measurements raw.
+- ShowDiffraction model-based detection denoise: `detect_denoise` also accepts
+  `tv` (scikit-image) and `denova_tv` / `denova_tv12` (denova package) as
+  explicit opt-ins; on very sparse spot patterns `denova_tv12` preserves dim
+  peaks that pure TV flattens away.
 - Add `ChooseLattice`, an interactive 2D selector for choosing an ordered
   origin, a1, and a2 and exposing their `(row, col)` coordinates and derived
   lattice vectors for downstream analysis.
