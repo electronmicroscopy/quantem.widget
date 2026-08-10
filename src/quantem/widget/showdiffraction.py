@@ -2417,9 +2417,15 @@ class ShowDiffraction(anywidget.AnyWidget):
         min_distance: int = 6,
         min_relative: float = 0.1,
         exclude_radius: float | None = None,
+        noise_sigma: float = 5.0,
         replace: bool = True,
     ) -> Self:
-        """Detect Bragg spots with contrast at least ``min_relative`` of the strongest peak."""
+        """Detect Bragg spots with contrast at least ``min_relative`` of the strongest peak.
+
+        ``noise_sigma`` sets the shot-noise contrast floor in robust sigma
+        units; lower it on frames whose background structure inflates the
+        estimate (diffuse scattering, detector shadows).
+        """
         frame = self._detection_frame().astype(np.float64)
         n_rows, n_cols = frame.shape
         if exclude_radius is None:
@@ -2451,7 +2457,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         # contrast relative to the strongest peak, with a noise floor on noisy data
         contrast = np.expm1(prominence)
         sigma = 1.4826 * float(np.median(np.abs(work - np.median(work))))
-        level = max(min_relative * float(contrast.max()), float(np.expm1(5.0 * sigma)))
+        level = max(min_relative * float(contrast.max()), float(np.expm1(noise_sigma * sigma)))
         keep = (prominence > 0) & (contrast >= level)
         coords, prominence = coords[keep], prominence[keep]
         if coords.size:
