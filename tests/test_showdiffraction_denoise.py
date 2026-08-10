@@ -195,6 +195,36 @@ def test_detected_au_ratios_index_as_fcc():
     assert abs(w.k_pixel_size - k) / k < 0.01
 
 
+def test_recover_predicted_rings_rescues_missed_reflection():
+    from quantem.widget import library_phase
+
+    au = library_phase("Au")
+    k = 0.008
+    hkls = ("111", "200", "220", "311")
+    radii = [1.0 / (au.d_spacing(tuple(int(c) for c in h)) * k) for h in hkls]
+
+    size = 256
+    cen = (size // 2, size // 2)
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    r = np.hypot(rows - cen[0], cols - cen[1])
+    dp = 200.0 * np.exp(-(r**2) / (2 * 5.0**2))
+    for rr, amp in zip(radii, (25.0, 25.0, 4.0, 25.0)):
+        dp = dp + amp * np.exp(-((r - rr) ** 2) / (2 * 2.0**2))
+    counts = np.random.default_rng(6).poisson(dp * 0.5).astype(np.float32)
+
+    w = ShowDiffraction(counts, center=cen, bf_radius=15, verbose=False)
+    w.detect_rings(max_rings=3, exclude_radius=30)
+    assert len(w.rings) == 3
+
+    w.calibrate_from_phase(au)
+    added = w.recover_predicted_rings(au)
+    assert len(added) == 1 and abs(added[0] - radii[1]) <= 2.0
+
+    w.index_rings(au)
+    assert [x["hkl"] for x in sorted(w.rings, key=lambda y: y["radius_px"])] == list(hkls)
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)
