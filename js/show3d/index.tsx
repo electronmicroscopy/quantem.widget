@@ -48,7 +48,6 @@ import {
   standaloneWidgetStaticHtmlFromDocument,
 } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
-import { packedPanelAutoByteRange } from "./packedPanelContrast";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
@@ -11456,10 +11455,6 @@ function Show3D() {
       const panelState = linkPanels
         ? linkedStateLiveRef.current
         : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
-      const panelContrastState =
-        panelStatesLiveRef.current[panelIdx]
-        || panelStates[panelIdx]
-        || stateFor(panelIdx);
       const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
       const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
       const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
@@ -11470,7 +11465,7 @@ function Show3D() {
       if (realN && drawIdx >= realN) continue;
       const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
       const panelStateRange = !linkContrast && Math.max(1, nPanels || 1) > 1
-        ? panelContrastState
+        ? panelState
         : null;
       const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
       const sharedPreview = imageHistogramPreviewPctRef.current;
@@ -11501,28 +11496,11 @@ function Show3D() {
         hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
         byteRangeSource = "histogram-preview";
       } else if (autoContrast) {
-        const autoRange = !linkContrast
-          ? null
-          : cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
+        const autoRange = cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
           || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, drawIdx, logScale);
-        const localAuto = !linkContrast ? panelStateRange : null;
-        const localAutoBytes = !linkContrast
-          ? packedPanelAutoByteRange(
-              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
-              percentileLow, percentileHigh,
-            )
-          : null;
         const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
         const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
-        if (localAutoBytes) {
-          loByte = localAutoBytes.lo;
-          hiByte = localAutoBytes.hi;
-          byteRangeSource = "auto-panel-percentile";
-        } else if (localAuto) {
-          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
-          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
-          byteRangeSource = "auto-panel-state";
-        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+        if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
           loByte = mappedLo;
           hiByte = mappedHi;
           byteRangeSource = "auto-range";
@@ -11745,10 +11723,6 @@ function Show3D() {
       const panelState = linkPanels
         ? linkedStateLiveRef.current
         : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
-      const panelContrastState =
-        panelStatesLiveRef.current[panelIdx]
-        || panelStates[panelIdx]
-        || stateFor(panelIdx);
       const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
       const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
       const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
@@ -11758,7 +11732,7 @@ function Show3D() {
       const realN = panelRealFrames && panelRealFrames[panelIdx];
       if (realN && frameIdx >= realN) continue;
       const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
-      const panelStateRange = !linkContrast ? panelContrastState : null;
+      const panelStateRange = !linkContrast ? panelState : null;
       const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
       const sharedPreview = imageHistogramPreviewPctRef.current;
       const preview = panelStateRange ? panelPreview : sharedPreview;
@@ -11786,26 +11760,11 @@ function Show3D() {
         loByte = clampByte((Number(preview[0]) || 0) * 2.55);
         hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
       } else if (autoContrast) {
-        const autoRange = !linkContrast
-          ? null
-          : cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale)
+        const autoRange = cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale)
           || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, frameIdx, logScale);
-        const localAuto = !linkContrast ? panelStateRange : null;
-        const localAutoBytes = !linkContrast
-          ? packedPanelAutoByteRange(
-              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
-              percentileLow, percentileHigh,
-            )
-          : null;
         const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
         const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
-        if (localAutoBytes) {
-          loByte = localAutoBytes.lo;
-          hiByte = localAutoBytes.hi;
-        } else if (localAuto) {
-          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
-          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
-        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+        if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
           loByte = mappedLo;
           hiByte = mappedHi;
         } else {
@@ -13360,103 +13319,6 @@ function Show3D() {
         c.imageVminPct,
         c.imageVmaxPct,
       ));
-    }
-
-    // Keep packed multi-panel frames on the same independent-contrast path as
-    // the settled standalone paint. This function also refreshes the retained
-    // offscreen canvas used by wheel zoom and pan; colorizing the whole packed
-    // BF/DF/phase frame with one range makes the next transform repaint appear
-    // to change contrast even though only the viewport changed.
-    const panelCount = Math.max(1, nPanels || 1);
-    const perPanelContrast = (
-      panelCount > 1 &&
-      !c.linkContrast &&
-      !sharedPanelSource &&
-      c.width % panelCount === 0 &&
-      c.height > 0
-    );
-    if (perPanelContrast) {
-      const panelWidth = Math.max(1, Math.floor(c.width / panelCount));
-      const panels = (c.visiblePanelIndices.length ? c.visiblePanelIndices : visiblePanelIndices)
-        .filter((panel) => panel >= 0 && panel < panelCount);
-      const stackBounds = resolveDisplayBounds(
-        c.dataMin,
-        c.dataMax,
-        c.traitVmin,
-        c.traitVmax,
-        c.logScale,
-      );
-      const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
-      const panelData = panels.map((panel) => extractPanelSlice(frame, panel, c.logScale));
-      const panelRanges = panels.map((panel, slot) => {
-        const data = panelData[slot];
-        const cachedRange = panelDataRanges[panel];
-        const bounds = data && data.length > 0
-          ? findDataRange(data)
-          : (cachedRange && cachedRange.max > cachedRange.min ? cachedRange : stackBounds);
-        return resolvePanelRenderRange(
-          panel,
-          bounds,
-          sharedAutoRange,
-          data,
-          c.autoContrast,
-          c.percentileLow,
-          c.percentileHigh,
-        );
-      });
-      const offCtx = mainOffscreenRef.current.getContext("2d");
-      let renderedPanels = false;
-      const engine = gpuCmapRef.current;
-      if (offCtx && engine && gpuCmapReadyRef.current) {
-        try {
-          engine.uploadLUT(c.cmap, lut);
-          engine.uploadData(0, frame, c.width, c.height);
-          const regions = panels.map((panel) => ({
-            x: panel * panelWidth,
-            y: 0,
-            width: panelWidth,
-            height: c.height,
-          }));
-          const bitmaps = engine.renderPerPanelGpuExplicit(
-            0,
-            regions,
-            panelRanges,
-            c.logScale,
-          );
-          if (bitmaps && bitmaps.length === panels.length) {
-            offCtx.clearRect(0, 0, c.width, c.height);
-            try {
-              for (let slot = 0; slot < panels.length; slot++) {
-                const bitmap = bitmaps[slot];
-                if (!bitmap) continue;
-                offCtx.drawImage(bitmap, panels[slot] * panelWidth, 0);
-              }
-              renderedPanels = bitmaps.every(Boolean);
-            } finally {
-              bitmaps.forEach((bitmap) => bitmap?.close());
-            }
-          }
-        } catch {
-          renderedPanels = false;
-        }
-      }
-      if (!renderedPanels && offCtx) {
-        offCtx.clearRect(0, 0, c.width, c.height);
-        const panelImage = offCtx.createImageData(panelWidth, c.height);
-        for (let slot = 0; slot < panels.length; slot++) {
-          const panel = panels[slot];
-          const data = panelData[slot];
-          if (!data) continue;
-          const panelLut = COLORMAPS[panelCmapFor(panel)] || lut;
-          const range = panelRanges[slot];
-          applyColormap(data, panelImage.data, panelLut, range.vmin, range.vmax);
-          offCtx.putImageData(panelImage, panel * panelWidth, 0);
-        }
-      }
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (ctx) drawMain(ctx, mainOffscreenRef.current);
-      return true;
     }
 
     let rendered = false;
@@ -19751,78 +19613,41 @@ function Show3D() {
                 : starElsewhere
                   ? `Star is on frame ${starredFrame + 1}. Click to move it to frame ${visibleSliceIdx + 1}.`
                   : `Click to mark frame ${visibleSliceIdx + 1} as best for ${panelLabel(i)}.`;
-              const hideVisible = cursorInfo?.panelIdx === i;
               return (
-                <React.Fragment key={`panel-actions-${i}`}>
-                  <IconButton
-                    className="show3d-panel-hide-button"
-                    size="small"
-                    disabled={visiblePanelCount <= 1}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setPanelHidden(i, true);
-                    }}
-                    aria-label={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
-                    title={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
-                    sx={{
-                      position: "absolute",
-                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
-                      left: `${((panelLeft + 6) / Math.max(1, canvasW)) * 100}%`,
-                      width: 20,
-                      height: 20,
-                      p: 0,
-                      opacity: hideVisible ? 1 : 0,
-                      transform: hideVisible ? "translateY(0)" : "translateY(-3px)",
-                      transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
-                      color: visiblePanelCount <= 1 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.78)",
-                      bgcolor: "rgba(0,0,0,0.22)",
-                      pointerEvents: hideVisible ? "auto" : "none",
-                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
-                      zIndex: 3,
-                      "&:hover, &:focus-visible": {
-                        opacity: 1,
-                        bgcolor: "rgba(0,0,0,0.42)",
-                        color: "rgba(255,255,255,0.95)",
-                      },
-                    }}
-                  >
-                    <VisibilityOffIcon sx={{ fontSize: 15 }} />
-                  </IconButton>
-                  <button
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onClick={() => {
-                      const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
-                      cur[i] = isStarredHere ? -1 : visibleSliceIdx;
-                      setStarred(cur);
-                    }}
-                    title={tooltip}
-                    aria-label={tooltip}
-                    style={{
-                      position: "absolute",
-                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
-                      left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
-                      width: 20, height: 20,
-                      padding: 0,
-                      border: "none",
-                      background: "transparent",
-                      cursor: "pointer",
-                      fontSize: 18,
-                      lineHeight: "20px",
-                      textAlign: "center",
-                      color: isStarredHere
-                        ? "#ffc107"  // bright gold: star IS on this frame
-                        : starElsewhere
-                          ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
-                          : "rgba(255,255,255,0.5)",   // grey: no star on this panel
-                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
-                      pointerEvents: "auto",
-                      userSelect: "none",
-                    }}
-                  >
-                    {isStarredHere ? "★" : "☆"}
-                  </button>
-                </React.Fragment>
+                <button
+                  key={`star-${i}`}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => {
+                    const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
+                    cur[i] = isStarredHere ? -1 : visibleSliceIdx;
+                    setStarred(cur);
+                  }}
+                  title={tooltip}
+                  aria-label={tooltip}
+                  style={{
+                    position: "absolute",
+                    top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                    left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
+                    width: 20, height: 20,
+                    padding: 0,
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
+                    fontSize: 18,
+                    lineHeight: "20px",
+                    textAlign: "center",
+                    color: isStarredHere
+                      ? "#ffc107"  // bright gold: star IS on this frame
+                      : starElsewhere
+                        ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
+                        : "rgba(255,255,255,0.5)",   // grey: no star on this panel
+                    textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                    pointerEvents: "auto",
+                    userSelect: "none",
+                  }}
+                >
+                  {isStarredHere ? "★" : "☆"}
+                </button>
               );
             })}
             {panelChromeVisible && reorderMode && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {

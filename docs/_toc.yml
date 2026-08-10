@@ -8,6 +8,8 @@ parts:
     chapters:
       - file: install
       - file: cli
+      - file: agent-prompts
+        title: Agent-assisted development
   # Show4DSTEM and ShowPtycho lead: they are the flagship workflows.
   # tutorials/show1d is hidden for now (restore from git history when ready).
   - caption: Tutorials

@@ -69,6 +69,15 @@ import {
   pageShortcutTarget,
   usesGalleryLayout,
 } from "./itemPages";
+import {
+  cancelContrastPreview,
+  contrastPreviewIndices,
+  enqueueContrastPreview,
+  linkedAutoContrastPercentRange,
+  seedAutoContrastMirror,
+  transitionContrastLinkState,
+  type ContrastPreviewQueue,
+} from "./contrastPreview";
 
 const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -3795,11 +3804,36 @@ function Show2D() {
   // Ref mirror for fast slider path (bypass React effect batching)
   const contrastRef = React.useRef<{ linked: { vminPct: number; vmaxPct: number }; perImage: Map<number, { vminPct: number; vmaxPct: number }> }>({ linked: { vminPct: 0, vmaxPct: 100 }, perImage: new Map() });
   const visibleImageIndicesRef = React.useRef<number[]>([]);
-  const sliderRafRef = React.useRef(0);
+  const sliderFrameQueueRef = React.useRef<ContrastPreviewQueue>({ frame: 0, inFlight: false, pendingPanel: null, epoch: 0 });
+  const contrastPreviewGenerationRef = React.useRef(0);
+  React.useEffect(() => () => {
+    contrastPreviewGenerationRef.current += 1;
+    cancelContrastPreview(
+      sliderFrameQueueRef.current,
+      (frame) => window.cancelAnimationFrame(frame),
+    );
+  }, []);
   const getContrastState = React.useCallback((idx: number) => {
     if (linkedContrast) return linkedContrastState;
     return contrastStates.get(idx) || { vminPct: 0, vmaxPct: 100 };
   }, [linkedContrast, linkedContrastState, contrastStates]);
+  const previousLinkedContrastRef = React.useRef(linkedContrast);
+  React.useLayoutEffect(() => {
+    if (previousLinkedContrastRef.current === linkedContrast) return;
+    const next = transitionContrastLinkState(
+      contrastRef.current,
+      linkedContrast,
+      selectedIdx,
+      nImages,
+    );
+    contrastRef.current = next;
+    if (linkedContrast) {
+      setLinkedContrastState(next.linked);
+    } else {
+      setContrastStates(next.perImage);
+    }
+    previousLinkedContrastRef.current = linkedContrast;
+  }, [linkedContrast, nImages, selectedIdx]);
   const setContrastState = React.useCallback((idx: number, state: { vminPct: number; vmaxPct: number }, commit = true) => {
     // Update ref immediately (for fast rAF render)
     if (linkedContrast) {
@@ -3812,15 +3846,27 @@ function Show2D() {
     // Fast path: direct GPU render via rAF, bypassing React effect batching
     const engine = gpuCmapRef.current;
     if (engine && gpuCmapReadyRef.current && engine.slotCount >= nImages) {
-      cancelAnimationFrame(sliderRafRef.current);
-      sliderRafRef.current = requestAnimationFrame(() => {
+      enqueueContrastPreview(
+        sliderFrameQueueRef.current,
+        idx,
+        (callback) => window.requestAnimationFrame(callback),
+        async (previewIdx) => {
+        const previewGeneration = contrastPreviewGenerationRef.current;
         const cachedRanges = dataRangesRef.current;
         if (cachedRanges.length === 0) return;
         const lut = COLORMAPS[cmapRef.current] || COLORMAPS.inferno;
         engine.uploadLUT(cmapRef.current, lut);
-        const visibleIndices = visibleImageIndicesRef.current.length > 0
-          ? visibleImageIndicesRef.current
-          : Array.from({ length: nImages }, (_, i) => i);
+        // Independent contrast is a panel-local interaction. Repainting the
+        // whole gallery here can momentarily apply stale/default ranges to
+        // untouched panels before React's settled render restores them. RGB
+        // overlays stay on their true-color path in both linked modes.
+        const previewIndices = contrastPreviewIndices(
+          linkedContrast,
+          visibleImageIndicesRef.current,
+          previewIdx,
+          nImages,
+          isRgbFlags,
+        );
         const ls = logScaleRef.current ?? false;
         const hasAbsoluteRange = traitVmin != null && traitVmax != null;
         const baseRanges: { min: number; max: number }[] = [];
@@ -3861,14 +3907,18 @@ function Show2D() {
           }
         }
         panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
-        const bitmapRanges = visibleIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
-        const bitmaps = engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls);
+        const bitmapRanges = previewIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        const bitmaps = await engine.renderSlotsToImageBitmapAsync(previewIndices, bitmapRanges, ls);
+        if (previewGeneration !== contrastPreviewGenerationRef.current) {
+          bitmaps?.forEach((bitmap) => bitmap?.close());
+          return;
+        }
         if (bitmaps && bitmaps[0]) {
           try {
             for (let k = 0; k < bitmaps.length; k++) {
               const bitmap = bitmaps[k];
               if (!bitmap) continue;
-              const panel = visibleIndices[k];
+              const panel = previewIndices[k];
               const offscreen = mainOffscreensRef.current[panel];
               if (offscreen) offscreen.getContext("2d")?.drawImage(bitmap, 0, 0);
             }
@@ -3877,9 +3927,10 @@ function Show2D() {
           }
           setOffscreenVersion(v => v + 1);
         }
-      });
+        },
+      );
     }
-  }, [linkedContrast, nImages, isGallery, traitVmin, traitVmax, traitVmins, traitVmaxs]);
+  }, [linkedContrast, nImages, isGallery, traitVmin, traitVmax, traitVmins, traitVmaxs, isRgbFlags]);
   const applyContrastPreset = React.useCallback((preset: string) => {
     setContrastPreset(preset);
     if (preset === "manual" || preset === "custom") {
@@ -4985,6 +5036,16 @@ function Show2D() {
   ]);
 
   const [dataVersion, setDataVersion] = React.useState(0);
+  React.useEffect(() => {
+    // A completed bitmap belongs to the data and display context that started
+    // it. Link, color, scale, or range changes must not let an older GPU paint
+    // flash over the newly selected context.
+    contrastPreviewGenerationRef.current += 1;
+    cancelContrastPreview(
+      sliderFrameQueueRef.current,
+      (frame) => window.cancelAnimationFrame(frame),
+    );
+  }, [cmap, dataVersion, linkedContrast, logScale, nImages, traitVmin, traitVmax, traitVmins, traitVmaxs]);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
   const [gpuCmapReadyVersion, setGpuCmapReadyVersion] = React.useState(0);
   // autoContrastVersion declared earlier (forward declaration for histogram thumbs).
@@ -5863,8 +5924,6 @@ function Show2D() {
     if (uint8FolderPreviewMode) return;
     const engine = gpuCmapRef.current;
     if (!engine || !gpuCmapReadyRef.current || !rawDataRef.current) return;
-    const cachedRanges = dataRangesRef.current;
-    if (cachedRanges.length === 0) return;
     const ls = logScale;
     const nImg = Math.min(rawDataRef.current.length, engine.slotCount);
     if (nImg === 0) return;
@@ -5872,6 +5931,23 @@ function Show2D() {
 
     (async () => {
       const indices = Array.from({ length: nImg }, (_, i) => i);
+      let cachedRanges = dataRangesRef.current;
+      if (cachedRanges.length < nImg) {
+        // The data-range GPU pass is asynchronous and may still be in flight
+        // when Auto first runs. Await an authoritative range here instead of
+        // returning and leaving the histogram thumbs at stale 0-100 forever.
+        const rawRanges = await engine.computeRangeBatch(indices);
+        if (request !== autoContrastRequestRef.current) return;
+        while (rawRanges.length < nImg) {
+          const raw = rawDataRef.current?.[rawRanges.length];
+          rawRanges.push(raw ? findDataRange(raw) : { min: 0, max: 1 });
+        }
+        rawRangesRef.current = rawRanges;
+        cachedRanges = ls
+          ? rawRanges.map((range) => displayRange(range.min, range.max, true))
+          : rawRanges;
+        dataRangesRef.current = cachedRanges;
+      }
       const histRanges = indices.map(i => cachedRanges[i] || { min: 0, max: 1 });
       const allBins = await engine.computeHistogramBatch(indices, histRanges, ls);
 
@@ -5935,6 +6011,19 @@ function Show2D() {
       const traitsAnchor = traitVmin != null && traitVmax != null;
       const hasPerImageTraits = traitVmins && traitVmaxs && traitVmins.some((v, i) => v != null && traitVmaxs[i] != null);
       if (!traitsAnchor && !hasPerImageTraits) {
+        const linkedAutoPercentRange = linkedContrast && newPcts.length > 0
+          ? linkedAutoContrastPercentRange(histRanges, acRanges, indices, isRgbFlags)
+          : undefined;
+        // The slider preview bypasses React state for low-latency GPU paints.
+        // Mirror auto-derived panel windows into that ref before publishing
+        // state so the first manual drag starts from the visible ranges.
+        const seededMirror = seedAutoContrastMirror(
+          contrastRef.current,
+          newPcts,
+          linkedContrast,
+          linkedAutoPercentRange,
+        );
+        contrastRef.current = seededMirror;
         // Write all panel pcts in a single state update.
         setContrastStates(prev => {
           const m = new Map(prev);
@@ -5946,15 +6035,13 @@ function Show2D() {
         // Auto when contrast is grouped. Use the widest envelope so all panels
         // still display within the active bars.
         if (linkedContrast && newPcts.length > 0) {
-          const vminPct = Math.min(...newPcts.map(p => p.vminPct));
-          const vmaxPct = Math.max(...newPcts.map(p => p.vmaxPct));
-          setLinkedContrastState({ vminPct, vmaxPct });
+          setLinkedContrastState(seededMirror.linked);
         }
       }
       console.log(`[Show2D] GPU auto-contrast: ${nImg} images, ${allBins.length} histograms`);
       setAutoContrastVersion(v => v + 1);
     })();
-  }, [autoContrast, dataVersion, logScale, gpuCmapVersion, linkedContrast, traitVmin, traitVmax, traitVmins, traitVmaxs, uint8FolderPreviewMode]);
+  }, [autoContrast, dataVersion, logScale, gpuCmapVersion, linkedContrast, traitVmin, traitVmax, traitVmins, traitVmaxs, uint8FolderPreviewMode, isRgbFlags]);
 
   // -------------------------------------------------------------------------
   // Data effect: normalize + colormap → reusable offscreen canvases
@@ -7776,7 +7863,9 @@ function Show2D() {
           displayData = new Float32Array(magnitude.length);
           for (let j = 0; j < magnitude.length; j++) displayData[j] = Math.sqrt(magnitude[j]);
         } else {
-          displayData = magnitude;
+          // Auto enhancement masks the DC display pixel. Keep that display-only
+          // mutation out of the cached scientific FFT magnitude used by metrics.
+          displayData = magnitude.slice();
         }
         let displayMin: number, displayMax: number;
         if (fftAuto) {
@@ -12125,7 +12214,7 @@ function Show2D() {
                               title={isRgbPanel(i) ? "RGB panel: contrast controls do not apply" : undefined}>
                               <Histogram data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
                                 onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
-                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                                onRangePreview={(min, max) => { const leavingAuto = autoContrast; if (leavingAuto) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, leavingAuto); }}
                                 onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
                                 width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
                                 dataMin={histRange?.min ?? imageDataRange.min}
@@ -12135,7 +12224,7 @@ function Show2D() {
                         })}
                       </Box>
                     ) : (
-                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { const leavingAuto = autoContrast; if (leavingAuto) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, leavingAuto); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
                     )}
                   </Box>
                 )}
