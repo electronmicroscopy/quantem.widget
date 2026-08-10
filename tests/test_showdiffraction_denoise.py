@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import traitlets
 
+from quantem.widget import library_phase
 from quantem.widget.showdiffraction import ShowDiffraction
 
 
@@ -57,7 +58,6 @@ def test_noisy_spot_detection_improves_with_denoise():
     raw = ShowDiffraction(counts, detect_denoise="none", **kwargs).detect_spots(max_spots=8)
     auto = ShowDiffraction(counts, detect_denoise="auto", **kwargs).detect_spots(max_spots=8)
 
-    # sparse counts: raw detection picks up shot noise, denoised finds just the lattice
     assert len(auto.spots) == 4
     assert _true_spots_found(auto.spots, truth) == 4
     assert len(raw.spots) > len(auto.spots)
@@ -72,7 +72,6 @@ def test_denoise_does_not_shift_measured_positions():
     raw = ShowDiffraction(counts, detect_denoise="none", **kwargs).detect_spots(max_spots=8)
     auto = ShowDiffraction(counts, detect_denoise="anscombe", **kwargs).detect_spots(max_spots=8)
 
-    # both find the lattice; refined positions agree because fits run on raw data
     for widget in (raw, auto):
         assert _true_spots_found(widget.spots, truth) == 4
     for r, c in truth:
@@ -94,7 +93,6 @@ def test_noisy_ring_detection_and_raw_fit():
     for target in radii:
         assert any(abs(f - target) <= 3.0 for f in found)
 
-    # fit runs on the raw profile, so radii stay honest
     w.fit_ring_profile()
     for target in radii:
         assert any(
@@ -132,7 +130,6 @@ def test_show_detection_view_ships_denoised_frame():
     w.show_detection_view = True
     assert w.frame_bytes != raw_bytes
 
-    # display only: stored data and measurements stay raw
     assert np.array_equal(w._displayed_frame(), counts)
     w.show_detection_view = False
     assert w.frame_bytes == raw_bytes
@@ -157,7 +154,7 @@ def test_noise_sigma_floor_is_tunable():
     cols = np.arange(160, dtype=np.float64)[None, :]
     r = np.hypot(rows - 80, cols - 80)
 
-    # wide dim spots on a diffuse cloud, the structured background case
+    # Wide dim spots on a diffuse cloud
     dp = 80.0 * np.exp(-(r**2) / (2 * 20.0**2))
     truth = [(80, 125), (35, 80), (125, 80), (80, 35)]
     for rr, cc in truth:
@@ -169,13 +166,10 @@ def test_noise_sigma_floor_is_tunable():
     assert len(w.spots) == 0
 
     w.detect_spots(min_distance=10, min_relative=0.3, noise_sigma=3.0)
-    near = sum(any(abs(s["row"] - a) <= 3 and abs(s["col"] - b) <= 3 for a, b in truth) for s in w.spots)
-    assert near >= 2
+    assert _true_spots_found(w.spots, truth, tol=3.0) >= 2
 
 
 def test_detected_au_ratios_index_as_fcc():
-    from quantem.widget import library_phase
-
     au = library_phase("Au")
     k = 0.008
     hkls = ("111", "200", "220", "311")
@@ -188,7 +182,6 @@ def test_detected_au_ratios_index_as_fcc():
     w.calibrate_from_phase(au)
     w.index_rings(au)
 
-    # detected radius ratios must land on the allowed fcc reflections
     ordered = sorted(w.rings, key=lambda r: r["radius_px"])
     assert [r["hkl"] for r in ordered] == list(hkls)
     assert all(r["d_error"] < 0.01 for r in ordered)
@@ -196,8 +189,6 @@ def test_detected_au_ratios_index_as_fcc():
 
 
 def test_recover_predicted_rings_rescues_missed_reflection():
-    from quantem.widget import library_phase
-
     au = library_phase("Au")
     k = 0.008
     hkls = ("111", "200", "220", "311")

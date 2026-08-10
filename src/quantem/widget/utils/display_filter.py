@@ -133,14 +133,14 @@ def _nlm(image: np.ndarray) -> np.ndarray:
     if positive.size == 0:
         return image.copy()
 
-    # true counts when the data is gain-quantized, pseudo counts otherwise
+    # Gain estimate
     gain = float(positive.min())
     ratio = positive / gain
     if not np.allclose(ratio, np.round(ratio), atol=1e-3):
         gain = float(np.percentile(positive, 99.5)) / 30.0
 
     counts = np.clip(image, 0.0, None) / gain
-    stabilized = 2.0 * np.sqrt(counts + 3.0 / 8.0)  # noise std near 1
+    stabilized = 2.0 * np.sqrt(counts + 3.0 / 8.0)
     smoothed = denoise_nl_means(
         stabilized, patch_size=5, patch_distance=6, h=0.8, sigma=1.0, fast_mode=True
     )
