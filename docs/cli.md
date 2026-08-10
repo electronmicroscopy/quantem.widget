@@ -15,6 +15,8 @@ quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable
 quantem showptycho scan_master.h5               # raw 4D-STEM master -> full-BF SSB review project
 quantem showptycho ./masters/                    # master folder     -> ShowPtycho project catalog
 quantem showfolder ./session/                  # microscopy folder  -> ShowFolder notebook/HTML
+quantem showdiffraction pattern.npy            # diffraction        -> analyzed ShowDiffraction HTML
+quantem showdiffraction --demo                 # real Fe3O4 SAED    -> the full pipeline, no data needed
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
 quantem github tutorial_github.ipynb --no-execute # optional static copy for GitHub preview
 ```
@@ -29,6 +31,7 @@ quantem github tutorial_github.ipynb --no-execute # optional static copy for Git
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
 | `quantem showptycho <master.h5 / folder>` | raw `*_master.h5` files, a folder of masters, or an existing ShowPtycho project | runs full-BF SSB and builds one index with direct ShowPtycho and Show4DSTEM browser viewers |
 | `quantem showfolder <folder>` | microscopy session folder | a ShowFolder notebook (or `--html`) |
+| `quantem showdiffraction <pattern>` | a diffraction pattern (`.npy`, `.emd`, `.dm3`/`.dm4`, or a raster image), or `--demo` | an analyzed ShowDiffraction HTML: center, rings, and profile fits; with `--phase`, also calibration and hkl indexing |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, or with `--no-execute` exports saved outputs/state, into one standalone interactive HTML |
 | `quantem github <notebook.ipynb>` | an optional static copy of a notebook | strips widget state and embeds compressed pictures for GitHub's notebook preview |
 
@@ -49,6 +52,28 @@ Image and Show4DSTEM outputs land in `~/Downloads` by default. ShowPtycho
 projects use the user-owned `~/QuantEM/showptycho/<acquisition>` root. Use
 `--out PATH` to choose another writable project folder or `--in-place` to opt
 into `SOURCE/quantem/showptycho`.
+
+## ShowDiffraction
+
+One command takes a SAED or powder pattern to a fully analyzed, shareable page:
+center refinement, ring detection, and profile fitting run automatically, and
+`--phase` (or `--demo`) adds phase calibration and hkl indexing. The standalone
+HTML then opens with the interactive analyzer and measurement tables.
+
+```bash
+quantem showdiffraction pattern.npy                  # detect + fit rings, no phase
+quantem showdiffraction pattern.npy --phase Au       # calibrate + index against a library phase
+quantem showdiffraction pattern.dm4 --exclude-radius 70   # skip an amorphous halo
+quantem showdiffraction --demo                       # real Fe3O4 nanoparticle SAED end-to-end
+```
+
+`--demo` downloads the tutorial pattern from the public dataset hub (or uses a
+packaged copy) and runs the pipeline against the Fe3O4 library phase. Use
+`--k-pixel-size` when the detector calibration is already known (it is kept even
+with `--phase`, which then only indexes), `--no-auto` to open the raw pattern
+untouched, and `--max-rings` to cap detection. Reading `.dm3`/`.dm4` needs the
+optional `ncempy` reader (`pip install ncempy`). A printed summary reports the
+calibration, rings, and matched phase before the page opens.
 
 ## Show4DSTEM HTML export
 
