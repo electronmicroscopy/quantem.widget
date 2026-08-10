@@ -123,6 +123,21 @@ def test_gain_scaled_counts_use_anscombe():
     assert w._resolve_detect_denoise(scaled) == "anscombe"
 
 
+def test_show_detection_view_ships_denoised_frame():
+    dp, _ = _spot_dp()
+    counts = np.random.default_rng(5).poisson(dp * 0.05).astype(np.float32)
+
+    w = ShowDiffraction(counts, detect_denoise="anscombe", verbose=False)
+    raw_bytes = w.frame_bytes
+    w.show_detection_view = True
+    assert w.frame_bytes != raw_bytes
+
+    # display only: stored data and measurements stay raw
+    assert np.array_equal(w._displayed_frame(), counts)
+    w.show_detection_view = False
+    assert w.frame_bytes == raw_bytes
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)

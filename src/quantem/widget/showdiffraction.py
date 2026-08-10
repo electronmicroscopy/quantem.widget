@@ -1708,7 +1708,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         Denoise applied to the frame before center refinement and spot/ring
         detection. "auto" estimates the noise level and picks a mode; fits
         and measurements always run on the raw data, so positions are not
-        biased by the smoothing.
+        biased by the smoothing. Set the ``show_detection_view`` trait to
+        display the denoised view instead of the raw frame.
     dp_scale_mode : str, default "log"
         Diffraction display scaling ("linear", "log", "sqrt").
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
@@ -1770,6 +1771,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         "snap_radius",
         "spot_refine",
         "detect_denoise",
+        "show_detection_view",
         "center_mode",
         "calibration_source",
         "calibration_ref_d",
@@ -1879,6 +1881,8 @@ class ShowDiffraction(anywidget.AnyWidget):
     detect_denoise = traitlets.Enum(
         ("auto", "none", "gaussian", "anscombe"), default_value="auto"
     ).tag(sync=True)
+    # display the denoised detection view instead of the raw frame
+    show_detection_view = traitlets.Bool(False).tag(sync=True)
 
     # Indexing
     zone_axis = traitlets.Unicode("").tag(sync=True)
@@ -2116,7 +2120,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.auto_detect_center()
 
     def _observe_traits(self) -> None:
-        self.observe(self._update_frame, names=["frame_idx"])
+        self.observe(self._update_frame, names=["frame_idx", "detect_denoise", "show_detection_view"])
         self.observe(self._bake_offline_frames, names=["offline"])
         self.observe(self._on_spot_add_request, names=["_spot_add_request"])
         self.observe(self._on_spot_undo_request, names=["_spot_undo_request"])
@@ -2302,7 +2306,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         return "gaussian" if signal < 50.0 * noise else "none"
 
     def _update_frame(self, change=None):
-        frame = self._displayed_frame()
+        frame = self._detection_frame() if self.show_detection_view else self._displayed_frame()
         self.dp_stats = [
             float(frame.mean()),
             float(frame.min()),
