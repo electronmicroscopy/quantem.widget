@@ -50,7 +50,17 @@ def main() -> int:
         size = path.stat().st_size
         notebook = json.loads(path.read_text(encoding="utf-8"))
         outputs = _output_bytes(notebook)
+        widget_state = _string_bytes(notebook.get("metadata", {}).get("widgets", {}))
         print(f"- {path}: {size / 1024 / 1024:.2f} MB, outputs {outputs / 1024 / 1024:.2f} MB")
+        if widget_state:
+            # The docs CI re-executes every tutorial (execute_notebooks: force)
+            # and bakes fresh widget state into the published HTML, so committed
+            # state is never used; it only grows git history on every save.
+            failures.append(
+                f"{path} carries {widget_state / 1024 / 1024:.2f} MB of baked widget "
+                f"state (metadata.widgets); strip it with "
+                f"jq 'del(.metadata.widgets)' {path} > tmp && mv tmp {path}"
+            )
         if size > max_bytes:
             failures.append(f"{path} is {size / 1024 / 1024:.2f} MB > {args.max_mb:.2f} MB")
         if outputs > max_output_bytes:

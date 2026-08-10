@@ -50,6 +50,9 @@ select any missing gates without relying on private logs.
   widget state into the published HTML only — never commit a re-executed
   notebook with stored widget state, and never switch the docs build to
   `cache` mode (it silently drops widget state and blanks every widget).
+  Saving a notebook after running widget cells stores that state silently;
+  strip it before committing:
+  `jq 'del(.metadata.widgets)' <nb>.ipynb > tmp && mv tmp <nb>.ipynb`
 - [ ] Only the sections below that this PR touches are kept; the rest are
   deleted from this description.
 
