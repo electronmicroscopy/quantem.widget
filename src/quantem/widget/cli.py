@@ -390,7 +390,7 @@ def _showdiffraction(args: argparse.Namespace) -> int:
 
     phase = None
     if args.phase is not None:
-        from quantem.widget.crystal import library_phase
+        from quantem.widget import library_phase
         phase = library_phase(args.phase)
 
     widget = ShowDiffraction(

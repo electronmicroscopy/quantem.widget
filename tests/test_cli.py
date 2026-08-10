@@ -1157,7 +1157,7 @@ def test_showdiffraction_writes_html(tmp_path, monkeypatch):
 def test_showdiffraction_phase_modes(tmp_path, capsys):
     # --phase calibrates and indexes, an explicit --k-pixel-size survives it,
     # and --no-auto still preselects the phase
-    from quantem.widget.crystal import library_phase
+    from quantem.widget import library_phase
 
     au = library_phase("Au")
     size = 512
