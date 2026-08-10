@@ -3417,6 +3417,28 @@ function Show4DSTEM() {
           return [] as string[];
         }
       })();
+      // Native uint16 HDF5 datasets are intentionally decoded one at a time so
+      // the viewer never holds the full collection in VRAM. That is a
+      // residency limit, not a preload target: the background loader still
+      // visits every visible dataset sequentially and publishes each BF/DF panel
+      // as soon as its volume is ready.
+      const h5DecodeDtype = String(
+        (globalThis as { __QT_H5_DECODE_DTYPE?: unknown }).__QT_H5_DECODE_DTYPE || "",
+      ).toLowerCase();
+      const h5UsesNativeU16 = h5DecodeDtype === "u2"
+        || h5DecodeDtype === "uint16"
+        || h5DecodeDtype === "native";
+      const h5AllowU16MultiResident = (globalThis as { __QT_H5_ALLOW_U16_MULTI_PRELOAD?: boolean })
+        .__QT_H5_ALLOW_U16_MULTI_PRELOAD === true;
+      const h5RequestedResidentLimit = show4DSTEMGlobalInt(
+        "__QT_H5_MAX_RESIDENT",
+        MAX_RESIDENT,
+        1,
+        MAX_RESIDENT,
+      );
+      const h5ResidentLimit = h5UsesNativeU16 && !h5AllowU16MultiResident
+        ? 1
+        : h5RequestedResidentLimit;
       if (requireLocalH5Files && (h5Url || h5Urls.length) && !show4DSTEMHasLocalFiles()) {
         if (!disposed) {
           setOfflineBackendStatus("Waiting for local HDF5 files");
@@ -3789,7 +3811,7 @@ function Show4DSTEM() {
               volCache.set(clamped, cc);
               latestResidentVolumeIndex = clamped;
               const activeFrame = Math.max(0, Math.min(h5Urls.length - 1, model.get("frame_idx") | 0));
-              while (volCache.size > MAX_RESIDENT) {
+              while (volCache.size > h5ResidentLimit) {
                 const old = [...volCache.keys()].find((k) => k !== clamped && k !== activeFrame);
                 if (old === undefined) break;
                 volCache.get(old)!.dispose(); volCache.delete(old);
@@ -3803,17 +3825,14 @@ function Show4DSTEM() {
         const initialIdx = Math.max(0, Math.min(h5Urls.length - 1, model.get("frame_idx") | 0));
         const startH5Preloads = (): Promise<void> => {
           if (!getVol) return Promise.resolve();
-          const preloadDecodeOverride = String((globalThis as { __QT_H5_DECODE_DTYPE?: unknown }).__QT_H5_DECODE_DTYPE || "").toLowerCase();
-          const preloadWantsU16 = preloadDecodeOverride === "u2" ||
-            preloadDecodeOverride === "uint16" ||
-            preloadDecodeOverride === "native";
-          const allowU16MultiPreload = (globalThis as { __QT_H5_ALLOW_U16_MULTI_PRELOAD?: boolean })
-            .__QT_H5_ALLOW_U16_MULTI_PRELOAD === true;
-          const residentPreloadLimit = preloadWantsU16 && !allowU16MultiPreload ? 1 : MAX_RESIDENT;
-          const maxPreload = Math.max(1, Math.min(residentPreloadLimit, h5Urls.length));
-          const defaultPreload = preloadWantsU16 ? 1 : h5Urls.length <= 4
-            ? h5Urls.length
-            : Math.min(compareResidentTarget, h5Urls.length);
+          const preloadWantsU16 = h5UsesNativeU16;
+          const allowU16MultiPreload = h5AllowU16MultiResident;
+          const residentPreloadLimit = h5ResidentLimit;
+          // Visit every dataset in the background. For uint16 this remains
+          // serial (preloadWindow=1) and only one detector volume is resident,
+          // but its BF/DF result is retained in a display slot before moving on.
+          const maxPreload = Math.max(1, h5Urls.length);
+          const defaultPreload = h5Urls.length;
           const preloadCount = show4DSTEMGlobalInt("__QT_H5_PRELOAD_VOLUMES", defaultPreload, 1, maxPreload);
           const preloadWindow = show4DSTEMGlobalInt(
             "__QT_H5_PRELOAD_WINDOW",
@@ -4750,7 +4769,10 @@ function Show4DSTEM() {
           const batchFrames: number[] = [];
           for (const idx of indices) {
             const slot = COMPARE_GPU_SLOT_BASE + slotCursor++;
-            if (getVol && !volIsResident(idx) && (interactiveDrag || !h5VolumePreloadDone)) continue;
+            // Do not turn a progressive refresh into an all-volume decode.
+            // A completed panel keeps its GPU display slot even after the
+            // native uint16 source volume has been evicted.
+            if (getVol && !volIsResident(idx)) continue;
             const panelCompute = getVol ? await getVol(idx) : compute;
             if (!(panelCompute instanceof DetectorCompute)) continue;
             batchComputes.push(panelCompute);

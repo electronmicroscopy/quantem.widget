@@ -92,8 +92,8 @@ def export_show4dstem_webgpu_bundle(
     root = pathlib.Path(out_dir)
     if not root.is_dir():
         raise ValueError(f"bundle out_dir must be an existing data folder: {root}")
-    masters = sorted(root.glob("*_master.h5"))
-    masters.extend(sorted(root.glob("*_master_wrapper.h5")))
+    masters = sorted(root.rglob("*_master.h5"))
+    masters.extend(sorted(root.rglob("*_master_wrapper.h5")))
     if not masters:
         raise ValueError(f"no *_master.h5 files in {root}; the bundle serves the data folder itself")
     viewer = root / ".viewer"
@@ -143,8 +143,13 @@ if (window.location.protocol === "file:") {
     )
 
 
-def bundle_master_urls(folder: str | pathlib.Path, names: Sequence[str] | None = None) -> list[str]:
-    """Viewer-relative URLs (``../<basename>``) for masters in a bundle folder.
+def bundle_master_urls(
+    folder: str | pathlib.Path,
+    names: Sequence[str] | None = None,
+    *,
+    viewer_prefix: str = "..",
+) -> list[str]:
+    """Return viewer-relative URLs for masters in a bundle folder.
 
     The viewer page lives one level down in ``.viewer/``, so data references
     must climb back to the served root; a bare basename would resolve inside
@@ -160,7 +165,7 @@ def bundle_master_urls(folder: str | pathlib.Path, names: Sequence[str] | None =
                 raise ValueError(f"no master matches {token!r} in {folder}")
             picked.append(hits[0])
         masters = picked
-    return [f"../{name}" for name in masters]
+    return [f"{viewer_prefix}/{name}" for name in masters]
 
 
 def _link_read_only(source: pathlib.Path, target: pathlib.Path) -> str:
