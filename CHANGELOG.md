@@ -11,6 +11,9 @@ new `rcN` heading when that rc is published to TestPyPI.
   Anscombe for sparse counting data, light Gaussian for moderate-SNR data,
   identity when clean). All fits and measurements keep using the raw frame, so
   positions and radii are never biased by the smoothing.
+- ShowDiffraction `detect_spots` exposes its shot-noise contrast floor as
+  `noise_sigma`; lower it on frames whose diffuse scattering or detector
+  shadows inflate the robust noise estimate past real peak contrast.
 - ShowDiffraction display denoise: a view-only `denoise` trait (including the
   new Poisson non-local means `nlm` filter, which keeps spots sharp where the
   detection blur softens them) and a `show_detection_view` toggle that

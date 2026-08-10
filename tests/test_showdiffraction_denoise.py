@@ -152,6 +152,27 @@ def test_display_denoise_is_view_only():
     assert w.frame_bytes == raw_bytes
 
 
+def test_noise_sigma_floor_is_tunable():
+    rows = np.arange(160, dtype=np.float64)[:, None]
+    cols = np.arange(160, dtype=np.float64)[None, :]
+    r = np.hypot(rows - 80, cols - 80)
+
+    # wide dim spots on a diffuse cloud, the structured background case
+    dp = 80.0 * np.exp(-(r**2) / (2 * 20.0**2))
+    truth = [(80, 125), (35, 80), (125, 80), (80, 35)]
+    for rr, cc in truth:
+        dp = dp + 6.0 * np.exp(-((rows - rr) ** 2 + (cols - cc) ** 2) / (2 * 4.0**2))
+    counts = np.random.default_rng(9).poisson(dp).astype(np.float32)
+
+    w = ShowDiffraction(counts, center=(80, 80), bf_radius=10, detect_denoise="anscombe", verbose=False)
+    w.detect_spots(min_distance=10, min_relative=0.3)
+    assert len(w.spots) == 0
+
+    w.detect_spots(min_distance=10, min_relative=0.3, noise_sigma=3.0)
+    near = sum(any(abs(s["row"] - a) <= 3 and abs(s["col"] - b) <= 3 for a, b in truth) for s in w.spots)
+    assert near >= 2
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)
