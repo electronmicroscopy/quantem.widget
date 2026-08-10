@@ -35,10 +35,11 @@ def test_show2d_to_show3d_uses_visible_panels_as_frames():
     assert out.n_panels == 1
     assert out.labels == ["raw", "filtered"]
     assert out.panel_titles == ["viewer source"]
-    assert out.pixel_size == pytest.approx(0.25)
+    assert out.display_bin == 4
+    assert out.pixel_size == pytest.approx(1.0)
     assert out.pixel_unit == "nm"
-    np.testing.assert_allclose(out._display_data[0], data[0])
-    np.testing.assert_allclose(out._display_data[1], data[1])
+    np.testing.assert_allclose(out._data[0], data[0])
+    np.testing.assert_allclose(out._data[1], data[1])
 
 
 def test_show2d_prepare_request_creates_prepared_show3d_view():
@@ -85,6 +86,8 @@ def test_show3d_to_show2d_uses_current_frame_and_visible_panels():
     assert isinstance(out, Show2D)
     assert out.n_images == 1
     assert out.labels == ["signal · t2 3/3"]
+    # The Show2D handoff returns native source pixels and sampling even though
+    # the live Show3D browser view uses its default 4× mean bin.
     assert out.pixel_size == pytest.approx(0.5)
     assert out.pixel_unit == "nm"
     assert out.cmap == "inferno"

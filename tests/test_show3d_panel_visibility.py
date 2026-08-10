@@ -115,8 +115,11 @@ def test_show3d_set_image_replaces_stack_and_triggers_new_frame_transfer() -> No
 
     assert widget.n_panels == 1
     assert widget.n_slices == 2
-    assert widget.height == 6
-    assert widget.width == 7
+    assert widget.height == 1
+    assert widget.width == 1
+    assert widget.source_height == 6
+    assert widget.source_panel_width == 7
+    np.testing.assert_allclose(widget._data, data)
     assert widget.labels == ["fresh 0", "fresh 1"]
     assert widget.slice_idx == 1
     assert widget.playing is False
@@ -126,8 +129,8 @@ def test_show3d_set_image_replaces_stack_and_triggers_new_frame_transfer() -> No
     assert widget.panel_titles == []
     assert widget.starred == [-1]
     assert widget.frame_seq > old_seq
-    assert bytes(widget.frame_bytes) == data[1].tobytes()
-    assert widget._buffer_bytes == b""
+    assert bytes(widget.frame_bytes) == b""
+    assert len(widget._offline_float_stack) == 2 * 1 * 1 * 4
 
 
 def test_show3d_controls_collapsed_roundtrips_state_and_html(tmp_path: pathlib.Path) -> None:
@@ -167,47 +170,32 @@ def test_show3d_paged_frontend_preserves_view_transform() -> None:
     # C1: page switching should repaint the newly active page while keeping the
     # scientist's zoom/pan inspection view, not reset it to the full image.
     assert "const resetPagedViewTransform" not in frontend
-    assert "const preparePagedPageChange" in frontend
+    assert "const preparePagedPageChange" not in frontend
     assert "resetPagedViewTransform()" not in frontend
-    page_change_helper = frontend.split("const preparePagedPageChange", 1)[1].split(
-        "const previousActivePageStartRef",
-        1,
-    )[0]
-    assert "setGpuDisplayVisible(false)" not in page_change_helper
-    assert "zoom: 1" not in page_change_helper
-    assert "panX: 0" not in page_change_helper
-    assert "panY: 0" not in page_change_helper
+    assert "const activePageStart" in frontend
 
-    sidecar_viewport_helper = frontend.split(
-        "const paintSidecarU8ViewportToContext",
+    packed_transform = frontend.split(
+        "const renderGpuPackedPanelTransformSlice",
         1,
-    )[1].split("const drawSidecarBitmapFrame", 1)[0]
-    assert "ctx.getImageData(0, 0, targetW, targetH)" in sidecar_viewport_helper
-    assert "if (rgba[p + 3] !== 0) continue;" in sidecar_viewport_helper
-    assert 'const bg = themeColors.bg || interPanelGapColor || "#fff";' in sidecar_viewport_helper
-    assert "const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);" in sidecar_viewport_helper
-    assert "effectivePanX" in sidecar_viewport_helper
+    )[1].split("const renderGpuCachedSliceDirect", 1)[0]
+    assert "engine.renderCombinedPanelRegionsDirectToCanvas" in packed_transform
+    assert "sourcePanelIndices" in packed_transform
 
     manual_commit_helper = frontend.split("const commitSlice = (idx: number) => {", 1)[1].split(
         "const handleLoopSliderMouseDown",
         1,
     )[0]
-    assert 'drawSidecarBitmapFrame(next, false, "scrub-commit")' in manual_commit_helper
-    assert 'drawSidecarBitmapFrame(next, false, "scrub-commit-confirm")' in manual_commit_helper
-
-    sidecar_draw_helper = frontend.split(
-        "const drawSidecarBitmapFrame",
-        1,
-    )[1].split("const previousSidecarPagePaintStartRef", 1)[0]
-    assert "getSidecarPaintScratchContext(canvasW, canvasH)" in sidecar_draw_helper
-    assert "paintSidecarU8ViewportToContext(paintCtx, drawIdx, canvasW, canvasH)" in sidecar_draw_helper
-    assert "ctx.clearRect(0, 0, canvasW, canvasH)" not in sidecar_draw_helper
+    assert "setLiveSliceIdx(next)" in manual_commit_helper
+    assert "setDisplaySliceIdx(next)" in manual_commit_helper
+    assert "setSliceIdx(next)" in manual_commit_helper
+    assert "sidecarCompositeFrameCacheRef" not in frontend
+    assert "paintEmbeddedPackedCompositeTransform" not in frontend
 
     transform_render_helper = frontend.split(
         "const scheduleTransformRender = (): boolean => {",
         1,
     )[1].split("React.useEffect(() => () => {", 1)[0]
-    assert 'drawSidecarBitmapFrame(\n        playing ? playbackIdxRef.current : liveSliceIdx,\n        false,\n        "transform-immediate",' in transform_render_helper
+    assert "renderCurrentPanelTransformDirect" in transform_render_helper
 
     wheel_zoom_helper = frontend.split(
         "const applyCanvasWheelZoom =",

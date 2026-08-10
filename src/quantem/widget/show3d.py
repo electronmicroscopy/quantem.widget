@@ -7,20 +7,15 @@ Includes playback controls, statistics, ROI selection, FFT, and more.
 
 import gc
 import html
-import http.server
 import json
 import math
 import os
 import pathlib
-import secrets
 import sys
 import threading
 import time
 import tempfile
-import urllib.parse
 import warnings
-import weakref
-from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Self
@@ -642,12 +637,9 @@ def _is_cmap_sequence(value: object) -> bool:
     """Return True for per-panel colormap inputs, excluding single strings."""
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
-# Keep a single synced playback chunk small enough for the Jupyter/AnyWidget
-# Comm path to survive. The data is still exact float32; large stacks move as
-# sliding windows instead of browser-hostile 256 MB+ messages.
-_MAX_PLAYBACK_CHUNK_BYTES = 128 * 1024 * 1024
+# One browser display stack is embedded as exact float32 and uploaded once.
 _MAX_PLAYBACK_FPS = 60.0
-_INITIAL_FRAME_DEFER_BYTES = 16 * 1024 * 1024
+_DEFAULT_DISPLAY_BIN = 4
 
 
 def _image_header_shape_and_range(path: pathlib.Path) -> tuple[tuple[int, int], tuple[float, float]]:
@@ -684,13 +676,6 @@ def _image_header_shape_and_range(path: pathlib.Path) -> tuple[tuple[int, int], 
     return (shape[0], shape[1]), (0.0, 1.0)
 
 
-class _Show3DFrameHTTPServer(http.server.ThreadingHTTPServer):
-    """Tiny localhost server for exact float32 frame reads."""
-
-    allow_reuse_address = True
-    daemon_threads = True
-
-
 # Rec. 709 luminance weights. A true-color stack keeps its RGB in _rgb_data and
 # a single luminance plane in _data so stats, FFT, ROI, and scale bars have one
 # scalar channel to work on.
@@ -701,10 +686,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """
     Interactive 3D stack viewer for sequential 2D images.
 
-    Renders an (N, H, W) stack through a WebGPU canvas (CPU fallback when WebGPU
-    is unavailable) with a sliding prefetch buffer for smooth playback. The full
-    stack is held once on the Python side; scrubbing and playback ship individual
-    frames or chunks over the Jupyter Comm channel. Common use cases: defocus
+    Renders an (N, H, W) stack through a WebGPU canvas, with a CPU/canvas fallback
+    when WebGPU is unavailable. By default, Python sends one 4× mean-binned
+    float32 display stack and the browser uploads every frame to WebGPU once.
+    The native arrays remain unchanged in Python. Common use cases: defocus
     sweep, time series, depth stack, in-situ movie, side-by-side trial comparison.
 
     Features
@@ -804,9 +789,14 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Canvas rendering size in CSS pixels (the on-screen width of the main
         viewport).  ``0`` uses the frontend default (500 px).  Pass e.g.
         ``size=800`` to enlarge for a presentation, or ``size=300`` to compress
-        alongside a control panel.  This controls **display only** - the
-        underlying stack resolution is never resampled; scrubbing and zoom
-        still see every pixel of the full-resolution frame.
+        alongside a control panel. This controls canvas size, independently
+        of ``display_bin``.
+    display_bin : {"auto", 1, 2, 4}, default 4
+        Browser display resolution. The default applies a 4×4 spatial mean bin
+        before transferring one float32 display stack to the browser. Use ``2``
+        for a sharper display or ``1`` to transfer native display pixels. The
+        original arrays remain unchanged in Python. ``"auto"`` is accepted as
+        an alias for the default value, 4.
     panel_width_px : int, default 0
         Display width for each panel in CSS pixels. When ``>0``, this wins over
         ``size`` and the frontend derives the total grid canvas from the active
@@ -985,11 +975,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
       ``set_image``. Small initial stacks can otherwise use the saved/offline
       notebook representation, which is meant for static notebook state and
       standalone exports rather than streaming new frames.
-    - ``display_bin="auto"`` keeps Show3D source pixels unchanged. For heavy
-      multi-panel movies or standalone exports, pass an explicit
-      ``display_bin=N`` to build a smaller display stack. This is a display
-      tradeoff: it improves first load and playback, while native-pixel viewing
-      requires ``display_bin=1`` or a separate high-resolution workflow.
+    - The default ``display_bin=4`` sends one 4×4 mean-binned float32 display
+      stack. Pass ``display_bin=1`` when native browser pixels are required and
+      the larger transfer is acceptable.
     - Multi-panel mode is auto-detected from input shape and configured via
       ``n_panels``, ``panel_titles``, and ``link_panels``.
     - Call ``free()`` before discarding the widget; ``del`` alone will not
@@ -1016,9 +1004,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
     # Display-only denoise/bin for sparse map stacks (EDS, low dose). Applied
-    # per frame at every display wire-out (buffer window, frame_bytes, offline
-    # pack, frame server); the stored stack is never modified and the lossless
-    # default is "none". The FFT panel computes from the displayed frame, so
+    # to the embedded display stack; the stored stack is never modified and the
+    # lossless default is "none". The FFT panel computes from the displayed frame, so
     # an active filter also affects the FFT view; set denoise="none"
     # for a raw FFT. Independent of display_bin (the GPU budget knob).
     denoise = traitlets.Unicode("none").tag(sync=True)
@@ -1086,14 +1073,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     notebook_preview_ncols = traitlets.CInt(0).tag(sync=True)
     _offline_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_float_stack = traitlets.Bytes(b"").tag(sync=True)
-    # Relative or absolute URL for a sidecar offline stack (raw uint8 bytes).
-    # When set and `_offline_stack` is empty, the browser fetches this file so
-    # multi-GB viewers stay thin HTML + on-disk payload (no single-file embed).
-    _offline_stack_url = traitlets.Unicode("").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
     _offline_mins = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     _offline_maxs = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    # Display provenance. Native arrays remain in Python; the one embedded
+    # float32 display stack is uploaded to WebGPU when the browser supports it.
+    display_bin = traitlets.Int(_DEFAULT_DISPLAY_BIN).tag(sync=True)
+    source_height = traitlets.Int(0).tag(sync=True)
+    source_panel_width = traitlets.Int(0).tag(sync=True)
+    source_bytes = traitlets.Int(0).tag(sync=True)
     # Frontend-triggered standalone HTML export. The request is JSON so repeated
     # exports of the same mode can include a unique id and still sync.
     export_request = traitlets.Unicode("").tag(sync=True)
@@ -1131,7 +1120,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
     panel_width_px = traitlets.Int(0).tag(sync=True)
     shared_panel_source = traitlets.Bool(False).tag(sync=True)
-    separate_panel_frames = traitlets.Bool(False).tag(sync=True)
     # Per-panel "best frame" marker. One int per panel; -1 = unset. Used to flag
     # the user's preferred iteration / trial / focal slice without losing the
     # full stack. JS draws a gold star top-right of each panel when set.
@@ -1186,7 +1174,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     boomerang = traitlets.Bool(True).tag(sync=True)  # Ping-pong playback
     fps = traitlets.Float(30.0).tag(sync=True)
     # Moving-window time average (temporal denoising for noisy data).
-    # 1 = raw single-frame display; the default keeps averaging on.
+    # 1 = raw single-frame display and is the interactive default. Averaging is
+    # opt-in so frame scrubbing always selects one resident frame directly.
     # The displayed frame is the mean of `avg_window` consecutive frames.
     # Edge behavior: the window slides inward to stay FULL-WIDTH rather than
     # shrinking - so frame 0 with window 5 averages frames [0..4], and the last
@@ -1194,7 +1183,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # the stack, at the cost of the average not being centered on the displayed
     # index near the ends (frame 0 shows the mean centered ~2 frames in). Even
     # windows are front-biased (window 4 = [idx-2 .. idx+1]).
-    avg_window = traitlets.Int(3).tag(sync=True)
+    avg_window = traitlets.Int(1).tag(sync=True)
     loop = traitlets.Bool(True).tag(sync=True)
     loop_start = traitlets.Int(0).tag(sync=True)  # Start frame for loop range
     loop_end = traitlets.Int(-1).tag(sync=True)  # End frame for loop (-1 = last)
@@ -1312,21 +1301,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # on Y. Single-panel only; JS hides the toggle when n_panels > 1 or the
     # offline stack is absent (it needs every frame client-side to build it).
     show_kymograph = traitlets.Bool(False).tag(sync=True)
-
-    # =========================================================================
-    # Playback Buffer (sliding prefetch)
-    # =========================================================================
-    _buffer_bytes = traitlets.Bytes(b"").tag(sync=True)
-    _buffer_start = traitlets.Int(0).tag(sync=True)
-    _buffer_count = traitlets.Int(0).tag(sync=True)
-    _prefetch_request = traitlets.Int(-1).tag(sync=True)
-    frame_server_url = traitlets.Unicode("").tag(sync=True)
-    frame_server_version = traitlets.Int(0).tag(sync=True)
-    frame_transport_timing = traitlets.Dict({}).tag(sync=True)
-    buffer_transport_timing = traitlets.Dict({}).tag(sync=True)
-    _scrub_preview_request = traitlets.Unicode("").tag(sync=True)
-    _scrub_preview_bytes = traitlets.Bytes(b"").tag(sync=True)
-    _scrub_preview_info = traitlets.Dict({}).tag(sync=True)
 
     # Browser-side benchmark hook. Setting benchmark_request from Python starts
     # an in-widget measurement in the visible frontend; benchmark_result is
@@ -2265,20 +2239,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_titles: Sequence[str] | None = None,
         **kwargs,
     ) -> Self:
-        """Open same-shape image folders as lazy full-resolution panels.
-
-        Only the first frame from each panel is decoded during construction so
-        remote notebooks can mount promptly. The frame server decodes requested
-        native frames on demand; source pixels remain full resolution.
-        """
+        """Open same-shape image folders as one embedded multi-panel stack."""
         if not panel_paths:
             raise ValueError("Show3D.from_panel_folders() needs at least one panel folder.")
 
-        from quantem.widget.io.image import _collect_frames  # noqa: PLC0415
+        from quantem.widget.io.image import _collect_frames, _read_frame  # noqa: PLC0415
 
         paths_by_panel: list[list[pathlib.Path]] = []
-        panel_shapes: list[tuple[int, int]] = []
-        panel_ranges: list[tuple[float, float]] = []
         for panel_path in panel_paths:
             folder = pathlib.Path(panel_path)
             files = _collect_frames(folder, file_type, pattern)
@@ -2286,15 +2253,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 files = files[: max(0, int(frame_count))]
             if not files:
                 raise FileNotFoundError(f"No image frames in {folder}")
-            shape, data_range = _image_header_shape_and_range(files[0])
-            if panel_shapes and shape != panel_shapes[0]:
-                raise ValueError(
-                    f"Panel folder {folder} first-frame shape {shape} "
-                    f"does not match panel 0 shape {panel_shapes[0]}."
-                )
             paths_by_panel.append(files)
-            panel_shapes.append(shape)
-            panel_ranges.append(data_range)
 
         real_n = [len(files) for files in paths_by_panel]
         max_n = max(real_n)
@@ -2304,7 +2263,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             resolved_labels = list(labels)
             if len(resolved_labels) != max_n:
                 raise ValueError(
-                    f"labels length ({len(resolved_labels)}) must match lazy frame count ({max_n})."
+                    f"labels length ({len(resolved_labels)}) must match frame count ({max_n})."
                 )
         if panel_frame_labels is None:
             resolved_panel_frame_labels = [
@@ -2317,34 +2276,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         else:
             resolved_panel_titles = list(panel_titles)
 
-        kwargs.setdefault("offline", False)
-        kwargs.setdefault("save_state", False)
-        height, width = panel_shapes[0]
-        placeholder = np.zeros((1, 1, 1), dtype=np.float32)
-        bootstrap_panel_labels = [
-            [values[0] if values else files[0].stem]
-            for values, files in zip(resolved_panel_frame_labels, paths_by_panel)
+        stacks = [
+            np.stack([np.asarray(_read_frame(path)) for path in files], axis=0)
+            for files in paths_by_panel
         ]
-        widget = cls(
-            *[placeholder.copy() for _ in paths_by_panel],
-            labels=["0"],
-            panel_frame_labels=bootstrap_panel_labels,
-            panel_titles=resolved_panel_titles,
-            panel_real_frames=[1] * len(panel_shapes),
-            **kwargs,
-        )
-        widget._install_lazy_panel_source(
-            paths_by_panel,
+        return cls(
+            *stacks,
             labels=resolved_labels,
             panel_frame_labels=resolved_panel_frame_labels,
+            panel_titles=resolved_panel_titles,
             panel_real_frames=real_n,
-            source_shape=(height, width),
-            data_range=(
-                min(value[0] for value in panel_ranges),
-                max(value[1] for value in panel_ranges),
-            ),
+            **kwargs,
         )
-        return widget
 
     def __init__(
         self,
@@ -2399,7 +2342,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         diff_cmap: str = "magenta-green",
         compare_background: str = "dark",
         fps: float = 30.0,
-        avg_window: int = 3,
+        avg_window: int = 1,
         timestamps: list[float] | None = None,
         timestamp_unit: str = "s",
         show_fft: bool = False,
@@ -2428,7 +2371,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         dim_label: str = "Frame",
         use_torch: bool | None = None,
         device: str | None = None,
-        display_bin: int | str = "auto",
+        display_bin: int | str = 4,
         hideable: bool = False,
         offline: bool | None = None,
         state=None,
@@ -2818,15 +2761,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         optional `state`. Split out from `__init__` so the construction surface
         reads as a clean kwargs list while the heavy work has its own scope."""
         self.widget_version = resolve_widget_version()
-        self._frame_server = None
-        self._frame_server_thread = None
-        self._frame_server_token = secrets.token_urlsafe(18)
-        self._separate_panel_data = None
-        self._lazy_panel_paths = None
-        self._lazy_panel_cache = OrderedDict()
-        self._lazy_panel_cache_bytes = 0
-        self._lazy_panel_cache_limit_bytes = 512 * 1024 * 1024
-        self._lazy_panel_lock = threading.RLock()
+        if display_bin == "auto":
+            display_bin = _DEFAULT_DISPLAY_BIN
+        if isinstance(display_bin, bool) or not isinstance(display_bin, int) or display_bin < 1:
+            raise ValueError(
+                "display_bin must be 'auto' or an integer >= 1; "
+                f"got {display_bin!r}"
+            )
         self._crop = _normalize_crop(crop)
         self._padding = _normalize_padding(padding)
         self.n_pages = int(max(1, n_pages))
@@ -3031,7 +2972,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.panel_width_px = self._panel_width
             self._multi_panel_bin = 0
             self.shared_panel_source = False
-            self.separate_panel_frames = False  # RGB uses the concat path, not the gray-LUT frame server
             concat_color = np.concatenate(panels, axis=2)  # (N, H, W * n_panels, 3)
             data = self._establish_rgb_luminance(concat_color, is_rgb=True)
         elif len(data_args) > 1:
@@ -3150,7 +3090,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     # before concatenating panels. Binning after concat would first
                     # materialize a 4096 x (4096 * panels) slab; nine 4k panels is a
                     # 604 MB frame. The full source panels remain referenced here.
-                    panel_bin = display_bin if isinstance(display_bin, int) and display_bin > 1 else 1
+                    panel_bin = (
+                        display_bin
+                        if (
+                            isinstance(display_bin, int)
+                            and display_bin > 1
+                            and orig_h >= display_bin
+                            and orig_w >= display_bin
+                        )
+                        else 1
+                    )
                     if panel_bin > 1:
                         from quantem.widget.utils.array import bin2d
 
@@ -3162,24 +3111,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         if pixel_size > 0:
                             pixel_size = pixel_size * panel_bin
                         display_bin = 1
-                        print(
-                            f"  Multi-panel display bin {panel_bin}x before concat: "
-                            f"{orig_h}x{orig_w} -> {panels[0].shape[1]}x{panels[0].shape[2]} per panel"
-                        )
-                    if panel_bin == 1:
-                        # Keep non-identical 4k panels separate. Concatenating
-                        # nine panels makes each playback frame 4096 x 36864
-                        # (~604 MB) and exceeds practical WebGPU storage-buffer
-                        # binding limits. The frame server exposes exact
-                        # float32 panel frames, and the frontend renders one
-                        # GPU buffer per panel without binning or quantization.
-                        self.separate_panel_frames = True
-                        self._separate_panel_data = panels
-                        data = panels[0]
-                    else:
-                        # Explicitly binned panels are small enough for the
-                        # legacy concatenated-frame path.
-                        data = np.concatenate(panels, axis=2)
+                        if self._verbose:
+                            print(
+                                f"  Multi-panel display bin {panel_bin}x before concat: "
+                                f"{orig_h}x{orig_w} -> "
+                                f"{panels[0].shape[1]}x{panels[0].shape[2]} per panel"
+                            )
+                    data = np.concatenate(panels, axis=2)
                     self._panel_width = panels[0].shape[2]
                     self.panel_width_px = self._panel_width
                     self._multi_panel_bin = panel_bin
@@ -3229,28 +3167,42 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         orig_h = int(self._data.shape[1])
         orig_w = int(self._data.shape[2])
 
-        # Display data is always source-pixel-exact unless explicitly requested.
-        # Honor explicit display_bin=N>1 only if caller asks; "auto" stays 1.
-        self._display_bin = 1
-        if isinstance(display_bin, int) and display_bin > 1:
-            self._display_bin = display_bin
+        requested_display_bin = int(display_bin)
+        # True-color stacks already use a dedicated browser paint path. Keep
+        # their established native-pixel contract, and avoid empty dimensions
+        # when a small scalar image is narrower than the default factor.
+        if self.is_rgb or orig_h < requested_display_bin or orig_w < requested_display_bin:
+            requested_display_bin = 1
+        self._display_bin = requested_display_bin
+        self.display_bin = max(self._display_bin, int(getattr(self, "_multi_panel_bin", 1)))
 
-        if self.separate_panel_frames:
-            self._display_data = self._data
-            self.height = orig_h
-            self.width = int(self.panel_width_px) * int(self.n_panels)
-        elif self._display_bin > 1:
+        if self._display_bin > 1:
             from quantem.widget.utils.array import bin2d
             self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
             self.height = int(self._display_data.shape[1])
             self.width = int(self._display_data.shape[2])
             if pixel_size > 0:
                 pixel_size = pixel_size * self._display_bin
-            print(f"  Display bin {self._display_bin}× (explicit): {orig_h}×{orig_w} → {self.height}×{self.width}")
+            if self._verbose:
+                print(
+                    f"  Display bin {self._display_bin}×: "
+                    f"{orig_h}×{orig_w} → {self.height}×{self.width}"
+                )
         else:
             self._display_data = self._data
             self.height = orig_h
             self.width = orig_w
+        source_panels = getattr(self, "_source_panels", None)
+        if source_panels:
+            self.source_height = int(source_panels[0].shape[1])
+            self.source_panel_width = int(source_panels[0].shape[2])
+            self.source_bytes = sum(int(panel.nbytes) for panel in source_panels)
+        else:
+            self.source_height = orig_h
+            self.source_panel_width = (
+                orig_w if self.shared_panel_source else max(1, orig_w // max(1, int(self.n_panels)))
+            )
+            self.source_bytes = int(self._data.nbytes)
         if self.shared_panel_source:
             self.panel_width_px = self.width
         if int(self.n_pages) > 1:
@@ -3283,10 +3235,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Compute global min/max ONCE - each scan is bandwidth-bound (~150 ms
         # per pass on 1.34 GB float32), so eliminating the duplicate scans
         # saves ~300 ms on a 20x4k stack.
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            stack_min = min(float(p.min()) for p in self._separate_panel_data)
-            stack_max = max(float(p.max()) for p in self._separate_panel_data)
-        elif self._use_torch:
+        if self._use_torch:
             stack_min = float(self._data_torch.min().item())
             stack_max = float(self._data_torch.max().item())
         else:
@@ -3535,12 +3484,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.show_frequency_filter = False if self.is_rgb else bool(show_frequency_filter)
         self.subpixel_align_enabled = False if self.is_rgb else bool(subpixel_align)
         self.subpixel_align_reference = int(subpixel_align_reference)
-        frame_bytes = self.height * self.width * 4  # float32
-        # Exact float32 sliding window. Do not ship the whole stack when it
-        # would cross the browser/Jupyter ~2 GB Comm cliff (36×4k×4k is 2.4 GB).
-        max_frames = max(1, _MAX_PLAYBACK_CHUNK_BYTES // max(1, frame_bytes))
-        self._buffer_size = min(buffer_size, self.n_slices, max_frames)
-
         # Initial position at middle
         self.slice_idx = int(self.n_slices // 2)
         self.notebook_preview_frames = self._normalize_notebook_preview_frames(
@@ -3550,27 +3493,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.notebook_preview_ncols = 0 if notebook_preview_ncols is None else int(notebook_preview_ncols)
         self._roi_plot_timer = None
 
-        # Offline mode stores the quantized uint8 stack for kernel-free scrub.
-        # Exact standalone exports use _offline_float_stack on an export clone.
-        # Default (offline=None): auto-enable uint8 when the pack fits a 1 GB
-        # budget; opt out with offline=False for absurdly huge stacks.
-        # Pick the right stack source for offline packing. separate_panel_frames
-        # keeps each panel as its own array in self._separate_panel_data; the
-        # offline path needs every panel, concatenated horizontally so JS
-        # indexes by (sliceIdx * width * height) where `width` is the trait
-        # value (= total concat width). Otherwise `_display_data` already holds
-        # the concatenated or single-panel stack.
-        offline_source = self._offline_pack_source()
-        stack_bytes = int(np.prod(offline_source.shape))  # uint8 = 1 B/px
-        if offline is None:
-            offline = stack_bytes <= 1 * 1024 * 1024 * 1024
-        if offline:
-            self.offline = True
-            # The offline stack is packed RAW (see _offline_pack_source); the browser
-            # owns denoise (WGSL, live sigma), so flag it. A no-WebGPU viewer falls back
-            # to the CPU filter port. Matches Show2D's offline behaviour.
-            self._webgpu_filter_ok = True
-            self._pack_offline_u8_stack(offline_source)
+        # Show3D has one transport: one float32 display stack. The native arrays
+        # remain in Python, while the browser uploads every display frame to
+        # WebGPU once. Keeping a single transport removes the former sidecar,
+        # localhost frame-server, and progressive request/response state machines.
+        self._webgpu_filter_ok = True
+        self._pack_exact_offline_stack()
 
         # Observers
         self.observe(self._on_slice_change, names=["slice_idx"])
@@ -3579,22 +3507,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             names=["roi_active", "roi_list", "roi_selected_idx"],
         )
         self.observe(self._on_playing_change, names=["playing"])
-        self.observe(self._on_prefetch, names=["_prefetch_request"])
-        self.observe(self._on_scrub_preview_request, names=["_scrub_preview_request"])
         self.observe(self._on_diff_mode_change, names=["diff_mode"])
         self.observe(self._on_export_request_change, names=["export_request"])
         self.observe(self._on_handoff_request_change, names=["handoff_request"])
 
-        self._start_frame_server()
-
-        # Initial paint should not block the widget shell behind a full native
-        # frame payload. When the detail frame server is available, the browser
-        # can mount controls immediately and fetch the first full-resolution
-        # frame asynchronously.
-        if self._defer_initial_frame_wire():
-            self.roi_stats = {}
-        else:
-            self._update_all()
+        self.roi_stats = {}
 
         if state is not None:
             if isinstance(state, (str, pathlib.Path)):
@@ -3648,7 +3565,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if not panel_indices:
             raise ValueError("Show3D.to_show2d() needs at least one visible panel")
 
-        frames = [np.asarray(self._get_display_panel_frame(p, idx), dtype=np.float32) for p in panel_indices]
+        frames = [np.asarray(self._get_source_panel_frame(p, idx), dtype=np.float32) for p in panel_indices]
         if copy:
             frames = [np.array(frame_arr, copy=True) for frame_arr in frames]
         labels = [self._static_panel_title(p, idx) for p in panel_indices]
@@ -3670,12 +3587,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         )
 
         chrome = self._gallery_export_chrome()
+        native_pixel_size = (
+            self.pixel_size / max(1, int(self.display_bin))
+            if self.pixel_size > 0
+            else None
+        )
         return Show2D(
             frames,
             labels=labels,
             title=title if title is not None else self.title,
             cmap=cmap,
-            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            sampling=native_pixel_size,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
             show_fft=False,
@@ -3764,8 +3686,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.labels = []
             self.frame_bytes = b""
             self.frame_seq += 1
-            self._buffer_bytes = b""
-            self._buffer_start = 0
             self._offline_stack = b""
             self._offline_float_stack = b""
             self._offline_mins = []
@@ -3798,8 +3718,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         cycle through datasets in one widget cell. Resets state that is tied to
         the previous frame dimensions: ROIs and the line profile are cleared if
         ``(height, width)`` changes; bookmarks and the loop range are clamped
-        to the new ``n_slices``; the playback prefetch buffer is invalidated;
-        cached display data and any in-flight ROI debounce timer are dropped.
+        to the new ``n_slices``; cached display data and any in-flight ROI
+        debounce timer are dropped.
 
         Parameters
         ----------
@@ -3812,10 +3732,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             New per-frame labels. If ``None``, string indices ``"0"..."N-1"``
             are used.
         display_bin : int | None, optional
-            Explicit display-only binning for the replacement stack. ``None``
-            keeps the historical ``set_image`` behavior of native-pixel
-            display. Folder-backed updates pass their existing factor so a
-            watched append cannot silently switch resolution.
+            Display-only mean-binning for the replacement stack. ``None``
+            preserves this widget's current factor (4 by default).
 
         Returns
         -------
@@ -3868,8 +3786,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             getattr(self, "_padding", (0, 0)),
             getattr(self, "_pad_mode", "median"),
         )
-        # Stop playback so JS doesn't keep painting from the stale _buffer_bytes
-        # while we swap data. Invalidate cached torch view of display data.
+        # Stop playback while replacing the resident display stack. Invalidate
+        # the cached torch view of display data.
         # Cancel any pending ROI plot timer so it doesn't fire mid-swap with
         # stale _display_data dims (race observed by audit).
         if getattr(self, "_roi_plot_timer", None) is not None:
@@ -3918,15 +3836,14 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.hidden_page_slots = []
         self._reset_panel_contrast_traits()
         self._multi_panel_bin = 0
+        self._source_panels = None
         self.shared_panel_source = False
-        self.separate_panel_frames = False
-        self._separate_panel_data = None
         self.panel_real_frames = []
         self._panel_width = int(data.shape[2])
         self.n_slices = int(data.shape[0])
 
         if display_bin is None:
-            replacement_display_bin = 1
+            replacement_display_bin = max(1, int(self.display_bin))
         elif isinstance(display_bin, bool) or not isinstance(display_bin, int) or display_bin < 1:
             raise ValueError(f"display_bin must be an integer >= 1, got {display_bin!r}")
         else:
@@ -3934,6 +3851,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         orig_h, orig_w = data.shape[1], data.shape[2]
         self._display_bin = replacement_display_bin
+        self.display_bin = self._display_bin
         if self._display_bin > 1:
             from quantem.widget.utils.array import bin2d
 
@@ -3948,6 +3866,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._display_data = self._data
             self.height = orig_h
             self.width = orig_w
+        self.source_height = int(orig_h)
+        self.source_panel_width = int(orig_w)
+        self.source_bytes = int(self._data.nbytes)
 
         if self._use_torch:
             self.data_min = float(self._data_torch.min().item())
@@ -3979,22 +3900,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.loop_start = 0
         if self.loop_end >= self.n_slices:
             self.loop_end = -1
-        # Recompute buffer_size against new frame size, then invalidate JS-side
-        # buffer (otherwise JS would slice the new H×W out of the old buffer).
-        frame_bytes_n = self.height * self.width * 4
-        max_frames = max(1, _MAX_PLAYBACK_CHUNK_BYTES // max(1, frame_bytes_n))
-        self._buffer_size = min(self._buffer_size, self.n_slices, max_frames)
-        self._buffer_bytes = b""
-        if self.offline:
-            # Kernel-less consumers (docs pages, exported HTML, saved widget
-            # state) slice frames straight out of _offline_stack. Without a
-            # repack it still holds the PREVIOUS stack, and any slice index
-            # past its end renders blank after reopen. Pack from the color
-            # source so RGB stacks keep true color (_display_data is luminance).
-            self._pack_offline_u8_stack(self._offline_pack_source())
-        self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
-        self._update_all()
+        self._pack_exact_offline_stack()
+        self.frame_seq += 1
 
     def _apply_folder_image_records(
         self,
@@ -4924,9 +4832,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def play(self) -> Self:
         """Start playback from the current frame.
 
-        Sets the ``playing`` trait to ``True``, which triggers the JS
-        playback loop and the Python-side sliding-prefetch buffer that
-        ships chunks of frames ahead of the scrubber position.
+        Sets the ``playing`` trait to ``True``. Playback selects frames from
+        the display stack already resident in the browser.
 
         Returns
         -------
@@ -5566,8 +5473,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def _raw_profile_stack(self, panel: int) -> np.ndarray:
         """Return one display-resolution panel stack without diff processing."""
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            return np.asarray(self._separate_panel_data[panel], dtype=np.float32)
         data = np.asarray(self._display_data, dtype=np.float32)
         if int(self.n_panels) <= 1 or self.shared_panel_source:
             return data
@@ -5838,8 +5743,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}.")
         downsample = self._normalise_animation_downsample(downsample)
         max_edge_px = self._normalise_animation_max_edge(max_edge_px)
-        source_w = max(1, int(self.panel_width_px or self.width))
-        source_h = max(1, int(self.height))
+        source_w = max(1, int(self.source_panel_width or self.panel_width_px or self.width))
+        source_h = max(1, int(self.source_height or self.height))
         scale = gif_utils.animation_output_scale(
             source_w,
             source_h,
@@ -5865,7 +5770,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         include_scale_bar = bool(self.scale_bar_visible) if show_scale_bar is None else bool(show_scale_bar)
         include_zoom = bool(self.show_zoom_indicator) if show_zoom is None else bool(show_zoom)
         include_panel_titles = bool(self.show_panel_titles) if show_panel_titles is None else bool(show_panel_titles)
-        pixel_size = float(self.pixel_size) if include_scale_bar else 0.0
+        pixel_size = (
+            float(self.pixel_size) / max(1, int(self.display_bin))
+            if include_scale_bar
+            else 0.0
+        )
         unit = self.pixel_unit or "A"
         panel_indices = self._animation_panel_indices()
         panel_titles = [self._panel_title_for_index(panel) for panel in panel_indices]
@@ -5879,7 +5788,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ):
             panel_images = []
             for panel in panel_indices:
-                data = self._get_display_panel_frame(panel, frame_idx)
+                data = self._get_source_panel_frame(panel, frame_idx)
                 img = gif_utils.colorize(self._normalize_frame(data), self.cmap)
                 panel_images.append(
                     gif_utils.finalize_frame(
@@ -6227,8 +6136,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Release VRAM and RAM held by this widget.
 
         Drops the numpy stack, the torch view (if any), the binned display
-        copy, synced frame / ROI / prefetch bytes, and cancels any in-flight
-        ROI debounce timer.
+        copy, synced frame / ROI bytes, and cancels any in-flight ROI debounce
+        timer.
         When applicable, also flushes the CuPy memory pool and the FFT plan
         cache (in case a torch tensor was a view into CuPy memory), and
         releases the active torch device cache (``mps`` or ``cuda``).
@@ -6257,7 +6166,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
           new ``Show3D`` if you need to re-display something.
         """
         self.stop_folder_watch()
-        self._stop_frame_server()
         if self._data is None:
             return
         # Stop frontend playback FIRST so JS rAF loop tears down before we
@@ -6273,13 +6181,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._data = None
         self._data_torch = None
         self._display_data = None
-        self._separate_panel_data = None
         # Offline/export stacks are synced Bytes traits; without clearing them
         # free() leaves that RAM pinned by traitlets after _data is dropped.
         for trait in (
             "frame_bytes",
             "roi_plot_data",
-            "_buffer_bytes",
             "_offline_stack",
             "_offline_float_stack",
             "export_payload",
@@ -6307,21 +6213,20 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return
         total_ms = (time.perf_counter() - self._init_t0) * 1000
         py_ms = self._init_py_elapsed_ms
-        shape = (self.n_slices, self.height, self.width)
-        if self.separate_panel_frames and getattr(self, "_separate_panel_data", None) is not None:
-            mem = sum(int(p.nbytes) for p in self._separate_panel_data)
-        else:
-            mem = self._data.nbytes
+        source_width = int(self.source_panel_width) * (
+            1 if self.shared_panel_source else max(1, int(self.n_panels))
+        )
+        shape = (self.n_slices, int(self.source_height), source_width)
+        mem = int(self.source_bytes)
         self.render_total_ms = int(total_ms)
         self.render_python_build_ms = int(py_ms)
         self.render_wire_js_ms = int(total_ms - py_ms)
         if not getattr(self, "_save_state", False):
-            # The frontend has decoded and painted the initial frame/chunk by
+            # The frontend has decoded and painted the initial stack by
             # the time it flips `_js_rendered`. Clear synced bulk buffers so a
             # later notebook save stores the compact static fallback, not the
-            # multi-frame transfer buffers. Targeted initial sync is untouched.
+            # embedded transfer payload. Targeted initial sync is untouched.
             self.frame_bytes = b""
-            self._buffer_bytes = b""
         if getattr(self, "_verbose", True):
             print(
                 format_widget_render_timing(
@@ -6333,11 +6238,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     python_ms=py_ms,
                     wire_js_ms=total_ms - py_ms,
                     extra_rows=[
-                        ("Frame server", "on" if self.frame_server_url else "off"),
+                        ("Display bin", f"{self.display_bin}× mean"),
                         (
-                            "Offline stack",
-                            "on" if bool(self._offline_stack or self._offline_float_stack) else "off",
+                            "Browser display",
+                            f"{self.n_slices}x{self.height}x{self.width} | float32",
                         ),
+                        ("Embedded float32 stack", "on"),
                     ],
                 ),
                 flush=True,
@@ -6379,115 +6285,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         else:
             self.data_min = float(data.min())
             self.data_max = float(data.max())
-        self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
-        self._update_all()
 
     def _on_slice_change(self, change: dict | None = None) -> None:
-        """Observer: `slice_idx` changed via scrub. Skipped during playback
-        (playback drives frames from the JS-side prefetch buffer). Stats are
-        computed JS-side from frame_bytes; Python only ships the raw bytes."""
-        if self.playing:
-            return
-        if self._lazy_panel_paths is not None and self.frame_server_url and not self.roi_active:
-            with self.hold_sync():
-                self.roi_stats = {}
-                self.frame_seq = self.frame_seq + 1
-            return
-        self._update_all()
+        """Keep slice changes metadata-only; frame selection is browser-owned."""
+        self.roi_stats = {}
 
     def _on_playing_change(self, change: dict | None = None) -> None:
-        """Observer: `playing` toggled. Starts the JS animation via a sliding
-        buffer chunk, or refreshes stats on the held frame on stop."""
-        if self.playing:
-            if self.frame_server_url:
-                with self.hold_sync():
-                    self._buffer_start = int(self.slice_idx)
-                    self._buffer_count = 0
-                    self._buffer_bytes = b""
-            else:
-                self._send_buffer(self.slice_idx)
-        else:
-            self._update_all()
-
-    def _on_prefetch(self, change: dict | None = None) -> None:
-        """Observer: JS requested the next playback chunk. Re-sends the sliding
-        window so playback never starves."""
-        if self.frame_server_url:
-            return
-        if self._prefetch_request >= 0 and self.playing:
-            self._send_buffer(self._prefetch_request % self.n_slices)
-
-    def _on_scrub_preview_request(self, change: dict | None = None) -> None:
-        """Ship a drag-time display preview when full frames are too large.
-
-        This never mutates or replaces the source/display stack. It only caps
-        the transient pixels used while the slider thumb is moving; committing a
-        slice still sends the native full-resolution frame through ``frame_bytes``.
-        """
-        request_raw = str(self._scrub_preview_request or "")
-        if not request_raw:
-            return
-        try:
-            request = json.loads(request_raw)
-        except json.JSONDecodeError:
-            return
-        token = str(request.get("token") or "")
-        if not token or self.n_slices <= 0:
-            return
-        idx = int(request.get("idx", self.slice_idx)) % int(self.n_slices)
-        max_bytes = int(request.get("maxBytes", 16 * 1024 * 1024))
-        max_bytes = max(1 * 1024 * 1024, min(128 * 1024 * 1024, max_bytes))
-
-        timing_t0 = time.perf_counter()
-        if self.is_rgb and self._rgb_data is not None:
-            frame = np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)
-            full_height, full_width = int(frame.shape[0]), int(frame.shape[1])
-            channels = 3
-        else:
-            frame = self._wire_frame(
-                self._get_display_frame(idx),
-                cache_key=("scrub-preview", idx, self.diff_mode),
-            )
-            full_height, full_width = int(frame.shape[0]), int(frame.shape[1])
-            channels = 1
-        full_bytes = int(frame.nbytes)
-        factor = max(1, int(math.ceil(math.sqrt(full_bytes / max_bytes))))
-        if factor > 1:
-            if channels == 3:
-                preview = np.ascontiguousarray(frame[::factor, ::factor, :], dtype=np.float32)
-            else:
-                preview = np.ascontiguousarray(frame[::factor, ::factor], dtype=np.float32)
-            if getattr(self, "_last_scrub_preview_factor", None) != factor:
-                print(
-                    "[Show3D scrub preview] "
-                    f"displaying {factor}x reduced frames during slider drag; "
-                    "release the slider or zoom/settle the view to request native full resolution."
-                )
-                self._last_scrub_preview_factor = factor
-        else:
-            preview = np.ascontiguousarray(frame, dtype=np.float32)
-        timing_after_prepare = time.perf_counter()
-        payload = preview.tobytes()
-        timing_after_encode = time.perf_counter()
-        send_wall_ms = time.time() * 1000.0
-        with self.hold_sync():
-            self._scrub_preview_info = {
-                "token": token,
-                "idx": idx,
-                "factor": factor,
-                "height": int(preview.shape[0]),
-                "width": int(preview.shape[1]),
-                "fullHeight": full_height,
-                "fullWidth": full_width,
-                "channels": channels,
-                "bytes": len(payload),
-                "fullBytes": full_bytes,
-                "sendTimeMs": send_wall_ms,
-                "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
-                "pythonEncodeMs": round((timing_after_encode - timing_after_prepare) * 1000.0, 3),
-            }
-            self._scrub_preview_bytes = payload
+        """Keep playback browser-owned; no stack data crosses the comm again."""
+        if not self.playing:
+            self.roi_stats = {}
 
     def _on_roi_change(self, change: dict | None = None) -> None:
         """Handle ROI change. Stats for current frame are instant.
@@ -6808,11 +6615,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if self.shared_panel_source and n_panels > 1:
             src = _bin_gray(self._display_data)
             return tuple(src for _ in range(n_panels))
-        if self._separate_panel_data is not None:
-            return tuple(
-                _bin_gray(panel)
-                for panel in self._separate_panel_data
-            )
         if n_panels > 1 and int(self.panel_width_px) > 0:
             panel_w = int(self.panel_width_px)
             if int(self.width) == panel_w * n_panels:
@@ -6866,8 +6668,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # RGB: pack (N, H, W, 3) float32 so JS can slice true-color frames offline.
         if self.is_rgb and getattr(self, "_rgb_data", None) is not None:
             return np.ascontiguousarray(self._rgb_data, dtype=np.float32)
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            return np.concatenate(self._separate_panel_data, axis=2)
         return np.ascontiguousarray(self._display_data, dtype=np.float32)
 
     def _pack_offline_u8_stack(self, offline_source: np.ndarray) -> None:
@@ -6883,14 +6683,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         range so offline HTML stays small enough for Chrome ``file://``.
         """
         arr = np.ascontiguousarray(offline_source, dtype=np.float32)
+        # Quantized exports carry exactly one pixel payload. The constructor
+        # first establishes the normal exact display stack, so explicitly drop
+        # it before replacing that payload with uint8.
+        self._offline_float_stack = b""
         # RGB true-color path: (N, H, W, 3)
         if getattr(self, "is_rgb", False) and arr.ndim == 4 and arr.shape[-1] == 3:
             self._offline_min = 0.0
             self._offline_max = 1.0
             self._offline_mins = []
             self._offline_maxs = []
-            self._offline_float_stack = b""
-            self._offline_stack_url = ""
             mx = float(np.nanmax(arr)) if arr.size else 1.0
             if mx > 1.5:
                 quantized = np.clip(arr, 0, 255).astype(np.uint8)
@@ -6910,7 +6712,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._offline_max = hi
         self._offline_mins = []
         self._offline_maxs = []
-        self._offline_stack_url = ""
         panel_count = int(self.n_panels)
         panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
         if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
@@ -6952,7 +6753,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._offline_stack = b""
         self._offline_float_stack = arr.tobytes()
         self.frame_bytes = b""
-        self._buffer_bytes = b""
 
     def _clone_for_html_export(self, *, quantized: bool, downsample: int = 1) -> Self:
         """Create an export-only widget with current state and requested packing."""
@@ -7002,7 +6802,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             debug=self.debug,
             size=self.size,
             diff_mode=self.diff_mode,
-            buffer_size=getattr(self, "_buffer_size", 64),
+            buffer_size=64,
             dim_label=self.dim_label,
             use_torch=False,
             display_bin=1,
@@ -7044,7 +6844,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if downsample > 1 and clone.pixel_size > 0:
             clone.pixel_size = export_pixel_size
         if quantized:
-            clone._offline_float_stack = b""
+            clone._pack_offline_u8_stack(clone._offline_pack_source())
         else:
             clone._pack_exact_offline_stack()
         clone.playing = bool(self.playing)
@@ -7058,185 +6858,26 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         clone.handoff_request = ""
         clone.prepared_view = None
         clone.prepared_view_widget = None
-        clone._stop_frame_server()
-        clone.frame_server_url = ""
-        clone._buffer_bytes = b""
         clone._export_light = True
         clone._save_state = True  # export clones must embed the offline stack;
         # get_state() drops _offline_*_stack when _save_state is False (notebook-metadata guard).
         return clone
 
-    def _start_frame_server(self) -> None:
-        """Start the localhost exact-frame endpoint used by browser playback."""
-        if getattr(self, "_frame_server", None) is not None:
-            return
-
-        widget_ref = weakref.ref(self)
-        token = self._frame_server_token
-
-        class FrameHandler(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, fmt: str, *args) -> None:  # noqa: D401
-                return
-
-            def _cors(self) -> None:
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
-                self.send_header("Cache-Control", "no-store")
-
-            def _text(self, status: int, message: str) -> None:
-                body = message.encode("utf-8")
-                self.send_response(status)
-                self._cors()
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(body)
-
-            def do_OPTIONS(self) -> None:
-                self.send_response(204)
-                self._cors()
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def do_GET(self) -> None:
-                parsed = urllib.parse.urlsplit(self.path)
-                if parsed.path != "/frame":
-                    self._text(404, "not found")
-                    return
-                params = urllib.parse.parse_qs(parsed.query)
-                if params.get("token", [""])[0] != token:
-                    self._text(403, "forbidden")
-                    return
-                try:
-                    idx = int(params.get("idx", [""])[0])
-                except ValueError:
-                    self._text(400, "idx must be an integer")
-                    return
-                panel_param = params.get("panel", [None])[0]
-                try:
-                    panel = int(panel_param) if panel_param is not None else None
-                except ValueError:
-                    self._text(400, "panel must be an integer")
-                    return
-                version_param = params.get("version", [None])[0]
-                try:
-                    version = int(version_param) if version_param is not None else None
-                except ValueError:
-                    self._text(400, "version must be an integer")
-                    return
-
-                widget = widget_ref()
-                if widget is None:
-                    self._text(410, "widget is gone")
-                    return
-                status, frame_or_message = widget._frame_for_http(idx, version, panel)
-                if status != 200:
-                    self._text(status, str(frame_or_message))
-                    return
-
-                frame = frame_or_message
-                view = memoryview(frame).cast("B")
-                self.send_response(200)
-                self._cors()
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(len(view)))
-                self.send_header("X-Frame-Index", str(idx))
-                self.send_header("X-Frame-Shape", f"{frame.shape[0]},{frame.shape[1]}")
-                self.end_headers()
-                try:
-                    self.wfile.write(view)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-
-        try:
-            server = _Show3DFrameHTTPServer(("127.0.0.1", 0), FrameHandler)
-        except OSError as exc:
-            warnings.warn(f"Show3D frame server disabled: {exc}", RuntimeWarning, stacklevel=2)
-            self.frame_server_url = ""
-            return
-
-        thread = threading.Thread(
-            target=server.serve_forever,
-            name=f"Show3DFrameServer-{id(self):x}",
-            daemon=True,
-        )
-        thread.start()
-        self._frame_server = server
-        self._frame_server_thread = thread
-        host, port = server.server_address[:2]
-        quoted_token = urllib.parse.quote(self._frame_server_token, safe="")
-        self.frame_server_url = f"http://{host}:{port}/frame?token={quoted_token}"
-        self._bump_frame_server_version()
-
-    def _stop_frame_server(self) -> None:
-        """Stop the localhost frame endpoint."""
-        server = getattr(self, "_frame_server", None)
-        thread = getattr(self, "_frame_server_thread", None)
-        self._frame_server = None
-        self._frame_server_thread = None
-        if self.frame_server_url:
-            self.frame_server_url = ""
-            self._bump_frame_server_version()
-        if server is None:
-            return
-        try:
-            server.shutdown()
-        finally:
-            server.server_close()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
-
-    def _bump_frame_server_version(self) -> None:
-        self.frame_server_version = int(self.frame_server_version) + 1
-
-    def _frame_for_http(self, idx: int, version: int | None, panel: int | None = None) -> tuple[int, np.ndarray | str]:
-        if version is not None and version != self.frame_server_version:
-            return 409, "stale frame server version"
-        data = self._display_data
-        if data is None:
-            return 410, "frame data has been released"
-        if idx < 0 or idx >= int(self.n_slices):
-            return 416, f"frame index {idx} out of range [0, {self.n_slices})"
-        if panel is not None:
-            if not self.separate_panel_frames:
-                return 400, "panel query is only valid for separate-panel frames"
-            if panel < 0 or panel >= int(self.n_panels):
-                return 416, f"panel index {panel} out of range [0, {self.n_panels})"
-            frame = np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32)
-        else:
-            frame = np.asarray(self._get_display_frame(idx), dtype=np.float32)
-        frame = self._wire_frame(frame, cache_key=("http", idx, panel, self.diff_mode))
-        if not frame.flags.c_contiguous:
-            frame = np.ascontiguousarray(frame)
-        return 200, frame
-
     def _get_display_panel_frame(self, panel: int, idx: int) -> np.ndarray:
-        if self._lazy_panel_paths is not None:
-            frame = self._lazy_panel_frame(panel, idx)
-            if self.diff_mode == "previous":
-                if idx == 0:
-                    return np.zeros_like(frame)
-                return frame - self._lazy_panel_frame(panel, idx - 1)
-            if self.diff_mode == "first":
-                return frame - self._lazy_panel_frame(panel, 0)
+        frame = self._get_display_frame(idx)
+        pw = int(self.panel_width_px) or frame.shape[1] // max(1, int(self.n_panels))
+        return frame[:, panel * pw : (panel + 1) * pw]
+
+    def _get_source_panel_frame(self, panel: int, idx: int) -> np.ndarray:
+        """Return one native Python frame for scientific handoff APIs."""
+        source_panels = getattr(self, "_source_panels", None)
+        if source_panels:
+            return np.asarray(source_panels[panel][idx])
+        frame = np.asarray(self._data[idx])
+        if self.shared_panel_source or int(self.n_panels) <= 1:
             return frame
-        panels = getattr(self, "_separate_panel_data", None)
-        if not self.separate_panel_frames or panels is None:
-            frame = self._get_display_frame(idx)
-            pw = int(self.panel_width_px) or frame.shape[1] // max(1, int(self.n_panels))
-            return frame[:, panel * pw : (panel + 1) * pw]
-        frame = panels[panel][idx]
-        if self.diff_mode == "previous":
-            if idx == 0:
-                return np.zeros_like(frame)
-            return frame - panels[panel][idx - 1]
-        if self.diff_mode == "first":
-            return frame - panels[panel][0]
-        return frame
+        panel_width = frame.shape[1] // int(self.n_panels)
+        return frame[:, panel * panel_width : (panel + 1) * panel_width]
 
     def _get_display_frame(self, idx: int | None = None) -> np.ndarray:
         """Return the (binned, possibly diff-mode) frame for display. idx=None uses
@@ -7244,11 +6885,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         observers see the same data the browser renders."""
         if idx is None:
             idx = self.slice_idx
-        if self.separate_panel_frames and getattr(self, "_separate_panel_data", None) is not None:
-            return np.concatenate(
-                [self._get_display_panel_frame(panel, idx) for panel in range(int(self.n_panels))],
-                axis=1,
-            )
         data = self._display_data
         frame = data[idx]
         if self.diff_mode == "previous":
@@ -7257,100 +6893,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return frame - data[idx - 1]
         if self.diff_mode == "first":
             return frame - data[0]
-        return frame
-
-    def _install_lazy_panel_source(
-        self,
-        paths_by_panel: Sequence[Sequence[pathlib.Path]],
-        *,
-        labels: Sequence[str],
-        panel_frame_labels: Sequence[Sequence[str]],
-        panel_real_frames: Sequence[int],
-        source_shape: tuple[int, int] | None = None,
-        data_range: tuple[float, float] | None = None,
-    ) -> None:
-        """Attach on-demand panel files after the metadata-only bootstrap."""
-        if not paths_by_panel:
-            raise ValueError("lazy panel source needs at least one panel")
-        max_n = max(len(files) for files in paths_by_panel)
-        if max_n <= 0:
-            raise ValueError("lazy panel source needs at least one frame")
-        self._lazy_panel_paths = [
-            [pathlib.Path(path) for path in files] for files in paths_by_panel
-        ]
-        self._lazy_panel_cache = OrderedDict()
-        self._lazy_panel_cache_bytes = 0
-        if source_shape is None:
-            height = int(self.height)
-            panel_width = int(self.panel_width_px) or max(1, int(self.width) // max(1, int(self.n_panels)))
-        else:
-            height = int(source_shape[0])
-            panel_width = int(source_shape[1])
-        stack_min = float(data_range[0]) if data_range is not None else float(self.data_min)
-        stack_max = float(data_range[1]) if data_range is not None else float(self.data_max)
-        if not math.isfinite(stack_min) or not math.isfinite(stack_max) or stack_min >= stack_max:
-            stack_min, stack_max = 0.0, 1.0
-        with self.hold_sync():
-            self.separate_panel_frames = True
-            self.n_panels = len(self._lazy_panel_paths)
-            self.n_slices = int(max_n)
-            self.panel_real_frames = [int(value) for value in panel_real_frames]
-            self.labels = list(labels)
-            self.panel_frame_labels = [list(values) for values in panel_frame_labels]
-            self.height = height
-            self.panel_width_px = panel_width
-            self._panel_width = panel_width
-            self.width = panel_width * int(self.n_panels)
-            self._buffer_size = min(int(getattr(self, "_buffer_size", 1)) or 1, int(max_n))
-            self.data_min = stack_min
-            self.data_max = stack_max
-            self._data_min_off = stack_min
-            self._data_max_off = stack_max
-            if self._vmin_user is None:
-                self._vmin = stack_min
-                self.vmin = stack_min
-            if self._vmax_user is None:
-                self._vmax = stack_max
-                self.vmax = stack_max
-            self.auto_vmins = [self._vmin] * int(max_n) if self.auto_contrast else []
-            self.auto_vmaxs = [self._vmax] * int(max_n) if self.auto_contrast else []
-            self.frame_bytes = b""
-            self._buffer_bytes = b""
-            self._buffer_start = 0
-            self._buffer_count = 0
-            self._bump_frame_server_version()
-
-    def _lazy_panel_frame(self, panel: int, idx: int) -> np.ndarray:
-        """Decode one lazy panel frame at native resolution with a small LRU."""
-        paths_by_panel = self._lazy_panel_paths
-        if paths_by_panel is None:
-            raise RuntimeError("lazy panel source is not installed")
-        panel = max(0, min(int(panel), len(paths_by_panel) - 1))
-        files = paths_by_panel[panel]
-        if not files:
-            raise RuntimeError(f"lazy panel {panel} has no frames")
-        frame_idx = max(0, min(int(idx), len(files) - 1))
-        key = (panel, frame_idx, str(files[frame_idx]))
-        with self._lazy_panel_lock:
-            cached = self._lazy_panel_cache.get(key)
-            if cached is not None:
-                self._lazy_panel_cache.move_to_end(key)
-                return cached
-
-        from quantem.widget.io.image import _read_frame  # noqa: PLC0415
-
-        frame = np.ascontiguousarray(_read_frame(files[frame_idx]), dtype=np.float32)
-        if frame.ndim != 2:
-            raise ValueError(f"Lazy panel frame must be 2D; got {frame.shape} from {files[frame_idx]}")
-        with self._lazy_panel_lock:
-            self._lazy_panel_cache[key] = frame
-            self._lazy_panel_cache_bytes += int(frame.nbytes)
-            while (
-                self._lazy_panel_cache_bytes > int(self._lazy_panel_cache_limit_bytes)
-                and len(self._lazy_panel_cache) > 1
-            ):
-                _, old = self._lazy_panel_cache.popitem(last=False)
-                self._lazy_panel_cache_bytes -= int(old.nbytes)
         return frame
 
     def _refresh_auto_contrast_ranges(self) -> None:
@@ -7369,30 +6911,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.auto_vmins = []
             self.auto_vmaxs = []
             return
-        if self._lazy_panel_paths is not None:
-            self.auto_vmins = [float(self._vmin)] * int(self.n_slices)
-            self.auto_vmaxs = [float(self._vmax)] * int(self.n_slices)
-            return
-
         low_target = self.percentile_low / 100.0
         high_target = self.percentile_high / 100.0
         bins = 1024
         denom = bins - 1
-        separate_panels = self.separate_panel_frames and getattr(self, "_separate_panel_data", None) is not None
         mn = float("inf")
         mx = float("-inf")
         total_size = 0
         for i in range(self.n_slices):
-            if separate_panels:
-                panel_frames = [self._get_display_panel_frame(panel, i) for panel in range(int(self.n_panels))]
-                mn = min(mn, min(float(np.min(frame)) for frame in panel_frames))
-                mx = max(mx, max(float(np.max(frame)) for frame in panel_frames))
-                total_size += sum(int(frame.size) for frame in panel_frames)
-            else:
-                frame = self._get_display_frame(i)
-                mn = min(mn, float(np.min(frame)))
-                mx = max(mx, float(np.max(frame)))
-                total_size += int(frame.size)
+            frame = self._get_display_frame(i)
+            mn = min(mn, float(np.min(frame)))
+            mx = max(mx, float(np.max(frame)))
+            total_size += int(frame.size)
         if total_size <= 0 or not math.isfinite(mn) or not math.isfinite(mx):
             self.auto_vmins = []
             self.auto_vmaxs = []
@@ -7404,15 +6934,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         hist = np.zeros(bins, dtype=np.int64)
         for i in range(self.n_slices):
-            if separate_panels:
-                for panel in range(int(self.n_panels)):
-                    frame = self._get_display_panel_frame(panel, i)
-                    panel_hist, _ = np.histogram(frame, bins=bins, range=(mn, mx))
-                    hist += panel_hist
-            else:
-                frame = self._get_display_frame(i)
-                frame_hist, _ = np.histogram(frame, bins=bins, range=(mn, mx))
-                hist += frame_hist
+            frame = self._get_display_frame(i)
+            frame_hist, _ = np.histogram(frame, bins=bins, range=(mn, mx))
+            hist += frame_hist
 
         csum = np.cumsum(hist)
         low_count = int(total_size * low_target)
@@ -7435,7 +6959,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # snapshot when save_state is False so a plain display stays a few MB, not GB.
     _UNSAVED_HEAVY_KEYS = (
         "frame_bytes",
-        "_buffer_bytes",
         "_offline_stack",
         "_offline_float_stack",
         "export_payload",
@@ -7449,8 +6972,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ``save_state`` is False we drop the heavy frame buffers from that
         snapshot, so a plain Show3D does not bake a hundreds-of-MB z-stack into
         the .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
-        send_state during live streaming) are untouched, so the frontend still
-        receives ``frame_bytes`` / ``_buffer_bytes`` normally. ``save_state=True``
+        send_state during live updates) are untouched. ``save_state=True``
         embeds everything so a reopened notebook restores the interactive widget
         without a kernel.
         """
@@ -7746,88 +7268,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         return np.zeros(frame.shape, dtype=np.uint8)
 
     def _update_all(self) -> None:
-        """Ship frame_bytes to JS. Stats (mean/min/max/std/histogram) are
-        recomputed entirely on the JS side from the float32 bytes - Python
-        doing the same reductions wastes ~50 ms per scrub at 4k full-res.
-        ROI stats stay on Python because the mask logic + per-ROI bookkeeping
-        lives here. In offline mode JS slices from _offline_stack directly,
-        so frame_bytes is dead weight in the HTML state - skip the write."""
-        timing_t0 = time.perf_counter()
-        display_frame = None
-        if self.roi_active or not self.separate_panel_frames:
-            display_frame = self._get_display_frame()
-        timing_after_prepare = time.perf_counter()
-        frame_timing: dict[str, object] | None = None
-        with self.hold_sync():
-            if self.roi_active and display_frame is not None:
-                self._update_roi_stats(display_frame)
-            else:
-                self.roi_stats = {}
-            if not self.offline and not self.separate_panel_frames:
-                timing_after_wire = time.perf_counter()
-                timing_after_encode = timing_after_wire
-                payload: bytes | None = None
-                if self.is_rgb and self._rgb_data is not None:
-                    # Ship display-ready RGB float32 (H, W, 3) so JS paints true color
-                    # without applying a colormap.
-                    idx = int(self.slice_idx) if hasattr(self, "slice_idx") else 0
-                    idx = max(0, min(idx, int(self._rgb_data.shape[0]) - 1))
-                    rgb_frame = np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)
-                    timing_after_wire = time.perf_counter()
-                    payload = rgb_frame.tobytes()
-                    timing_after_encode = time.perf_counter()
-                else:
-                    wire = self._wire_frame(
-                        display_frame, cache_key=("buf", int(self.slice_idx), self.diff_mode)
-                    )
-                    timing_after_wire = time.perf_counter()
-                    payload = wire.tobytes()
-                    timing_after_encode = time.perf_counter()
-                send_wall_ms = time.time() * 1000.0
-                send_perf = time.perf_counter()
-                self.frame_bytes = payload
-                timing_after_trait = time.perf_counter()
-                frame_timing = {
-                    "kind": "frame",
-                    "seq": int(self.frame_seq) + 1,
-                    "slice": int(self.slice_idx),
-                    "bytes": len(payload or b""),
-                    "sendTimeMs": send_wall_ms,
-                    "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
-                    "pythonWireMs": round((timing_after_wire - timing_after_prepare) * 1000.0, 3),
-                    "pythonEncodeMs": round((timing_after_encode - timing_after_wire) * 1000.0, 3),
-                    "pythonTraitSetMs": round((timing_after_trait - send_perf) * 1000.0, 3),
-                }
-                self.frame_transport_timing = frame_timing
-            self.frame_seq = self.frame_seq + 1
-        if frame_timing and bool(getattr(self, "debug", False)):
-            print(
-                "[Show3D transport] frame "
-                f"slice={frame_timing['slice']} bytes={frame_timing['bytes']} "
-                f"prepare={frame_timing['pythonPrepareMs']}ms "
-                f"wire={frame_timing['pythonWireMs']}ms "
-                f"encode={frame_timing['pythonEncodeMs']}ms"
-            )
-
-    def _defer_initial_frame_wire(self) -> bool:
-        """Return True when JS can fetch the initial native frame after mount.
-
-        This keeps remote notebooks responsive: the controls and canvas mount
-        first, then the browser fetches native pixels through the frame server.
-        Source arrays stay full resolution; only the initial transport ordering
-        changes.
-        """
-        channels = 3 if bool(getattr(self, "is_rgb", False)) else 1
-        frame_bytes = int(getattr(self, "height", 0)) * int(getattr(self, "width", 0)) * 4 * channels
-        return (
-            not bool(getattr(self, "offline", False))
-            and bool(getattr(self, "frame_server_url", ""))
-            and not bool(getattr(self, "roi_active", False))
-            and (
-                bool(getattr(self, "separate_panel_frames", False))
-                or frame_bytes > _INITIAL_FRAME_DEFER_BYTES
-            )
-        )
+        """Refresh Python-owned ROI statistics without sending frame pixels."""
+        if self.roi_active:
+            self._update_roi_stats(self._get_display_frame())
+        else:
+            self.roi_stats = {}
 
     def _update_roi_stats(self, frame: np.ndarray) -> None:
         """Compute mean/min/max/std/area of the currently-selected ROI on `frame`
@@ -7974,7 +7419,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
     def _on_display_filter_change(self, change: dict) -> None:
-        """Invalidate the filtered-frame cache and resend the view (no disk I/O)."""
+        """Update display-filter state without retransferring the resident stack."""
         if not getattr(self, "_display_filter_ready", False):
             return
         if change["name"] == "denoise":
@@ -7992,25 +7437,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.denoise_enabled = True
         self._display_filter_cache = {}
         self._refresh_display_filter_banner(announce=True)
-        if self.offline:
-            self._pack_offline_u8_stack(self._offline_pack_source())
-        self.frame_server_version = int(self.frame_server_version) + 1
-        self._send_buffer(int(self._buffer_start))
-        self._update_all()
 
     @traitlets.observe("_webgpu_filter_ok")
     def _on_webgpu_filter_ok_change(self, change: dict) -> None:
-        """Re-ship the view when browser filtering is negotiated on/off.
-
-        Flipping the flag changes whether Python bakes the denoise or ships raw,
-        so the cached filtered frames are stale and the buffer must re-send.
-        """
+        """Invalidate derived filter caches without retransferring source pixels."""
         if not getattr(self, "_display_filter_ready", False):
             return
         self._display_filter_cache = {}
-        self.frame_server_version = int(self.frame_server_version) + 1
-        self._send_buffer(int(self._buffer_start))
-        self._update_all()
 
     def _has_denoise_config(self) -> bool:
         """A denoise config is present, regardless of the master on/off (used to
@@ -8060,23 +7493,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # True-color stacks pack RGB, not the luminance plane used for stats.
         if self.is_rgb and getattr(self, "_rgb_data", None) is not None:
             return np.ascontiguousarray(self._rgb_data, dtype=np.float32)
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            return np.concatenate(self._separate_panel_data, axis=2)
         return self._display_data
-
-    def _wire_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
-        """Filtered VIEW copy of one display-bound frame; raw data untouched.
-
-        Live frames leaving Python for display (buffer window, frame_bytes,
-        frame server) pass through here. When the frontend negotiated
-        ``_webgpu_filter_ok`` (a real GPU adapter), the denoise runs in the
-        browser (WGSL, live sigma scrub) instead, so we ship RAW frames and
-        skip the scipy path entirely. Offline packing calls ``_filter_frame``
-        directly so exported HTML always carries the filtered pixels.
-        """
-        if bool(self._webgpu_filter_ok):
-            return frame
-        return self._filter_frame(frame, cache_key)
 
     def _filter_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
         """Apply the display denoise to one frame in Python (scipy path).
@@ -8101,46 +7518,6 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._display_filter_cache[cache_key] = filtered
         return filtered
 
-    def _send_buffer(self, start_idx: int) -> None:
-        timing_t0 = time.perf_counter()
-        end_idx = start_idx + self._buffer_size
-        # Ship raw display frames directly when denoise is off OR when the
-        # browser owns filtering (_webgpu_filter_ok): the WGSL port applies it.
-        if self.diff_mode == "off" and (not self._display_filter_active() or bool(self._webgpu_filter_ok)):
-            data = self._display_data
-            if end_idx <= self.n_slices:
-                chunk = data[start_idx:end_idx]
-            else:
-                chunk = np.concatenate(
-                    [data[start_idx:], data[: end_idx - self.n_slices]]
-                )
-        else:
-            frames = []
-            for j in range(self._buffer_size):
-                idx = (start_idx + j) % self.n_slices
-                key = ("buf", idx, self.diff_mode)
-                frames.append(self._wire_frame(self._get_display_frame(idx), cache_key=key))
-            chunk = np.stack(frames)
-        timing_after_prepare = time.perf_counter()
-        payload = chunk.tobytes()
-        timing_after_encode = time.perf_counter()
-        with self.hold_sync():
-            self._buffer_start = int(start_idx)
-            self._buffer_count = int(chunk.shape[0])
-            send_wall_ms = time.time() * 1000.0
-            send_perf = time.perf_counter()
-            self._buffer_bytes = payload
-            timing_after_trait = time.perf_counter()
-            self.buffer_transport_timing = {
-                "kind": "buffer",
-                "start": int(start_idx),
-                "count": int(chunk.shape[0]),
-                "bytes": len(payload),
-                "sendTimeMs": send_wall_ms,
-                "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
-                "pythonEncodeMs": round((timing_after_encode - timing_after_prepare) * 1000.0, 3),
-                "pythonTraitSetMs": round((timing_after_trait - send_perf) * 1000.0, 3),
-            }
 
     def _sample_line(self, img: np.ndarray, row0: float, col0: float, row1: float, col1: float) -> np.ndarray:
         """Sample one pixel line between two endpoints via bilinear interpolation.

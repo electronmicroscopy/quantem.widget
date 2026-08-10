@@ -76,8 +76,9 @@ def test_show3d_rgb_stack_from_pngs(tmp_path: Path):
     assert w.height == 24 and w.width == 32
     assert w._rgb_data is not None
     assert w._rgb_data.shape == (2, 24, 32, 3)
-    # frame_bytes should be RGB float32, 3 channels
-    assert len(w.frame_bytes) == 24 * 32 * 3 * 4
+    # The single embedded RGB float32 stack is the live browser payload.
+    assert w.frame_bytes == b""
+    assert len(w._offline_float_stack) == 2 * 24 * 32 * 3 * 4
 
 
 def test_show3d_direct_rgb_array():

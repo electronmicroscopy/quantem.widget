@@ -43,7 +43,8 @@ def test_show3d_panel_width_px_sets_display_size_not_source_width():
     assert widget.size == 70
     assert widget.max_cols == 13
     assert widget.n_panels == 13
-    assert widget.panel_width_px == 8
+    assert widget.panel_width_px == 2
+    assert widget.source_panel_width == 8
 
 
 def test_show3d_quantized_offline_uses_per_panel_ranges():
@@ -53,15 +54,19 @@ def test_show3d_quantized_offline_uses_per_panel_ranges():
         np.linspace(-0.3, 0.7, 2 * 4 * 4, dtype=np.float32).reshape(2, 4, 4),
     ]
 
-    widget = Show3D(*panels, offline=True, show_controls=False)
-    packed = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(2, 4, 12)
+    widget = Show3D(*panels, display_bin=1, show_controls=False)
+    clone = widget._clone_for_html_export(quantized=True)
+    assert clone._offline_float_stack == b""
+    packed = np.frombuffer(clone._offline_stack, dtype=np.uint8).reshape(2, 4, 12)
 
-    assert widget._offline_mins == [10.0, 0.0, np.float32(-0.3)]
-    assert widget._offline_maxs == [1000.0, 100.0, np.float32(0.7)]
+    assert clone._offline_mins == [10.0, 0.0, np.float32(-0.3)]
+    assert clone._offline_maxs == [1000.0, 100.0, np.float32(0.7)]
     assert [
         (int(packed[:, :, i * 4 : (i + 1) * 4].min()), int(packed[:, :, i * 4 : (i + 1) * 4].max()))
         for i in range(3)
     ] == [(0, 255), (0, 255), (0, 255)]
+    clone.close()
+    widget.close()
 
 
 def test_show3dslices_panel_width_px_syncs_to_frontend_state():

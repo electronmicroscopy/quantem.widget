@@ -1012,7 +1012,12 @@ def test_folder_calibration_is_preserved_until_files_disagree(
 
     widget = viewer.from_folder(tmp_path, watch=False)
     try:
-        assert widget.pixel_size == pytest.approx(0.2)
+        if viewer is Show3D:
+            assert widget.display_bin == 4
+            assert widget.pixel_size == pytest.approx(0.8)
+            assert widget.pixel_size / widget.display_bin == pytest.approx(0.2)
+        else:
+            assert widget.pixel_size == pytest.approx(0.2)
         assert widget.pixel_unit == "nm"
         assert widget.scale_bar_visible is True
 

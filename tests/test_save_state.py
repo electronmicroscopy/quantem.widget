@@ -765,21 +765,23 @@ def test_show2d_first_render_clears_heavy_frame_buffer():
 
 
 def test_show3d_first_render_clears_heavy_transfer_buffers():
-    """After JS paints, later notebook saves should not keep transfer buffers."""
+    """After JS paints, later notebook saves omit the initial display stack."""
     stack = np.random.default_rng(1).random((6, 128, 128), dtype=np.float32)
     widget = Show3D(stack, save_state=False)
     widget.frame_bytes = b"frame-transfer"
-    widget._buffer_bytes = b"chunk-transfer"
 
     widget._on_first_render({"new": True})
 
     assert widget.frame_bytes == b""
-    assert widget._buffer_bytes == b""
     full = widget.get_state()
     assert "frame_bytes" not in full
-    assert "_buffer_bytes" not in full
+    assert "_offline_float_stack" not in full
     buffers = widget._get_embed_state().get("buffers", [])
-    assert not [b for b in buffers if b.get("path") in (["frame_bytes"], ["_buffer_bytes"])]
+    assert not [
+        b
+        for b in buffers
+        if b.get("path") in (["frame_bytes"], ["_offline_float_stack"])
+    ]
     assert not [b for b in buffers if b.get("data")]
 
 
@@ -796,13 +798,13 @@ def test_show3d_live_mount_state_keeps_initial_frame_before_first_render():
     pre_render = widget._with_initial_live_mount_state(widget.get_state)
 
     assert widget._js_rendered is False
-    assert pre_render.get("frame_bytes"), "pre-render live mount lost frame_bytes"
+    assert pre_render.get("_offline_float_stack"), "pre-render live mount lost display stack"
 
     widget._on_first_render({"new": True})
     post_render = widget.get_state()
 
     assert "frame_bytes" not in post_render
-    assert "_buffer_bytes" not in post_render
+    assert "_offline_float_stack" not in post_render
 
 
 def _assert_export_state_keeps_buffer(widget, key: str) -> None:
@@ -871,8 +873,8 @@ def test_show3d_html_export_clone_preserves_playing_state():
 def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
     """Report-style Show3D exports can opt into a compact binned uint8 pack.
 
-    The live widget remains native resolution; only the export clone is
-    spatially binned and its scale-bar pixel size is adjusted.
+    The live widget starts at its default 4× display bin. Export downsampling
+    is additional and its scale-bar pixel size is adjusted.
     """
     rng = np.random.default_rng(123)
     data = rng.random((4, 64, 64), dtype=np.float32)
@@ -881,11 +883,11 @@ def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
     full_clone = widget._clone_for_html_export(quantized=True)
     binned_clone = widget._clone_for_html_export(quantized=True, downsample=4)
     try:
-        assert (widget.height, widget.width) == (64, 64)
-        assert widget.pixel_size == pytest.approx(0.2)
-        assert (full_clone.n_slices, full_clone.height, full_clone.width) == (4, 64, 64)
-        assert (binned_clone.n_slices, binned_clone.height, binned_clone.width) == (4, 16, 16)
-        assert binned_clone.pixel_size == pytest.approx(0.8)
+        assert (widget.height, widget.width) == (16, 16)
+        assert widget.pixel_size == pytest.approx(0.8)
+        assert (full_clone.n_slices, full_clone.height, full_clone.width) == (4, 16, 16)
+        assert (binned_clone.n_slices, binned_clone.height, binned_clone.width) == (4, 4, 4)
+        assert binned_clone.pixel_size == pytest.approx(3.2)
         assert len(binned_clone._offline_stack) < len(full_clone._offline_stack) / 8
     finally:
         full_clone.close()
@@ -1508,7 +1510,7 @@ def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
         ncols=3,
         gallery_gap_px=3,
         size=180,
-        sampling=0.05,
+        sampling=widget.pixel_size,
         units="nm",
         cmap=widget.cmap,
         auto_contrast=widget.auto_contrast,
@@ -1612,7 +1614,7 @@ def test_show3d_static_png_pixel_matches_show2d_layout_matrix(
         ncols=max(1, min(max_cols, len(visible))),
         gallery_gap_px=panel_gap,
         size=size,
-        sampling=0.12,
+        sampling=widget.pixel_size,
         units="nm",
         scale_bar_visible=scale_bar,
         cmap=widget.cmap,

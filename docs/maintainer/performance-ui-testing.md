@@ -26,7 +26,7 @@ change needs them.
 | `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan, small MoS2-like Show2D/Show3D lattice examples for meaningful visual review. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
 | `scripts/widget_showfolder_live_smoke.py` | ShowFolder live-folder handoff stays centralized and functional. | Activates simultaneous all-image Show2D/Show3D through the public dual-view path, adds image files and `*_master.h5` markers, calls `watch_once()`, verifies active Show2D/Show3D/Show4DSTEM refresh, and writes reviewable exports. | CI/default signoff; update when ShowFolder watcher or selection handoff changes. | `showfolder-live/index.html`, `showfolder-live/report.json`, final ShowFolder/Show2D/Show3D/Show4DSTEM exports. |
 | `scripts/widget_show3d_animation_smoke.py` | Show3D GIF exports are presentation-ready. | Dry-run size plan, multi-panel low/medium/high GIF previews, panel-gap control, live-style labels, scale bar, zoom readout, export seconds, file sizes, dimensions, frame count, frame-delta metric, optional local reference time-series source. | When GIF/MP4 animation export, PowerPoint sharing, or Show3D movie quality changes. | `index.html`, `report.json`, `show3d-timeseries-*.gif` unless `--dry-run`. |
-| `scripts/widget_show3d_stress.py` | Show3D single-file HTML and legacy folder sidecar paths stay responsive on real data. | Opens current Show3D HTML or an existing legacy sidecar folder, serves `offline_stack.u8` with HTTP Range when needed, checks first nonblank paint, optional `--independent-contrast` mixed-product views, column reflow, FFT toggle, playback, zoom/pan stress, debug layout counters, transform render paths, FPS, console/network errors, and screenshots. | Local-only after Show3D render, layout, sidecar, WebGPU/canvas fallback, or large multi-panel interaction changes; never commit the generated report or generated sidecar. | `index.html`, `metrics.json`, screenshots, and optional legacy sidecar evidence under `/tmp` or `--artifact-dir`. |
+| `scripts/widget_show3d_stress.py` | Show3D single-file HTML stays responsive on real data. | Opens current Show3D HTML, checks first nonblank paint, optional `--independent-contrast` mixed-product views, column reflow, FFT toggle, playback, zoom/pan stress, WebGPU residency/debug counters, FPS, console/network errors, and screenshots. | Local-only after Show3D render, layout, WebGPU/canvas fallback, or large multi-panel interaction changes; never commit the generated report. | `index.html`, `metrics.json`, and screenshots under `/tmp` or `--artifact-dir`. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. Add `--browser` to local signoff when those exports also need automated Chromium interaction/FPS proof. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML; plus `browser-smoke.html` when driven through local signoff with `--browser`. |
 | `scripts/widget_external_html_profile.py` | A standalone exported HTML report that already exists outside the repo remains interactive and fast. | Opens a provided URL, checks nonblank canvases, samples FPS, drives common Show3D page/play/hide controls when present, captures screenshots and console/page errors. | Local-only review of Tailscale-served or hosted real-data reports, especially when a user points to an existing exported HTML file. | `index.html`, `metrics.json`, screenshots under `/tmp` or `--artifact-dir`. |
@@ -211,16 +211,13 @@ For Show3D, drive and record:
   synchronized,
 - high-FPS playback stress and slider lag,
 - frame slider scrub, keyboard frame step, loop, bounce, and averaging,
-- remote Jupyter tunnel scrub for
-  [S3D-20](storyboard-show3d.md#s3d-20-scrub-full-resolution-movies-over-a-remote-jupyter-tunnel):
-  measure Python prepare/wire/encode/trait-set, browser receive/decode/paint,
-  and UI latency over the real laptop-to-backend ssh tunnel; verify any
-  drag-time preview announces its factor and that release restores native
-  full-resolution pixels,
+- remote Jupyter tunnel scrub for the one embedded display stack: verify its
+  declared mean-bin factor, one-time WebGPU upload, and interaction latency on
+  the laptop after residency,
 - paged panel sweeps: Page slider scrubs and Page play should not wait for a
   Python trait round trip before the rendered page changes,
-- sidecar/manual scrub flash check: in exported Show3D HTML, zoom into a
-  multi-panel paged sidecar view, scrub the lower frame slider by clicking,
+- manual scrub flash check: in exported Show3D HTML, zoom into a
+  multi-panel paged view, scrub the lower frame slider by clicking,
   dragging the current-frame thumb, releasing, and then using Page play. The
   scientific canvas must keep the previous or next painted frame visible during
   every transition. Treat any full-panel black/white beat as a failure even if

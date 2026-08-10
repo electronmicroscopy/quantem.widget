@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""Stress-test current Show3D HTML and legacy folder exports in Chromium.
-
-This is a local-only maintainer gate for real Show3D reports. It can open
-current portable single-file HTML exports and serve already-created legacy
-Show3D folder exports with HTTP Range support. It does not create new sidecar
-exports.
-"""
+"""Stress-test current single-file Show3D HTML in Chromium."""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import html
-import http.server
 import json
 import os
 from pathlib import Path
 import re
 import socket
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,13 +19,11 @@ from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-from serve_sidecar_range import RangeRequestHandler
 from widget_browser_smoke import (
     _canvas_layout_summary,
     _chrome_executable,
     _exercise_column_select,
     _exercise_fft_toggle,
-    _free_port,
     _image_nonblank,
     _measure_fps,
     _start_canvas_update_probe,
@@ -60,37 +50,7 @@ class TargetSpec:
     mode: str
     source: str
     url: str | None = None
-    root: Path | None = None
     metadata: dict[str, Any] | None = None
-
-
-@dataclass
-class RangeServer:
-    root: Path
-    port: int
-    httpd: http.server.ThreadingHTTPServer | None = None
-    thread: threading.Thread | None = None
-
-    def __enter__(self) -> str:
-        handler = type(
-            "ConfiguredRangeRequestHandler",
-            (RangeRequestHandler,),
-            {
-                "root": self.root,
-                "log_message": lambda self, format, *args: None,  # noqa: A002
-            },
-        )
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), handler)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-        return f"http://127.0.0.1:{self.port}"
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self.httpd is not None:
-            self.httpd.shutdown()
-            self.httpd.server_close()
-        if self.thread is not None:
-            self.thread.join(timeout=5)
 
 
 def _timestamp() -> str:
@@ -155,7 +115,6 @@ def _show3d_metadata_from_html(html_path: Path) -> dict[str, Any]:
         "n_slices": int(traits.get("n_slices", 0) or 0),
         "n_panels": int(traits.get("n_panels", 0) or 0),
         "panel_width_px": int(traits.get("panel_width_px", 0) or 0),
-        "offline_stack_url": traits.get("_offline_stack_url", ""),
         "buffer_sizes": buffer_sizes,
     }
 
@@ -1000,8 +959,6 @@ def _run_case(
     for item in responses:
         if int(item.get("status", 0)) >= 400:
             errors.append(f"HTTP {item['status']} while loading {item['url']}")
-    if target.mode == "sidecar" and not any("offline_stack" in item["url"] for item in responses):
-        errors.append("sidecar target did not request offline_stack.u8")
 
     panels = int((target.metadata or {}).get("n_panels", final_debug.get("layoutRequestedMaxCols", 1)) or 1)
     aspect = final_layout.get("primary_aspect")
@@ -1011,10 +968,6 @@ def _run_case(
         warnings.append("zoom/pan stress did not report an interaction render path")
     if int((stress.get("update_probe") or {}).get("visual_changes") or 0) <= 0:
         errors.append("zoom/pan stress produced no visible canvas pixel updates during interaction")
-    if target.mode == "sidecar":
-        range_hits = [item for item in responses if item.get("status") == 206]
-        if not range_hits:
-            warnings.append("sidecar loaded without HTTP 206 byte ranges; browser may have fetched the whole stack")
     if independent_contrast and not (contrast_step or {}).get("found"):
         warnings.append("--independent-contrast requested but the Contrast switch was not found")
 
@@ -1052,16 +1005,11 @@ def _run_case(
     }
 
 
-def _target_url(target: TargetSpec) -> tuple[str, RangeServer | None]:
-    if target.mode == "sidecar":
-        if target.root is None:
-            raise ValueError(f"sidecar target {target.name} has no root")
-        server = RangeServer(target.root.resolve(), _free_port())
-        return "", server
+def _target_url(target: TargetSpec) -> str:
     if target.url:
-        return target.url, None
+        return target.url
     path = Path(target.source).expanduser().resolve()
-    return path.as_uri(), None
+    return path.as_uri()
 
 
 def _write_report(artifact_dir: Path, report: dict[str, Any]) -> None:
@@ -1150,7 +1098,7 @@ def _write_report(artifact_dir: Path, report: dict[str, Any]) -> None:
 <body>
   <h1>Show3D stress report</h1>
   <p class="status">{status}</p>
-  <p>Local-only Chromium stress run for single-file HTML and legacy folder sidecar paths.</p>
+  <p>Local-only Chromium stress run for single-file Show3D HTML.</p>
   <h2>Sources</h2>
   <ul>{sources_html}</ul>
   <h2>Summary</h2>
@@ -1177,13 +1125,8 @@ def _build_targets(args: argparse.Namespace, artifact_dir: Path) -> list[TargetS
         targets.append(TargetSpec(name=_safe_name(path.stem), mode="single", source=str(path), metadata=metadata))
     for url in args.url:
         targets.append(TargetSpec(name=_safe_name(url.rsplit("/", 1)[-1] or "url"), mode="url", source=url, url=url))
-    for sidecar_dir in args.sidecar_dir:
-        root = Path(sidecar_dir).expanduser().resolve()
-        manifest_path = root / "manifest.json"
-        metadata = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-        targets.append(TargetSpec(name=_safe_name(root.name), mode="sidecar", source=str(root), root=root, metadata=metadata))
     if not targets:
-        raise SystemExit("Provide at least one --html, --url, --sidecar-dir target.")
+        raise SystemExit("Provide at least one --html or --url target.")
     return targets
 
 
@@ -1191,7 +1134,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--html", action="append", default=[], help="Existing standalone Show3D HTML file.")
     parser.add_argument("--url", action="append", default=[], help="Existing served Show3D HTML URL.")
-    parser.add_argument("--sidecar-dir", action="append", default=[], help="Existing legacy folder export containing index.html and offline_stack.u8.")
     parser.add_argument("--artifact-dir", default=str(_default_artifact_dir()), help="Output directory for report and screenshots.")
     parser.add_argument("--viewports", default="desktop", help="Comma-separated viewport names: desktop,wide,narrow.")
     parser.add_argument("--seconds", type=float, default=8.0, help="Zoom/pan stress seconds per case.")
@@ -1219,49 +1161,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             for target in targets:
-                target_url, server = _target_url(target)
-                if server is None:
-                    for viewport_name in viewport_names:
-                        page = browser.new_page()
-                        try:
-                            cases.append(
-                                _run_case(
-                                    page,
-                                    target=target,
-                                    url=target_url,
-                                    viewport_name=viewport_name,
-                                    viewport=VIEWPORTS[viewport_name],
-                                    artifact_dir=artifact_dir,
-                                    seconds=args.seconds,
-                                    timeout_ms=args.timeout_ms,
-                                    min_fps=args.min_fps,
-                                    independent_contrast=args.independent_contrast,
-                                )
+                target_url = _target_url(target)
+                for viewport_name in viewport_names:
+                    page = browser.new_page()
+                    try:
+                        cases.append(
+                            _run_case(
+                                page,
+                                target=target,
+                                url=target_url,
+                                viewport_name=viewport_name,
+                                viewport=VIEWPORTS[viewport_name],
+                                artifact_dir=artifact_dir,
+                                seconds=args.seconds,
+                                timeout_ms=args.timeout_ms,
+                                min_fps=args.min_fps,
+                                independent_contrast=args.independent_contrast,
                             )
-                        finally:
-                            page.close()
-                else:
-                    with server as base_url:
-                        served_url = f"{base_url}/index.html"
-                        for viewport_name in viewport_names:
-                            page = browser.new_page()
-                            try:
-                                cases.append(
-                                    _run_case(
-                                        page,
-                                        target=target,
-                                        url=served_url,
-                                        viewport_name=viewport_name,
-                                        viewport=VIEWPORTS[viewport_name],
-                                        artifact_dir=artifact_dir,
-                                        seconds=args.seconds,
-                                        timeout_ms=args.timeout_ms,
-                                        min_fps=args.min_fps,
-                                        independent_contrast=args.independent_contrast,
-                                    )
-                                )
-                            finally:
-                                page.close()
+                        )
+                    finally:
+                        page.close()
         finally:
             browser.close()
 
@@ -1275,7 +1194,6 @@ def main(argv: list[str] | None = None) -> int:
                 "name": target.name,
                 "mode": target.mode,
                 "source": target.source,
-                "root": str(target.root) if target.root else None,
                 "metadata": target.metadata,
             }
             for target in targets

@@ -18,32 +18,31 @@ def _color_stack(n: int, h: int = 8, w: int = 8) -> np.ndarray:
 
 
 def test_set_image_repacks_offline_stack():
-    # Docs pages, exported HTML, and saved widget state slice frames straight
-    # out of _offline_stack. set_image() must repack it, or any appended frame
-    # index points past the old stack's end and renders blank on reopen.
+    # Show3D embeds one float32 display stack. Replacing data must rebuild that
+    # stack at the widget's existing display bin without mutating native data.
     widget = Show3D(np.random.rand(4, 32, 32).astype("float32"))
     assert widget.offline
-    assert len(widget._offline_stack) == 4 * 32 * 32
+    assert widget.display_bin == 4
+    assert len(widget._offline_float_stack) == 4 * 8 * 8 * 4
 
     widget.set_image(np.random.rand(8, 32, 32).astype("float32"))
 
     assert widget.n_slices == 8
-    assert len(widget._offline_stack) == 8 * 32 * 32
+    assert (widget.height, widget.width) == (8, 8)
+    assert len(widget._offline_float_stack) == 8 * 8 * 8 * 4
     lo, hi = widget._offline_min, widget._offline_max
     assert hi > lo
 
 
 def test_rgb_offline_stack_frames_decode_at_rgb_stride():
-    # RGB stacks pack 3 bytes/px; frame k must live at k*3*H*W. A grayscale
-    # stride here scrambles every frame after the first on kernel-less reopen
-    # (the fig4 RGB export bug). This is the uint8-path parity lock.
+    # RGB retains its native-pixel paint contract and uses the same embedded
+    # float32 stack rather than a second uint8 transport mode.
     src = _color_stack(6, 12, 12)
     widget = Show3D(src)
     assert widget.is_rgb and widget.offline
-    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(6, 12, 12, 3)
+    stack = np.frombuffer(widget._offline_float_stack, dtype=np.float32).reshape(6, 12, 12, 3)
     for k in range(6):
-        expected = np.clip(src[k] * 255.0, 0, 255).astype(np.uint8)
-        assert np.array_equal(stack[k], expected), f"RGB frame {k} scrambled"
+        np.testing.assert_array_equal(stack[k], src[k], err_msg=f"RGB frame {k} scrambled")
 
 
 def test_set_image_gray_rgb_swap_keeps_color_content_and_luminance():
@@ -61,13 +60,13 @@ def test_set_image_gray_rgb_swap_keeps_color_content_and_luminance():
     assert widget._data.shape == (3, 8, 8)  # luminance, not 4-D color
     np.testing.assert_allclose(widget._rgb_data, rgb, atol=1e-6)
     np.testing.assert_allclose(widget._data, rgb @ _RGB_LUMA, atol=1e-5)
-    # the offline stack the browser slices carries the color, not the luminance
-    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(3, 8, 8, 3)
-    np.testing.assert_allclose(stack[0] / 255.0, rgb[0], atol=1.5 / 255)
+    # the embedded stack the browser slices carries color, not luminance
+    stack = np.frombuffer(widget._offline_float_stack, dtype=np.float32).reshape(3, 8, 8, 3)
+    np.testing.assert_allclose(stack[0], rgb[0], atol=1e-6)
 
     widget.set_image(np.random.rand(5, 8, 8).astype("float32"))
     assert not widget.is_rgb and widget._rgb_data is None
-    assert len(widget._offline_stack) == 5 * 8 * 8  # gray stride, color cleared
+    assert len(widget._offline_float_stack) == 5 * 2 * 2 * 4
 
 
 def test_rgb_export_source_and_raster_stay_true_color_after_set_image():
@@ -179,49 +178,75 @@ def test_subpixel_alignment_state_round_trips():
     assert restored._data.shape == stack.shape
 
 
-def test_show3d_rich_panel_titles_keep_plain_titles_and_state():
-    """C1: Show3D panel title spans preserve plain title fallbacks."""
-    stack_a = np.random.default_rng(13).random((3, 12, 12), dtype=np.float32)
-    stack_b = np.random.default_rng(14).random((3, 12, 12), dtype=np.float32)
-    widget = Show3D(
-        stack_a,
-        stack_b,
-        panel_titles=[
-            [
-                {"text": "BF denoise  "},
-                {"text": "low", "color": "#60a5fa"},
-                {"text": "  χ²="},
-                {"text": "0.5", "color": "#f59e0b"},
-            ],
-            "BF denoise mid",
-        ],
-        verbose=False,
-    )
-
-    assert widget.panel_titles == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
-    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
-
-    restored = Show3D(stack_a, stack_b, verbose=False)
-    restored.load_state_dict(widget.state_dict())
-    assert restored.panel_titles == widget.panel_titles
-    assert restored.panel_title_spans == widget.panel_title_spans
 
 
-def test_show3d_single_panel_title_spans_are_one_title():
-    """C2: a single list of span dictionaries represents one rich title."""
-    stack = np.random.default_rng(15).random((2, 10, 10), dtype=np.float32)
-    widget = Show3D(
-        stack,
-        panel_title_spans=[
-            {"text": "raw vs "},
-            {"text": "denoise", "color": "#34d399"},
-        ],
-        verbose=False,
-    )
+def test_show3d_embeds_one_mean_binned_float32_display():
+    """The default contract is one 4× mean-binned float32 display stack."""
+    left = np.arange(3 * 16 * 16, dtype=np.float32).reshape(3, 16, 16)
+    right = left + np.float32(10_000)
+    widget = Show3D(left, right, verbose=False)
+    try:
+        assert widget.offline is True
+        assert widget._offline_stack == b""
+        assert widget.frame_bytes == b""
+        assert widget.display_bin == 4
+        assert widget.source_bytes == left.nbytes + right.nbytes
+        display = np.frombuffer(widget._offline_float_stack, dtype=np.float32).reshape(3, 4, 8)[1]
+        expected_left = left[1].reshape(4, 4, 4, 4).mean(axis=(1, 3))
+        expected_right = right[1].reshape(4, 4, 4, 4).mean(axis=(1, 3))
+        np.testing.assert_array_equal(display[:, :4], expected_left)
+        np.testing.assert_array_equal(display[:, 4:], expected_right)
 
-    assert widget.panel_titles == ["raw vs denoise"]
-    assert len(widget.panel_title_spans) == 1
-    assert widget.panel_title_spans[0][1] == {"text": "denoise", "color": "#34d399"}
+        frame_seq = widget.frame_seq
+        widget.playing = True
+        widget.playing = False
+        widget.slice_idx = 2
+        assert widget.frame_bytes == b""
+        assert widget.frame_seq == frame_seq
+
+        replacement = np.ones((2, 12, 20), dtype=np.float32)
+        widget.set_image(replacement)
+        assert widget.source_bytes == replacement.nbytes
+        assert len(widget._offline_float_stack) == 2 * 3 * 5 * 4
+    finally:
+        widget.free()
+
+
+def test_multi_panel_embedded_stack_records_native_and_display_sizes():
+    """Display payload size is distinct from the native arrays retained in Python."""
+    panels = [np.zeros((3, 16, 16), dtype=np.float32) for _ in range(4)]
+    widget = Show3D(*panels, max_cols=2, verbose=False)
+    try:
+        assert widget.display_bin == 4
+        assert widget.source_bytes == sum(panel.nbytes for panel in panels)
+        assert len(widget._offline_float_stack) == 3 * 4 * 16 * 4
+    finally:
+        widget.free()
+
+
+def test_embedded_stack_is_not_baked_into_default_notebook_state():
+    """The live Comm payload stays out of default saved notebook metadata."""
+    widget = Show3D(np.arange(2 * 8 * 8, dtype=np.float32).reshape(2, 8, 8), verbose=False)
+    try:
+        assert widget._offline_float_stack
+        state = widget.get_state()
+        assert "_offline_float_stack" not in state
+    finally:
+        widget.free()
+
+
+@pytest.mark.parametrize("display_bin, side", [(1, 16), (2, 8), (4, 4)])
+def test_show3d_honors_explicit_display_bin(display_bin, side):
+    """Scientists can explicitly trade browser resolution for load time."""
+    data = np.arange(2 * 16 * 16, dtype=np.float32).reshape(2, 16, 16)
+    widget = Show3D(data, display_bin=display_bin, verbose=False)
+    try:
+        assert widget.display_bin == display_bin
+        assert (widget.height, widget.width) == (side, side)
+        frame = np.frombuffer(widget._offline_float_stack, dtype=np.float32)
+        assert frame.size == 2 * side * side
+    finally:
+        widget.free()
 
 
 def test_show3d_panel_title_style_and_group_markers_round_trip():
@@ -421,16 +446,16 @@ def test_show3d_playback_accepts_sixty_fps():
     assert too_high.fps == pytest.approx(60.0)
 
 
-def test_show3d_moving_average_defaults_on_but_can_be_disabled():
-    # C1: a microscopist reviewing a noisy time stack gets temporal averaging
-    # immediately, while raw single-frame review remains an explicit option.
+def test_show3d_moving_average_is_opt_in():
+    # C1: ordinary frame review selects one resident frame directly. Temporal
+    # averaging remains available when a scientist explicitly requests it.
     stack = np.random.default_rng(63).random((5, 8, 8), dtype=np.float32)
     widget = Show3D(stack, verbose=False)
-    raw = Show3D(stack, avg_window=1, verbose=False)
+    averaged = Show3D(stack, avg_window=3, verbose=False)
 
-    assert widget.avg_window == 3
-    assert widget.state_dict()["avg_window"] == 3
-    assert raw.avg_window == 1
+    assert widget.avg_window == 1
+    assert widget.state_dict()["avg_window"] == 1
+    assert averaged.avg_window == 3
 
 
 def test_show3d_compare_markers_histogram_and_flip_state_round_trip():
@@ -502,11 +527,11 @@ def test_multi_panel_rgb_packs_independent_color_panels():
     assert widget.panel_width_px == 16
     assert widget._rgb_data.shape == (5, 12, 32, 3)
     assert widget._data.shape == (5, 12, 32)  # luminance concat drives stats
-    assert not widget.separate_panel_frames
+    assert "separate_panel_frames" not in widget.traits()
 
-    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(5, 12, 32, 3)
-    assert (stack[0, :, :16, 0] == 255).all()   # left panel red
-    assert (stack[0, :, 16:, 2] == 255).all()   # right panel blue
+    stack = np.frombuffer(widget._offline_float_stack, dtype=np.float32).reshape(5, 12, 32, 3)
+    assert (stack[0, :, :16, 0] == 1).all()   # left panel red
+    assert (stack[0, :, 16:, 2] == 1).all()   # right panel blue
 
 
 def test_multi_panel_rgb_export_clone_keeps_panels():

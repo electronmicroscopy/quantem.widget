@@ -89,8 +89,11 @@ def test_read_gif_returns_stack_and_widgets_open_it(tmp_path):
     )
     assert movie.title == "denoise_preview"
     assert movie.n_slices == 4
-    assert movie.height == 7
-    assert movie.width == 9
+    assert movie.source_height == 7
+    assert movie.source_panel_width == 9
+    assert movie.height == 1
+    assert movie.width == 2
+    assert movie._data.shape == (4, 7, 9)
     assert movie.fps == 12
     assert movie.labels == ["Frame 1", "Frame 2", "Frame 3", "Frame 4"]
 

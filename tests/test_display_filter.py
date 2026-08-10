@@ -148,33 +148,26 @@ def test_show2d_gallery_filters_scalar_panels_and_persists_state():
 
 
 def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
-    """A scrubbable EDS stack: default playback buffer is raw, turning the
-    filter on re-sends a filtered buffer (with the banner), sigma re-filters,
-    and none restores the identical raw buffer while .array stays intact."""
+    """Show3D filter edits retain one immutable browser display stack."""
     from quantem.widget import Show3D
 
     stack = np.stack([_sparse_eds_map(seed=s, shape=(64, 64)) for s in range(3)])
     kept = stack.copy()
     widget = Show3D(stack, verbose=False, offline=False)
-    # These assertions watch the pixels Python puts on the wire, so pin the
-    # widget to the Python filter path. By default the browser owns the
-    # filter and Python ships raw (see
-    # test_browser_owns_display_filter_by_default).
-    widget._webgpu_filter_ok = False
+    raw_stack = bytes(widget._offline_float_stack)
+    assert raw_stack
     assert widget.denoise == "none"
-    widget._send_buffer(0)  # what the browser's first prefetch triggers
-    raw_buffer = widget._buffer_bytes
-    assert raw_buffer
     widget.denoise = "bin2_anscombe"  # compound alias -> (anscombe, bin 2)
-    assert widget._buffer_bytes != raw_buffer
+    assert widget.denoise == "anscombe"
+    assert widget.denoise_bin == 2
+    assert bytes(widget._offline_float_stack) == raw_stack
     assert "denoise: anscombe" in capsys.readouterr().out
-    sigma_buffer = widget._buffer_bytes
     widget.denoise_sigma = 12.0
-    assert widget._buffer_bytes != sigma_buffer
+    assert bytes(widget._offline_float_stack) == raw_stack
     # The compound alias raised the bin knob; raw needs both knobs reset.
     widget.denoise = "none"
     widget.denoise_bin = 1
-    assert widget._buffer_bytes == raw_buffer
+    assert bytes(widget._offline_float_stack) == raw_stack
     np.testing.assert_array_equal(widget._data, kept)
     state = widget.state_dict()
     assert state["denoise"] == "none" and state["denoise_sigma"] == 12.0
@@ -469,8 +462,12 @@ def test_show3d_html_export_enables_browser_filter_for_raw_stack():
     try:
         # C1: full export is packed after construction, expect browser ownership.
         assert clone._webgpu_filter_ok is True
-        sent = np.frombuffer(clone._offline_float_stack, dtype=np.float32).reshape(counts.shape)
-        np.testing.assert_array_equal(sent, counts)
+        sent = np.frombuffer(clone._offline_float_stack, dtype=np.float32).reshape(
+            clone.n_slices,
+            clone.height,
+            clone.width,
+        )
+        np.testing.assert_array_equal(sent, clone._display_data)
         assert clone.denoise == "gaussian"
         assert clone.denoise_sigma == 6.0
         assert clone.denoise_enabled is True
@@ -574,6 +571,9 @@ def test_browser_owns_display_filter_by_default():
     three_d = Show3D(stack, denoise="gaussian", denoise_sigma=4, verbose=False)
     assert three_d._webgpu_filter_ok is True
 
-    # With the default flag the wire frame is the raw frame: no scipy call.
-    frame = np.asarray(counts, dtype=np.float32)
-    np.testing.assert_array_equal(three_d._wire_frame(frame), frame)
+    # The one embedded stack is raw display data. Filter knobs are browser
+    # uniforms and must not trigger another Python-side pixel transfer.
+    sent = np.frombuffer(three_d._offline_float_stack, dtype=np.float32).reshape(
+        three_d._display_data.shape,
+    )
+    np.testing.assert_array_equal(sent, three_d._display_data)

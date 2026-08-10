@@ -5,7 +5,7 @@ export function normalizedAverageWindow(value: unknown): number {
 }
 
 /**
- * Live Show3D transport is already differenced by Python/the frame server.
+ * The embedded Show3D display stack is already differenced by Python.
  * Standalone HTML stores raw frames, so only the offline path applies the
  * difference in JavaScript. Moving average remains a browser-side transform.
  */

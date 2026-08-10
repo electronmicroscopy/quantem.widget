@@ -100,8 +100,9 @@ Data             40x4096x4096 | uint16 | 1.25 GiB
 Render total     5.47 s
 Python build     820 ms
 Wire + JS paint  4.65 s
-Frame server     on
-Offline stack    off
+Display bin      4x mean
+Browser stack    40x1024x1024 | float32 | 160 MiB
+WebGPU residency ready | 40/40 frames
 ```
 
 Do not report only the fastest number. For large data, report the total path a
@@ -128,10 +129,9 @@ one common metric plus widget-specific metrics:
 - **Common**: UI FPS, dropped frames, pointer-to-preview latency.
 - **Show2D**: image decode/draw, histogram draw, FFT prep/worker/GPU/post time,
   ROI/profile time, page scrub latency, and panel cache state.
-- **Show3D**: frame fetch/decode, numerical source/FFT cache hit/miss, play
-  FPS, frame scrub latency, remote Comm/tunnel receive latency,
-  scrub-preview factor/bytes when active, FFT/FFT-metric time, and panel/page
-  cache state.
+- **Show3D**: embedded-stack decode/upload, resident WebGPU slots, numerical
+  source/FFT cache hit/miss, play FPS, frame scrub latency, FFT/FFT-metric
+  time, and panel/page state.
 - **Show4DSTEM**: diffraction-pattern fetch, virtual-detector compute, detector
   ROI drag latency, compare-grid cache, WebGPU/backend path, and GPU memory.
 - **ShowEDS**: map compute/draw, spectrum compute/draw, backend path, and sparse
@@ -169,8 +169,9 @@ an append path, not as a periodic full rebuild.
 ## Show3D remote tunnel scrub contract
 
 Remote Jupyter is a first-class production path for Show3D: the browser may be
-on a laptop while the kernel, data, CUDA device, and any Python frame server
-live on a workstation reached through `ssh -L`.
+on a laptop while the kernel, native source data, and CUDA device live on a
+workstation reached through `ssh -L`. Show3D sends one display-resolution stack
+during construction and keeps interaction browser-local after WebGPU upload.
 
 ## Show3D direct-display no-blank contract
 
@@ -196,6 +197,11 @@ covers autoplay does not prove manual scrubbing is safe. Keep these rules:
   different panel's contrast, colormap, Smooth state, or selection.
 - With linking off, a histogram edit writes only the addressed panel state;
   with linking on, the propagation is explicit and testable.
+- Coalesce manual frame-slider pointer events with `requestAnimationFrame` and
+  commit the Jupyter trait once on release. `avg_window=1` is the raw-frame
+  interactive default. When opt-in temporal averaging is active,
+  average the already-resident frame slots on WebGPU; do not upload or sum the
+  window again on the JavaScript thread for every pointer sample.
 
 Browser signoff must include transition-time screenshots or equivalent pixel
 sampling during manual lower-slider drag/release, Page slider scrub, Page play,
@@ -211,23 +217,18 @@ blank canvases. Any proposal to reintroduce it requires a dedicated issue,
 one rendering owner, live-Jupyter plus fresh-export visual proof, and the
 independence/no-blank checks in S3D-05A.
 
-A kernel-local frame server on `127.0.0.1` is only fast if the browser can reach
-that exact endpoint. Across an SSH tunnel, the browser's localhost is the
-laptop; use measurement to prove whether frame fetches are actually reaching
-the backend endpoint before assuming the fast path works.
+Native source arrays remain unchanged in Python. `display_bin=4` is the default
+browser-display policy for large float32 stacks; `display_bin=2` and
+`display_bin=1` are explicit user choices with larger transfer and GPU-memory
+costs. The widget must report native shape/bytes, display bin, display
+shape/bytes, upload progress, and whether hardware WebGPU residency succeeded.
+Do not silently crop or claim that a binned browser stack contains native
+pixels. Scientific export methods continue to use the native Python arrays.
 
-Full-resolution movie data must remain full resolution. Do not solve remote
-scrub latency by silently binning, cropping, or replacing the source array.
-During active frame-slider drag, Show3D may use a bounded display preview to
-avoid shipping one native frame per pointer tick over Jupyter Comm. That
-preview is a transport/display optimization only, not a data reduction.
-
-Any preview factor greater than 1 must announce itself once in Python output or
-browser logs and say how to get native pixels, for example by releasing the
-slider or zooming/settling the view. Release, keyboard step, playback settle,
-zoom/detail inspection, and explicit native fetch paths must keep native pixels
-reachable. Reports should list native bytes, preview bytes, factor, Python
-encode time, browser receive time, decode time, and paint/UI latency.
+Frame scrub, playback, contrast, colormap, Smooth, log/linear, zoom, and pan
+must select or repaint resident WebGPU data without another Jupyter Comm
+transfer. A software adapter is not treated as hardware WebGPU; the existing
+on-demand CPU/canvas renderer is the functional fallback.
 
 | Viewer | Required append behavior | Work that must not repeat |
 |---|---|---|
@@ -456,7 +457,7 @@ Rule for future cursor and hover UI:
 - If an overlay is hidden, make sure it does not steal pointer events from the
   scientific image underneath.
 
-## Mistake log: Show3D standalone HTML WebGPU playback blank
+## Mistake log: Show3D standalone HTML had two render owners
 
 Date: 2026-07-09
 
@@ -470,25 +471,23 @@ What was wrong:
 
 - The standalone offline playback path was not always the same as the manual
   scrub path.
-- Packed multi-panel HTML playback could opt back into a direct WebGPU canvas
-  route even though the stable scrub path rendered through the static 2D
-  canvas.
-- The direct WebGPU display canvas and the React/static canvas can race during
-  opacity/display handoff in exported HTML, especially on browser GPU stacks
-  where GPU work may present one frame later than the JavaScript state update.
-- The earlier generic "offline GPU playback owns canvas" guard was not enough:
-  packed multi-panel exports need their own rule because they have per-panel
-  contrast, panel geometry, and page/frame playback controls.
+- Packed multi-panel HTML maintained a prebuilt canvas for every frame while
+  also uploading the same stack to WebGPU.
+- The canvas cache and resident WebGPU display could race during
+  opacity/display handoff, especially when GPU work presented one frame after
+  JavaScript state changed.
+- The duplicate cache also repeated per-panel contrast, colormap, transform,
+  and visibility logic, so the two renderers could disagree.
 - Testing only a paused frame, a slider drag, or a unit test misses the bug.
 
-Fix:
+Current fix:
 
-- For offline packed multi-panel Show3D HTML, keep frame playback on the stable
-  static 2D canvas path. The code guard is
-  `offlinePackedPanelPlaybackUsesStaticCanvas`.
-- Do not let packed-panel standalone playback use the direct WebGPU display
-  canvas unless a browser test proves active playback stays nonblank on the
-  exported HTML.
+- Use the one resident WebGPU stack for both float32 live widgets and uint8
+  standalone exports whenever hardware WebGPU is available. A uint8 export is
+  decoded once before upload.
+- Do not build a second per-frame composite canvas cache. If hardware WebGPU is
+  unavailable, draw the requested frame on demand through the existing
+  CPU/canvas fallback.
 - Preserve per-panel contrast during playback. Do not fall back to a global
   packed-frame range for BF/DF/DPC/SSB/COM panels with different physical
   scales.
@@ -497,8 +496,8 @@ Fix:
 
 Required verification for future changes:
 
-- Build and reinstall the local widget checkout before exporting:
-  `npm run build && python -m pip install -e .`.
+- Build the local widget checkout before exporting with `npm run build`, and
+  run the notebook from that checkout rather than an installed release.
 - Regenerate the standalone HTML after the code change; the exported file embeds
   the widget bundle.
 - Open the regenerated HTML in a real browser and capture screenshots while

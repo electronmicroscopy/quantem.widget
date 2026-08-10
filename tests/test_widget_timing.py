@@ -99,8 +99,9 @@ def test_show3d_first_render_uses_timing_table_and_honors_verbose(capsys):
     out = capsys.readouterr().out
     assert "Show3D timing" in out
     assert "2x8x8 | float32 | 512 B" in out
-    assert "Frame server" in out
-    assert "Offline stack" in out
+    assert "Display bin" in out
+    assert "Browser display" in out
+    assert "Embedded float32 stack" in out
 
 
 def test_show4dstem_constructor_is_quiet_by_default(capsys):

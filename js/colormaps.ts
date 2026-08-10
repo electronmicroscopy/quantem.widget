@@ -1321,57 +1321,71 @@ export class GPUColormapEngine {
   }
 
   /**
-   * Temporal mean of `frames` (the avg_window slice) computed ON THE GPU, written
-   * straight into slot `idx`'s dataBuffer so the existing colormap/render path
-   * picks it up unchanged. Replaces the old CPU `for j { for k { out[k]+=... } }`
-   * double-loop that ran on the UI thread per scrub - the per-pixel sum is now a
-   * parallel compute shader, so avg=15 scrubs as fast as avg=1.
+   * Average already-resident frame slots entirely on the GPU.
+   *
+   * The source buffers are copied GPU-to-GPU into the reused average scratch
+   * buffer, then the same temporal-mean compute shader writes the result into
+   * `idx`. This keeps Show3D scrubbing off the JS CPU after residency completes.
    */
-  averageFramesInto(idx: number, frames: Float32Array[], width: number, height: number): void {
-    if (frames.length === 0) return;
-    if (frames.length === 1) { this.uploadData(idx, frames[0], width, height); return; }
-    // Allocate the slot (dataBuffer + rgba/params/hist) by uploading the first
-    // frame, then overwrite its dataBuffer with the GPU-computed average.
-    this.uploadData(idx, frames[0], width, height);
-    const slot = this.slots[idx];
-    const frameSize = slot.count;
-    const n = frames.length;
+  averageResidentSlotsInto(idx: number, sourceIndices: number[]): boolean {
+    const sources = sourceIndices.map(sourceIdx => this.slots[sourceIdx]).filter(Boolean);
+    if (sources.length !== sourceIndices.length || sources.length === 0) return false;
+    const first = sources[0];
+    if (!sources.every(slot => (
+      slot.count === first.count && slot.width === first.width && slot.height === first.height
+    ))) return false;
+
+    while (this.slots.length <= idx) this.slots.push(null as never);
+    let target = this.slots[idx];
+    if (
+      !target || target.count !== first.count ||
+      target.width !== first.width || target.height !== first.height
+    ) {
+      this.uploadData(idx, new Float32Array(first.count), first.width, first.height, first.rgbaCapacity);
+      target = this.slots[idx];
+    }
+
     this.ensureAveragePipeline();
-    const need = n * frameSize * 4;
-    if (!this.avgScratch || this.avgScratchSize < need) {
+    const frameBytes = first.count * 4;
+    const scratchBytes = sources.length * frameBytes;
+    if (!this.avgScratch || this.avgScratchSize < scratchBytes) {
       this.avgScratch?.destroy();
       this.avgScratch = this.device.createBuffer({
-        size: need, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        size: scratchBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
-      this.avgScratchSize = need;
-    }
-    for (let j = 0; j < n; j++) {
-      const f = frames[j];
-      if (f.length < frameSize) continue;
-      this.device.queue.writeBuffer(this.avgScratch, j * frameSize * 4,
-        f.buffer as ArrayBuffer, f.byteOffset, frameSize * 4);
+      this.avgScratchSize = scratchBytes;
     }
     if (!this.avgParamsBuffer) {
       this.avgParamsBuffer = this.device.createBuffer({
-        size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    this.device.queue.writeBuffer(this.avgParamsBuffer, 0, new Uint32Array([n, frameSize]));
+    this.device.queue.writeBuffer(
+      this.avgParamsBuffer,
+      0,
+      new Uint32Array([sources.length, first.count]),
+    );
     const bind = this.device.createBindGroup({
       layout: this.avgPipeline!.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.avgScratch } },
-        { binding: 1, resource: { buffer: slot.dataBuffer } },
+        { binding: 1, resource: { buffer: target.dataBuffer } },
         { binding: 2, resource: { buffer: this.avgParamsBuffer } },
       ],
     });
-    const enc = this.device.createCommandEncoder();
-    const pass = enc.beginComputePass();
+    const encoder = this.device.createCommandEncoder();
+    sources.forEach((slot, sourceIdx) => {
+      encoder.copyBufferToBuffer(slot.dataBuffer, 0, this.avgScratch!, sourceIdx * frameBytes, frameBytes);
+    });
+    const pass = encoder.beginComputePass();
     pass.setPipeline(this.avgPipeline!);
     pass.setBindGroup(0, bind);
-    pass.dispatchWorkgroups(Math.ceil(frameSize / 64));
+    pass.dispatchWorkgroups(Math.ceil(first.count / 64));
     pass.end();
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([encoder.finish()]);
+    return true;
   }
 
   private ensureSharedGridPipeline(): void {
@@ -1504,7 +1518,7 @@ export class GPUColormapEngine {
     }
     const dataBuffer = this.device.createBuffer({
       size: byteSize,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.device.queue.writeBuffer(dataBuffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
     const rgbaBuffer = this.device.createBuffer({
@@ -3318,6 +3332,32 @@ export class GPUColormapEngine {
   /** Resolve once all GPU work submitted so far has completed. */
   async waitForSubmittedWork(): Promise<void> {
     await this.device.queue.onSubmittedWorkDone();
+  }
+
+  /** Read selected float32 display slots without retaining a CPU stack copy. */
+  async readDataSlots(indices: number[]): Promise<(Float32Array | null)[]> {
+    if (indices.length === 0) return [];
+    const encoder = this.device.createCommandEncoder();
+    const jobs = indices.map((idx) => {
+      const slot = this.slots[idx];
+      if (!slot) return null;
+      const byteSize = slot.count * Float32Array.BYTES_PER_ELEMENT;
+      const readBuffer = this.device.createBuffer({
+        size: byteSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      encoder.copyBufferToBuffer(slot.dataBuffer, 0, readBuffer, 0, byteSize);
+      return { readBuffer, byteSize };
+    });
+    this.device.queue.submit([encoder.finish()]);
+    await Promise.all(jobs.map(job => job?.readBuffer.mapAsync(GPUMapMode.READ)));
+    return jobs.map((job) => {
+      if (!job) return null;
+      const data = new Float32Array(job.readBuffer.getMappedRange().slice(0, job.byteSize));
+      job.readBuffer.unmap();
+      job.readBuffer.destroy();
+      return data;
+    });
   }
 
   // ── GPU min/max reduction ──
