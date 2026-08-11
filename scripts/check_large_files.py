@@ -24,6 +24,12 @@ DATA_SUFFIXES = {
     ".tiff",
 }
 
+# This public README demo intentionally trades repository size for enough
+# spatial and temporal resolution to show live Show4DSTEM interaction.
+DATA_MAX_MB_EXCEPTIONS = {
+    "docs/_static/show4dstem-serin-gold.gif": 20.0,
+}
+
 
 def _tracked_files() -> list[Path]:
     out = subprocess.check_output(["git", "ls-files"], text=True)
@@ -55,10 +61,21 @@ def main() -> int:
         suffix = path.suffix.lower()
         if size > max_bytes:
             failures.append(f"{path} is {size / 1024 / 1024:.2f} MB > {args.max_mb:.2f} MB")
-        if suffix in DATA_SUFFIXES and size > data_max_bytes:
+        data_limit_mb = DATA_MAX_MB_EXCEPTIONS.get(path.as_posix(), args.data_max_mb)
+        data_limit_bytes = int(data_limit_mb * 1024 * 1024)
+        if suffix in DATA_SUFFIXES and size > data_limit_bytes:
             failures.append(
                 f"{path} is a data/rendered artifact ({suffix}) and "
-                f"{size / 1024 / 1024:.2f} MB > {args.data_max_mb:.2f} MB"
+                f"{size / 1024 / 1024:.2f} MB > {data_limit_mb:.2f} MB"
+            )
+        elif (
+            suffix in DATA_SUFFIXES
+            and data_limit_mb != args.data_max_mb
+            and size > data_max_bytes
+        ):
+            print(
+                f"Approved size exception: {path} is {size / 1024 / 1024:.2f} MB "
+                f"<= {data_limit_mb:.2f} MB"
             )
 
     if failures:

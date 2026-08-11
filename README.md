@@ -3,9 +3,19 @@
 [![TestPyPI](https://img.shields.io/pypi/v/quantem-widget?pypiBaseUrl=https://test.pypi.org&label=TestPyPI)](https://test.pypi.org/project/quantem-widget/)
 
 Interactive, GPU-accelerated visualization widgets for 4D-STEM and electron
-microscopy. Use them in Jupyter or open data directly from the command line;
-NumPy, PyTorch, CuPy, CUDA, Apple Silicon, and browser WebGPU workflows are
-supported.
+microscopy. Use them in Jupyter notebooks, as local HTML files, or from the
+command line. NumPy, PyTorch, CuPy, CUDA, Apple Silicon, and browser WebGPU
+workflows are supported.
+
+![Show4DSTEM WebGPU demo with a diffraction pattern and live virtual detector image](docs/_static/show4dstem-serin-gold.gif)
+
+**Demo: Show4DSTEM HTML with WebGPU.** Explore live diffraction-pattern and
+virtual-detector views locally in a browser on a personal laptop or supported
+phone, without a Python kernel or remote compute server. Thanks to Serin Lee for
+sharing this liquid-cell Au nanoparticle 4D-STEM dataset. Check Serin's 4D-STEM
+and 5D-STEM segmentation and clustering work
+([paper](https://academic.oup.com/mam/article-abstract/32/3/ozag044/8701498))
+and the source data ([Zenodo](https://zenodo.org/records/18167694)).
 
 > `quantem.widget` is currently a prototype on
 > [TestPyPI](https://test.pypi.org/project/quantem-widget/) and is built on the
