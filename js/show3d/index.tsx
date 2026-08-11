@@ -53,6 +53,7 @@ import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
 import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
 import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../frequencyFilter";
+import { encodeIndexedGif, quantizeRgbaForBrowserGif } from "./gif";
 
 const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -2126,158 +2127,6 @@ const GIF_EXPORT_PRESETS: Array<{ value: GifExportPreset; label: string }> = [
   { value: "full", label: "Full" },
 ];
 
-let browserGifPaletteCache: Uint8Array | null = null;
-
-function asciiBytes(value: string): Uint8Array {
-  const out = new Uint8Array(value.length);
-  for (let i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
-  return out;
-}
-
-function u16Bytes(value: number): Uint8Array {
-  const v = Math.max(0, Math.min(65535, Math.round(value)));
-  return new Uint8Array([v & 0xff, (v >> 8) & 0xff]);
-}
-
-function concatUint8(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const part of parts) total += part.byteLength;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-
-function browserGifPalette(): Uint8Array {
-  if (browserGifPaletteCache) return browserGifPaletteCache;
-  const palette = new Uint8Array(256 * 3);
-  let idx = 0;
-  for (let r = 0; r < 6; r++) {
-    for (let g = 0; g < 6; g++) {
-      for (let b = 0; b < 6; b++) {
-        const j = idx * 3;
-        palette[j] = r * 51;
-        palette[j + 1] = g * 51;
-        palette[j + 2] = b * 51;
-        idx++;
-      }
-    }
-  }
-  const grayCount = 256 - idx;
-  for (let i = 0; idx < 256; idx++, i++) {
-    const v = grayCount <= 1 ? 0 : Math.round((i / (grayCount - 1)) * 255);
-    const j = idx * 3;
-    palette[j] = v;
-    palette[j + 1] = v;
-    palette[j + 2] = v;
-  }
-  browserGifPaletteCache = palette;
-  return palette;
-}
-
-function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
-  const out = new Uint8Array(Math.floor(rgba.length / 4));
-  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
-    const a = rgba[j + 3];
-    const r = a === 255 ? rgba[j] : Math.round((rgba[j] * a + 255 * (255 - a)) / 255);
-    const g = a === 255 ? rgba[j + 1] : Math.round((rgba[j + 1] * a + 255 * (255 - a)) / 255);
-    const b = a === 255 ? rgba[j + 2] : Math.round((rgba[j + 2] * a + 255 * (255 - a)) / 255);
-    const rq = Math.max(0, Math.min(5, Math.round(r / 51)));
-    const gq = Math.max(0, Math.min(5, Math.round(g / 51)));
-    const bq = Math.max(0, Math.min(5, Math.round(b / 51)));
-    out[i] = rq * 36 + gq * 6 + bq;
-  }
-  return out;
-}
-
-function gifLzwEncode(indices: Uint8Array): Uint8Array {
-  const minCodeSize = 8;
-  const clearCode = 1 << minCodeSize;
-  const endCode = clearCode + 1;
-  const codeSize = minCodeSize + 1;
-  const bytes: number[] = [];
-  let bitBuffer = 0;
-  let bitCount = 0;
-  const writeCode = (code: number) => {
-    bitBuffer |= code << bitCount;
-    bitCount += codeSize;
-    while (bitCount >= 8) {
-      bytes.push(bitBuffer & 0xff);
-      bitBuffer >>= 8;
-      bitCount -= 8;
-    }
-  };
-
-  // Conservative "clear-block" GIF LZW: emit raw color indices and reset before
-  // the decoder grows past 9-bit codes. It is larger than dictionary-compressed
-  // GIF, but browser-side standalone export values correctness over file size.
-  writeCode(clearCode);
-  let sinceClear = 0;
-  for (let i = 0; i < indices.length; i++) {
-    if (sinceClear >= 250) {
-      writeCode(clearCode);
-      sinceClear = 0;
-    }
-    writeCode(indices[i]);
-    sinceClear++;
-  }
-  writeCode(endCode);
-  if (bitCount > 0) bytes.push(bitBuffer & 0xff);
-  return new Uint8Array(bytes);
-}
-
-function pushGifSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
-  for (let offset = 0; offset < data.length; offset += 255) {
-    const chunk = data.subarray(offset, Math.min(offset + 255, data.length));
-    parts.push(new Uint8Array([chunk.length]));
-    parts.push(chunk);
-  }
-  parts.push(new Uint8Array([0]));
-}
-
-function encodeIndexedGif(
-  width: number,
-  height: number,
-  frames: Uint8Array[],
-  delayCs: number,
-): Uint8Array {
-  if (width <= 0 || height <= 0 || frames.length === 0) {
-    throw new Error("GIF export needs at least one non-empty frame.");
-  }
-  const pixelCount = width * height;
-  for (const frame of frames) {
-    if (frame.length !== pixelCount) {
-      throw new Error(`GIF frame has ${frame.length} pixels; expected ${pixelCount}.`);
-    }
-  }
-  const parts: Uint8Array[] = [
-    asciiBytes("GIF89a"),
-    u16Bytes(width),
-    u16Bytes(height),
-    new Uint8Array([0xf7, 0, 0]),
-    browserGifPalette(),
-    new Uint8Array([0x21, 0xff, 0x0b]),
-    asciiBytes("NETSCAPE2.0"),
-    new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),
-  ];
-  const delay = Math.max(1, Math.min(65535, Math.round(delayCs)));
-  for (const frame of frames) {
-    parts.push(new Uint8Array([0x21, 0xf9, 0x04, 0x04]));
-    parts.push(u16Bytes(delay));
-    parts.push(new Uint8Array([0, 0]));
-    parts.push(new Uint8Array([0x2c, 0, 0, 0, 0]));
-    parts.push(u16Bytes(width));
-    parts.push(u16Bytes(height));
-    parts.push(new Uint8Array([0, 8]));
-    pushGifSubBlocks(parts, gifLzwEncode(frame));
-  }
-  parts.push(new Uint8Array([0x3b]));
-  return concatUint8(parts);
-}
-
 type Mp4Sample = {
   data: Uint8Array;
   timestamp: number;
@@ -2300,7 +2149,22 @@ function mp4U32(value: number): Uint8Array {
 }
 
 function mp4Ascii(value: string): Uint8Array {
-  return asciiBytes(value);
+  const out = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) {
+    out[i] = value.charCodeAt(i) & 0xff;
+  }
+  return out;
+}
+
+function concatMp4Bytes(parts: Uint8Array[]): Uint8Array {
+  const length = parts.reduce((total, part) => total + part.byteLength, 0);
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
 }
 
 function mp4Zeros(length: number): Uint8Array {
@@ -2317,9 +2181,9 @@ function copyMp4Bytes(source: ArrayBufferLike | ArrayBufferView<ArrayBufferLike>
 }
 
 function mp4Box(type: string, ...payloads: Uint8Array[]): Uint8Array {
-  const payload = concatUint8(payloads);
+  const payload = concatMp4Bytes(payloads);
   const size = 8 + payload.byteLength;
-  return concatUint8([mp4U32(size), mp4Ascii(type), payload]);
+  return concatMp4Bytes([mp4U32(size), mp4Ascii(type), payload]);
 }
 
 function mp4FullBox(type: string, version: number, flags: number, ...payloads: Uint8Array[]): Uint8Array {
@@ -2340,14 +2204,14 @@ function mp4Fixed8(value: number): Uint8Array {
 
 function mp4CompressorName(value: string): Uint8Array {
   const out = new Uint8Array(32);
-  const name = asciiBytes(value.slice(0, 31));
+  const name = mp4Ascii(value.slice(0, 31));
   out[0] = name.byteLength;
   out.set(name, 1);
   return out;
 }
 
 function mp4Matrix(): Uint8Array {
-  return concatUint8([
+  return concatMp4Bytes([
     mp4Fixed16(1), mp4U32(0), mp4U32(0),
     mp4U32(0), mp4Fixed16(1), mp4U32(0),
     mp4U32(0), mp4U32(0), mp4U32(0x40000000),
@@ -2462,12 +2326,12 @@ function encodeAvcMp4(samples: Mp4Sample[], width: number, height: number, avcDe
   if (!samples.length) throw new Error("MP4 export needs at least one encoded frame.");
   if (!avcDescription.byteLength) throw new Error("Browser did not provide the H.264 AVC configuration needed for MP4.");
   const timescale = 1_000_000;
-  const mdatPayload = concatUint8(samples.map((sample) => sample.data));
+  const mdatPayload = concatMp4Bytes(samples.map((sample) => sample.data));
   const ftyp = mp4Ftyp();
   let moov = mp4Moov(samples, width, height, timescale, avcDescription, 0);
   const chunkOffset = ftyp.byteLength + moov.byteLength + 8;
   moov = mp4Moov(samples, width, height, timescale, avcDescription, chunkOffset);
-  return concatUint8([ftyp, moov, mp4Box("mdat", mdatPayload)]);
+  return concatMp4Bytes([ftyp, moov, mp4Box("mdat", mdatPayload)]);
 }
 
 function browserMp4Bitrate(width: number, height: number, fps: number): number {
