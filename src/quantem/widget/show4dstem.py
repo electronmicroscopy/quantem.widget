@@ -5708,7 +5708,37 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # avoiding 4 sync trait round-trips per scan-position click).
         self.frame_bytes = payload
 
-    def to_showdiffraction(self, source: str = "current", **kwargs):
+    def to_showdiffraction(self, source: str = "current", **kwargs) -> "ShowDiffraction":
+        """
+        Hand a diffraction pattern to a ShowDiffraction widget.
+
+        The 1/Å calibration carries over when this widget is calibrated, so the
+        new widget opens ready to measure instead of needing manual setup.
+
+        Parameters
+        ----------
+        source : str, default "current"
+            ``"current"`` sends the pattern at the displayed scan position,
+            ``"mean"`` sends the mean pattern over the whole scan.
+        **kwargs
+            Passed to the ShowDiffraction constructor. ``k_pixel_size`` and
+            ``title`` are filled from this widget unless given here.
+
+        Returns
+        -------
+        ShowDiffraction
+            Widget holding the selected pattern.
+
+        Raises
+        ------
+        ValueError
+            If ``source`` is neither ``"current"`` nor ``"mean"``.
+
+        Examples
+        --------
+        >>> widget.to_showdiffraction()
+        >>> widget.to_showdiffraction(source="mean", dp_scale_mode="linear")
+        """
         from quantem.widget.showdiffraction import ShowDiffraction
 
         if source == "current":
