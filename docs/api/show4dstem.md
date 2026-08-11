@@ -607,6 +607,26 @@ For performance signoff, inspect `window.__loadprof` after load and
 `window.__sh4dLiveViStats` while dragging the virtual detector. The maintainer
 performance notes record the current seven-panel WebGPU compare-grid signoff.
 
+## Handing a pattern to ShowDiffraction
+
+`to_showdiffraction` moves one diffraction pattern into a ShowDiffraction widget
+for indexing, ring fitting, and spot detection. Use `source="current"` for the
+pattern at the displayed scan position, or `source="mean"` for the mean over the
+whole scan:
+
+```python
+widget = Show4DSTEM(data)
+widget.position = (12, 34)
+
+sd = widget.to_showdiffraction()
+mean = widget.to_showdiffraction(source="mean", dp_scale_mode="linear")
+```
+
+When the viewer carries a 1/Å calibration, `k_pixel_size` transfers so the new
+widget reports calibrated distances immediately. The `title` carries over too.
+Pass either explicitly to override, along with any other ShowDiffraction
+constructor option.
+
 ## Reference
 
 ```{eval-rst}
