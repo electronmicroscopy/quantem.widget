@@ -13,15 +13,30 @@ and 5D-STEM segmentation and clustering work
 ([paper](https://academic.oup.com/mam/article-abstract/32/3/ozag044/8701498))
 and the source data ([Zenodo](https://zenodo.org/records/18167694)).
 
+## Start with ARINA 4D-STEM in Jupyter
+
+The demo above is the same `Show4DSTEM` workflow you can use at the microscope.
+After [installing](install), open a Jupyter notebook, load a completed ARINA
+`*_master.h5` file, and pass the result directly to the widget:
+
 ```python
 from quantem.gpu.io import load
-from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowPtycho, ShowEDS, ShowDiffraction, ShowFolder
+from quantem.widget import Show4DSTEM
+
+data = load("/data/session/scan_000_master.h5")
+viewer = Show4DSTEM(data)
+viewer
 ```
 
-## Quickest start: no notebook needed
+`load(...)` selects CUDA or Apple Metal automatically. Leave `viewer` as the
+final line, then move through scan positions or drag the detector to update the
+virtual image. Continue with the [Show4DSTEM tutorial](tutorials/show4dstem) or
+[Load and I/O](api/io).
 
-After [installing](install), point the `quantem` command at a file or folder and
-it renders the right viewer in your browser:
+## Prefer the command line?
+
+Point the `quantem` command at a file or folder when you want the same viewers
+without writing a notebook:
 
 ```bash
 quantem show2d image.tif         # an image            -> Show2D
@@ -29,8 +44,8 @@ quantem show3d ./frames/         # a folder of frames  -> Show3D scrub
 quantem show4dstem ./masters/    # 4D-STEM master(s)   -> live viewer (or --html)
 ```
 
-It saves to `~/Downloads`, opens automatically, and picks the GPU (CUDA / Apple
-Metal) for you. Full details on [the command line](cli) page.
+It saves to `~/Downloads`, opens automatically, and picks the GPU for you. Full
+details are on [the command line](cli) page.
 
 ## Built for two platforms
 

@@ -17,6 +17,10 @@ and 5D-STEM segmentation and clustering work
 ([paper](https://academic.oup.com/mam/article-abstract/32/3/ozag044/8701498))
 and the source data ([Zenodo](https://zenodo.org/records/18167694)).
 
+**[Start with the documentation](https://electronmicroscopy.github.io/quantem.widget/)**
+to load ARINA 4D-STEM data in Jupyter, open `Show4DSTEM`, and explore the
+interactive widgets.
+
 > `quantem.widget` is currently a prototype on
 > [TestPyPI](https://test.pypi.org/project/quantem-widget/) and is built on the
 > [`quantem`](https://github.com/electronmicroscopy/quantem) core.
@@ -30,39 +34,6 @@ pip install -i https://test.pypi.org/simple/ \
 
 See the [installation guide](https://electronmicroscopy.github.io/quantem.widget/install.html)
 for backend setup, Colab instructions, and verification.
-
-## Quick start
-
-Open an image or microscopy dataset without writing a notebook:
-
-```bash
-quantem show image.tif
-quantem show3d ./frames/
-quantem show4dstem ./masters/
-```
-
-Or construct widgets directly in Python:
-
-```python
-import numpy as np
-from quantem.widget import Show2D, Show4DSTEM
-
-Show2D(np.random.random((512, 512)))
-Show4DSTEM(np.random.random((64, 64, 128, 128)))
-```
-
-For real 4D-STEM data, load a master file onto the available GPU:
-
-```python
-from quantem.gpu.io import load
-from quantem.widget import Show4DSTEM
-
-Show4DSTEM(load("scan_master.h5"))
-```
-
-The [command-line guide](https://electronmicroscopy.github.io/quantem.widget/cli.html)
-and [tutorials](https://electronmicroscopy.github.io/quantem.widget/tutorials/download_data.html)
-cover data loading, HTML export, public example datasets, and complete workflows.
 
 ## Widgets
 
