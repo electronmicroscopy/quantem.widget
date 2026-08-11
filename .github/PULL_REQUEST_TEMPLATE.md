@@ -10,11 +10,6 @@ should only see boxes that are relevant to this PR. Either verify each box
 yourself or have a coding agent verify it and check it off for you; mark an
 item that is in a relevant section but does not apply as "n/a — reason".
 
-This PR workflow follows the scientific-software packaging standards described
-in: S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
-"Scikit-package - software packaging standards and roadmap for sharing
-reproducible scientific software", Digital Discovery (2026).
-https://doi.org/10.1039/d6dd00121a
 -->
 
 ## Summary
@@ -206,8 +201,6 @@ select any missing gates without relying on private logs.
 
 ---
 
-This PR workflow follows the packaging standards for reproducible scientific
-software described in [scikit-package](https://doi.org/10.1039/d6dd00121a):
-S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
-*Digital Discovery* (2026), DOI
-[10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a).
+This PR follows the
+[scikit-package](https://scikit-package.github.io/scikit-package/) workflow for
+reproducible scientific software.
