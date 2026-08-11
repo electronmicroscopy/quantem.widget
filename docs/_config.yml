@@ -16,6 +16,11 @@ exclude_patterns:
 execute:
   execute_notebooks: "force"
   timeout: 900
+  # Keep the documentation deployable while this tutorial's referenced public
+  # dataset is unavailable. The source page is still published; only its build-
+  # time execution is skipped. Remove this once the public fixture exists.
+  exclude_patterns:
+    - "tutorials/showdiffraction.ipynb"
 
 # Embedded anywidget views need the ipywidgets HTML manager in the static page.
 # myst-nb writes the widget state baked into each notebook; this pulls the JS
