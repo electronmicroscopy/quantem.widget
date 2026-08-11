@@ -8566,24 +8566,10 @@ function Show3D() {
         // here at the same 10 Hz cadence. Skip every 2nd tick → ~5 Hz refresh.
         playbackHistogramCounterRef.current = (playbackHistogramCounterRef.current + 1) % 2;
         if (playbackHistogramCounterRef.current === 0) {
-          if ((nPanels || 1) > 1 && !linkContrast && frame) {
-            // Keep playback free of per-panel Float32Array copies. The static
-            // histogram effect refreshes panel ranges after playback stops or
-            // when the user commits a scrub. On large 8-panel exports this is
-            // the difference between microscope-like playback and a browser
-            // ArrayBuffer allocation crash.
-            const d = show3dPerfDebug();
-            if (d) {
-              d.lastHistogramFrame = next;
-              d.lastHistogramSource = "deferred-per-panel-playback";
-            }
-          } else {
-            // GPU histogram for the current frame (honors WebGPU-first-class):
-            // refreshHistogram computes bins on the GPU (live slot or offline
-            // scratch slot) AND sets lastHistogramFrame so it is verifiable.
-            // Replaces the old CPU setImageHistogramData(frame).
-            void refreshHistogramRef.current?.(next);
-          }
+          // Refresh the visible histogram from the current resident frame.
+          // Independent packed panels use one GPU submission for all visible
+          // regions, so playback never allocates panel-sized Float32Array slabs.
+          void refreshHistogramRef.current?.(next);
         }
       }
       if (!isRgb && transformActive) {
@@ -8731,6 +8717,58 @@ function Show3D() {
       if (!raw || raw.length === 0) return;
       if (perPanelHistogramEnabled) {
         const n = Math.max(1, nPanels || 1);
+        const engine = gpuCmapRef.current;
+        if (
+          engine &&
+          gpuCmapReadyRef.current &&
+          gpuFrameCacheUploadedRef.current.has(renderIdx) &&
+          !frameTransformActive()
+        ) {
+          const panelW = totalPanelCount > 1
+            ? Math.max(1, panelWidthPx || Math.round(width / totalPanelCount))
+            : Math.max(1, width);
+          const regions = visiblePanelIndices.map(panel => ({
+            x: sharedPanelSource ? 0 : panel * panelW,
+            y: 0,
+            width: panelW,
+            height,
+          }));
+          try {
+            const histograms = await engine.computeHistogramRegions(
+              renderIdx,
+              regions,
+              logScale,
+            );
+            if (
+              serial === histogramRefreshSerialRef.current &&
+              histograms.length === visiblePanelIndices.length
+            ) {
+              const nextBins: (number[] | null)[] = Array.from({ length: n }, () => null);
+              const nextRanges: { min: number; max: number }[] = Array.from(
+                { length: n },
+                (_, panel) => panelDataRanges[panel]
+                  ?? resolveDisplayBounds(dataMin, dataMax, null, null, logScale),
+              );
+              visiblePanelIndices.forEach((panel, k) => {
+                nextBins[panel] = histograms[k].bins;
+                nextRanges[panel] = histograms[k].range;
+              });
+              const dbg = show3dPerfDebug();
+              if (dbg) {
+                dbg.lastHistogramFrame = renderIdx;
+                dbg.lastHistogramSource = "gpu-panel-regions";
+              }
+              setPanelHistogramData(Array.from({ length: n }, () => null));
+              setPanelHistogramBins(nextBins);
+              setPanelDataRanges(nextRanges);
+              setImageHistogramBins(null);
+              return;
+            }
+          } catch {
+            // Preserve the existing CPU fallback for browsers without a usable
+            // region compute path. Hardware WebGPU stays on the resident path.
+          }
+        }
         const nextData: (Float32Array | null)[] = Array.from({ length: n }, () => null);
         const nextRanges: { min: number; max: number }[] = Array.from(
           { length: n },
@@ -8779,7 +8817,7 @@ function Show3D() {
         window.setTimeout(() => { void refreshHistogram(pending); }, 0);
       }
     }
-  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, nSlices, visiblePanelIndices, extractPanelSlice, displaySliceIdx, isRgb]);
+  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, nSlices, visiblePanelIndices, extractPanelSlice, displaySliceIdx, isRgb, height, panelDataRanges, panelWidthPx, sharedPanelSource, totalPanelCount, width, diffMode, avgWindow, frequencyFilterIsActive, offline, subpixelAlignEnabled]);
   refreshHistogramRef.current = refreshHistogram;
   React.useEffect(() => {
     if (playing) {

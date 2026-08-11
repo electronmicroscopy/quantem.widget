@@ -4168,6 +4168,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
   private histPipeline: GPUComputePipeline | null = null;
   private histClearPipeline: GPUComputePipeline | null = null;
+  private histRegionPipeline: GPUComputePipeline | null = null;
 
   private ensureHistPipeline(): void {
     if (this.histPipeline) return;
@@ -4210,6 +4211,186 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
       layout: "auto",
       compute: { module, entryPoint: "clear_bins" },
     });
+  }
+
+  private ensureHistRegionPipeline(): void {
+    if (this.histRegionPipeline) return;
+    const code = /* wgsl */ `
+struct RegionParams {
+  region: vec4u,
+  full_width: u32,
+  log_scale: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+struct RangeIn { vmin: f32, vmax: f32, _p0: f32, _p1: f32 };
+
+@group(0) @binding(0) var<uniform> params: RegionParams;
+@group(0) @binding(1) var<storage, read> data: array<f32>;
+@group(0) @binding(2) var<storage, read> range_in: RangeIn;
+@group(0) @binding(3) var<storage, read_write> bins: array<atomic<u32>>;
+
+@compute @workgroup_size(16, 16)
+fn histogram(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.region.z || gid.y >= params.region.w) { return; }
+  let idx = (params.region.y + gid.y) * params.full_width + params.region.x + gid.x;
+  var val = data[idx];
+  if (params.log_scale == 1u) { val = log(1.0 + max(val, 0.0)); }
+  let span = max(range_in.vmax - range_in.vmin, 1e-30);
+  let t = clamp((val - range_in.vmin) / span, 0.0, 1.0);
+  let bin = min(u32(t * 256.0), 255u);
+  atomicAdd(&bins[bin], 1u);
+}
+`;
+    const module = this.device.createShaderModule({ code });
+    this.histRegionPipeline = this.device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "histogram" },
+    });
+  }
+
+  /**
+   * Compute ranges and 256-bin histograms for rectangular regions of one slot.
+   *
+   * Show3D packs independent panels side-by-side in one resident frame slot.
+   * This keeps playback histogram refreshes on WebGPU: range reduction and bin
+   * accumulation happen in one submission, with only the small ranges and bins
+   * read back for drawing the histogram controls.
+   */
+  async computeHistogramRegions(
+    idx: number,
+    regions: { x: number; y: number; width: number; height: number }[],
+    logScale: boolean = false,
+  ): Promise<{ range: { min: number; max: number }; bins: number[] }[]> {
+    this.ensureRangeRegionPipeline();
+    this.ensureHistRegionPipeline();
+    const slot = this.slots[idx];
+    if (!slot || !this.rangeRegionPipeline || !this.histRegionPipeline || regions.length === 0) {
+      return [];
+    }
+
+    const validRegions = regions.map(region => {
+      const x = Math.max(0, Math.min(slot.width - 1, Math.round(region.x)));
+      const y = Math.max(0, Math.min(slot.height - 1, Math.round(region.y)));
+      return {
+        x,
+        y,
+        width: Math.max(1, Math.min(slot.width - x, Math.round(region.width))),
+        height: Math.max(1, Math.min(slot.height - y, Math.round(region.height))),
+      };
+    });
+    const binsBytes = validRegions.length * 256 * 4;
+    const rangesBytes = validRegions.length * 16;
+    const binsBuffer = this.device.createBuffer({
+      size: binsBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    const binsReadBuffer = this.device.createBuffer({
+      size: binsBytes,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const rangesReadBuffer = this.device.createBuffer({
+      size: rangesBytes,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const paramsBuffers: GPUBuffer[] = [];
+    const encoder = this.device.createCommandEncoder();
+    encoder.clearBuffer(binsBuffer);
+
+    for (let k = 0; k < validRegions.length; k++) {
+      const region = validRegions[k];
+      const scratch = this.ensurePanelScratch(k, region.width * region.height);
+      const paramsBuffer = this.device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(
+        paramsBuffer,
+        0,
+        new Uint32Array([
+          region.x,
+          region.y,
+          region.width,
+          region.height,
+          slot.width,
+          logScale ? 1 : 0,
+          0,
+          0,
+        ]),
+      );
+      paramsBuffers.push(paramsBuffer);
+
+      const rangeGroup = this.device.createBindGroup({
+        layout: this.rangeRegionPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: slot.dataBuffer } },
+          { binding: 1, resource: { buffer: paramsBuffer } },
+          { binding: 2, resource: { buffer: scratch.range } },
+        ],
+      });
+      const rangePass = encoder.beginComputePass();
+      rangePass.setPipeline(this.rangeRegionPipeline);
+      rangePass.setBindGroup(0, rangeGroup);
+      rangePass.dispatchWorkgroups(1);
+      rangePass.end();
+
+      const histogramGroup = this.device.createBindGroup({
+        layout: this.histRegionPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: paramsBuffer } },
+          { binding: 1, resource: { buffer: slot.dataBuffer } },
+          { binding: 2, resource: { buffer: scratch.range } },
+          {
+            binding: 3,
+            resource: { buffer: binsBuffer, offset: k * 256 * 4, size: 256 * 4 },
+          },
+        ],
+      });
+      const histogramPass = encoder.beginComputePass();
+      histogramPass.setPipeline(this.histRegionPipeline);
+      histogramPass.setBindGroup(0, histogramGroup);
+      histogramPass.dispatchWorkgroups(
+        Math.ceil(region.width / 16),
+        Math.ceil(region.height / 16),
+      );
+      histogramPass.end();
+      encoder.copyBufferToBuffer(scratch.range, 0, rangesReadBuffer, k * 16, 16);
+    }
+
+    encoder.copyBufferToBuffer(binsBuffer, 0, binsReadBuffer, 0, binsBytes);
+    this.device.queue.submit([encoder.finish()]);
+
+    try {
+      await Promise.all([
+        binsReadBuffer.mapAsync(GPUMapMode.READ),
+        rangesReadBuffer.mapAsync(GPUMapMode.READ),
+      ]);
+      const rawBins = new Uint32Array(binsReadBuffer.getMappedRange().slice(0));
+      const rawRanges = new Float32Array(rangesReadBuffer.getMappedRange().slice(0));
+      binsReadBuffer.unmap();
+      rangesReadBuffer.unmap();
+
+      return validRegions.map((_, k) => {
+        const offset = k * 256;
+        let maxCount = 0;
+        for (let bin = 0; bin < 256; bin++) {
+          maxCount = Math.max(maxCount, rawBins[offset + bin]);
+        }
+        const bins = new Array<number>(256);
+        for (let bin = 0; bin < 256; bin++) {
+          bins[bin] = maxCount > 0 ? rawBins[offset + bin] / maxCount : 0;
+        }
+        return {
+          range: { min: rawRanges[k * 4], max: rawRanges[k * 4 + 1] },
+          bins,
+        };
+      });
+    } finally {
+      for (const buffer of paramsBuffers) buffer.destroy();
+      binsBuffer.destroy();
+      binsReadBuffer.destroy();
+      rangesReadBuffer.destroy();
+    }
   }
 
   /**

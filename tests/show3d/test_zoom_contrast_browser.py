@@ -623,6 +623,70 @@ def test_display_controls_repaint_pixels_immediately_during_playback(tmp_path):
         assert page.get_by_role("button", name="Pause playback").count() == 1
         assert np.abs(playing_after_style - playing_before_style).mean() > 2
         assert min(_panel_spatial_std(playing_after_style, 3, layout_cols)) > 3
+
+        # Independent histogram curves must follow resident playback frames,
+        # and dragging one panel's clip range must repaint immediately without
+        # stopping the movie or waiting for pointer release.
+        page.get_by_role("checkbox", name="Link contrast across panels").uncheck()
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf.lastHistogramSource === 'gpu-panel-regions'"
+        )
+        histogram_canvas = page.get_by_role(
+            "img", name="Histogram of intensity values with min and max clip handles"
+        ).first
+        histogram_before = histogram_canvas.screenshot()
+        histogram_frame = page.evaluate(
+            "() => window.__quantemShow3DPerf.lastHistogramFrame"
+        )
+        page.wait_for_function(
+            "previous => window.__quantemShow3DPerf.lastHistogramFrame !== previous",
+            arg=histogram_frame,
+        )
+        histogram_after = histogram_canvas.screenshot()
+        assert histogram_after != histogram_before
+
+        frame_before_histogram_drag = page.evaluate(
+            "() => window.__quantemShow3DPerf.lastPlaybackLiveCountText"
+        )
+        playing_before_histogram_drag = _visible_canvas_pixels(page)
+        playing_histogram_thumb = page.locator(
+            'input[aria-label="Histogram intensity clip range"]'
+        ).first
+        playing_histogram_slider = playing_histogram_thumb.locator(
+            "xpath=ancestor::*[contains(@class, 'MuiSlider-root')]"
+        )
+        playing_histogram_slider.scroll_into_view_if_needed()
+        playing_thumb_box = playing_histogram_slider.locator(
+            ".MuiSlider-thumb"
+        ).first.bounding_box()
+        playing_slider_box = playing_histogram_slider.bounding_box()
+        assert playing_thumb_box is not None and playing_slider_box is not None
+        page.mouse.move(
+            playing_thumb_box["x"] + playing_thumb_box["width"] / 2,
+            playing_thumb_box["y"] + playing_thumb_box["height"] / 2,
+        )
+        page.mouse.down()
+        page.mouse.move(
+            playing_slider_box["x"] + playing_slider_box["width"] * 0.45,
+            playing_slider_box["y"] + playing_slider_box["height"] / 2,
+        )
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf.lastHistogramRenderPath?.includes('webgpu')"
+        )
+        playing_during_histogram_drag = _visible_canvas_pixels(page)
+        histogram_drag_perf = page.evaluate(
+            "() => ({ ...window.__quantemShow3DPerf })"
+        )
+        assert page.get_by_role("button", name="Pause playback").count() == 1
+        assert np.abs(
+            playing_during_histogram_drag - playing_before_histogram_drag
+        ).mean() > 1
+        assert histogram_drag_perf["lastHistogramInputLatencyMs"] < 100
+        page.mouse.up()
+        page.wait_for_function(
+            "previous => window.__quantemShow3DPerf.lastPlaybackLiveCountText !== previous",
+            arg=frame_before_histogram_drag,
+        )
         page.get_by_role("button", name="Pause playback").click()
 
         assert page_errors == []
