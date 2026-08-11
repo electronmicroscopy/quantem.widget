@@ -1,40 +1,36 @@
-<!--
-This is the canonical operational checklist for quantem.widget pull requests.
-It is intentionally thorough so humans and coding agents can select the right
-gates and leave reproducible, automation-friendly evidence. Links are absolute
-because relative links do not resolve in PR descriptions.
-
-How to use: keep the Core checklist, then expand and complete only the
-sections your change touches. Delete sections that do not apply — a reviewer
-should only see boxes that are relevant to this PR. Either verify each box
-yourself or have a coding agent verify it and check it off for you; mark an
-item that is in a relevant section but does not apply as "n/a — reason".
-
--->
-
-## Summary
-
-<!-- What does this PR change, and why? -->
-
-## Verification
+### What problem does it solve?
 
 <!--
-Keep this concise and use "n/a" where a field does not apply. These structured
-fields help reviewers and coding agents reproduce the scientific workflow and
-select any missing gates without relying on private logs.
-
-- Checks run:
-- User workflow exercised:
-- Data: source category (public/synthetic/private), shape, dtype, raw size:
-- Backend and hardware:
-- Load/render/interaction timing:
-- Evidence artifacts or screenshots:
+Describe the concrete user or scientific-workflow problem. Explain why the
+change is needed; do not merely summarize the files that changed.
 -->
+
+### What should reviewer(s) do?
+
+<!--
+Give reviewers a short, specific path through the important behavior, files,
+or UI. Include only the actions needed to judge this change.
+-->
+
+### Verification
+
+<!--
+List the checks that actually ran and their results. For UI or scientific
+workflow changes, include the exercised workflow, representative data,
+backend/hardware, and visual or timing evidence when relevant. Omit fields
+that do not apply.
+-->
+
+<!--
+Internal preflight checklist for authors and coding agents. Use every relevant
+item during authoring and review, but do not expose this checklist
+in the rendered PR. Put only the resulting reviewer actions and verification
+evidence in the three visible sections above.
 
 ## Core checklist (every PR)
 
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
@@ -48,8 +44,9 @@ select any missing gates without relying on private logs.
   Saving a notebook after running widget cells stores that state silently;
   strip it before committing:
   `jq 'del(.metadata.widgets)' <nb>.ipynb > tmp && mv tmp <nb>.ipynb`
-- [ ] Only the sections below that this PR touches are kept; the rest are
-  deleted from this description.
+- [ ] Use every checklist item relevant to this PR. Keep the full checklist
+  hidden, and copy only the resulting actions or evidence into the visible
+  description.
 
 <details>
 <summary><b>Python API and docs</b> — new widget, loader, or API change</summary>
@@ -198,6 +195,7 @@ select any missing gates without relying on private logs.
   state. See [GitHub preview](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/github-preview.md).
 
 </details>
+-->
 
 ---
 
