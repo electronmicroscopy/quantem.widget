@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from quantem.gpu.io.load import LoadResult
 
+from quantem.widget import Show4DSTEM
+from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 import quantem.widget.show4dstem_factory as factory
 
 
@@ -55,7 +57,6 @@ def _preset_region_data(
 
 
 def test_public_show4dstem_import_uses_factory() -> None:
-    from quantem.widget import Show4DSTEM
 
     assert Show4DSTEM is factory.Show4DSTEM
 
@@ -199,8 +200,6 @@ def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
 
 
 def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -222,7 +221,6 @@ def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
 
 
 def test_show4dstem_auto_detects_bf_disk_when_calibration_is_omitted() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = _offset_bf_disk_data()
     widget = Show4DSTEM(data, precompute_virtual_images=False, verbose=False)
@@ -239,7 +237,6 @@ def test_show4dstem_auto_detects_bf_disk_when_calibration_is_omitted() -> None:
 
 
 def test_show4dstem_explicit_bf_calibration_is_not_auto_overwritten() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = _offset_bf_disk_data()
     widget = Show4DSTEM(
@@ -259,7 +256,6 @@ def test_show4dstem_explicit_bf_calibration_is_not_auto_overwritten() -> None:
 
 
 def test_show4dstem_accepts_read_only_numpy_without_torch_warning(recwarn) -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
     data.setflags(write=False)
@@ -277,7 +273,6 @@ def test_show4dstem_accepts_read_only_numpy_without_torch_warning(recwarn) -> No
 
 
 def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(5 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(5, 3, 4, 6, 6)
     widget = Show4DSTEM(
@@ -381,7 +376,6 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
 
 
 def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -408,7 +402,6 @@ def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
 
 def test_show4dstem_one_frame_multiple_mode_keeps_single_virtual_image_live() -> None:
     """C1: one 4D dataset with multiple selected, expect single VI drag updates."""
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(3 * 4 * 8 * 8, dtype=np.uint16).reshape(3, 4, 8, 8)
     widget = Show4DSTEM(
@@ -438,7 +431,6 @@ def test_show4dstem_one_frame_multiple_mode_keeps_single_virtual_image_live() ->
 
 def test_show4dstem_one_frame_multiple_mode_preset_clicks_update_single_vi() -> None:
     """C1: BF/ABF/ADF clicks update the visible VI in one-frame multiple mode."""
-    from quantem.widget import Show4DSTEM
 
     data = _preset_region_data()
     widget = Show4DSTEM(
@@ -478,7 +470,6 @@ def test_show4dstem_one_frame_multiple_mode_preset_clicks_update_single_vi() -> 
 
 def test_show4dstem_multiple_mode_preset_clicks_update_compare_grid() -> None:
     """C2: BF/ABF/ADF clicks update the visible compare-grid virtual images."""
-    from quantem.widget import Show4DSTEM
 
     data = _preset_region_data(n_frames=3)
     widget = Show4DSTEM(
@@ -513,7 +504,6 @@ def test_show4dstem_multiple_mode_preset_clicks_update_compare_grid() -> None:
 
 
 def test_show4dstem_compare_grid_pages_panels() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(7 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(7, 3, 4, 6, 6)
     widget = Show4DSTEM(
@@ -585,8 +575,6 @@ def test_show4dstem_compare_grid_pages_panels() -> None:
 
 
 def test_show4dstem_multiple_init_renders_compare_grid_once(monkeypatch) -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
     calls = {"virtual": 0, "compare": 0}
@@ -630,7 +618,6 @@ def test_show4dstem_multiple_init_renders_compare_grid_once(monkeypatch) -> None
 
 
 def test_show4dstem_free_reports_data_freed_for_multiple_grid() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(2 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -653,8 +640,6 @@ def test_show4dstem_free_reports_data_freed_for_multiple_grid() -> None:
 
 
 def test_show4dstem_compare_preset_cache_reuses_multiple_grid(monkeypatch) -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(3 * 2 * 2 * 6 * 6, dtype=np.uint16).reshape(3, 2, 2, 6, 6)
     widget = Show4DSTEM(
@@ -695,8 +680,6 @@ def test_show4dstem_compare_preset_cache_reuses_multiple_grid(monkeypatch) -> No
 def test_show4dstem_frame_virtual_image_uses_sparse_detector_mask(monkeypatch) -> None:
     import torch
 
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = torch.arange(2 * 4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
     data = data.reshape(2, 4, 4, 16, 16)
@@ -758,7 +741,6 @@ def test_detector_session_masked_sum_matches_dense_reference() -> None:
 
 
 def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
     data[0] = 4
@@ -793,7 +775,6 @@ def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
 
 
 def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.empty((2, 2, 2, 4, 4), dtype=np.uint16)
     data[0] = 1
@@ -825,7 +806,6 @@ def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
 
 
 def test_show4dstem_rejects_noncanonical_view_modes() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
     for view_mode in ("compare", "temporal"):
@@ -834,7 +814,6 @@ def test_show4dstem_rejects_noncanonical_view_modes() -> None:
 
 
 def test_show4dstem_compare_grid_validates_api() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
 

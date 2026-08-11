@@ -187,12 +187,7 @@ class WatchedImageFolder:
     ) -> None:
         self.folder = _canonical_path(Path(folder))
         if create:
-            try:
-                self.folder.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise OSError(
-                    f"Could not create watched image folder {self.folder}: {exc}"
-                ) from exc
+            self.folder.mkdir(parents=True, exist_ok=True)
         if not self.folder.is_dir():
             raise FileNotFoundError(f"Image folder does not exist or is not a directory: {self.folder}")
         self.pattern = str(pattern)

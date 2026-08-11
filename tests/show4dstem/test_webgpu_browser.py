@@ -6,9 +6,11 @@ from contextlib import suppress
 import numpy as np
 import pytest
 
+from quantem.widget import Show4DSTEM
+
 
 pytest.importorskip("hdf5plugin")
-pytest.importorskip("playwright.sync_api")
+sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
 
 def _chrome_executable():
@@ -167,8 +169,6 @@ def _exercise_roi_backend(page, expected_pixels):
     reason="set QT_RUN_BROWSER_TESTS=1 to run headed WebGPU browser smoke tests",
 )
 def test_webgpu_multi_volume_export_fetches_second_volume(tmp_path):
-    from playwright.sync_api import sync_playwright
-    from quantem.widget import Show4DSTEM
 
     chrome = _chrome_executable()
     if chrome is None:

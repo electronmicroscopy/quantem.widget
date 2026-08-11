@@ -194,7 +194,7 @@ def test_show3d_profiles_follow_single_panel_pages() -> None:
 
 def test_show3d_single_panel_page_kymograph_frontend_contract() -> None:
     source = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
 
     assert "const singlePanelPageProfile" in source

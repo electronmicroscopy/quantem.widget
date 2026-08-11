@@ -8,7 +8,7 @@ import pathlib
 def test_packed_panel_frame_refresh_preserves_independent_contrast_on_zoom() -> None:
     """The retained zoom frame must use the settled per-panel contrast path."""
     frontend = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
     assert "const perPanelContrast" in frontend
     assert "resolvePanelRenderRange(" in frontend
@@ -20,7 +20,7 @@ def test_packed_panel_frame_refresh_preserves_independent_contrast_on_zoom() -> 
 def test_one_resident_renderer_keeps_unlinked_contrast_per_panel() -> None:
     """GPU and the CPU fallback share the per-panel contrast resolver."""
     frontend = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
 
     assert "const directPanelRanges =" in frontend
@@ -34,7 +34,7 @@ def test_one_resident_renderer_keeps_unlinked_contrast_per_panel() -> None:
 def test_scale_change_converts_manual_limits_before_repaint() -> None:
     """Linear limits must never be reused as logarithmic limits or vice versa."""
     frontend = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
 
     assert "const signedExpm1" in frontend
@@ -46,7 +46,7 @@ def test_scale_change_converts_manual_limits_before_repaint() -> None:
 
 def test_frame_scrub_is_raf_coalesced_and_commits_once_on_release() -> None:
     """Pointer floods repaint resident data but commit only on release."""
-    root = pathlib.Path(__file__).resolve().parents[1]
+    root = pathlib.Path(__file__).resolve().parents[2]
     frontend = (root / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
     colormaps = (root / "js" / "colormaps.ts").read_text(encoding="utf-8")
 
@@ -64,7 +64,7 @@ def test_frame_scrub_is_raf_coalesced_and_commits_once_on_release() -> None:
 def test_gpu_resident_display_controls_are_immediate_repaint_dependencies() -> None:
     """Every display-only control must re-present the current GPU frame."""
     frontend = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
     effect = frontend.split(
         "// Display controls repaint the current resident GPU slot immediately.",

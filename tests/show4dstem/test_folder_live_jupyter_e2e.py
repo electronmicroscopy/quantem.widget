@@ -47,7 +47,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -219,7 +219,7 @@ def _load_config() -> _Config:
         _fail(
             "Run pytest with the CUDA environment's Python instead of pointing "
             "the test at a second interpreter. For example: "
-            f"{python} -m pytest tests/test_show4dstem_folder_live_jupyter_e2e.py. "
+            f"{python} -m pytest tests/show4dstem/test_folder_live_jupyter_e2e.py. "
             f"Current interpreter: {sys.executable}."
         )
 

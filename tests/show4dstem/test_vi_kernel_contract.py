@@ -6,9 +6,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from quantem.widget import Show4DSTEM
+
 
 def _webgpu_source(name: str) -> str:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     return (repo / "js" / ".generated" / "engine" / name).read_text(
         encoding="utf-8"
     )
@@ -22,7 +24,6 @@ def test_show4dstem_cuda_keeps_cupy_compute_source_for_rawkernel() -> None:
     except cp.cuda.runtime.CUDARuntimeError as exc:
         pytest.skip(f"CUDA device is not available: {exc}")
 
-    from quantem.widget import Show4DSTEM
 
     data = cp.ones((4, 4, 12, 12), dtype=cp.uint16)
     widget = Show4DSTEM(
@@ -48,7 +49,6 @@ def test_show4dstem_cuda_compare_grid_uses_rawkernel_frames() -> None:
     except cp.cuda.runtime.CUDARuntimeError as exc:
         pytest.skip(f"CUDA device is not available: {exc}")
 
-    from quantem.widget import Show4DSTEM
 
     data = cp.ones((2, 4, 4, 12, 12), dtype=cp.uint16)
     widget = Show4DSTEM(
@@ -75,7 +75,7 @@ def test_show4dstem_cuda_compare_grid_uses_rawkernel_frames() -> None:
 
 def test_show4dstem_uses_public_detector_session() -> None:
     source = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[2]
         / "src"
         / "quantem"
         / "widget"
@@ -87,7 +87,7 @@ def test_show4dstem_uses_public_detector_session() -> None:
 
 
 def test_show4dstem_webgpu_engine_has_selected_index_vi_kernel() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     source = _webgpu_source("detector/compute/webgpu/backend.ts")
     dpc_source = _webgpu_source("dpc/compute/webgpu/kernels.ts")
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
@@ -136,7 +136,7 @@ def test_show4dstem_webgpu_engine_has_selected_index_vi_kernel() -> None:
 
 
 def test_show4dstem_webgpu_h5_master_loader_batches_external_decodes() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -251,7 +251,7 @@ def test_show4dstem_webgpu_h5_master_loader_batches_external_decodes() -> None:
 
 
 def test_show4dstem_webgpu_h5_prefetch_is_bounded_by_master_data_file_count() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -270,7 +270,7 @@ def test_show4dstem_webgpu_h5_prefetch_is_bounded_by_master_data_file_count() ->
 
 
 def test_show4dstem_webgpu_h5_initial_load_uses_visible_loading_panels() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -300,7 +300,7 @@ def test_show4dstem_webgpu_h5_initial_load_uses_visible_loading_panels() -> None
 
 def test_show4dstem_h5_preload_publishes_every_dataset_progressively() -> None:
     """Every HDF5 dataset is visited even when native uint16 residency is one."""
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -315,7 +315,6 @@ def test_show4dstem_h5_preload_publishes_every_dataset_progressively() -> None:
 
 
 def test_show4dstem_h5_multiple_starts_with_loading_compare_state() -> None:
-    from quantem.widget import Show4DSTEM
 
     widget = Show4DSTEM(
         np.zeros((1, 1, 1, 1), dtype=np.uint8),
@@ -342,7 +341,7 @@ def test_show4dstem_h5_multiple_starts_with_loading_compare_state() -> None:
 
 
 def test_show4dstem_frontend_virtual_image_bytes_use_react_setter() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -363,7 +362,7 @@ def test_show4dstem_frontend_virtual_image_bytes_use_react_setter() -> None:
 
 
 def test_show4dstem_multiple_detector_drag_uses_live_gpu_compare_slots() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -397,7 +396,7 @@ def test_show4dstem_multiple_detector_drag_uses_live_gpu_compare_slots() -> None
 
 
 def test_show4dstem_webgpu_fits_bf_disk_in_browser_for_h5_sources() -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     frontend = (repo / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )

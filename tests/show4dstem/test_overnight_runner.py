@@ -7,9 +7,9 @@ import subprocess
 import sys
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "widget_show4dstem_folder_overnight.py"
-E2E_TEST = ROOT / "tests" / "test_show4dstem_folder_live_jupyter_e2e.py"
+E2E_TEST = ROOT / "tests" / "show4dstem" / "test_folder_live_jupyter_e2e.py"
 
 
 def _module():

@@ -5,7 +5,7 @@ import pathlib
 
 def test_show4dstem_preset_clicks_sync_without_comm_guard() -> None:
     """C1: BF/ABF/ADF clicks must sync in JupyterLab models without ``comm``."""
-    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
     source = (repo_root / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
@@ -24,7 +24,7 @@ def test_show4dstem_preset_clicks_sync_without_comm_guard() -> None:
 
 def test_show4dstem_file_open_exports_keep_local_h5_folder_grant_visible() -> None:
     """C2: file-opened H5 exports must expose the no-server folder grant path."""
-    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
     source = (repo_root / "js" / "show4dstem" / "index.tsx").read_text(
         encoding="utf-8"
     )
