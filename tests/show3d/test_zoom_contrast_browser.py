@@ -624,6 +624,54 @@ def test_display_controls_repaint_pixels_immediately_during_playback(tmp_path):
         assert np.abs(playing_after_style - playing_before_style).mean() > 2
         assert min(_panel_spatial_std(playing_after_style, 3, layout_cols)) > 3
 
+        # Linked histogram contrast must repaint every panel while playback is
+        # still running. The playback loop reads live control values rather
+        # than the React state captured before the pointer gesture.
+        linked_playing_before = _visible_canvas_pixels(page)
+        linked_playing_ranges_before = page.evaluate(
+            "() => window.__quantemShow3DPerf.lastDirectPanelRanges"
+        )
+        linked_playing_thumb = page.locator(
+            'input[aria-label="Histogram intensity clip range"]'
+        ).first
+        linked_playing_slider = linked_playing_thumb.locator(
+            "xpath=ancestor::*[contains(@class, 'MuiSlider-root')]"
+        )
+        linked_playing_slider.scroll_into_view_if_needed()
+        linked_playing_thumb_box = linked_playing_slider.locator(
+            ".MuiSlider-thumb"
+        ).first.bounding_box()
+        linked_playing_slider_box = linked_playing_slider.bounding_box()
+        assert linked_playing_thumb_box is not None
+        assert linked_playing_slider_box is not None
+        page.mouse.move(
+            linked_playing_thumb_box["x"] + linked_playing_thumb_box["width"] / 2,
+            linked_playing_thumb_box["y"] + linked_playing_thumb_box["height"] / 2,
+        )
+        page.mouse.down()
+        page.mouse.move(
+            linked_playing_slider_box["x"] + linked_playing_slider_box["width"] * 0.45,
+            linked_playing_slider_box["y"] + linked_playing_slider_box["height"] / 2,
+        )
+        page.wait_for_function(
+            """previous => {
+              const current = window.__quantemShow3DPerf.lastDirectPanelRanges;
+              return JSON.stringify(current) !== JSON.stringify(previous);
+            }""",
+            arg=linked_playing_ranges_before,
+        )
+        linked_playing_during = _visible_canvas_pixels(page)
+        assert page.get_by_role("button", name="Pause playback").count() == 1
+        assert min(
+            _panel_pixel_differences(
+                linked_playing_before,
+                linked_playing_during,
+                3,
+                layout_cols,
+            )
+        ) > 1
+        page.mouse.up()
+
         # Independent histogram curves must follow resident playback frames,
         # and dragging one panel's clip range must repaint immediately without
         # stopping the movie or waiting for pointer release.

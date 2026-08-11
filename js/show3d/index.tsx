@@ -7314,6 +7314,23 @@ function Show3D() {
     if (panels.length > 1) {
       const sharedAutoRange = c.autoContrast ? sharedDirectDisplayRange(normalized, c) : null;
       const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+      if (c.linkContrast && !c.autoContrast) {
+        return panels.map((panel) => {
+          const panelRange = panelDataRanges[panel];
+          const bounds = (panelRange && panelRange.max > panelRange.min)
+            ? panelRange
+            : stack;
+          return {
+            ...sliderRange(
+              bounds.min,
+              bounds.max,
+              c.imageVminPct,
+              c.imageVmaxPct,
+            ),
+            logScale: c.logScale,
+          };
+        });
+      }
       return panels.map((panel) => {
         const pdr = panelDataRanges[panel];
         const bounds = (pdr && pdr.max > pdr.min) ? pdr : stack;
