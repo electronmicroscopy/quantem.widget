@@ -25,6 +25,79 @@ def _wait_until(predicate, timeout: float = 2.0) -> None:
     raise AssertionError("condition was not reached before the watcher timeout")
 
 
+def test_show3d_live_folder_creates_missing_path_and_appends_png(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    folder = tmp_path / "new" / "microscope-session"
+    widget = Show3D.from_folder(
+        folder,
+        file_types=".PNG",
+        watch=True,
+        watch_interval=60,
+    )
+    try:
+        assert folder.is_dir()
+        assert widget.n_slices == 0
+        # Keep this focused test deterministic; the existing watcher tests
+        # cover background-thread delivery separately.
+        widget.stop_folder_watch()
+
+        frame = np.arange(6 * 8, dtype=np.uint8).reshape(6, 8)
+        Image.fromarray(frame).save(folder / "frame_001.png")
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [0]
+        assert widget.n_slices == 1
+        assert widget.labels == ["frame_001"]
+        np.testing.assert_array_equal(widget._data[0], frame)
+    finally:
+        widget.close()
+
+
+def test_show3d_live_folder_file_types_filter_new_arrivals(tmp_path: Path) -> None:
+    from PIL import Image
+
+    folder = tmp_path / "mixed-session"
+    widget = Show3D.from_folder(
+        folder,
+        file_types=["png", ".tif"],
+        watch=True,
+        watch_interval=60,
+    )
+    try:
+        widget.stop_folder_watch()
+        frame = np.arange(6 * 8, dtype=np.uint8).reshape(6, 8)
+        Image.fromarray(frame).save(folder / "frame_001.png")
+        Image.fromarray(frame + 1).save(folder / "frame_002.tif")
+        _save(folder / "frame_003.npy", 3)
+
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [0, 1]
+        assert widget.labels == ["frame_001", "frame_002"]
+        assert [path.suffix for path in widget.folder_paths] == [".png", ".tif"]
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize("file_types", [[], "", ["png", "csv"], ["png", 1]])
+def test_show3d_folder_rejects_invalid_file_types(
+    tmp_path: Path,
+    file_types: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match="file_types|Unsupported"):
+        Show3D.from_folder(tmp_path, file_types=file_types, watch=False)
+
+
+def test_show3d_one_shot_folder_keeps_missing_path_strict(tmp_path: Path) -> None:
+    folder = tmp_path / "missing"
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        Show3D.from_folder(folder, watch=False)
+
+    assert not folder.exists()
+
+
 def test_show2d_folder_poll_remaps_panel_state_by_path(tmp_path: Path) -> None:
     _save(tmp_path / "frame_2.npy", 2)
     _save(tmp_path / "frame_10.npy", 10)

@@ -3976,6 +3976,13 @@ function Show3D() {
   const [panelInnerBorderColorState] = useModelState<string>("panel_inner_border_color");
   const [linkContrast, setLinkContrast] = useModelState<boolean>("link_contrast");
   const [cmap, setCmap] = useModelState<string>("cmap");
+  // The model-backed setter can emit its React update after another synced
+  // trait in the same control event. Direct WebGPU repaint paths must use the
+  // palette selected by this event, not the palette from the previous render.
+  const cmapLiveRef = React.useRef(cmap || "inferno");
+  React.useEffect(() => {
+    cmapLiveRef.current = cmap || "inferno";
+  }, [cmap]);
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
   const [markerColors] = useModelState<string[]>("marker_colors");
   const [identityColors] = useModelState<string[]>("identity_colors");
@@ -4029,7 +4036,9 @@ function Show3D() {
   const setColorShared = React.useCallback((shared: boolean, panelIdx = 0) => {
     const n = Math.max(1, nPanels || 1);
     if (shared || n <= 1) {
-      setCmap(panelCmapFor(panelIdx));
+      const value = panelCmapFor(panelIdx);
+      cmapLiveRef.current = value;
+      setCmap(value);
       setPanelCmaps([]);
       return;
     }
@@ -4038,8 +4047,9 @@ function Show3D() {
   const setCmapForPanel = React.useCallback((panelIdx: number, value: string) => {
     const n = Math.max(1, nPanels || 1);
     if (n <= 1 || colorShared) {
+      cmapLiveRef.current = value;
       setCmap(value);
-      setPanelCmaps([]);
+      if (normalizedPanelCmaps.length > 0) setPanelCmaps([]);
       return;
     }
     const idx = Math.max(0, Math.min(n - 1, Math.round(panelIdx)));
@@ -7531,8 +7541,9 @@ function Show3D() {
     }
     if (slotIdx === null) return false;
 
-    const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
-    engine.uploadLUT(c.cmap, lut);
+    const liveCmap = cmapLiveRef.current || c.cmap;
+    const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
+    engine.uploadLUT(liveCmap, lut);
     const panelCount = panels.length;
     const cols = panelColsForCount(panelCount);
     const rows = Math.ceil(panelCount / cols);
@@ -7620,8 +7631,9 @@ function Show3D() {
     const gpuCtx = ensureGpuDisplayContext(engine, c.canvasW, c.canvasH);
     if (!gpuCtx) return false;
 
-    const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
-    engine.uploadLUT(c.cmap, lut);
+    const liveCmap = cmapLiveRef.current || c.cmap;
+    const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
+    engine.uploadLUT(liveCmap, lut);
     let vmin: number, vmax: number;
     if (c.autoContrast) {
       const cached = cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
@@ -8269,7 +8281,8 @@ function Show3D() {
       // Render frame. The 4k playback hot path must stay off the JS CPU:
       // one 4096^2 colormap loop alone is ~37 ms, before auto-contrast/canvas.
       const renderStartMs = performance.now();
-      const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
+      const liveCmap = cmapLiveRef.current || c.cmap;
+      const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
       if (mainOffscreenRef.current && mainImgDataRef.current) {
         let vmin: number, vmax: number;
         let cpuData: Float32Array | null = frame;
@@ -8449,7 +8462,7 @@ function Show3D() {
         }
         if (!rendered && engine && gpuCmapReadyRef.current) {
           try {
-            engine.uploadLUT(c.cmap, lut);
+            engine.uploadLUT(liveCmap, lut);
             const hasGpuSlot = gpuFrameCacheUploadedRef.current.has(next);
             const canGpuFrameCache = hasGpuSlot;
             const slotIdx = canGpuFrameCache ? next : 0;

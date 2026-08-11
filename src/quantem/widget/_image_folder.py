@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -28,6 +29,38 @@ _SUPPORTED_IMAGE_SUFFIXES = {
     ".tiff",
 }
 _NATURAL_PART_RE = re.compile(r"(\d+)")
+
+
+def _normalize_file_types(
+    file_types: str | Sequence[str] | None,
+) -> frozenset[str] | None:
+    """Normalize an optional image-extension filter."""
+    if file_types is None:
+        return None
+    values = [file_types] if isinstance(file_types, str) else list(file_types)
+    if not values:
+        raise ValueError(
+            "file_types must name at least one image type, for example "
+            "'tif' or ['png', 'tif']"
+        )
+    suffixes: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise TypeError(
+                "file_types entries must be strings such as 'emd', 'png', or 'tif'"
+            )
+        suffix = value.strip().casefold()
+        if not suffix:
+            raise ValueError("file_types entries must not be empty")
+        if not suffix.startswith("."):
+            suffix = f".{suffix}"
+        if suffix not in _SUPPORTED_IMAGE_SUFFIXES:
+            supported = ", ".join(sorted(_SUPPORTED_IMAGE_SUFFIXES))
+            raise ValueError(
+                f"Unsupported image file type {value!r}. Supported types: {supported}"
+            )
+        suffixes.add(suffix)
+    return frozenset(suffixes)
 
 
 def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object], ...], ...]:
@@ -146,16 +179,26 @@ class WatchedImageFolder:
         folder: str | Path,
         *,
         pattern: str = "*",
+        file_types: str | Sequence[str] | None = None,
         recursive: bool = False,
         interval: float = 1.0,
         mode: Literal["panels", "frames"],
+        create: bool = False,
     ) -> None:
         self.folder = _canonical_path(Path(folder))
+        if create:
+            try:
+                self.folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise OSError(
+                    f"Could not create watched image folder {self.folder}: {exc}"
+                ) from exc
         if not self.folder.is_dir():
             raise FileNotFoundError(f"Image folder does not exist or is not a directory: {self.folder}")
         self.pattern = str(pattern)
         if not self.pattern:
             raise ValueError("pattern must be a non-empty glob, for example '*.tif' or '*'")
+        self.file_types = _normalize_file_types(file_types)
         self.recursive = bool(recursive)
         self.interval = self._validate_interval(interval)
         self.mode = mode
@@ -189,7 +232,10 @@ class WatchedImageFolder:
         for candidate in candidates:
             if not candidate.is_file() or candidate.name.startswith("."):
                 continue
-            if candidate.suffix.casefold() not in _SUPPORTED_IMAGE_SUFFIXES:
+            suffix = candidate.suffix.casefold()
+            if suffix not in _SUPPORTED_IMAGE_SUFFIXES:
+                continue
+            if self.file_types is not None and suffix not in self.file_types:
                 continue
             # Keep the path as named in the folder: resolving through a final
             # symlink can land on an extension-less target (Hugging Face hub

@@ -2113,6 +2113,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         path: str | pathlib.Path,
         *,
         pattern: str = "*",
+        file_types: str | Sequence[str] | None = None,
         recursive: bool = False,
         watch: bool = True,
         watch_interval: float = 1.0,
@@ -2123,7 +2124,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Stable additions update this widget in place. Every file is decoded
         through :func:`quantem.widget.io.read_image`; failed or partially
         written files remain pending for a later poll. Folder size never creates
-        pages: every matching file extends the frame axis of this one stack.
+        pages: every matching file extends the frame axis of this one stack. A
+        missing folder is created automatically when ``watch=True``. Use
+        ``file_types="emd"`` or ``file_types=["png", "tif", "tiff"]`` to
+        watch only selected image formats. ``pattern`` and ``file_types`` are
+        combined when both are provided.
         """
         if "labels" in kwargs:
             raise TypeError(
@@ -2140,9 +2145,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         source = WatchedImageFolder(
             path,
             pattern=pattern,
+            file_types=file_types,
             recursive=recursive,
             interval=watch_interval,
             mode="frames",
+            create=watch,
         )
         arrays, records = source.read_initial(
             allow_empty=watch,

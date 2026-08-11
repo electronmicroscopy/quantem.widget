@@ -609,3 +609,61 @@ def test_display_controls_repaint_pixels_immediately_during_playback(tmp_path):
 
         assert page_errors == []
         browser.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
+    reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
+)
+def test_single_panel_colormap_repaints_on_the_selected_event(tmp_path):
+    """The direct WebGPU canvas must never display the previous palette."""
+    from playwright.sync_api import sync_playwright
+
+    from quantem.widget import Show3D
+
+    chrome = _chrome_executable()
+    if chrome is None:
+        pytest.skip("Chrome/Chromium executable not found")
+
+    rows, cols = np.indices((192, 192), dtype=np.float32)
+    image = (
+        0.25 * rows
+        + 0.5 * cols
+        + 80 * np.exp(-((rows - 72) ** 2 + (cols - 118) ** 2) / 500)
+    ).astype(np.float32)
+    stack = np.stack([image, np.roll(image, 8, axis=1)], axis=0)
+    widget = Show3D(stack, cmap="plasma", debug=True, verbose=False)
+    html_path = tmp_path / "show3d-single-panel-colormap-event.html"
+    widget.export_html(html_path, encoding="full")
+
+    page_errors: list[str] = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            executable_path=chrome,
+            headless=True,
+            args=["--enable-unsafe-swiftshader", "--enable-webgpu"],
+        )
+        page = browser.new_page(viewport={"width": 1000, "height": 900})
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(html_path.as_uri())
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf?.offlineFramePrewarmDone === 2"
+        )
+        page.wait_for_timeout(200)
+
+        colormap = page.get_by_role("combobox", name="Image colormap")
+        colormap.click()
+        page.get_by_role("option", name="Gray", exact=True).click()
+        page.wait_for_timeout(150)
+        gray = _visible_canvas_pixels(page)
+        gray_channel_spread = gray.max(axis=2) - gray.min(axis=2)
+        assert float(np.quantile(gray_channel_spread, 0.99)) <= 2
+
+        colormap.click()
+        page.get_by_role("option", name="Viridis", exact=True).click()
+        page.wait_for_timeout(150)
+        viridis = _visible_canvas_pixels(page)
+        assert float(np.abs(viridis - gray).mean()) > 5
+        assert float(np.quantile(viridis.max(axis=2) - viridis.min(axis=2), 0.75)) > 10
+        assert page_errors == []
+        browser.close()
