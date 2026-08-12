@@ -135,6 +135,29 @@ def test_show4dstem_routes_loadresult_chunked_payload_to_mps_builder(monkeypatch
     assert calls == [(payload, {"verbose": False})]
 
 
+def test_show4dstem_opens_mps_5d_loadresult_as_dataset_comparison(monkeypatch) -> None:
+    payload = SimpleNamespace(
+        chunks=[object()],
+        shape=(2, 4, 4, 8, 8),
+        metadata={"scan_shape": (4, 4)},
+    )
+    load_result = LoadResult(payload, {"file_names": ["-2 deg", "+2 deg"]})
+
+    def _fake_mps_builder(data, **kwargs):
+        return {"data": data, "kwargs": kwargs}
+
+    monkeypatch.setattr(factory, "_build_mps_viewer", _fake_mps_builder)
+
+    result = factory.Show4DSTEM(load_result)
+
+    assert result["kwargs"] == {
+        "frame_dim_label": "Dataset",
+        "frame_labels": ["-2 deg", "+2 deg"],
+        "view_mode": "multiple",
+        "compare_dp_mode": "selected",
+    }
+
+
 def test_show4dstem_routes_mps_gpu_frame_proxy_to_mps_builder(monkeypatch) -> None:
     payload = SimpleNamespace(_is_gpu_frames=True, device="mps:0")
 
@@ -182,7 +205,7 @@ def test_show4dstem_base_route_does_not_import_mps_implementation(monkeypatch) -
     assert factory.show4dstem_backend_kind(payload) == "base"
 
 
-def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
+def test_show4dstem_opens_5d_loadresult_as_dataset_comparison(monkeypatch) -> None:
     payload = SimpleNamespace(ndim=5)
     load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
 
@@ -196,7 +219,59 @@ def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
     assert result["data"] is payload
     assert result["kwargs"]["frame_dim_label"] == "Dataset"
     assert result["kwargs"]["frame_labels"] == ["first.h5", "second.h5"]
+    assert result["kwargs"]["view_mode"] == "multiple"
+    assert result["kwargs"]["compare_dp_mode"] == "selected"
     assert result["kwargs"]["verbose"] is False
+
+
+def test_show4dstem_preserves_explicit_5d_view_options(monkeypatch) -> None:
+    payload = SimpleNamespace(ndim=5)
+    load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
+
+    def _fake_base(data, **kwargs):
+        return {"data": data, "kwargs": kwargs}
+
+    monkeypatch.setattr(factory, "_Show4DSTEMBase", _fake_base)
+
+    result = factory.Show4DSTEM(
+        load_result,
+        view_mode="single",
+        compare_dp_mode="average",
+    )
+
+    assert result["kwargs"]["view_mode"] == "single"
+    assert result["kwargs"]["compare_dp_mode"] == "average"
+
+
+def test_simple_5d_loadresult_keeps_selected_and_average_dp_working() -> None:
+    data = np.zeros((2, 2, 2, 6, 6), dtype=np.uint16)
+    data[0, :, :, 1:3, 1:3] = 8
+    data[1, :, :, 3:5, 3:5] = 24
+    loaded = LoadResult(data, {"file_names": ("tilt -2 deg", "tilt +2 deg")})
+
+    widget = factory.Show4DSTEM(
+        loaded,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+    try:
+        assert widget.view_mode == "multiple"
+        assert widget.compare_dp_mode == "selected"
+        selected_first = widget.frame_bytes
+
+        widget.frame_idx = 1
+        selected_second = widget.frame_bytes
+        assert selected_second != selected_first
+
+        widget.compare_dp_mode = "average"
+        average = widget.frame_bytes
+        assert average != selected_first
+        assert average != selected_second
+
+        widget.compare_dp_mode = "selected"
+        assert widget.frame_bytes == selected_second
+    finally:
+        widget.close()
 
 
 def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:

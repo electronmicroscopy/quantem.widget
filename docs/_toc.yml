@@ -16,6 +16,11 @@ parts:
     chapters:
       - file: tutorials/download_data
       - file: tutorials/show4dstem
+        sections:
+          - file: tutorials/show4dstem_single
+            title: Open one 4D-STEM dataset
+          - file: tutorials/show4dstem_multiple
+            title: Compare datasets or tilts
       - file: tutorials/showptycho
       - file: tutorials/show2d
       - file: tutorials/show3d
