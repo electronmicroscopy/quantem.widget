@@ -753,10 +753,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     auto_contrast : bool, default True
         Use percentile-based contrast (ignores vmin/vmax).
     link_contrast : bool, optional
-        Share one contrast range across panels. Paged data defaults to
-        ``False`` so each reconstruction uses its own automatic percentile
-        range; ordinary multi-panel data defaults to ``True``. Pass ``True``
-        for a matched physical scale across every page and panel.
+        Link relative contrast-handle movement across panels. Multi-panel data
+        defaults to ``False`` because panels may represent different physical
+        quantities. Pass ``True`` only when every panel has a comparable
+        intensity scale; each panel still resolves the linked percentages in
+        its own data range.
     percentile_low : float, default 0.5
         Lower percentile for auto-contrast.
     percentile_high : float, default 99.5
@@ -1221,6 +1222,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     data_max = traitlets.Float(0.0).tag(sync=True)
     auto_vmins = traitlets.List(traitlets.Float()).tag(sync=True)
     auto_vmaxs = traitlets.List(traitlets.Float()).tag(sync=True)
+    auto_vmins_per_panel = traitlets.List(traitlets.Float()).tag(sync=True)
+    auto_vmaxs_per_panel = traitlets.List(traitlets.Float()).tag(sync=True)
     identity_colors = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
 
     # =========================================================================
@@ -2585,7 +2588,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             labels=panel_titles,
         )
         if link_contrast is None:
-            link_contrast = n_pages <= 1
+            # Independent contrast is the scientifically safe multi-panel
+            # default. Phase, BF, DF, residual, and reconstruction panels may
+            # differ by orders of magnitude even when they share a layout.
+            link_contrast = len(panel_titles or data_args or []) <= 1
         kwargs["link_contrast"] = bool(link_contrast)
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
@@ -6903,64 +6909,101 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         return frame
 
     def _refresh_auto_contrast_ranges(self) -> None:
-        """Precompute one stack-level auto-contrast range for JS playback.
+        """Precompute stable stack and panel auto-contrast ranges.
 
-        Show3D is a scrubber, so Auto should give a stable intensity mapping
-        across frames and panels. The synced lists still have one entry per
-        slice for the existing JS cache contract, but every entry carries the
-        same stack percentile range.
+        A Show3D panel may represent a different physical quantity from its
+        neighbors, such as SSB phase beside bright- and dark-field counts.
+        Each independent panel therefore receives one percentile range across
+        its complete time series. This keeps playback stable without forcing
+        unlike units through one absolute intensity window.
         """
         if self.n_slices <= 0:
             self.auto_vmins = []
             self.auto_vmaxs = []
+            self.auto_vmins_per_panel = []
+            self.auto_vmaxs_per_panel = []
             return
         if not self.auto_contrast:
             self.auto_vmins = []
             self.auto_vmaxs = []
+            self.auto_vmins_per_panel = []
+            self.auto_vmaxs_per_panel = []
             return
-        low_target = self.percentile_low / 100.0
-        high_target = self.percentile_high / 100.0
         bins = 1024
-        denom = bins - 1
-        mn = float("inf")
-        mx = float("-inf")
-        total_size = 0
-        for i in range(self.n_slices):
-            frame = self._get_display_frame(i)
-            mn = min(mn, float(np.min(frame)))
-            mx = max(mx, float(np.max(frame)))
-            total_size += int(frame.size)
-        if total_size <= 0 or not math.isfinite(mn) or not math.isfinite(mx):
+
+        def stack_percentiles(
+            frames: list[np.ndarray],
+        ) -> tuple[float, float] | None:
+            """Approximate configured percentiles without joining frames."""
+            if not frames:
+                return None
+            mn = min(float(np.min(frame)) for frame in frames)
+            mx = max(float(np.max(frame)) for frame in frames)
+            total_size = sum(int(frame.size) for frame in frames)
+            if total_size <= 0 or not math.isfinite(mn) or not math.isfinite(mx):
+                return None
+            if mn == mx:
+                return mn, mx
+            hist = np.zeros(bins, dtype=np.int64)
+            for frame in frames:
+                frame_hist, _ = np.histogram(frame, bins=bins, range=(mn, mx))
+                hist += frame_hist
+            csum = np.cumsum(hist)
+            lo = int(
+                np.searchsorted(
+                    csum,
+                    int(total_size * self.percentile_low / 100.0),
+                    side="left",
+                )
+            )
+            hi = int(
+                np.searchsorted(
+                    csum,
+                    int(np.ceil(total_size * self.percentile_high / 100.0)),
+                    side="left",
+                )
+            )
+            denom = bins - 1
+            lo = max(0, min(denom, lo))
+            hi = max(0, min(denom, hi))
+            span = mx - mn
+            return mn + (lo / denom) * span, mn + (hi / denom) * span
+
+        display_frames = [
+            np.asarray(self._get_display_frame(i))
+            for i in range(int(self.n_slices))
+        ]
+        stack_range = stack_percentiles(display_frames)
+        if stack_range is None:
             self.auto_vmins = []
             self.auto_vmaxs = []
+            self.auto_vmins_per_panel = []
+            self.auto_vmaxs_per_panel = []
             return
-        if mn == mx:
-            self.auto_vmins = [mn] * int(self.n_slices)
-            self.auto_vmaxs = [mx] * int(self.n_slices)
-            return
-
-        hist = np.zeros(bins, dtype=np.int64)
-        for i in range(self.n_slices):
-            frame = self._get_display_frame(i)
-            frame_hist, _ = np.histogram(frame, bins=bins, range=(mn, mx))
-            hist += frame_hist
-
-        csum = np.cumsum(hist)
-        low_count = int(total_size * low_target)
-        high_count = int(np.ceil(total_size * high_target))
-        lo = int(np.searchsorted(csum, low_count, side="left"))
-        hi = int(np.searchsorted(csum, high_count, side="left"))
-        lo = max(0, min(denom, lo))
-        hi = max(0, min(denom, hi))
-        span = mx - mn
-        vmin = float(mn + (lo / denom) * span)
-        vmax = float(mn + (hi / denom) * span)
+        vmin, vmax = stack_range
         vmins = [vmin] * int(self.n_slices)
         vmaxs = [vmax] * int(self.n_slices)
+
+        panel_vmins: list[float] = []
+        panel_vmaxs: list[float] = []
+        independent_panels = int(self.n_panels) > 1 and not self.shared_panel_source
+        if independent_panels:
+            for panel in range(int(self.n_panels)):
+                panel_range = stack_percentiles(
+                    [
+                        np.asarray(self._get_display_panel_frame(panel, i))
+                        for i in range(int(self.n_slices))
+                    ]
+                )
+                if panel_range is not None:
+                    panel_vmins.append(panel_range[0])
+                    panel_vmaxs.append(panel_range[1])
 
         with self.hold_sync():
             self.auto_vmins = vmins
             self.auto_vmaxs = vmaxs
+            self.auto_vmins_per_panel = panel_vmins
+            self.auto_vmaxs_per_panel = panel_vmaxs
 
     # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
     # snapshot when save_state is False so a plain display stays a few MB, not GB.

@@ -68,7 +68,7 @@ def test_show3d_pages_default_to_independent_auto_contrast() -> None:
     assert paged.auto_contrast is True
     assert paged.link_contrast is False
     assert shared_pages.link_contrast is True
-    assert ordinary_panels.link_contrast is True
+    assert ordinary_panels.link_contrast is False
 
 
 def test_show3d_accepts_dict_pages_and_page_stars() -> None:

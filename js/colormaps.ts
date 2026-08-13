@@ -1178,6 +1178,7 @@ type GPUSlot = {
   directSlotBindGroup: GPUBindGroup | null;
   directRegionParamsBuffers: (GPUBuffer | null)[];
   directRegionBindGroups: (GPUBindGroup | null)[];
+  directRegionLutNames: string[];
   sharedGridBindGroup: GPUBindGroup | null;
   sharedGridBlitBindGroup: GPUBindGroup | null;
   count: number;
@@ -1216,6 +1217,7 @@ export class GPUColormapEngine {
   private slots: GPUSlot[] = [];
   private lutBuffer: GPUBuffer | null = null;
   private currentLutName: string = "";
+  private namedLutBuffers = new Map<string, GPUBuffer>();
   private directGridParams = new ArrayBuffer(64);
   private directGridParamsU32 = new Uint32Array(this.directGridParams);
   private directGridParamsF32 = new Float32Array(this.directGridParams);
@@ -1272,6 +1274,27 @@ export class GPUColormapEngine {
     slot.histReadBuffer.destroy();
     slot.rangeBuffer?.destroy();
     for (const buf of slot.directRegionParamsBuffers) buf?.destroy();
+  }
+
+  private createLutBuffer(lut: Uint8Array): GPUBuffer {
+    const packed = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      packed[i] = lut[i * 3] | (lut[i * 3 + 1] << 8) | (lut[i * 3 + 2] << 16);
+    }
+    const buffer = this.device.createBuffer({
+      size: packed.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(buffer, 0, packed);
+    return buffer;
+  }
+
+  private namedLutBuffer(name: string, lut: Uint8Array): GPUBuffer {
+    const cached = this.namedLutBuffers.get(name);
+    if (cached) return cached;
+    const buffer = this.createLutBuffer(lut);
+    this.namedLutBuffers.set(name, buffer);
+    return buffer;
   }
 
   private retireSlot(slot: GPUSlot): void {
@@ -1482,16 +1505,7 @@ export class GPUColormapEngine {
         slot.sharedGridBindGroup = null;
       }
     }
-    // Pack RGB triplets into u32 for GPU (R in low bits)
-    const packed = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-      packed[i] = lut[i * 3] | (lut[i * 3 + 1] << 8) | (lut[i * 3 + 2] << 16);
-    }
-    this.lutBuffer = this.device.createBuffer({
-      size: packed.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.lutBuffer, 0, packed);
+    this.lutBuffer = this.createLutBuffer(lut);
     this.currentLutName = lutName;
   }
 
@@ -1563,6 +1577,7 @@ export class GPUColormapEngine {
       directSlotBindGroup: null,
       directRegionParamsBuffers: [],
       directRegionBindGroups: [],
+      directRegionLutNames: [],
       sharedGridBindGroup: null,
       sharedGridBlitBindGroup: null,
       count: data.length,
@@ -1618,6 +1633,7 @@ export class GPUColormapEngine {
       directSlotBindGroup: null,
       directRegionParamsBuffers: [],
       directRegionBindGroups: [],
+      directRegionLutNames: [],
       sharedGridBindGroup: null,
       sharedGridBlitBindGroup: null,
       count,
@@ -3156,6 +3172,7 @@ export class GPUColormapEngine {
       sourcePanelWidth: number;
       transforms?: { zoom: number; panX: number; panY: number }[];
       sourcePanelIndices?: number[];
+      panelLuts?: { name: string; lut: Uint8Array }[];
       smooth?: boolean;
     },
   ): boolean {
@@ -3167,7 +3184,11 @@ export class GPUColormapEngine {
       Math.abs(transform?.panX ?? 0) > 1e-3 ||
       Math.abs(transform?.panY ?? 0) > 1e-3
     ));
-    if (!hasActiveTransform && this.renderPackedPanelTransformComputeToCanvas(slot, range, logScale, ctx, opts)) {
+    // The compute shortcut binds the one shared LUT. Any explicit panel LUT
+    // contract must use the per-panel fragment bindings, even when all named
+    // panel maps currently happen to be identical.
+    const hasPanelLuts = Boolean(opts.panelLuts?.length);
+    if (!hasActiveTransform && !hasPanelLuts && this.renderPackedPanelTransformComputeToCanvas(slot, range, logScale, ctx, opts)) {
       return true;
     }
     const outW = Math.max(1, Math.round(opts.width));
@@ -3202,6 +3223,12 @@ export class GPUColormapEngine {
         });
         slot.directRegionParamsBuffers[panel] = paramsBuffer;
       }
+      const panelLut = opts.panelLuts?.[panel];
+      const lutName = panelLut?.name || this.currentLutName;
+      const lutBuffer = panelLut
+        ? this.namedLutBuffer(panelLut.name, panelLut.lut)
+        : this.lutBuffer;
+      if (!lutBuffer) continue;
       const panelRange = Array.isArray(range) ? (range[panel] ?? range[0]) : range;
       const panelLogScale = Array.isArray(logScale) ? !!logScale[panel] : logScale;
       const sourcePanel = Math.max(0, Math.round(opts.sourcePanelIndices?.[panel] ?? panel));
@@ -3229,15 +3256,19 @@ export class GPUColormapEngine {
       pf[14] = transform?.panX ?? 0;
       pf[15] = transform?.panY ?? 0;
       this.device.queue.writeBuffer(paramsBuffer, 0, params);
-      if (!slot.directRegionBindGroups[panel]) {
+      if (
+        !slot.directRegionBindGroups[panel]
+        || slot.directRegionLutNames[panel] !== lutName
+      ) {
         slot.directRegionBindGroups[panel] = this.device.createBindGroup({
           layout: pipeline.getBindGroupLayout(0),
           entries: [
             { binding: 0, resource: { buffer: paramsBuffer } },
             { binding: 1, resource: { buffer: slot.dataBuffer } },
-            { binding: 2, resource: { buffer: this.lutBuffer } },
+            { binding: 2, resource: { buffer: lutBuffer } },
           ],
         });
+        slot.directRegionLutNames[panel] = lutName;
       }
     }
 
@@ -3309,6 +3340,8 @@ export class GPUColormapEngine {
     this.retiredSlots = [];
     this.lutBuffer?.destroy();
     this.lutBuffer = null;
+    for (const buffer of this.namedLutBuffers.values()) buffer.destroy();
+    this.namedLutBuffers.clear();
     this.directGridRangesBuffer?.destroy();
     this.directGridRangesBuffer = null;
     this.directGridRangesCapacity = 0;

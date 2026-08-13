@@ -135,7 +135,7 @@ def test_show3d_histogram_drag_repaints_single_file_exports():
     stress = (ROOT / "scripts" / "widget_show3d_stress.py").read_text(encoding="utf-8")
 
     assert show3d.count("commitOnChange") >= 2
-    assert "freezeCurrentPanelContrastAsManual(panel, { min, max })" in show3d
+    assert "setPanelRangePercentages(panel, min, max, linkContrast)" in show3d
     assert "keep the visible Auto windows as the editable manual baseline" in show3d
     assert "commitPanelRange();" in show3d
     assert "commitSharedRange();" in show3d
