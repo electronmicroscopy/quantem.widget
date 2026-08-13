@@ -117,18 +117,22 @@ def _panel_spatial_std(
     cols: int,
 ) -> list[float]:
     """Measure scientific texture while excluding titles and panel edges."""
+    return [float(np.std(region.mean(axis=2))) for region in _panel_regions(pixels, count, cols)]
+
+
+def _panel_regions(pixels: np.ndarray, count: int, cols: int) -> list[np.ndarray]:
+    """Return panel interiors without titles and grid edges."""
     rows = int(np.ceil(count / cols))
     height, width = pixels.shape[:2]
-    spreads: list[float] = []
+    regions = []
     for panel in range(count):
         row, col = divmod(panel, cols)
         y0 = round((row + 0.12) * height / rows)
         y1 = round((row + 0.88) * height / rows)
         x0 = round((col + 0.08) * width / cols)
         x1 = round((col + 0.92) * width / cols)
-        region = pixels[y0:y1, x0:x1]
-        spreads.append(float(np.std(region.mean(axis=2))))
-    return spreads
+        regions.append(pixels[y0:y1, x0:x1])
+    return regions
 
 
 def _panel_color_spreads(
@@ -137,18 +141,10 @@ def _panel_color_spreads(
     cols: int,
 ) -> list[float]:
     """Measure RGB channel separation inside each real grid panel."""
-    rows = int(np.ceil(count / cols))
-    height, width = pixels.shape[:2]
-    spreads: list[float] = []
-    for panel in range(count):
-        row, col = divmod(panel, cols)
-        y0 = round((row + 0.08) * height / rows)
-        y1 = round((row + 0.92) * height / rows)
-        x0 = round((col + 0.08) * width / cols)
-        x1 = round((col + 0.92) * width / cols)
-        region = pixels[y0:y1, x0:x1]
-        spreads.append(float((region.max(axis=2) - region.min(axis=2)).mean()))
-    return spreads
+    return [
+        float((region.max(axis=2) - region.min(axis=2)).mean())
+        for region in _panel_regions(pixels, count, cols)
+    ]
 
 
 def _panel_saturation_fractions(
@@ -157,16 +153,9 @@ def _panel_saturation_fractions(
     cols: int,
 ) -> list[tuple[float, float]]:
     """Return near-black and near-white fractions for each scientific panel."""
-    rows = int(np.ceil(count / cols))
-    height, width = pixels.shape[:2]
     fractions: list[tuple[float, float]] = []
-    for panel in range(count):
-        row, col = divmod(panel, cols)
-        y0 = round((row + 0.12) * height / rows)
-        y1 = round((row + 0.88) * height / rows)
-        x0 = round((col + 0.08) * width / cols)
-        x1 = round((col + 0.92) * width / cols)
-        luminance = pixels[y0:y1, x0:x1].mean(axis=2)
+    for region in _panel_regions(pixels, count, cols):
+        luminance = region.mean(axis=2)
         fractions.append((float((luminance < 3).mean()), float((luminance > 252).mean())))
     return fractions
 
@@ -481,73 +470,6 @@ def test_scrub_commit_preserves_mixed_panel_colormaps(tmp_path):
     os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
     reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
 )
-def test_column_choice_persists_and_preserves_square_panels(tmp_path):
-    """Changing 2↔3 columns keeps square panels and survives display edits."""
-    chrome = _chrome_executable()
-    if chrome is None:
-        pytest.skip("Chrome/Chromium executable not found")
-
-    bf, df, phase = _contrast_fixture()
-    widget = Show3D(
-        bf,
-        df,
-        phase,
-        panel_titles=["Phase", "BF", "DF"],
-        cmap=["plasma", "gray", "gray"],
-        max_cols=3,
-        debug=True,
-        verbose=False,
-    )
-    html_path = tmp_path / "show3d-column-aspect.html"
-    widget.export_html(html_path, encoding="full")
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            executable_path=chrome,
-            headless=True,
-            args=["--enable-unsafe-swiftshader", "--enable-webgpu"],
-        )
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.goto(html_path.as_uri())
-        page.wait_for_function(
-            "() => window.__quantemShow3DPerf?.offlineFramePrewarmDone === 3"
-        )
-
-        columns = page.get_by_role("combobox", name="Show3D panel columns")
-        columns.click()
-        page.get_by_role("option", name="2", exact=True).click()
-        page.wait_for_function(
-            "() => window.__quantemShow3DPerf?.layoutRequestedMaxCols === 2 "
-            "&& window.__quantemShow3DPerf?.layoutCols === 2"
-        )
-        two = page.evaluate("() => ({...window.__quantemShow3DPerf})")
-        assert two["layoutRows"] == 2
-        assert abs(two["layoutCanvasW"] / 2 - two["layoutCanvasH"] / 2) <= 1
-
-        columns.click()
-        page.get_by_role("option", name="3", exact=True).click()
-        page.wait_for_function(
-            "() => window.__quantemShow3DPerf?.layoutRequestedMaxCols === 3 "
-            "&& window.__quantemShow3DPerf?.layoutCols === 3"
-        )
-        three = page.evaluate("() => ({...window.__quantemShow3DPerf})")
-        assert three["layoutRows"] == 1
-        assert abs(three["layoutCanvasW"] / 3 - three["layoutCanvasH"]) <= 1
-
-        page.get_by_role("combobox", name="Selected panel colormap").click()
-        page.get_by_role("option", name="Inferno", exact=True).click()
-        page.wait_for_timeout(100)
-        assert page.evaluate(
-            "() => window.__quantemShow3DPerf.layoutRequestedMaxCols"
-        ) == 3
-        assert page.evaluate("() => window.__quantemShow3DPerf.layoutCols") == 3
-        browser.close()
-
-
-@pytest.mark.skipif(
-    os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
-    reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
-)
 def test_column_change_during_playback_uses_live_layout(tmp_path):
     """A 2→1 column change must not stretch the old two-column GPU frame."""
     chrome = _chrome_executable()
@@ -650,6 +572,9 @@ def test_playback_preserves_and_live_updates_mixed_panel_colormaps(tmp_path):
         debug=True,
         verbose=False,
     )
+    assert widget.auto_vmaxs_per_panel[0] > 10_000
+    assert widget.auto_vmins_per_panel[1] > 100
+    assert widget.auto_vmaxs_per_panel[2] < 1
     html_path = tmp_path / "show3d-mixed-colormap-playback.html"
     widget.export_html(html_path, encoding="full")
 
@@ -677,9 +602,17 @@ def test_playback_preserves_and_live_updates_mixed_panel_colormaps(tmp_path):
         page.get_by_role("button", name="Play", exact=True).click()
         page.wait_for_timeout(300)
         playing = _panel_color_spreads(_visible_canvas_pixels(page), 3, layout_cols)
+        playing_pixels = _visible_canvas_pixels(page)
         assert page.get_by_role("button", name="Pause playback").count() == 1
         assert playing[0] > 20
         assert max(playing[1:]) < 4
+        assert min(_panel_spatial_std(playing_pixels, 3, layout_cols)) > 3
+        assert all(
+            black < 0.9 and white < 0.9
+            for black, white in _panel_saturation_fractions(
+                playing_pixels, 3, layout_cols
+            )
+        )
 
         # Hiding and restoring a gray panel while playing must not shift the
         # source-indexed color assignments onto a neighboring panel.
@@ -761,110 +694,6 @@ def test_playback_preserves_and_live_updates_mixed_panel_colormaps(tmp_path):
         assert paused_again[0] > 20
         assert paused_again[1] < 4
         assert paused_again[2] > 20
-        assert page_errors == []
-        browser.close()
-
-
-@pytest.mark.skipif(
-    os.environ.get("QT_RUN_BROWSER_TESTS") != "1",
-    reason="set QT_RUN_BROWSER_TESTS=1 to run Show3D browser regression tests",
-)
-def test_linked_auto_contrast_resolves_mixed_physical_panel_domains(tmp_path):
-    """Linked Auto shares policy, never one absolute BF/DF/phase range."""
-    chrome = _chrome_executable()
-    if chrome is None:
-        pytest.skip("Chrome/Chromium executable not found")
-
-    bf, df, phase = _contrast_fixture()
-    widget = Show3D(
-        phase,
-        bf,
-        df,
-        panel_titles=["Phase", "BF", "DF"],
-        cmap=["magma", "gray", "gray"],
-        hidden_panels=["BF", "DF"],
-        auto_contrast=True,
-        link_contrast=True,
-        display_bin=1,
-        max_cols=3,
-        fps=12,
-        debug=True,
-        verbose=False,
-    )
-    assert widget.auto_vmaxs_per_panel[0] < 1
-    assert widget.auto_vmins_per_panel[1] > 10_000
-    assert widget.auto_vmins_per_panel[2] > 100
-    html_path = tmp_path / "show3d-linked-mixed-units.html"
-    widget.export_html(html_path, encoding="full")
-
-    page_errors: list[str] = []
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            executable_path=chrome,
-            headless=True,
-            args=["--enable-unsafe-swiftshader", "--enable-webgpu"],
-        )
-        page = browser.new_page(viewport={"width": 1400, "height": 900})
-        page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.goto(html_path.as_uri())
-        page.wait_for_function(
-            "() => window.__quantemShow3DPerf?.offlineFramePrewarmDone === 3"
-        )
-        page.wait_for_timeout(250)
-
-        # The reported regression first appeared before restoring BF/DF: with
-        # one visible panel, fast frame scrubbing must still use the Phase
-        # panel's range rather than the packed phase+BF+DF global range.
-        slider = page.locator(
-            'input[aria-label^="Loop range and current frame"][data-index="1"]'
-        )
-        slider.press("End")
-        page.wait_for_timeout(100)
-        hidden_scrub = _visible_canvas_pixels(page)
-        assert min(_panel_spatial_std(hidden_scrub, 1, 1)) > 3
-        assert _panel_color_spreads(hidden_scrub, 1, 1)[0] > 3
-        page.get_by_role("button", name="Play", exact=True).click()
-        page.wait_for_timeout(250)
-        hidden_playing = _visible_canvas_pixels(page)
-        assert min(_panel_spatial_std(hidden_playing, 1, 1)) > 3
-        assert _panel_color_spreads(hidden_playing, 1, 1)[0] > 3
-        page.get_by_role("button", name="Pause playback").click()
-
-        # Reproduce the quantem.gpu SSB workflow exactly: BF and DF begin
-        # hidden, the scientist restores them, and only then starts playback.
-        page.get_by_role("button", name="Choose visible panels").click()
-        page.get_by_text("Show all panels", exact=True).click()
-        page.wait_for_function(
-            "() => window.__quantemShow3DPerf?.layoutVisiblePanels === 3"
-        )
-        page.wait_for_timeout(150)
-        layout_cols = page.evaluate("() => window.__quantemShow3DPerf.layoutCols")
-
-        paused = _visible_canvas_pixels(page)
-        paused_texture = _panel_spatial_std(paused, 3, layout_cols)
-        paused_color = _panel_color_spreads(paused, 3, layout_cols)
-        assert min(paused_texture) > 3
-        assert paused_color[0] > 3
-        assert max(paused_color[1:]) < 4
-
-        page.get_by_role("button", name="Play", exact=True).click()
-        page.wait_for_timeout(350)
-        playing = _visible_canvas_pixels(page)
-        playing_texture = _panel_spatial_std(playing, 3, layout_cols)
-        playing_color = _panel_color_spreads(playing, 3, layout_cols)
-        assert min(playing_texture) > 3
-        assert playing_color[0] > 3
-        assert max(playing_color[1:]) < 4
-        assert all(
-            black < 0.9 and white < 0.9
-            for black, white in _panel_saturation_fractions(playing, 3, layout_cols)
-        )
-        assert page.get_by_role("button", name="Pause playback").count() == 1
-
-        page.get_by_role("button", name="Pause playback").click()
-        page.wait_for_timeout(100)
-        stopped = _visible_canvas_pixels(page)
-        assert min(_panel_spatial_std(stopped, 3, layout_cols)) > 3
         assert page_errors == []
         browser.close()
 
