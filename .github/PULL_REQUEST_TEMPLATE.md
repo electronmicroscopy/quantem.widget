@@ -35,6 +35,11 @@ evidence in the three visible sections above.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
   private data, or machine-specific notes.
+- [ ] Scan the committed diff and the PR title/body for unintended private
+  information: personal names or usernames, private email addresses, absolute
+  machine paths, hostnames, credentials or tokens, and private sample or
+  dataset identifiers. Keep public attribution or provenance only when it is
+  intentional and approved.
 - [ ] Committed notebooks carry NO baked widget state (`metadata.widgets`) and
   pass `scripts/check_notebook_sizes.py`. The docs CI executes tutorials at
   build time (`execute_notebooks: force` in `docs/_config.yml`) and bakes

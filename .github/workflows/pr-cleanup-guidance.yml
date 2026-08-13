@@ -1,0 +1,89 @@
+name: pr cleanup guidance
+
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  guidance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update cleanup guidance
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const marker = "<!-- quantem-pr-cleanup-guidance:v1 -->";
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+            const headRepository = pr.head.repo?.full_name ?? "unknown";
+            const headBranch = pr.head.ref;
+            const baseRepository = pr.base.repo.full_name;
+            const baseBranch = pr.base.ref;
+            const code = (value) => `\`${String(value).replaceAll("`", "\\`")}\``;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100,
+              },
+            );
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(marker),
+            );
+
+            if (action === "closed" && !pr.merged) {
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+              }
+              return;
+            }
+
+            let tasks;
+            if (pr.merged) {
+              tasks = [
+                `Delete ${code(`${headRepository}:${headBranch}`)} from its remote if you own it, it is not long-lived, and no other PR uses it.`,
+                `Remove the dedicated worktree and local ${code(headBranch)} branch after confirming the worktree is clean.`,
+                `Fetch ${code(baseRepository)} and update local ${code(baseBranch)} before starting new work.`,
+              ];
+            } else {
+              tasks = [
+                `Keep ${code(`${headRepository}:${headBranch}`)} until this PR is merged.`,
+                `After merge, delete ${code(`${headRepository}:${headBranch}`)} if you own it and no other PR uses it.`,
+                `Then remove its dedicated worktree and local ${code(headBranch)} branch and update local ${code(baseBranch)}.`,
+              ];
+            }
+
+            const body = [
+              marker,
+              ...tasks.map((task) => `- ${task}`),
+            ].join("\n");
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
