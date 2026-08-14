@@ -66,6 +66,7 @@ parts:
           - file: api/viewer-ui
           - file: api/show1d
           - file: api/show2d
+          - file: api/mask2d
           - file: api/show3d
           - file: api/show3dslices
           - file: api/show4dstem

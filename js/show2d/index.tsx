@@ -165,6 +165,8 @@ const SHOW2D_STANDALONE_VIEW_STATE_KEYS = [
   "roi_active",
   "roi_list",
   "roi_selected_idx",
+  "mask_mode",
+  "mask_shape",
   "rotation_scope",
   "row_markers",
   "scale_bar_label",
@@ -3276,6 +3278,8 @@ function Show2D() {
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<ROIItem[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
+  const [maskMode] = useModelState<boolean>("mask_mode");
+  const [maskShape, setMaskShape] = useModelState<"rectangle" | "square" | "circle">("mask_shape");
   const [isDraggingROI, setIsDraggingROI] = React.useState(false);
   const [isDraggingResize, setIsDraggingResize] = React.useState(false);
   const [isDraggingResizeInner, setIsDraggingResizeInner] = React.useState(false);
@@ -3283,6 +3287,10 @@ function Show2D() {
   const [isHoveringResizeInner, setIsHoveringResizeInner] = React.useState(false);
   const resizeAspectRef = React.useRef<number | null>(null);
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
+  const maskDragRef = React.useRef<{ idx: number; row: number; col: number } | null>(null);
+  const maskDraftPendingRef = React.useRef<ROIItem | null>(null);
+  const maskDraftRafRef = React.useRef(0);
+  const [maskDraft, setMaskDraft] = React.useState<ROIItem | null>(null);
   const [overlayEditMode, setOverlayEditMode] = React.useState(false);
   const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
   const [annotationSelection, setAnnotationSelection] = React.useState<AnnotationSelection | null>(null);
@@ -3336,6 +3344,63 @@ function Show2D() {
     handle: Show2DFileHandle | null;
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
+
+  const maskRoiFromDrag = React.useCallback((
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+  ): ROIItem => {
+    const row = Math.max(0, Math.min(height - 1, (startRow + endRow) / 2));
+    const col = Math.max(0, Math.min(width - 1, (startCol + endCol) / 2));
+    const deltaRow = Math.abs(endRow - startRow);
+    const deltaCol = Math.abs(endCol - startCol);
+    const radius = Math.max(1, maskShape === "circle"
+      ? Math.hypot(deltaRow, deltaCol) / 2
+      : Math.max(deltaRow, deltaCol) / 2);
+    return {
+      row,
+      col,
+      shape: maskShape,
+      radius,
+      radius_inner: Math.max(1, radius / 2),
+      width: Math.max(2, deltaCol),
+      height: Math.max(2, deltaRow),
+      color: ROI_COLORS[0],
+      line_width: 2,
+      highlight: true,
+    };
+  }, [height, maskShape, width]);
+
+  const scheduleMaskDraft = React.useCallback((draft: ROIItem) => {
+    maskDraftPendingRef.current = draft;
+    if (maskDraftRafRef.current) return;
+    maskDraftRafRef.current = window.requestAnimationFrame(() => {
+      maskDraftRafRef.current = 0;
+      setMaskDraft(maskDraftPendingRef.current);
+    });
+  }, []);
+
+  const finishMaskDrag = React.useCallback((): boolean => {
+    if (!maskDragRef.current) return false;
+    const committed = maskDraftPendingRef.current || maskDraft;
+    if (maskDraftRafRef.current) {
+      window.cancelAnimationFrame(maskDraftRafRef.current);
+      maskDraftRafRef.current = 0;
+    }
+    maskDragRef.current = null;
+    maskDraftPendingRef.current = null;
+    setMaskDraft(null);
+    if (committed) {
+      setRoiList([committed]);
+      setRoiSelectedIdx(0);
+    }
+    return true;
+  }, [maskDraft, setRoiList, setRoiSelectedIdx]);
+
+  React.useEffect(() => () => {
+    if (maskDraftRafRef.current) window.cancelAnimationFrame(maskDraftRafRef.current);
+  }, []);
   const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
   const hasPanelAnnotations = React.useMemo(() => (panelAnnotations || []).some((items) => items && items.length > 0), [panelAnnotations]);
   const hasEditablePanelDecorations = hasPanelOverlays || hasPanelAnnotations;
@@ -6637,14 +6702,14 @@ function Show2D() {
       }
 
       // ROI overlay — draw all ROIs
-      if (roiActive && roiList && roiList.length > 0) {
+      if (roiActive && ((roiList && roiList.length > 0) || (maskMode && maskDraft))) {
         const zs = getZoomState(i);
         const { zoom, panX, panY } = zs;
         const cx = canvasW / 2;
         const cy = canvasH / 2;
 
         // Highlight mask: dim everything outside highlighted ROIs
-        const highlightedRois = roiList.filter(r => r.highlight);
+        const highlightedRois = (roiList || []).filter(r => r.highlight);
         if (highlightedRois.length > 0) {
           ctx.save();
           ctx.scale(DPR, DPR);
@@ -6680,8 +6745,8 @@ function Show2D() {
 
         ctx.save();
         ctx.scale(DPR, DPR);
-        for (let ri = 0; ri < roiList.length; ri++) {
-          const roi = roiList[ri];
+        for (let ri = 0; ri < (roiList?.length || 0); ri++) {
+          const roi = (roiList || [])[ri];
           const isSelected = ri === roiSelectedIdx;
           const screenX = (roi.col * displayScale - cx) * zoom + cx + panX;
           const screenY = (roi.row * displayScale - cy) * zoom + cy + panY;
@@ -6705,6 +6770,28 @@ function Show2D() {
             }
             ctx.setLineDash([]);
           }
+        }
+        if (maskMode && maskDraft) {
+          const screenX = (maskDraft.col * displayScale - cx) * zoom + cx + panX;
+          const screenY = (maskDraft.row * displayScale - cy) * zoom + cy + panY;
+          const screenRadius = maskDraft.radius * displayScale * zoom;
+          const screenW = maskDraft.width * displayScale * zoom;
+          const screenH = maskDraft.height * displayScale * zoom;
+          ctx.setLineDash([5, 3]);
+          ctx.lineWidth = 2;
+          drawROI(
+            ctx,
+            screenX,
+            screenY,
+            maskDraft.shape as "circle" | "square" | "rectangle",
+            screenRadius,
+            screenW,
+            screenH,
+            maskDraft.color,
+            maskDraft.color,
+            true,
+          );
+          ctx.setLineDash([]);
         }
         ctx.restore();
       }
@@ -6817,7 +6904,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkPan, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, viewportPaintImageIndices, panelOverlays, overlaySelection, settledViewPaintVersion]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkPan, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, maskMode, maskDraft, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, viewportPaintImageIndices, panelOverlays, overlaySelection, settledViewPaintVersion]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -8832,6 +8919,17 @@ function Show2D() {
     }
     if (roiActive) {
       const { imgCol, imgRow } = screenToImg(e, idx);
+      if (maskMode) {
+        const startRow = Math.max(0, Math.min(height - 1, imgRow));
+        const startCol = Math.max(0, Math.min(width - 1, imgCol));
+        maskDragRef.current = { idx, row: startRow, col: startCol };
+        scheduleMaskDraft(maskRoiFromDrag(startRow, startCol, startRow, startCol));
+        setIsDraggingPan(false);
+        setPanStart(null);
+        setPanningIdx(null);
+        e.preventDefault();
+        return;
+      }
       // Check resize handles on selected ROI first
       if (isNearResizeHandleInner(imgCol, imgRow)) {
         setIsDraggingResizeInner(true);
@@ -8876,6 +8974,19 @@ function Show2D() {
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
     if (updateInsetPlotDrag(e, idx)) return;
+    if (maskDragRef.current) {
+      const drag = maskDragRef.current;
+      if (idx !== drag.idx) return;
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      scheduleMaskDraft(maskRoiFromDrag(
+        drag.row,
+        drag.col,
+        Math.max(0, Math.min(height - 1, imgRow)),
+        Math.max(0, Math.min(width - 1, imgCol)),
+      ));
+      e.preventDefault();
+      return;
+    }
     if (annotationDragRef.current) {
       const drag = annotationDragRef.current;
       if (idx !== drag.panel) return;
@@ -9115,6 +9226,10 @@ function Show2D() {
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
     if (finishInsetPlotDrag(e, idx)) return;
+    if (finishMaskDrag()) {
+      e.preventDefault();
+      return;
+    }
     if (annotationDragRef.current) {
       annotationDragRef.current = null;
       setIsDraggingAnnotation(false);
@@ -9224,6 +9339,7 @@ function Show2D() {
   };
 
   const handleMouseLeave = (idx: number) => {
+    finishMaskDrag();
     setCursorInfo(null);
     insetHoverKeyRef.current = "";
     setInsetHoverInfo(null);
@@ -10255,6 +10371,53 @@ function Show2D() {
 	              </>
 	            )}
 	          </Typography>}
+	          {maskMode && (
+	            <Box
+	              data-mask2d-toolbar="true"
+	              aria-label="Region selection controls"
+	              sx={{
+	                display: "flex",
+	                alignItems: "center",
+	                flexWrap: "wrap",
+	                gap: `${SPACING.SM}px`,
+	                mb: `${SPACING.XS}px`,
+	                px: 1,
+	                py: 0.5,
+	                border: `1px solid ${themeColors.border}`,
+	                bgcolor: themeColors.controlBg,
+	              }}
+	            >
+	              <Box sx={controlPairSx}>
+	                <Typography sx={compactLabelSx}>Shape</Typography>
+	                <Select
+	                  size="small"
+	                  value={maskShape || "rectangle"}
+	                  onChange={(event) => setMaskShape(event.target.value as "rectangle" | "square" | "circle")}
+	                  MenuProps={themedMenuProps}
+	                  sx={{ ...themedSelect, minWidth: 92, fontSize: 10 }}
+	                  inputProps={{ "aria-label": "Region shape" }}
+	                >
+	                  <MenuItem value="rectangle">Rectangle</MenuItem>
+	                  <MenuItem value="square">Square</MenuItem>
+	                  <MenuItem value="circle">Circle</MenuItem>
+	                </Select>
+	              </Box>
+	              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, flex: "1 1 190px" }}>
+	                Drag on the image to replace the selected region.
+	              </Typography>
+	              <Button
+	                size="small"
+	                sx={{ ...compactButton, color: "#ef5350" }}
+	                disabled={!roiList?.length}
+	                onClick={() => {
+	                  setRoiList([]);
+	                  setRoiSelectedIdx(-1);
+	                }}
+	              >
+	                Clear
+	              </Button>
+	            </Box>
+	          )}
 	          {/* Page navigation sits above the analysis toolbar, matching Show3D. */}
 	          {controlsVisible && isPaged && (
 	            <Box
