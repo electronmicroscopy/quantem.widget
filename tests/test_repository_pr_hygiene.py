@@ -10,7 +10,8 @@ def test_pr_cleanup_guidance_is_safe_and_agent_readable() -> None:
 
     assert "pull_request_target:" in workflow
     assert "types: [opened, reopened, closed]" in workflow
-    assert "issues: write" in workflow
+    assert "pull-requests: write" in workflow
+    assert "issues: write" not in workflow
     assert "actions/checkout" not in workflow
     assert "quantem-pr-cleanup-guidance:v1" in workflow
     assert "Agent-readable" not in workflow
