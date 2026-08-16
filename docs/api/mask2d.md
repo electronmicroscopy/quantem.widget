@@ -35,20 +35,18 @@ selector = Mask2D(
     auto_contrast=True,
     sampling=0.02,
     units="nm",
-    show_scale_bar=True,
 )
 ```
 
-The toolbar can switch between rectangle, square, and circle without rebuilding
-the widget. A new drag replaces the previous region; **Clear** returns an
-all-false mask. The selection is synchronized to Python when the pointer is
-released, so dragging remains browser-local and responsive.
+The dedicated Mask2D toolbar can switch among rectangle, square, and circle,
+change the image color, adjust contrast, reset the view, and clear the region.
+A new drag replaces the previous region. **Clear** returns an all-false mask.
+The selection is synchronized to Python when the pointer is released, so
+dragging remains browser-local and responsive.
 
-`Mask2D` accepts the normal [Show2D](show2d) display options. It defaults to a
-focused selection surface with the general controls, statistics, and FFT hidden.
-Set `show_controls=True`, `show_stats=True`, or `show_fft=True` when those
-Show2D tools are useful for choosing the region. Display binning remains fixed
-at 1 so `selector.mask` always matches the input image shape.
+Display binning remains fixed at 1 so `selector.mask` always matches the input
+image shape. Mask2D is separate from Show2D: using it does not add controls or
+selection behavior to a Show2D widget.
 
 Standalone HTML export likewise keeps `downsample=1`; choose either full
 float32 or uint8 encoding without changing the selection coordinates.
@@ -64,7 +62,6 @@ selector = Mask2D(
     gold,
     title="Select a gold region",
     cmap="inferno",
-    show_scale_bar=True,
 )
 selector
 

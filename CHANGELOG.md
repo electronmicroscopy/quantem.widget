@@ -6,7 +6,7 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
-- Add `Mask2D`, a focused Show2D-based selector that turns one full-resolution
+- Add `Mask2D`, a focused image selector that turns one full-resolution
   rectangle, square, or circle into a Boolean `(row, col)` mask for downstream
   analysis while preserving calibrated dataset display and standalone HTML.
 - Add `ChooseLattice`, an interactive 2D selector for choosing an ordered

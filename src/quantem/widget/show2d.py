@@ -2145,10 +2145,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     roi_active = traitlets.Bool(False).tag(sync=True)
     roi_list = traitlets.List([]).tag(sync=True)
     roi_selected_idx = traitlets.Int(-1).tag(sync=True)
-    mask_mode = traitlets.Bool(False).tag(sync=True)
-    mask_shape = traitlets.Enum(
-        ["rectangle", "square", "circle"], default_value="rectangle"
-    ).tag(sync=True)
 
     # =========================================================================
     # Line Profile
@@ -6585,8 +6581,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
-            "mask_mode": self.mask_mode,
-            "mask_shape": self.mask_shape,
             "profile_line": self.profile_line,
             "image_rotations": list(self.image_rotations),
             "rotation_scope": self.rotation_scope,
@@ -7118,7 +7112,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             ]
         else:
             export_data = downsample_stack(data)
-        export_data = self._html_export_constructor_data(export_data)
         export_pixel_size = self.pixel_size * downsample if self.pixel_size > 0 else self.pixel_size
         clone = type(self)(
             export_data,
@@ -7210,10 +7203,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         clone._webgpu_filter_ok = True
         clone._update_all_frames()
         return clone
-
-    def _html_export_constructor_data(self, data):
-        """Return data shaped for reconstructing this widget during export."""
-        return data
 
     def load_state_dict(self, state):
         state = dict(state)

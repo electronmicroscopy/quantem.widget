@@ -1,8 +1,10 @@
 """Focused interactive region selection for two-dimensional arrays."""
 
+from pathlib import Path
 from typing import Self
 
 import numpy as np
+import traitlets
 
 from .show2d import Colormap, Show2D
 from .utils.roi_geometry import roi_masks
@@ -11,9 +13,9 @@ from .utils.roi_geometry import roi_masks
 class Mask2D(Show2D):
     """Draw one reusable Boolean mask over a two-dimensional image.
 
-    ``Mask2D`` reuses the Show2D renderer, zoom, contrast, and export path but
-    presents one focused interaction: choose a shape and drag the desired
-    region. The committed region is synchronized to Python only on release.
+    ``Mask2D`` has its own focused browser interface: choose a shape and drag
+    the desired region. The committed region is synchronized to Python only on
+    release. Its display does not alter :class:`Show2D`.
 
     Parameters
     ----------
@@ -27,9 +29,8 @@ class Mask2D(Show2D):
     cmap : str or Colormap, default="gray"
         Image colormap.
     **kwargs
-        Additional Show2D display options. ``show_controls``, ``show_stats``,
-        and ``show_fft`` default to ``False`` to preserve the focused surface.
-        ``display_bin`` must remain 1 so the returned mask matches the input.
+        Image display options accepted by ``Show2D``. ``display_bin`` must
+        remain 1 so the returned mask matches the input.
 
     Examples
     --------
@@ -40,6 +41,11 @@ class Mask2D(Show2D):
     """
 
     _VALID_SHAPES = {"rectangle", "square", "circle"}
+    _esm = Path(__file__).parent / "static" / "mask2d.js"
+
+    mask_shape = traitlets.Enum(
+        ["rectangle", "square", "circle"], default_value="rectangle"
+    ).tag(sync=True)
 
     def __init__(
         self,
@@ -51,6 +57,9 @@ class Mask2D(Show2D):
         **kwargs,
     ) -> None:
         values = np.asarray(data.array if hasattr(data, "array") else data)
+        if values.ndim == 3 and values.shape[0] == 1:
+            data = values[0]
+            values = data
         if values.ndim != 2:
             raise ValueError(
                 "Mask2D accepts one 2-D image with shape (row, col); "
@@ -73,7 +82,6 @@ class Mask2D(Show2D):
         kwargs.setdefault("verbose", False)
         super().__init__(data, title=title, cmap=cmap, **kwargs)
         with self.hold_sync():
-            self.mask_mode = True
             self.mask_shape = shape
             self.roi_active = True
 
@@ -114,6 +122,18 @@ class Mask2D(Show2D):
         self.roi_active = True
         return self
 
+    def state_dict(self) -> dict:
+        """Return display state including the active selection shape."""
+        return {**super().state_dict(), "mask_shape": self.mask_shape}
+
+    def load_state_dict(self, state) -> None:
+        """Restore display and selection state."""
+        state = dict(state)
+        shape = state.pop("mask_shape", self.mask_shape)
+        super().load_state_dict(state)
+        if shape in self._VALID_SHAPES:
+            self.mask_shape = shape
+
     def _normalise_html_export_options(self, **kwargs) -> tuple[str, bool, int]:
         options = super()._normalise_html_export_options(**kwargs)
         if options[2] != 1:
@@ -122,10 +142,3 @@ class Mask2D(Show2D):
                 "coordinates remain full resolution."
             )
         return options
-
-    def _html_export_constructor_data(self, data):
-        """Restore the public 2-D input shape from Show2D's panel stack."""
-        values = np.asarray(data)
-        if values.ndim == 3 and values.shape[0] == 1:
-            return values[0]
-        return data

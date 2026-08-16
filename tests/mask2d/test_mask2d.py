@@ -12,7 +12,6 @@ from quantem.widget.utils.roi_geometry import roi_masks
 def test_mask2d_defaults_to_one_focused_selection_surface():
     widget = Mask2D(np.arange(80 * 96, dtype=np.float32).reshape(80, 96))
 
-    assert widget.mask_mode is True
     assert widget.mask_shape == "rectangle"
     assert widget.roi_active is True
     assert widget.show_controls is False
@@ -49,31 +48,23 @@ def test_mask2d_rectangle_is_available_as_python_boolean_mask():
     }
 
 
-def test_mask2d_forwards_optional_show2d_display_configuration():
+def test_mask2d_accepts_useful_image_display_configuration():
     widget = Mask2D(
         np.ones((32, 40), dtype=np.float32),
         shape="circle",
         title="Gold particle region",
         cmap="viridis",
         auto_contrast=True,
-        show_controls=True,
-        show_stats=True,
-        show_fft=True,
         sampling=0.2,
         units="nm",
-        show_scale_bar=True,
     )
 
     assert widget.mask_shape == "circle"
     assert widget.title == "Gold particle region"
     assert widget.cmap == "viridis"
     assert widget.auto_contrast is True
-    assert widget.show_controls is True
-    assert widget.show_stats is True
-    assert widget.show_fft is True
     assert widget.pixel_size == pytest.approx(0.2)
     assert widget.pixel_unit == "nm"
-    assert widget.scale_bar_visible is True
 
 
 def test_mask2d_preserves_dataset_calibration():
@@ -84,12 +75,11 @@ def test_mask2d_preserves_dataset_calibration():
         units=("nm", "nm"),
     )
 
-    widget = Mask2D(dataset, show_scale_bar=True)
+    widget = Mask2D(dataset)
 
     assert widget.mask.shape == dataset.array.shape
     assert widget.pixel_size == pytest.approx(0.1)
     assert widget.pixel_unit == "nm"
-    assert widget.scale_bar_visible is True
 
 
 def test_mask2d_preserves_native_4k_image_coordinates():
@@ -154,6 +144,12 @@ def test_mask2d_rejects_non_2d_inputs(shape):
         Mask2D(np.zeros(shape, dtype=np.float32))
 
 
+def test_mask2d_accepts_singleton_image_stack_used_by_html_export():
+    widget = Mask2D(np.zeros((1, 20, 20), dtype=np.float32))
+
+    assert widget.mask.shape == (20, 20)
+
+
 def test_mask2d_rejects_unknown_shape_with_corrective_choices():
     with pytest.raises(ValueError, match="circle, rectangle, square"):
         Mask2D(np.zeros((24, 24), dtype=np.float32), shape="polygon")
@@ -164,12 +160,11 @@ def test_mask2d_rejects_display_binning_that_would_change_mask_shape():
         Mask2D(np.zeros((24, 24), dtype=np.float32), display_bin=2)
 
 
-def test_mask2d_state_preserves_selection_mode_and_shape():
+def test_mask2d_state_preserves_selection_shape():
     widget = Mask2D(np.zeros((24, 24), dtype=np.float32), shape="circle")
 
     state = widget.state_dict()
 
-    assert state["mask_mode"] is True
     assert state["mask_shape"] == "circle"
 
 
@@ -181,7 +176,6 @@ def test_mask2d_exports_selected_region_to_standalone_html(tmp_path):
     html = path.read_text(encoding="utf-8")
 
     assert path.is_file()
-    assert '"mask_mode": true' in html
     assert '"mask_shape": "circle"' in html
     assert '"shape": "circle"' in html
 
