@@ -78,6 +78,8 @@ parts:
           - file: api/html-export
           - file: api/io
           - file: api/load
+      - file: developer/widget-creation
+        title: Creating a widget
       - file: developer/ui-guide
         title: UI Guide
       - file: developer/save-state-and-notebook-size
