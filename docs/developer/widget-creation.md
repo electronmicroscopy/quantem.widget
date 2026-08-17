@@ -1,17 +1,33 @@
 # Creating a widget
 
-This guide shows how to add a new interactive viewer or tool to `quantem.widget`.
+This guide shows how to add a new interactive viewer or tool to `quantem.widget`. Instructions for agentic-driven development are on the [Agent-assisted development](../agent-prompts) page, and the workflow for setup, test, and PRs is in [CONTRIBUTING.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md).
 
 Let's use `Ruler2D` as an example, a widget where the user places two endpoints on a 2D image and reads back a calibrated distance.
 
 A widget has two parts:
 
-- a Python `traitlets` class in `src/quantem/widget/`, which owns the scientific data, validation, state, and scriptable API; and
-- a React entry point in `js/<bundle>/index.tsx`, bundled by esbuild into `src/quantem/widget/static/<bundle>.js` and loaded through the Python class's `_esm` path.
+- a Python `traitlets` class in [`src/quantem/widget/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/src/quantem/widget), which owns the scientific data, validation, state, and scriptable API; and
+- a React entry point in [`js/<bundle>/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js), bundled by esbuild into `src/quantem/widget/static/<bundle>.js` and loaded through the Python class's `_esm` path.
 
 Traits tagged with `sync=True` are the interface between Python and the browser.
 
 Keep file I/O, GPU work, fitting, scientific transforms, and anything users may want to script on the Python side. Keep rendering and temporary interaction state in the browser.
+
+Each widget should be self-contained, meaning that its Python module and `js/<bundle>/` folder holds everything specific to it. Adding or changing one widget should have as few side effects on the others as possible.
+
+| Kind of code | Where it goes |
+|---|---|
+| Widget state, layout, and interactions | `src/quantem/widget/<widget>.py` and `js/<bundle>/` |
+| Frontend helpers for several widgets | shared modules at the top of [`js/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js) |
+| WebGPU browser computation - FFT, reductions, histograms | [`quantem.gpu`](https://github.com/bobleesj/quantem.gpu) |
+
+The rule of thumb is that browser-GPU work that is not specific to one widget belongs in `quantem.gpu`, so that every widget reuses the same kernels. [`scripts/sync-gpu-webgpu.mjs`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/sync-gpu-webgpu.mjs) generates them into `js/.generated/engine/` before each frontend build:
+
+```bash
+npm run sync:webgpu
+```
+
+Always edit the file in `quantem.gpu`, never the generated copy.
 
 ## Before you start
 
@@ -25,12 +41,10 @@ This should be consistent across the Python API, frontend, tests, and documentat
 
 | Base | Use when | Example |
 |---|---|---|
-| Subclass an existing viewer (`Show2D`, `Show3D`, …) | The new widget is mostly an existing viewer with an additional interaction or analysis tool | [`Mask2D`](../api/mask2d) |
-| Standalone `anywidget.AnyWidget` | The widget has its own layout or only needs a small part of the existing viewer infrastructure | [`ChooseLattice`](../api/choose-lattice) |
+| Subclass an existing viewer (`Show2D`, `Show3D`, …) | The new widget is mostly an existing viewer with an additional interaction or analysis tool | [`Mask2D`](../api/mask2d): [`mask2d.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/mask2d.py), [`js/mask2d/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/mask2d/index.tsx) |
+| Standalone `anywidget.AnyWidget` | The widget has its own layout or only needs a small part of the existing viewer infrastructure | [`ChooseLattice`](../api/choose-lattice): [`choose_lattice.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/choose_lattice.py), [`js/chooselattice/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/chooselattice/index.tsx) |
 
-`Ruler2D` is better as a standalone widget. It only needs an image and two endpoints, so carrying the complete `Show2D` state would add unnecessary complexity.
-
-When unsure, start by finding the existing widget whose behavior is closest to what you are building.
+`Ruler2D` is better as a standalone widget. It only needs an image and two endpoints, so carrying the complete `Show2D` state would add unnecessary complexity. When unsure, start by finding the existing widget whose behavior is closest to what you are building.
 
 ## Step 2: Follow the naming conventions
 
@@ -82,16 +96,16 @@ Use the existing frontend infrastructure:
 
 | Module | Purpose |
 |---|---|
-| `js/theme.ts` | widget themes and host environment |
-| `js/format.ts` | trait decoding and formatting |
-| `js/colormaps.ts` | colormaps and image rendering |
-| `js/stats.ts` | display ranges and image statistics |
-| `js/figure.ts` | scale bars and figure formatting |
-| `js/staticFallback.ts` | saved-notebook fallback behavior |
+| [`js/theme.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/theme.ts) | widget themes and host environment |
+| [`js/format.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/format.ts) | trait decoding and formatting |
+| [`js/colormaps.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/colormaps.ts) | colormaps and image rendering |
+| [`js/stats.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/stats.ts) | display ranges and image statistics |
+| [`js/figure.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/figure.ts) | scale bars and figure formatting |
+| [`js/staticFallback.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/staticFallback.ts) | saved-notebook fallback behavior |
 
 For `Ruler2D`, dragging an endpoint can update the line locally in the browser and synchronize the final coordinate when the user releases the pointer.
 
-If the frontend develops numerical logic, move that logic into a separate TypeScript module, so that it can be tested independently of React.
+If the frontend develops numerical logic, move that logic into a separate TypeScript module, so that it can be tested independently of React. Keep that module inside the widget's own folder unless another widget needs it, as [`js/showdiffraction/measurements.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/showdiffraction/measurements.ts) does.
 
 ## Step 5: Scientific vs display coords
 
@@ -107,10 +121,10 @@ Once the Python class and frontend exist, register the widget with the package a
 
 | File | What to add |
 |---|---|
-| `scripts/build.mjs` | frontend bundle |
-| `src/quantem/widget/__init__.py` | lazy public export |
-| `scripts/widget_release_check.sh` | generated JS bundle |
-| `.github/workflows/widget-release.yml` | generated JS bundle |
+| [`scripts/build.mjs`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/build.mjs) | frontend bundle |
+| [`src/quantem/widget/__init__.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/__init__.py) | lazy public export |
+| [`scripts/widget_release_check.sh`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/widget_release_check.sh) | generated JS bundle |
+| [`.github/workflows/widget-release.yml`](https://github.com/electronmicroscopy/quantem.widget/blob/main/.github/workflows/widget-release.yml) | generated JS bundle |
 
 Then build the frontend and confirm that the public import works:
 
@@ -119,17 +133,19 @@ npm run build
 PYTHONPATH=src:. python -c "from quantem.widget import Ruler2D" # replace Ruler2D with widget
 ```
 
-If the widget supports additional protocols such as saved interactive state or HTML export, also register it in the corresponding protocol tests.
+If the widget supports additional protocols such as saved interactive state or HTML export, also register it in the corresponding protocol tests, [`tests/test_save_state.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/tests/test_save_state.py) and [`tests/test_html_export_protocol.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/tests/test_html_export_protocol.py).
 
 ## Step 7: Add tests
 
+Recent widgets keep their tests in a folder of their own, which is the preferred layout for a new widget:
+
 ```text
-tests/test_ruler2d.py
+tests/ruler2d/test_ruler2d.py
 ```
 
 Test the behavior a user relies on.
 
-For `Ruler2D`, the important cases are that valid 2D input works, invalid input is rejected, and known endpoints with known calibration produce the correct distance.
+For `Ruler2D`, the important cases are that valid 2D input works, invalid input is rejected, and known endpoints with known calibration produce the correct distance. [`tests/mask2d/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/tests/mask2d) is a small example to read.
 
 Frontend numerical helpers can be tested with Vitest.
 
@@ -139,7 +155,7 @@ Use browser tests - for behavior that requires users interaction, like clicking 
 
 Large synchronized arrays can make saved notebooks unnecessarily large.
 
-Widgets that contain substantial image or array state should follow the existing `save_state` protocol. By default, large data should not be embedded in the notebook.
+Widgets that contain substantial image or array state should follow the existing `save_state` protocol, described in [Save state & notebook size](save-state-and-notebook-size). By default, large data should not be embedded in the notebook.
 
 ## Step 9: Add HTML export
 
@@ -180,7 +196,7 @@ As good practice, manually check to see that the widget works in the browser and
 During development, run the unit tests:
 
 ```bash
-PYTHONPATH=src:. pytest -q tests/test_ruler2d.py
+PYTHONPATH=src:. pytest -q tests/ruler2d
 ```
 
 Then run the frontend checks:
@@ -191,7 +207,7 @@ npm run typecheck
 npm test
 ```
 
-Before opening a pull request, run:
+Before opening a pull request, run [`scripts/widget_local_signoff.sh`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/widget_local_signoff.sh):
 
 ```bash
 scripts/widget_local_signoff.sh --quick
