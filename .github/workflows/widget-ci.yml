@@ -3,6 +3,8 @@ name: widget ci
 on:
   pull_request:
     paths:
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/pr-cleanup-guidance.yml"
       - ".github/workflows/widget-ci.yml"
       - "docs/**"
       - "js/**"
@@ -15,6 +17,8 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/pr-cleanup-guidance.yml"
       - ".github/workflows/widget-ci.yml"
       - "docs/**"
       - "js/**"

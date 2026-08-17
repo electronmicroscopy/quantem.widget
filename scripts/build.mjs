@@ -13,6 +13,7 @@ if (process.env.QUANTEM_WIDGET_SKIP_GPU_WEBGPU_SYNC !== "1") {
 const widgets = [
   { name: "show1d" },
   { name: "show2d" },
+  { name: "mask2d" },
   { name: "show3d" },
   { name: "show3dslices" },
   { name: "show4dstem" },

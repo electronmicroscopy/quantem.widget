@@ -474,142 +474,6 @@ function downloadBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-let browserGifPaletteCache: Uint8Array | null = null;
-
-function asciiBytes(value: string): Uint8Array {
-  const out = new Uint8Array(value.length);
-  for (let i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
-  return out;
-}
-
-function u16Bytes(value: number): Uint8Array {
-  const v = Math.max(0, Math.min(65535, Math.round(value)));
-  return new Uint8Array([v & 0xff, (v >> 8) & 0xff]);
-}
-
-function concatUint8(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const part of parts) total += part.byteLength;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-
-function browserGifPalette(): Uint8Array {
-  if (browserGifPaletteCache) return browserGifPaletteCache;
-  const palette = new Uint8Array(256 * 3);
-  let idx = 0;
-  for (let r = 0; r < 6; r++) {
-    for (let g = 0; g < 6; g++) {
-      for (let b = 0; b < 6; b++) {
-        const j = idx * 3;
-        palette[j] = r * 51;
-        palette[j + 1] = g * 51;
-        palette[j + 2] = b * 51;
-        idx++;
-      }
-    }
-  }
-  const grayCount = 256 - idx;
-  for (let i = 0; idx < 256; idx++, i++) {
-    const v = grayCount <= 1 ? 0 : Math.round((i / (grayCount - 1)) * 255);
-    const j = idx * 3;
-    palette[j] = v;
-    palette[j + 1] = v;
-    palette[j + 2] = v;
-  }
-  browserGifPaletteCache = palette;
-  return palette;
-}
-
-function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
-  const out = new Uint8Array(Math.floor(rgba.length / 4));
-  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
-    const a = rgba[j + 3];
-    const r = a === 255 ? rgba[j] : Math.round((rgba[j] * a + 255 * (255 - a)) / 255);
-    const g = a === 255 ? rgba[j + 1] : Math.round((rgba[j + 1] * a + 255 * (255 - a)) / 255);
-    const b = a === 255 ? rgba[j + 2] : Math.round((rgba[j + 2] * a + 255 * (255 - a)) / 255);
-    const rq = Math.max(0, Math.min(5, Math.round(r / 51)));
-    const gq = Math.max(0, Math.min(5, Math.round(g / 51)));
-    const bq = Math.max(0, Math.min(5, Math.round(b / 51)));
-    out[i] = rq * 36 + gq * 6 + bq;
-  }
-  return out;
-}
-
-function gifLzwEncode(indices: Uint8Array): Uint8Array {
-  const minCodeSize = 8;
-  const clearCode = 1 << minCodeSize;
-  const endCode = clearCode + 1;
-  const codeSize = minCodeSize + 1;
-  const bytes: number[] = [];
-  let bitBuffer = 0;
-  let bitCount = 0;
-  const writeCode = (code: number) => {
-    bitBuffer |= code << bitCount;
-    bitCount += codeSize;
-    while (bitCount >= 8) {
-      bytes.push(bitBuffer & 0xff);
-      bitBuffer >>= 8;
-      bitCount -= 8;
-    }
-  };
-  writeCode(clearCode);
-  let sinceClear = 0;
-  for (let i = 0; i < indices.length; i++) {
-    if (sinceClear >= 250) {
-      writeCode(clearCode);
-      sinceClear = 0;
-    }
-    writeCode(indices[i]);
-    sinceClear++;
-  }
-  writeCode(endCode);
-  if (bitCount > 0) bytes.push(bitBuffer & 0xff);
-  return new Uint8Array(bytes);
-}
-
-function pushGifSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
-  for (let offset = 0; offset < data.length; offset += 255) {
-    const chunk = data.subarray(offset, Math.min(offset + 255, data.length));
-    parts.push(new Uint8Array([chunk.length]));
-    parts.push(chunk);
-  }
-  parts.push(new Uint8Array([0]));
-}
-
-function encodeIndexedGif(width: number, height: number, frames: Uint8Array[], delayCs: number): Uint8Array {
-  if (width <= 0 || height <= 0 || frames.length === 0) {
-    throw new Error("GIF export needs at least one frame.");
-  }
-  const parts: Uint8Array[] = [
-    asciiBytes("GIF89a"),
-    u16Bytes(width),
-    u16Bytes(height),
-    new Uint8Array([0xf7, 0, 0]),
-    browserGifPalette(),
-    new Uint8Array([0x21, 0xff, 0x0b]),
-    asciiBytes("NETSCAPE2.0"),
-    new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),
-  ];
-  const delay = Math.max(1, Math.min(65535, Math.round(delayCs)));
-  for (const frame of frames) {
-    parts.push(new Uint8Array([0x21, 0xf9, 0x04, 0x04]));
-    parts.push(u16Bytes(delay));
-    parts.push(new Uint8Array([0, 0]));
-    parts.push(new Uint8Array([0x2c]));
-    parts.push(u16Bytes(0), u16Bytes(0), u16Bytes(width), u16Bytes(height));
-    parts.push(new Uint8Array([0, 8]));
-    pushGifSubBlocks(parts, gifLzwEncode(frame));
-  }
-  parts.push(new Uint8Array([0x3b]));
-  return concatUint8(parts);
-}
-
 function formatSavedBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -617,10 +481,10 @@ function formatSavedBytes(bytes: number): string {
   return `${Math.round(bytes)} B`;
 }
 
-function makeShowPtychoExportFilename(mode: "gif" | "mp4", sweepParam: string, frameCount: number): string {
+function makeShowPtychoMp4Filename(sweepParam: string, frameCount: number): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const target = slugPart(sweepParam.replace(/^bundle:/, "").replace(/^ho:/, ""));
-  return `showptycho_${target}_${frameCount}f_${stamp}.${mode}`;
+  return `showptycho_${target}_${frameCount}f_${stamp}.mp4`;
 }
 
 function publishShowPtychoTestPhase(data: Float32Array, w: number, h: number): void {
@@ -3272,7 +3136,7 @@ function Explore() {
     maxPanelEdge = 512,
   ): Promise<HTMLCanvasElement> => {
     const engine = webgpuSsbRef.current;
-    if (!engine) throw new Error("GIF/MP4 export needs the WebGPU ShowPtycho engine.");
+    if (!engine) throw new Error("MP4 export needs the WebGPU ShowPtycho engine.");
     const bfCount = selectedDragBfCount();
     const total = Math.max(1, effectiveTotalBf || bfCount);
     const result = await engine.reconstruct(
@@ -3322,47 +3186,14 @@ function Explore() {
     return out;
   }, [effectiveTotalBf, selectedDragBfCount]);
 
-  const exportAnimationGif = React.useCallback(async () => {
-    const frames = animationFrameValues();
-    const filename = makeShowPtychoExportFilename("gif", sweepParam, frames.length);
-    setAnimationExportBusy(true);
-    setAnimationExportStatus(`Preparing ${filename}`);
-    try {
-      const indexed: Uint8Array[] = [];
-      let outW = 0;
-      let outH = 0;
-      for (let i = 0; i < frames.length; i++) {
-        const canvas = await renderAnimationFrameCanvas(frames[i], 512);
-        outW = canvas.width;
-        outH = canvas.height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("Could not read export frame.");
-        indexed.push(quantizeRgbaForBrowserGif(ctx.getImageData(0, 0, outW, outH).data));
-        if (i === 0 || i === frames.length - 1 || (i + 1) % 4 === 0) {
-          setAnimationExportStatus(`Encoding ${filename} ${i + 1}/${frames.length}`);
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-        }
-      }
-      const gif = encodeIndexedGif(outW, outH, indexed, 100 / Math.max(1, Math.min(30, playFps)));
-      const blob = new Blob([gif as BlobPart], { type: "image/gif" });
-      downloadBlob(blob, filename);
-      setAnimationExportStatus(`Downloaded ${filename} (${formatSavedBytes(blob.size)})`);
-      document.documentElement.setAttribute("data-showptycho-last-animation-export", JSON.stringify({ mode: "gif", frames: frames.length, bytes: blob.size }));
-    } catch (err) {
-      setAnimationExportStatus(`Export failed ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setAnimationExportBusy(false);
-    }
-  }, [animationFrameValues, playFps, renderAnimationFrameCanvas, sweepParam]);
-
   const exportAnimationMp4 = React.useCallback(async () => {
     const mime = "video/mp4";
     if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported(mime)) {
-      setAnimationExportStatus("MP4 export unavailable in this browser; use GIF here.");
+      setAnimationExportStatus("MP4 export unavailable in this browser.");
       return;
     }
     const frames = animationFrameValues();
-    const filename = makeShowPtychoExportFilename("mp4", sweepParam, frames.length);
+    const filename = makeShowPtychoMp4Filename(sweepParam, frames.length);
     setAnimationExportBusy(true);
     setAnimationExportStatus(`Preparing ${filename}`);
     try {
@@ -3853,9 +3684,6 @@ function Explore() {
           <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
             <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: tc.textMuted, textTransform: "uppercase" }}>Export</Typography>
           </Box>
-          <MenuItem dense onClick={() => { void exportAnimationGif(); setToolbarMoreAnchor(null); }} disabled={animationExportBusy || !rawPhaseRef.current} sx={{ fontSize: 12 }}>
-            Export GIF
-          </MenuItem>
           <MenuItem dense onClick={() => { void exportAnimationMp4(); setToolbarMoreAnchor(null); }} disabled={animationExportBusy || !rawPhaseRef.current || !canRecordMp4} sx={{ fontSize: 12 }}>
             Export MP4
           </MenuItem>

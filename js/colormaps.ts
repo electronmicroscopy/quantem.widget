@@ -1178,6 +1178,7 @@ type GPUSlot = {
   directSlotBindGroup: GPUBindGroup | null;
   directRegionParamsBuffers: (GPUBuffer | null)[];
   directRegionBindGroups: (GPUBindGroup | null)[];
+  directRegionLutNames: string[];
   sharedGridBindGroup: GPUBindGroup | null;
   sharedGridBlitBindGroup: GPUBindGroup | null;
   count: number;
@@ -1216,6 +1217,7 @@ export class GPUColormapEngine {
   private slots: GPUSlot[] = [];
   private lutBuffer: GPUBuffer | null = null;
   private currentLutName: string = "";
+  private namedLutBuffers = new Map<string, GPUBuffer>();
   private directGridParams = new ArrayBuffer(64);
   private directGridParamsU32 = new Uint32Array(this.directGridParams);
   private directGridParamsF32 = new Float32Array(this.directGridParams);
@@ -1272,6 +1274,27 @@ export class GPUColormapEngine {
     slot.histReadBuffer.destroy();
     slot.rangeBuffer?.destroy();
     for (const buf of slot.directRegionParamsBuffers) buf?.destroy();
+  }
+
+  private createLutBuffer(lut: Uint8Array): GPUBuffer {
+    const packed = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      packed[i] = lut[i * 3] | (lut[i * 3 + 1] << 8) | (lut[i * 3 + 2] << 16);
+    }
+    const buffer = this.device.createBuffer({
+      size: packed.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(buffer, 0, packed);
+    return buffer;
+  }
+
+  private namedLutBuffer(name: string, lut: Uint8Array): GPUBuffer {
+    const cached = this.namedLutBuffers.get(name);
+    if (cached) return cached;
+    const buffer = this.createLutBuffer(lut);
+    this.namedLutBuffers.set(name, buffer);
+    return buffer;
   }
 
   private retireSlot(slot: GPUSlot): void {
@@ -1482,16 +1505,7 @@ export class GPUColormapEngine {
         slot.sharedGridBindGroup = null;
       }
     }
-    // Pack RGB triplets into u32 for GPU (R in low bits)
-    const packed = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-      packed[i] = lut[i * 3] | (lut[i * 3 + 1] << 8) | (lut[i * 3 + 2] << 16);
-    }
-    this.lutBuffer = this.device.createBuffer({
-      size: packed.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.lutBuffer, 0, packed);
+    this.lutBuffer = this.createLutBuffer(lut);
     this.currentLutName = lutName;
   }
 
@@ -1563,6 +1577,7 @@ export class GPUColormapEngine {
       directSlotBindGroup: null,
       directRegionParamsBuffers: [],
       directRegionBindGroups: [],
+      directRegionLutNames: [],
       sharedGridBindGroup: null,
       sharedGridBlitBindGroup: null,
       count: data.length,
@@ -1618,6 +1633,7 @@ export class GPUColormapEngine {
       directSlotBindGroup: null,
       directRegionParamsBuffers: [],
       directRegionBindGroups: [],
+      directRegionLutNames: [],
       sharedGridBindGroup: null,
       sharedGridBlitBindGroup: null,
       count,
@@ -3156,6 +3172,7 @@ export class GPUColormapEngine {
       sourcePanelWidth: number;
       transforms?: { zoom: number; panX: number; panY: number }[];
       sourcePanelIndices?: number[];
+      panelLuts?: { name: string; lut: Uint8Array }[];
       smooth?: boolean;
     },
   ): boolean {
@@ -3167,7 +3184,11 @@ export class GPUColormapEngine {
       Math.abs(transform?.panX ?? 0) > 1e-3 ||
       Math.abs(transform?.panY ?? 0) > 1e-3
     ));
-    if (!hasActiveTransform && this.renderPackedPanelTransformComputeToCanvas(slot, range, logScale, ctx, opts)) {
+    // The compute shortcut binds the one shared LUT. Any explicit panel LUT
+    // contract must use the per-panel fragment bindings, even when all named
+    // panel maps currently happen to be identical.
+    const hasPanelLuts = Boolean(opts.panelLuts?.length);
+    if (!hasActiveTransform && !hasPanelLuts && this.renderPackedPanelTransformComputeToCanvas(slot, range, logScale, ctx, opts)) {
       return true;
     }
     const outW = Math.max(1, Math.round(opts.width));
@@ -3202,6 +3223,12 @@ export class GPUColormapEngine {
         });
         slot.directRegionParamsBuffers[panel] = paramsBuffer;
       }
+      const panelLut = opts.panelLuts?.[panel];
+      const lutName = panelLut?.name || this.currentLutName;
+      const lutBuffer = panelLut
+        ? this.namedLutBuffer(panelLut.name, panelLut.lut)
+        : this.lutBuffer;
+      if (!lutBuffer) continue;
       const panelRange = Array.isArray(range) ? (range[panel] ?? range[0]) : range;
       const panelLogScale = Array.isArray(logScale) ? !!logScale[panel] : logScale;
       const sourcePanel = Math.max(0, Math.round(opts.sourcePanelIndices?.[panel] ?? panel));
@@ -3229,15 +3256,19 @@ export class GPUColormapEngine {
       pf[14] = transform?.panX ?? 0;
       pf[15] = transform?.panY ?? 0;
       this.device.queue.writeBuffer(paramsBuffer, 0, params);
-      if (!slot.directRegionBindGroups[panel]) {
+      if (
+        !slot.directRegionBindGroups[panel]
+        || slot.directRegionLutNames[panel] !== lutName
+      ) {
         slot.directRegionBindGroups[panel] = this.device.createBindGroup({
           layout: pipeline.getBindGroupLayout(0),
           entries: [
             { binding: 0, resource: { buffer: paramsBuffer } },
             { binding: 1, resource: { buffer: slot.dataBuffer } },
-            { binding: 2, resource: { buffer: this.lutBuffer } },
+            { binding: 2, resource: { buffer: lutBuffer } },
           ],
         });
+        slot.directRegionLutNames[panel] = lutName;
       }
     }
 
@@ -3309,6 +3340,8 @@ export class GPUColormapEngine {
     this.retiredSlots = [];
     this.lutBuffer?.destroy();
     this.lutBuffer = null;
+    for (const buffer of this.namedLutBuffers.values()) buffer.destroy();
+    this.namedLutBuffers.clear();
     this.directGridRangesBuffer?.destroy();
     this.directGridRangesBuffer = null;
     this.directGridRangesCapacity = 0;
@@ -4168,6 +4201,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
   private histPipeline: GPUComputePipeline | null = null;
   private histClearPipeline: GPUComputePipeline | null = null;
+  private histRegionPipeline: GPUComputePipeline | null = null;
 
   private ensureHistPipeline(): void {
     if (this.histPipeline) return;
@@ -4210,6 +4244,186 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
       layout: "auto",
       compute: { module, entryPoint: "clear_bins" },
     });
+  }
+
+  private ensureHistRegionPipeline(): void {
+    if (this.histRegionPipeline) return;
+    const code = /* wgsl */ `
+struct RegionParams {
+  region: vec4u,
+  full_width: u32,
+  log_scale: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+struct RangeIn { vmin: f32, vmax: f32, _p0: f32, _p1: f32 };
+
+@group(0) @binding(0) var<uniform> params: RegionParams;
+@group(0) @binding(1) var<storage, read> data: array<f32>;
+@group(0) @binding(2) var<storage, read> range_in: RangeIn;
+@group(0) @binding(3) var<storage, read_write> bins: array<atomic<u32>>;
+
+@compute @workgroup_size(16, 16)
+fn histogram(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.region.z || gid.y >= params.region.w) { return; }
+  let idx = (params.region.y + gid.y) * params.full_width + params.region.x + gid.x;
+  var val = data[idx];
+  if (params.log_scale == 1u) { val = log(1.0 + max(val, 0.0)); }
+  let span = max(range_in.vmax - range_in.vmin, 1e-30);
+  let t = clamp((val - range_in.vmin) / span, 0.0, 1.0);
+  let bin = min(u32(t * 256.0), 255u);
+  atomicAdd(&bins[bin], 1u);
+}
+`;
+    const module = this.device.createShaderModule({ code });
+    this.histRegionPipeline = this.device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "histogram" },
+    });
+  }
+
+  /**
+   * Compute ranges and 256-bin histograms for rectangular regions of one slot.
+   *
+   * Show3D packs independent panels side-by-side in one resident frame slot.
+   * This keeps playback histogram refreshes on WebGPU: range reduction and bin
+   * accumulation happen in one submission, with only the small ranges and bins
+   * read back for drawing the histogram controls.
+   */
+  async computeHistogramRegions(
+    idx: number,
+    regions: { x: number; y: number; width: number; height: number }[],
+    logScale: boolean = false,
+  ): Promise<{ range: { min: number; max: number }; bins: number[] }[]> {
+    this.ensureRangeRegionPipeline();
+    this.ensureHistRegionPipeline();
+    const slot = this.slots[idx];
+    if (!slot || !this.rangeRegionPipeline || !this.histRegionPipeline || regions.length === 0) {
+      return [];
+    }
+
+    const validRegions = regions.map(region => {
+      const x = Math.max(0, Math.min(slot.width - 1, Math.round(region.x)));
+      const y = Math.max(0, Math.min(slot.height - 1, Math.round(region.y)));
+      return {
+        x,
+        y,
+        width: Math.max(1, Math.min(slot.width - x, Math.round(region.width))),
+        height: Math.max(1, Math.min(slot.height - y, Math.round(region.height))),
+      };
+    });
+    const binsBytes = validRegions.length * 256 * 4;
+    const rangesBytes = validRegions.length * 16;
+    const binsBuffer = this.device.createBuffer({
+      size: binsBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    const binsReadBuffer = this.device.createBuffer({
+      size: binsBytes,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const rangesReadBuffer = this.device.createBuffer({
+      size: rangesBytes,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const paramsBuffers: GPUBuffer[] = [];
+    const encoder = this.device.createCommandEncoder();
+    encoder.clearBuffer(binsBuffer);
+
+    for (let k = 0; k < validRegions.length; k++) {
+      const region = validRegions[k];
+      const scratch = this.ensurePanelScratch(k, region.width * region.height);
+      const paramsBuffer = this.device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(
+        paramsBuffer,
+        0,
+        new Uint32Array([
+          region.x,
+          region.y,
+          region.width,
+          region.height,
+          slot.width,
+          logScale ? 1 : 0,
+          0,
+          0,
+        ]),
+      );
+      paramsBuffers.push(paramsBuffer);
+
+      const rangeGroup = this.device.createBindGroup({
+        layout: this.rangeRegionPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: slot.dataBuffer } },
+          { binding: 1, resource: { buffer: paramsBuffer } },
+          { binding: 2, resource: { buffer: scratch.range } },
+        ],
+      });
+      const rangePass = encoder.beginComputePass();
+      rangePass.setPipeline(this.rangeRegionPipeline);
+      rangePass.setBindGroup(0, rangeGroup);
+      rangePass.dispatchWorkgroups(1);
+      rangePass.end();
+
+      const histogramGroup = this.device.createBindGroup({
+        layout: this.histRegionPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: paramsBuffer } },
+          { binding: 1, resource: { buffer: slot.dataBuffer } },
+          { binding: 2, resource: { buffer: scratch.range } },
+          {
+            binding: 3,
+            resource: { buffer: binsBuffer, offset: k * 256 * 4, size: 256 * 4 },
+          },
+        ],
+      });
+      const histogramPass = encoder.beginComputePass();
+      histogramPass.setPipeline(this.histRegionPipeline);
+      histogramPass.setBindGroup(0, histogramGroup);
+      histogramPass.dispatchWorkgroups(
+        Math.ceil(region.width / 16),
+        Math.ceil(region.height / 16),
+      );
+      histogramPass.end();
+      encoder.copyBufferToBuffer(scratch.range, 0, rangesReadBuffer, k * 16, 16);
+    }
+
+    encoder.copyBufferToBuffer(binsBuffer, 0, binsReadBuffer, 0, binsBytes);
+    this.device.queue.submit([encoder.finish()]);
+
+    try {
+      await Promise.all([
+        binsReadBuffer.mapAsync(GPUMapMode.READ),
+        rangesReadBuffer.mapAsync(GPUMapMode.READ),
+      ]);
+      const rawBins = new Uint32Array(binsReadBuffer.getMappedRange().slice(0));
+      const rawRanges = new Float32Array(rangesReadBuffer.getMappedRange().slice(0));
+      binsReadBuffer.unmap();
+      rangesReadBuffer.unmap();
+
+      return validRegions.map((_, k) => {
+        const offset = k * 256;
+        let maxCount = 0;
+        for (let bin = 0; bin < 256; bin++) {
+          maxCount = Math.max(maxCount, rawBins[offset + bin]);
+        }
+        const bins = new Array<number>(256);
+        for (let bin = 0; bin < 256; bin++) {
+          bins[bin] = maxCount > 0 ? rawBins[offset + bin] / maxCount : 0;
+        }
+        return {
+          range: { min: rawRanges[k * 4], max: rawRanges[k * 4 + 1] },
+          bins,
+        };
+      });
+    } finally {
+      for (const buffer of paramsBuffers) buffer.destroy();
+      binsBuffer.destroy();
+      binsReadBuffer.destroy();
+      rangesReadBuffer.destroy();
+    }
   }
 
   /**

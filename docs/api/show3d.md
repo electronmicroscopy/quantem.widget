@@ -395,17 +395,37 @@ from quantem.widget import Show3D
 
 w = Show3D.from_folder(
     "/data/session/reconstruction",
-    pattern="frame_*.tif",
+    file_types="tif",
+    pattern="frame_*",
     watch_interval=2.0,
     title="Live reconstruction",
 )
 w
 ```
 
+Use `file_types` when the acquisition folder contains other outputs that should
+not join the stack. It accepts one extension or a list, with or without the
+leading dot, and ignores case:
+
+```python
+emd_only = Show3D.from_folder("/data/session", file_types="emd")
+images = Show3D.from_folder(
+    "/data/session",
+    file_types=["png", "tif", "tiff"],
+)
+```
+
+`pattern` remains available for filename filtering. When both are supplied,
+a file must match both filters. Supported image files include EMD, TIFF, PNG,
+NumPy, DM3/DM4, JPEG, BMP, and GIF.
+
 `watch=True` is the default. The first folder scan establishes deterministic
 frame order, then the watcher appends newly readable files without rebuilding
-the widget or rereading unchanged source files. Use Show2D instead when each
-file should be a separate comparison panel.
+the widget or rereading unchanged source files. If the requested folder does
+not exist, this live path creates it, including missing parent directories, and
+waits for the first stable frame. Use Show2D instead when each file should be a
+separate comparison panel. A one-shot ``watch=False`` read remains strict and
+requires an existing folder with readable images.
 
 Folder size never creates Show3D pages. Whether the folder has 2, 20, or 200
 files, each file extends the frame axis of one stack and the frame

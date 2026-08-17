@@ -108,7 +108,7 @@ scripts/widget_local_signoff.sh --quick --browser
 ### WebGPU or GPU-sensitive change
 
 ```bash
-PYTHONPATH=src:. pytest -q tests/test_show4dstem_webgpu_browser.py tests/test_wgsl_parity.py
+PYTHONPATH=src:. pytest -q tests/show4dstem/test_webgpu_browser.py tests/test_wgsl_parity.py
 PYTHONPATH=src:. pytest -q tests/test_quantem_gpu_ownership.py tests/test_core_dataset4dstem.py
 ```
 

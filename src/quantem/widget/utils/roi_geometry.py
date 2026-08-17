@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 
 def roi_geometries(
     roi_list: list[Any],
@@ -111,3 +113,72 @@ def roi_geometries(
         geometries.append(geometry)
 
     return geometries
+
+
+def roi_masks(
+    roi_list: list[Any],
+    *,
+    height: int,
+    width: int,
+    visible_only: bool = True,
+) -> np.ndarray:
+    """Rasterize ROIs as Boolean masks in image ``(row, col)`` coordinates.
+
+    Parameters
+    ----------
+    roi_list : list
+        Synced Show2D ROI dictionaries.
+    height, width : int
+        Output image dimensions in pixels.
+    visible_only : bool, default=True
+        If ``True``, omit ROIs whose synced state has ``visible=False``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean array with shape ``(region, row, col)``. An empty ROI list
+        returns an empty leading dimension rather than an all-false region.
+    """
+    if height < 1 or width < 1:
+        raise ValueError(
+            f"height and width must be positive, got {(height, width)}."
+        )
+    rows, columns = np.ogrid[:height, :width]
+    masks = []
+    for geometry in roi_geometries(
+        roi_list,
+        height=height,
+        width=width,
+        visible_only=visible_only,
+    ):
+        center_row = float(geometry["row"])
+        center_column = float(geometry["col"])
+        shape = geometry["shape"]
+        if shape == "circle":
+            radius = float(geometry["radius"])
+            mask = (
+                (rows - center_row) ** 2 + (columns - center_column) ** 2
+                <= radius**2
+            )
+        elif shape == "annular":
+            radius_inner = float(geometry["radius_inner"])
+            radius_outer = float(geometry["radius_outer"])
+            distance_squared = (
+                (rows - center_row) ** 2 + (columns - center_column) ** 2
+            )
+            mask = (
+                (distance_squared >= radius_inner**2)
+                & (distance_squared <= radius_outer**2)
+            )
+        else:
+            bounds = geometry["bounds"]
+            mask = (
+                (rows >= bounds["row_min"])
+                & (rows <= bounds["row_max"])
+                & (columns >= bounds["col_min"])
+                & (columns <= bounds["col_max"])
+            )
+        masks.append(np.asarray(mask, dtype=bool))
+    if not masks:
+        return np.zeros((0, height, width), dtype=bool)
+    return np.stack(masks)
