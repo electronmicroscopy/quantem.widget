@@ -79,5 +79,13 @@ tests, documentation standards, and the pull-request workflow. That workflow
 follows the reproducible scientific-software procedures described by
 [scikit-package](https://scikit-package.github.io/scikit-package/).
 
+Would you like to create a widget? Linked [here](https://electronmicroscopy.github.io/quantem.widget/developer/widget-creation.html)
+is a walkthrough that discusses what one should contain and the eleven steps needed to create a widget.
+
+Each widget is meant to be self-contained in its own Python module and `js/`
+folder. This way, every widget can reuse the same kernels and shared browser-GPU work like FFTs
+can all belong in
+[quantem.gpu](https://github.com/bobleesj/quantem.gpu).
+
 Questions and bug reports belong in the
 [issue tracker](https://github.com/electronmicroscopy/quantem.widget/issues).
