@@ -28,7 +28,7 @@ import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import traitlets
-from quantem.widget._image_folder import (
+from quantem.widget.image_folder import (
     ImageFolderRecord,
     WatchedImageFolder,
     WatchedImageFolderMixin,

@@ -59,12 +59,19 @@ def _build_mps_viewer(data: Any, **kwargs: Any) -> Any:
     return _show4dstem_mps(data, **kwargs)
 
 
-def _apply_loadresult_labels(data: Any, payload: Any, kwargs: dict[str, Any]) -> None:
-    """Label a CUDA 5D ``load([...])`` stack as datasets."""
-    if not isinstance(data, LoadResult) or getattr(payload, "ndim", 0) != 5:
+def _apply_loadresult_defaults(data: Any, payload: Any, kwargs: dict[str, Any]) -> None:
+    """Give a loaded multi-dataset stack its natural comparison view."""
+    shape = getattr(payload, "shape", ())
+    try:
+        is_multi_dataset = int(getattr(payload, "ndim", len(shape))) == 5
+    except (TypeError, ValueError):
+        is_multi_dataset = False
+    if not isinstance(data, LoadResult) or not is_multi_dataset:
         return
     meta = getattr(data, "metadata", {}) or {}
     kwargs.setdefault("frame_dim_label", "Dataset")
+    kwargs.setdefault("view_mode", "multiple")
+    kwargs.setdefault("compare_dp_mode", "selected")
     names = meta.get("file_names")
     if names is not None:
         kwargs.setdefault("frame_labels", list(names))
@@ -79,13 +86,7 @@ def Show4DSTEM(data: Any, **kwargs: Any) -> Any:
         from quantem.widget import Show4DSTEM
 
         Show4DSTEM(load("a.h5"))                         # auto: CUDA / MPS
-        Show4DSTEM(load("a.h5", backend="mps"))          # explicit Apple Metal load
-        Show4DSTEM(load(["a.h5", "b.h5"], det_bin=4))    # many datasets, one slider
-        Show4DSTEM(load("a.h5"), backend="webgpu")       # browser WebGPU compute
-
-        w = Show4DSTEM(load("a.h5"), backend="webgpu", offline_codec="bslz4",
-                       data_url="show4dstem-data")
-        w.export_html("show4dstem.html")
+        Show4DSTEM(load(["a.h5", "b.h5"]))               # automatic comparison
 
     Dispatch is automatic from what ``load`` returns:
       - Apple Silicon MPS single-file loads use the raw-Metal real-time viewer.
@@ -96,10 +97,10 @@ def Show4DSTEM(data: Any, **kwargs: Any) -> Any:
       - Browser WebGPU performs detector reductions in the browser.
     """
     payload = _payload(data)
+    _apply_loadresult_defaults(data, payload, kwargs)
     if is_mps_show4dstem_payload(payload):
         return _build_mps_viewer(payload, **kwargs)
 
-    _apply_loadresult_labels(data, payload, kwargs)
     return _Show4DSTEMBase(payload, **kwargs)
 
 

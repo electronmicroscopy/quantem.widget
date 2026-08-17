@@ -53,6 +53,7 @@ import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
 import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
 import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../frequencyFilter";
+import { encodeIndexedGif, quantizeRgbaForBrowserGif } from "./gif";
 
 const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -2126,158 +2127,6 @@ const GIF_EXPORT_PRESETS: Array<{ value: GifExportPreset; label: string }> = [
   { value: "full", label: "Full" },
 ];
 
-let browserGifPaletteCache: Uint8Array | null = null;
-
-function asciiBytes(value: string): Uint8Array {
-  const out = new Uint8Array(value.length);
-  for (let i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
-  return out;
-}
-
-function u16Bytes(value: number): Uint8Array {
-  const v = Math.max(0, Math.min(65535, Math.round(value)));
-  return new Uint8Array([v & 0xff, (v >> 8) & 0xff]);
-}
-
-function concatUint8(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const part of parts) total += part.byteLength;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-
-function browserGifPalette(): Uint8Array {
-  if (browserGifPaletteCache) return browserGifPaletteCache;
-  const palette = new Uint8Array(256 * 3);
-  let idx = 0;
-  for (let r = 0; r < 6; r++) {
-    for (let g = 0; g < 6; g++) {
-      for (let b = 0; b < 6; b++) {
-        const j = idx * 3;
-        palette[j] = r * 51;
-        palette[j + 1] = g * 51;
-        palette[j + 2] = b * 51;
-        idx++;
-      }
-    }
-  }
-  const grayCount = 256 - idx;
-  for (let i = 0; idx < 256; idx++, i++) {
-    const v = grayCount <= 1 ? 0 : Math.round((i / (grayCount - 1)) * 255);
-    const j = idx * 3;
-    palette[j] = v;
-    palette[j + 1] = v;
-    palette[j + 2] = v;
-  }
-  browserGifPaletteCache = palette;
-  return palette;
-}
-
-function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
-  const out = new Uint8Array(Math.floor(rgba.length / 4));
-  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
-    const a = rgba[j + 3];
-    const r = a === 255 ? rgba[j] : Math.round((rgba[j] * a + 255 * (255 - a)) / 255);
-    const g = a === 255 ? rgba[j + 1] : Math.round((rgba[j + 1] * a + 255 * (255 - a)) / 255);
-    const b = a === 255 ? rgba[j + 2] : Math.round((rgba[j + 2] * a + 255 * (255 - a)) / 255);
-    const rq = Math.max(0, Math.min(5, Math.round(r / 51)));
-    const gq = Math.max(0, Math.min(5, Math.round(g / 51)));
-    const bq = Math.max(0, Math.min(5, Math.round(b / 51)));
-    out[i] = rq * 36 + gq * 6 + bq;
-  }
-  return out;
-}
-
-function gifLzwEncode(indices: Uint8Array): Uint8Array {
-  const minCodeSize = 8;
-  const clearCode = 1 << minCodeSize;
-  const endCode = clearCode + 1;
-  const codeSize = minCodeSize + 1;
-  const bytes: number[] = [];
-  let bitBuffer = 0;
-  let bitCount = 0;
-  const writeCode = (code: number) => {
-    bitBuffer |= code << bitCount;
-    bitCount += codeSize;
-    while (bitCount >= 8) {
-      bytes.push(bitBuffer & 0xff);
-      bitBuffer >>= 8;
-      bitCount -= 8;
-    }
-  };
-
-  // Conservative "clear-block" GIF LZW: emit raw color indices and reset before
-  // the decoder grows past 9-bit codes. It is larger than dictionary-compressed
-  // GIF, but browser-side standalone export values correctness over file size.
-  writeCode(clearCode);
-  let sinceClear = 0;
-  for (let i = 0; i < indices.length; i++) {
-    if (sinceClear >= 250) {
-      writeCode(clearCode);
-      sinceClear = 0;
-    }
-    writeCode(indices[i]);
-    sinceClear++;
-  }
-  writeCode(endCode);
-  if (bitCount > 0) bytes.push(bitBuffer & 0xff);
-  return new Uint8Array(bytes);
-}
-
-function pushGifSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
-  for (let offset = 0; offset < data.length; offset += 255) {
-    const chunk = data.subarray(offset, Math.min(offset + 255, data.length));
-    parts.push(new Uint8Array([chunk.length]));
-    parts.push(chunk);
-  }
-  parts.push(new Uint8Array([0]));
-}
-
-function encodeIndexedGif(
-  width: number,
-  height: number,
-  frames: Uint8Array[],
-  delayCs: number,
-): Uint8Array {
-  if (width <= 0 || height <= 0 || frames.length === 0) {
-    throw new Error("GIF export needs at least one non-empty frame.");
-  }
-  const pixelCount = width * height;
-  for (const frame of frames) {
-    if (frame.length !== pixelCount) {
-      throw new Error(`GIF frame has ${frame.length} pixels; expected ${pixelCount}.`);
-    }
-  }
-  const parts: Uint8Array[] = [
-    asciiBytes("GIF89a"),
-    u16Bytes(width),
-    u16Bytes(height),
-    new Uint8Array([0xf7, 0, 0]),
-    browserGifPalette(),
-    new Uint8Array([0x21, 0xff, 0x0b]),
-    asciiBytes("NETSCAPE2.0"),
-    new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),
-  ];
-  const delay = Math.max(1, Math.min(65535, Math.round(delayCs)));
-  for (const frame of frames) {
-    parts.push(new Uint8Array([0x21, 0xf9, 0x04, 0x04]));
-    parts.push(u16Bytes(delay));
-    parts.push(new Uint8Array([0, 0]));
-    parts.push(new Uint8Array([0x2c, 0, 0, 0, 0]));
-    parts.push(u16Bytes(width));
-    parts.push(u16Bytes(height));
-    parts.push(new Uint8Array([0, 8]));
-    pushGifSubBlocks(parts, gifLzwEncode(frame));
-  }
-  parts.push(new Uint8Array([0x3b]));
-  return concatUint8(parts);
-}
-
 type Mp4Sample = {
   data: Uint8Array;
   timestamp: number;
@@ -2300,7 +2149,22 @@ function mp4U32(value: number): Uint8Array {
 }
 
 function mp4Ascii(value: string): Uint8Array {
-  return asciiBytes(value);
+  const out = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) {
+    out[i] = value.charCodeAt(i) & 0xff;
+  }
+  return out;
+}
+
+function concatMp4Bytes(parts: Uint8Array[]): Uint8Array {
+  const length = parts.reduce((total, part) => total + part.byteLength, 0);
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
 }
 
 function mp4Zeros(length: number): Uint8Array {
@@ -2317,9 +2181,9 @@ function copyMp4Bytes(source: ArrayBufferLike | ArrayBufferView<ArrayBufferLike>
 }
 
 function mp4Box(type: string, ...payloads: Uint8Array[]): Uint8Array {
-  const payload = concatUint8(payloads);
+  const payload = concatMp4Bytes(payloads);
   const size = 8 + payload.byteLength;
-  return concatUint8([mp4U32(size), mp4Ascii(type), payload]);
+  return concatMp4Bytes([mp4U32(size), mp4Ascii(type), payload]);
 }
 
 function mp4FullBox(type: string, version: number, flags: number, ...payloads: Uint8Array[]): Uint8Array {
@@ -2340,14 +2204,14 @@ function mp4Fixed8(value: number): Uint8Array {
 
 function mp4CompressorName(value: string): Uint8Array {
   const out = new Uint8Array(32);
-  const name = asciiBytes(value.slice(0, 31));
+  const name = mp4Ascii(value.slice(0, 31));
   out[0] = name.byteLength;
   out.set(name, 1);
   return out;
 }
 
 function mp4Matrix(): Uint8Array {
-  return concatUint8([
+  return concatMp4Bytes([
     mp4Fixed16(1), mp4U32(0), mp4U32(0),
     mp4U32(0), mp4Fixed16(1), mp4U32(0),
     mp4U32(0), mp4U32(0), mp4U32(0x40000000),
@@ -2462,12 +2326,12 @@ function encodeAvcMp4(samples: Mp4Sample[], width: number, height: number, avcDe
   if (!samples.length) throw new Error("MP4 export needs at least one encoded frame.");
   if (!avcDescription.byteLength) throw new Error("Browser did not provide the H.264 AVC configuration needed for MP4.");
   const timescale = 1_000_000;
-  const mdatPayload = concatUint8(samples.map((sample) => sample.data));
+  const mdatPayload = concatMp4Bytes(samples.map((sample) => sample.data));
   const ftyp = mp4Ftyp();
   let moov = mp4Moov(samples, width, height, timescale, avcDescription, 0);
   const chunkOffset = ftyp.byteLength + moov.byteLength + 8;
   moov = mp4Moov(samples, width, height, timescale, avcDescription, chunkOffset);
-  return concatUint8([ftyp, moov, mp4Box("mdat", mdatPayload)]);
+  return concatMp4Bytes([ftyp, moov, mp4Box("mdat", mdatPayload)]);
 }
 
 function browserMp4Bitrate(width: number, height: number, fps: number): number {
@@ -3613,6 +3477,11 @@ function Show3D() {
       next = [panel];
     }
     lastSelectedPanelRef.current = panel;
+    const selectionDebug = show3dPerfDebug();
+    if (selectionDebug) {
+      selectionDebug.lastSelectedPanel = panel;
+      selectionDebug.selectedPanels = next.slice();
+    }
     setSelectedPanels(next);
     return event.shiftKey || event.metaKey || event.ctrlKey;
   }, [displayOrderedPanelIndices, hasPanelChoices, reorderMode, selectedPanelSet, selectedVisiblePanels, setSelectedPanels, visiblePanelIndices]);
@@ -3976,6 +3845,13 @@ function Show3D() {
   const [panelInnerBorderColorState] = useModelState<string>("panel_inner_border_color");
   const [linkContrast, setLinkContrast] = useModelState<boolean>("link_contrast");
   const [cmap, setCmap] = useModelState<string>("cmap");
+  // The model-backed setter can emit its React update after another synced
+  // trait in the same control event. Direct WebGPU repaint paths must use the
+  // palette selected by this event, not the palette from the previous render.
+  const cmapLiveRef = React.useRef(cmap || "inferno");
+  React.useEffect(() => {
+    cmapLiveRef.current = cmap || "inferno";
+  }, [cmap]);
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
   const [markerColors] = useModelState<string[]>("marker_colors");
   const [identityColors] = useModelState<string[]>("identity_colors");
@@ -4015,6 +3891,10 @@ function Show3D() {
     () => Array.isArray(panelCmaps) ? panelCmaps : [],
     [panelCmaps],
   );
+  const panelCmapsLiveRef = React.useRef<string[]>(normalizedPanelCmaps);
+  React.useEffect(() => {
+    panelCmapsLiveRef.current = normalizedPanelCmaps;
+  }, [normalizedPanelCmaps]);
   const panelCmapFor = React.useCallback((panelIdx: number) => {
     const value = normalizedPanelCmaps[panelIdx];
     return (value && COLORMAPS[value]) ? value : (cmap || "inferno");
@@ -4029,17 +3909,23 @@ function Show3D() {
   const setColorShared = React.useCallback((shared: boolean, panelIdx = 0) => {
     const n = Math.max(1, nPanels || 1);
     if (shared || n <= 1) {
-      setCmap(panelCmapFor(panelIdx));
+      const value = panelCmapFor(panelIdx);
+      cmapLiveRef.current = value;
+      panelCmapsLiveRef.current = [];
+      setCmap(value);
       setPanelCmaps([]);
       return;
     }
-    setPanelCmaps(Array.from({ length: n }, (_, idx) => panelCmapFor(idx)));
+    const next = Array.from({ length: n }, (_, idx) => panelCmapFor(idx));
+    panelCmapsLiveRef.current = next;
+    setPanelCmaps(next);
   }, [nPanels, panelCmapFor, setCmap, setPanelCmaps]);
   const setCmapForPanel = React.useCallback((panelIdx: number, value: string) => {
     const n = Math.max(1, nPanels || 1);
     if (n <= 1 || colorShared) {
+      cmapLiveRef.current = value;
       setCmap(value);
-      setPanelCmaps([]);
+      if (normalizedPanelCmaps.length > 0) setPanelCmaps([]);
       return;
     }
     const idx = Math.max(0, Math.min(n - 1, Math.round(panelIdx)));
@@ -4047,7 +3933,13 @@ function Show3D() {
       ? [...normalizedPanelCmaps]
       : Array.from({ length: n }, () => cmap || "inferno");
     next[idx] = value;
+    panelCmapsLiveRef.current = next;
     setPanelCmaps(next);
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.lastColorPanel = idx;
+      debug.lastPanelCmaps = next.slice();
+    }
     if (idx === 0) setCmap(value);
   }, [cmap, colorShared, normalizedPanelCmaps, nPanels, setCmap, setPanelCmaps]);
 
@@ -4149,6 +4041,12 @@ function Show3D() {
   const [dataMax] = useModelState<number>("data_max");
   const [autoVmins] = useModelState<number[]>("auto_vmins");
   const [autoVmaxs] = useModelState<number[]>("auto_vmaxs");
+  const [autoVminsPerPanel] = useModelState<number[]>("auto_vmins_per_panel");
+  const [autoVmaxsPerPanel] = useModelState<number[]>("auto_vmaxs_per_panel");
+  const initialAutoPercentilesRef = React.useRef({
+    low: percentileLow,
+    high: percentileHigh,
+  });
   React.useEffect(() => {
     if (compareMode !== "blink") {
       setBlinkPhase(0);
@@ -5537,7 +5435,11 @@ function Show3D() {
     const requestedCols = (maxCols && maxCols > 0)
       ? Math.min(maxCols, n, MAX_PANEL_COLUMNS)
       : Math.min(n, MAX_PANEL_COLUMNS);
-    if (n >= 8 && requestedCols >= 3 && rootLayoutWidth > 0) {
+    // Honor the scientist's column choice by shrinking square panels to fit
+    // the current surface. Previously only galleries with 8+ panels did this,
+    // so a 3-panel stack could display `Cols 2` while retaining max_cols=3/4,
+    // then silently jump to three columns after an unrelated repaint.
+    if (rootLayoutWidth > 0) {
       return Math.max(180, Math.min(500, Math.floor(rootLayoutWidth / requestedCols)));
     }
     return 500;
@@ -5589,13 +5491,16 @@ function Show3D() {
     }
     if (cursorInfoRafRef.current != null) return;
     if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      if (next) setCursorInfo(next);
+      setCursorInfo(next);
       return;
     }
     cursorInfoRafRef.current = window.requestAnimationFrame(() => {
       cursorInfoRafRef.current = null;
       const pending = cursorInfoPendingRef.current;
-      if (!pending) return;
+      if (!pending) {
+        setCursorInfo(null);
+        return;
+      }
       setCursorInfo((prev) => (
         prev &&
         prev.row === pending.row &&
@@ -5607,6 +5512,13 @@ function Show3D() {
       ));
     });
   }, []);
+
+  // Hover is inspection only. A committed color edit targets the selected
+  // panel so moving from the canvas to the dropdown cannot silently retarget
+  // the control or retain a stale hover from another panel.
+  const colorTargetPanel = nPanels > 1
+    ? Math.max(0, selectedVisiblePanels[0] ?? visiblePanelIndices[0] ?? 0)
+    : 0;
 
   React.useEffect(() => () => {
     if (cursorInfoRafRef.current != null && typeof window !== "undefined") {
@@ -5990,28 +5902,41 @@ function Show3D() {
   const imageHistogramPreviewPctRef = React.useRef<[number, number] | null>(null);
   const panelHistogramPreviewPctRef = React.useRef<Map<number, [number, number]>>(new Map());
   const histogramPreviewPaintRafRef = React.useRef<number | null>(null);
-  const perPanelHistogramEnabled = (nPanels || 1) > 1 && !linkContrast;
+  // Packed panels are independent scientific domains. Always compute their
+  // histograms and numerical ranges independently; `linkContrast` links only
+  // the relative handle gesture and must never share one absolute range.
+  const perPanelHistogramEnabled = (nPanels || 1) > 1 && !sharedPanelSource;
 
-  const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
+  const setPanelRangePercentages = (
+    panel: number,
+    minPct: number,
+    maxPct: number,
+    linked: boolean,
+  ) => {
     const n = Math.max(1, nPanels || 1);
-    const live = panelStatesLiveRef.current.length === n
+    const stack = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const liveStates = panelStatesLiveRef.current.length === n
       ? panelStatesLiveRef.current
       : panelStates;
-    const next = Array.from({ length: n }, (_, i) => {
-      const state = live[i] || panelStates[i] || initialState;
-      return i === panel ? { ...state, ...patch } : state;
+    const nextStates = Array.from({ length: n }, (_, index) => {
+      const state = liveStates[index] || initialState;
+      return linked || index === panel
+        ? { ...state, imageVminPct: minPct, imageVmaxPct: maxPct }
+        : state;
     });
-    panelStatesLiveRef.current = next;
-    setPanelStates(next);
-  };
-  const setPanelRangeValues = (panel: number, minValue: number | null, maxValue: number | null) => {
-    const n = Math.max(1, nPanels || 1);
-    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanelLiveRef.current[i] ?? null);
-    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanelLiveRef.current[i] ?? null);
-    nextMins[panel] = minValue;
-    nextMaxs[panel] = maxValue;
+    const nextMins = Array.from({ length: n }, (_, index) => vminPerPanelLiveRef.current[index] ?? null);
+    const nextMaxs = Array.from({ length: n }, (_, index) => vmaxPerPanelLiveRef.current[index] ?? null);
+    for (let index = 0; index < n; index++) {
+      if (!linked && index !== panel) continue;
+      const panelRange = panelDataRanges[index];
+      const range = panelRange && panelRange.max > panelRange.min ? panelRange : stack;
+      nextMins[index] = pctToValue(minPct, range.min, range.max);
+      nextMaxs[index] = pctToValue(maxPct, range.min, range.max);
+    }
+    panelStatesLiveRef.current = nextStates;
     vminPerPanelLiveRef.current = nextMins;
     vmaxPerPanelLiveRef.current = nextMaxs;
+    setPanelStates(nextStates);
     setVminPerPanel(nextMins);
     setVmaxPerPanel(nextMaxs);
   };
@@ -6065,8 +5990,8 @@ function Show3D() {
       const highPct = valueToPct(sharedAutoRange.vmax, stack.min, stack.max, imageVmaxPct);
       return { ...sliderRange(effectiveRange.min, effectiveRange.max, lowPct, highPct), logScale };
     }
-    const lowPct = linkContrast ? imageVminPct : state.imageVminPct;
-    const highPct = linkContrast ? imageVmaxPct : state.imageVmaxPct;
+    const lowPct = perPanelHistogramEnabled ? state.imageVminPct : imageVminPct;
+    const highPct = perPanelHistogramEnabled ? state.imageVmaxPct : imageVmaxPct;
     const slider = sliderRange(effectiveRange.min, effectiveRange.max, lowPct, highPct);
     return { ...slider, logScale };
   };
@@ -6081,10 +6006,10 @@ function Show3D() {
     const dataRange = findDataRange(panelData);
     const range = dataRange.max > dataRange.min ? dataRange : fallbackRange;
     if (range.max <= range.min) return null;
-    let clipped: { vmin: number; vmax: number } = percentileClip(panelData, low, high);
+    let clipped = percentileClip(panelData, low, high);
     const span = range.max - range.min;
     if (!Number.isFinite(clipped.vmin) || !Number.isFinite(clipped.vmax) || clipped.vmax <= clipped.vmin || clipped.vmax - clipped.vmin < span * 1e-4) {
-      clipped = { vmin: range.min, vmax: range.max };
+      return { vmin: range.min, vmax: range.max, logScale };
     }
     return { vmin: clipped.vmin, vmax: Math.max(clipped.vmin, clipped.vmax), logScale };
   };
@@ -6200,7 +6125,27 @@ function Show3D() {
     low: number,
     high: number,
   ): { vmin: number; vmax: number; logScale: boolean } => {
-    if ((perPanelHistogramEnabled || linkContrast) && autoOn) {
+    const initialPercentiles = initialAutoPercentilesRef.current;
+    const temporalAverageOnly = offline
+      && normalizedAverageWindow(avgWindow) > 1
+      && diffMode === "off"
+      && !browserFilterOnRef.current
+      && !frequencyFilterIsActive
+      && !subpixelAlignEnabled;
+    const stablePanelRange = (!frameTransformActive() || temporalAverageOnly)
+      && Math.abs(low - initialPercentiles.low) < 1e-6
+      && Math.abs(high - initialPercentiles.high) < 1e-6
+      ? cachedAutoDisplayRange(
+          autoVminsPerPanel,
+          autoVmaxsPerPanel,
+          panel,
+          logScale,
+        )
+      : null;
+    if (autoOn && stablePanelRange) {
+      return { ...stablePanelRange, logScale };
+    }
+    if (perPanelHistogramEnabled && autoOn) {
       const autoRange = autoPanelRangeFromData(panelData, range, low, high);
       if (autoRange) return autoRange;
     }
@@ -7013,7 +6958,7 @@ function Show3D() {
   const pathIdxRef = React.useRef(0);
   const playRef = React.useRef({
     fps: playbackFps, reverse, boomerang, loop, loopStart, loopEnd: effectiveLoopEnd,
-    nSlices, width, height, displayScale, canvasW, canvasH,
+    nSlices, width, height, displayScale, canvasW, canvasH, panelCols: _colsLocal,
     logScale, autoContrast, percentileLow, percentileHigh,
     dataMin, dataMax, cmap, imageVminPct, imageVmaxPct,
     autoVmins, autoVmaxs,
@@ -7039,7 +6984,7 @@ function Show3D() {
       : panelStates;
     playRef.current = {
       fps: playbackFps, reverse, boomerang, loop, loopStart, loopEnd: effectiveLoopEnd,
-      nSlices, width, height, displayScale, canvasW, canvasH,
+      nSlices, width, height, displayScale, canvasW, canvasH, panelCols: _colsLocal,
       logScale, autoContrast, percentileLow, percentileHigh,
       dataMin, dataMax, cmap, imageVminPct, imageVmaxPct,
       autoVmins, autoVmaxs,
@@ -7053,7 +6998,7 @@ function Show3D() {
       diffMode, avgWindow,
     };
   }, [playbackFps, reverse, boomerang, loop, loopStart, effectiveLoopEnd,
-    nSlices, width, height, displayScale, canvasW, canvasH,
+    nSlices, width, height, displayScale, canvasW, canvasH, _colsLocal,
     logScale, autoContrast, percentileLow, percentileHigh,
     dataMin, dataMax, cmap, imageVminPct, imageVmaxPct,
     autoVmins, autoVmaxs, linkContrast, linkedState, linkPanels, panelStates, vminPerPanel, vmaxPerPanel, visiblePanelIndices,
@@ -7437,13 +7382,25 @@ function Show3D() {
     panels: number[],
     c: typeof playRef.current,
   ): RenderRange | RenderRange[] => {
-    if (panels.length > 1) {
+    // A packed multi-panel source remains multi-panel even when the scientist
+    // hides all but one panel. Basing this branch on `panels.length` decoded an
+    // isolated phase panel against the global phase+BF+DF count range during
+    // GPU scrubbing/playback, so the visible phase image became black.
+    if (Math.max(1, nPanels || 1) > 1 && !sharedPanelSource) {
       const sharedAutoRange = c.autoContrast ? sharedDirectDisplayRange(normalized, c) : null;
       const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
       return panels.map((panel) => {
         const pdr = panelDataRanges[panel];
         const bounds = (pdr && pdr.max > pdr.min) ? pdr : stack;
-        return resolvePanelRange(panel, bounds, sharedAutoRange);
+        return resolvePanelRenderRange(
+          panel,
+          bounds,
+          sharedAutoRange,
+          null,
+          c.autoContrast,
+          c.percentileLow,
+          c.percentileHigh,
+        );
       });
     }
     return sharedDirectDisplayRange(normalized, c);
@@ -7469,7 +7426,6 @@ function Show3D() {
     if (
       sharedPanelSource
       || isRgb
-      || hasMixedPanelCmaps
       || flipRows
       || flipCols
       || imageRotation % 4 !== 0
@@ -7531,14 +7487,27 @@ function Show3D() {
     }
     if (slotIdx === null) return false;
 
-    const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
-    engine.uploadLUT(c.cmap, lut);
+    const liveCmap = cmapLiveRef.current || c.cmap;
+    const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
+    engine.uploadLUT(liveCmap, lut);
     const panelCount = panels.length;
-    const cols = panelColsForCount(panelCount);
+    // Playback continues in one long rAF effect while layout controls remain
+    // live. Read columns from playRef with the other live canvas geometry;
+    // panelColsForCount here would be the closure captured when Play started.
+    const cols = Math.max(1, Math.min(panelCount, Math.round(c.panelCols || 1)));
     const rows = Math.ceil(panelCount / cols);
     const gap = panelCount > 1 ? panelGapPx : 0;
     const ranges = directPanelRanges(normalized, panels, c);
     const transforms = directPanelTransforms(panels, c);
+    const livePanelCmaps = panelCmapsLiveRef.current;
+    const panelLuts = livePanelCmaps.length === panelSourceCount
+      ? panels.map((panel) => {
+          const name = livePanelCmaps[panel] && COLORMAPS[livePanelCmaps[panel]]
+            ? livePanelCmaps[panel]
+            : liveCmap;
+          return { name, lut: COLORMAPS[name] || lut };
+        })
+      : undefined;
     const rendered = engine.renderCombinedPanelRegionsDirectToCanvas(
       slotIdx,
       ranges,
@@ -7555,6 +7524,7 @@ function Show3D() {
         sourcePanelWidth,
         transforms,
         sourcePanelIndices: panels,
+        panelLuts,
         smooth: c.smooth,
       },
     );
@@ -7586,6 +7556,7 @@ function Show3D() {
           };
       dbg.lastDirectSourcePanelIndices = panels.slice();
       dbg.lastDirectSourcePanelWidth = sourcePanelWidth;
+      dbg.lastRenderedPanelCmaps = panelLuts?.map((entry) => entry.name) ?? [liveCmap];
       dbg.gpuFrameCacheUploaded = gpuFrameCacheUploadedRef.current.size;
     }
     return true;
@@ -7620,8 +7591,9 @@ function Show3D() {
     const gpuCtx = ensureGpuDisplayContext(engine, c.canvasW, c.canvasH);
     if (!gpuCtx) return false;
 
-    const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
-    engine.uploadLUT(c.cmap, lut);
+    const liveCmap = cmapLiveRef.current || c.cmap;
+    const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
+    engine.uploadLUT(liveCmap, lut);
     let vmin: number, vmax: number;
     if (c.autoContrast) {
       const cached = cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
@@ -7653,7 +7625,7 @@ function Show3D() {
 
     if (hiddenPanelSet.size > 0) return false;
     const n = Math.max(1, nPanels || 1);
-    const cols = panelColsForCount(n);
+    const cols = Math.max(1, Math.min(n, Math.round(c.panelCols || 1)));
     const rows = Math.ceil(n / cols);
     const gap = n > 1 ? (panelGapPx) : 0;
     const renderStartMs = performance.now();
@@ -7709,6 +7681,10 @@ function Show3D() {
         dbg.lastFrameSource = residentSlotIdx === null ? "gpu-cache" : "gpu-resident-transform";
         dbg.lastRenderPath = "webgpu-grid-panels-explicit-ranges";
         dbg.lastRenderMs = Number((performance.now() - renderStartMs).toFixed(2));
+        dbg.lastDirectPanelRanges = ranges.map(range => ({
+          vmin: Number(range.vmin.toPrecision(6)),
+          vmax: Number(range.vmax.toPrecision(6)),
+        }));
       }
       return true;
     }
@@ -7820,6 +7796,8 @@ function Show3D() {
     }
     const engine = gpuCmapRef.current;
     const adapterInfo = getGPUInfo();
+    const adapterDebug = show3dPerfDebug();
+    if (adapterDebug) adapterDebug.webgpuAdapter = adapterInfo || "unknown";
     if (!engine || !gpuCmapReadyRef.current || /swiftshader|software/i.test(adapterInfo)) {
       setGpuResidency({ stage: "fallback", ready: 0, error: "WebGPU unavailable" });
       const dbg = show3dPerfDebug();
@@ -8269,7 +8247,8 @@ function Show3D() {
       // Render frame. The 4k playback hot path must stay off the JS CPU:
       // one 4096^2 colormap loop alone is ~37 ms, before auto-contrast/canvas.
       const renderStartMs = performance.now();
-      const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
+      const liveCmap = cmapLiveRef.current || c.cmap;
+      const lut = COLORMAPS[liveCmap] || COLORMAPS.inferno;
       if (mainOffscreenRef.current && mainImgDataRef.current) {
         let vmin: number, vmax: number;
         let cpuData: Float32Array | null = frame;
@@ -8358,7 +8337,7 @@ function Show3D() {
           dh <= c.canvasH;
         const drawSharedScaledBitmap = (ctx: CanvasRenderingContext2D, bitmap: ImageBitmap) => {
           const n = Math.max(1, nPanels || 1);
-          const cols = panelColsForCount(n);
+          const cols = Math.max(1, Math.min(n, Math.round(c.panelCols || 1)));
           const rows = Math.ceil(n / cols);
           const gap = n > 1 ? (panelGapPx) : 0;
           const outPanelW = (c.canvasW - gap * (cols - 1)) / cols;
@@ -8387,6 +8366,7 @@ function Show3D() {
           if (sourceW <= 0 || frame.length < c.height * sourceW) return false;
           const panelImg = offCtx.createImageData(panelW, c.height);
           const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
+          const livePanelCmaps = panelCmapsLiveRef.current;
           offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
           for (const panel of c.visiblePanelIndices) {
             if (panel < 0 || panel >= panelCountForGrid) continue;
@@ -8401,7 +8381,11 @@ function Show3D() {
               ? pdr
               : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
             const range = resolvePanelRenderRange(panel, panelRange, sharedAutoRange, null, c.autoContrast, c.percentileLow, c.percentileHigh);
-            renderPackedPanelPlayback(frame, sourceW, x0, panelW, c.height, panelImg.data, lut, range.vmin, range.vmax, c.logScale);
+            const panelCmap = livePanelCmaps.length === panelCountForGrid
+              ? livePanelCmaps[panel]
+              : liveCmap;
+            const panelLut = COLORMAPS[panelCmap] || lut;
+            renderPackedPanelPlayback(frame, sourceW, x0, panelW, c.height, panelImg.data, panelLut, range.vmin, range.vmax, c.logScale);
             offCtx.putImageData(panelImg, panel * panelW, 0);
           }
           drawMain(ctx, offscreen);
@@ -8449,7 +8433,7 @@ function Show3D() {
         }
         if (!rendered && engine && gpuCmapReadyRef.current) {
           try {
-            engine.uploadLUT(c.cmap, lut);
+            engine.uploadLUT(liveCmap, lut);
             const hasGpuSlot = gpuFrameCacheUploadedRef.current.has(next);
             const canGpuFrameCache = hasGpuSlot;
             const slotIdx = canGpuFrameCache ? next : 0;
@@ -8474,7 +8458,7 @@ function Show3D() {
               const gpuCtx = ensureGpuDisplayContext(engine, c.canvasW, c.canvasH);
               if (gpuCtx) {
                 const n = panelCountForGrid;
-                const cols = panelColsForCount(n);
+                const cols = Math.max(1, Math.min(n, Math.round(c.panelCols || 1)));
                 const rows = Math.ceil(n / cols);
                 const gap = n > 1 ? (panelGapPx) : 0;
                 const sourcePanelWidthForGrid = sharedPanelSource
@@ -8495,7 +8479,7 @@ function Show3D() {
                 if (usedPackedPanelRegions) {
                   const panelW = sourcePanelWidthForGrid;
                   const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
-                  const ranges = c.linkContrast
+                  const ranges = !perPanelHistogramEnabled
                     ? { vmin, vmax }
                     : Array.from({ length: n }, (_, p) => {
                         const panelData = frame ? extractPanelSlice(frame, p, c.logScale) : null;
@@ -8513,6 +8497,15 @@ function Show3D() {
                               : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
                         return resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
                       });
+                  const livePanelCmaps = panelCmapsLiveRef.current;
+                  const panelLuts = livePanelCmaps.length === n
+                    ? Array.from({ length: n }, (_, panel) => {
+                        const name = livePanelCmaps[panel] && COLORMAPS[livePanelCmaps[panel]]
+                          ? livePanelCmaps[panel]
+                          : liveCmap;
+                        return { name, lut: COLORMAPS[name] || lut };
+                      })
+                    : undefined;
                   rendered = engine.renderCombinedPanelRegionsDirectToCanvas(
                     slotIdx,
                     ranges,
@@ -8528,6 +8521,7 @@ function Show3D() {
                       bgRgb: packedRgbFromHex(interPanelGapColor),
                       sourcePanelWidth: panelW,
                       transforms: panelTransformsForDirect,
+                      panelLuts,
                       smooth: c.smooth,
                     },
                   );
@@ -8689,24 +8683,10 @@ function Show3D() {
         // here at the same 10 Hz cadence. Skip every 2nd tick → ~5 Hz refresh.
         playbackHistogramCounterRef.current = (playbackHistogramCounterRef.current + 1) % 2;
         if (playbackHistogramCounterRef.current === 0) {
-          if ((nPanels || 1) > 1 && !linkContrast && frame) {
-            // Keep playback free of per-panel Float32Array copies. The static
-            // histogram effect refreshes panel ranges after playback stops or
-            // when the user commits a scrub. On large 8-panel exports this is
-            // the difference between microscope-like playback and a browser
-            // ArrayBuffer allocation crash.
-            const d = show3dPerfDebug();
-            if (d) {
-              d.lastHistogramFrame = next;
-              d.lastHistogramSource = "deferred-per-panel-playback";
-            }
-          } else {
-            // GPU histogram for the current frame (honors WebGPU-first-class):
-            // refreshHistogram computes bins on the GPU (live slot or offline
-            // scratch slot) AND sets lastHistogramFrame so it is verifiable.
-            // Replaces the old CPU setImageHistogramData(frame).
-            void refreshHistogramRef.current?.(next);
-          }
+          // Refresh the visible histogram from the current resident frame.
+          // Independent packed panels use one GPU submission for all visible
+          // regions, so playback never allocates panel-sized Float32Array slabs.
+          void refreshHistogramRef.current?.(next);
         }
       }
       if (!isRgb && transformActive) {
@@ -8854,6 +8834,58 @@ function Show3D() {
       if (!raw || raw.length === 0) return;
       if (perPanelHistogramEnabled) {
         const n = Math.max(1, nPanels || 1);
+        const engine = gpuCmapRef.current;
+        if (
+          engine &&
+          gpuCmapReadyRef.current &&
+          gpuFrameCacheUploadedRef.current.has(renderIdx) &&
+          !frameTransformActive()
+        ) {
+          const panelW = totalPanelCount > 1
+            ? Math.max(1, panelWidthPx || Math.round(width / totalPanelCount))
+            : Math.max(1, width);
+          const regions = visiblePanelIndices.map(panel => ({
+            x: sharedPanelSource ? 0 : panel * panelW,
+            y: 0,
+            width: panelW,
+            height,
+          }));
+          try {
+            const histograms = await engine.computeHistogramRegions(
+              renderIdx,
+              regions,
+              logScale,
+            );
+            if (
+              serial === histogramRefreshSerialRef.current &&
+              histograms.length === visiblePanelIndices.length
+            ) {
+              const nextBins: (number[] | null)[] = Array.from({ length: n }, () => null);
+              const nextRanges: { min: number; max: number }[] = Array.from(
+                { length: n },
+                (_, panel) => panelDataRanges[panel]
+                  ?? resolveDisplayBounds(dataMin, dataMax, null, null, logScale),
+              );
+              visiblePanelIndices.forEach((panel, k) => {
+                nextBins[panel] = histograms[k].bins;
+                nextRanges[panel] = histograms[k].range;
+              });
+              const dbg = show3dPerfDebug();
+              if (dbg) {
+                dbg.lastHistogramFrame = renderIdx;
+                dbg.lastHistogramSource = "gpu-panel-regions";
+              }
+              setPanelHistogramData(Array.from({ length: n }, () => null));
+              setPanelHistogramBins(nextBins);
+              setPanelDataRanges(nextRanges);
+              setImageHistogramBins(null);
+              return;
+            }
+          } catch {
+            // Preserve the existing CPU fallback for browsers without a usable
+            // region compute path. Hardware WebGPU stays on the resident path.
+          }
+        }
         const nextData: (Float32Array | null)[] = Array.from({ length: n }, () => null);
         const nextRanges: { min: number; max: number }[] = Array.from(
           { length: n },
@@ -8902,7 +8934,7 @@ function Show3D() {
         window.setTimeout(() => { void refreshHistogram(pending); }, 0);
       }
     }
-  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, nSlices, visiblePanelIndices, extractPanelSlice, displaySliceIdx, isRgb]);
+  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, nSlices, visiblePanelIndices, extractPanelSlice, displaySliceIdx, isRgb, height, panelDataRanges, panelWidthPx, sharedPanelSource, totalPanelCount, width, diffMode, avgWindow, frequencyFilterIsActive, offline, subpixelAlignEnabled]);
   refreshHistogramRef.current = refreshHistogram;
   React.useEffect(() => {
     if (playing) {
@@ -9467,7 +9499,11 @@ function Show3D() {
     const n = Math.max(1, Math.round(nSlices || 1));
     const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
     const inputAt = Number(show3dPerfDebug()?.lastHistogramInputAt || performance.now());
-    if (gpuFrameCacheUploadedRef.current.has(drawIdx) && renderGpuCachedSliceDirect(drawIdx, false)) {
+    const rendered = gpuFrameCacheUploadedRef.current.has(drawIdx) && (
+      renderGpuTemporalAverageSliceDirect(drawIdx, false)
+      || renderGpuCachedSliceDirect(drawIdx, false)
+    );
+    if (rendered) {
       updatePlaybackLiveControls(drawIdx);
       const debug = show3dPerfDebug();
       if (debug) {
@@ -9485,6 +9521,7 @@ function Show3D() {
     liveSliceIdx,
     nSlices,
     renderGpuCachedSliceDirect,
+    renderGpuTemporalAverageSliceDirect,
     updatePlaybackLiveControls,
   ]);
 
@@ -9767,7 +9804,8 @@ function Show3D() {
       return;
     }
     const started = performance.now();
-    const rendered = renderGpuCachedSliceDirect(idx, false);
+    const rendered = renderGpuTemporalAverageSliceDirect(idx, false)
+      || renderGpuCachedSliceDirect(idx, false);
     if (!rendered) {
       if (debug) debug.lastDisplayStyleSkip = "gpu-render-declined";
       return;
@@ -12443,6 +12481,8 @@ function Show3D() {
     // multiple of max_cols). Otherwise the click attributes to the last
     // real panel and zoom/pan jumps unexpectedly.
     const panelForSelection = panelIdxFromEvent(e);
+    const pointerDebug = show3dPerfDebug();
+    if (pointerDebug) pointerDebug.lastCanvasMouseDownPanel = panelForSelection;
     if (panelForSelection < 0) return;
     if (handlePanelSelectionMouseDown(e, panelForSelection)) return;
     clickStartRef.current = { x: e.clientX, y: e.clientY };
@@ -12731,6 +12771,8 @@ function Show3D() {
     // numbers from a phantom panel.
     const canvas = canvasRef.current;
     const hoverPanelIdx = panelIdxFromEvent(e);
+    const hoverDebug = show3dPerfDebug();
+    if (hoverDebug) hoverDebug.lastHoverPanel = hoverPanelIdx;
     if (hoverPanelIdx < 0) {
       scheduleCursorInfo(null);
       if (showLens) setLensPos(null);
@@ -15056,17 +15098,17 @@ function Show3D() {
                     dense
                     onClick={() => setColorShared(
                       colorShared ? false : true,
-                      nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                      colorTargetPanel,
                     )}
                     sx={{ fontSize: 12, gap: 1, color: !colorShared ? themeColors.accent : themeColors.text }}
                   >
-                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the hovered or selected panel.">Color shared</Typography>
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the selected panel.">Color shared</Typography>
                     <Switch
                       checked={colorShared}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => setColorShared(
                         e.target.checked,
-                        nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                        colorTargetPanel,
                       )}
                       size="small"
                       sx={switchStyles.small}
@@ -15219,7 +15261,7 @@ function Show3D() {
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Zoom</Typography>
                 <Switch checked={linkPanels} onChange={(e) => setLinkPanels(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link zoom and pan across panels" } }} />
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Contrast</Typography>
-                <Switch checked={linkContrast} onChange={(e) => setLinkContrast(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link contrast across panels" } }} />
+                <Switch checked={linkContrast} onChange={(e) => setLinkContrast(e.target.checked)} size="small" sx={switchStyles.small} title="Link relative contrast adjustment; numerical ranges remain panel-local" slotProps={{ input: { "aria-label": "Link contrast across panels" } }} />
               </>
             )}
             {fftAllowed && (
@@ -15344,6 +15386,7 @@ function Show3D() {
                           setHiddenPageSlotsTrait([]);
                         }
                         setHiddenPanels([]);
+                        setPanelMenuAnchor(null);
                       }}
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
@@ -16288,14 +16331,14 @@ function Show3D() {
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color</Typography>
                   <Select
                     size="small"
-                    value={panelCmapFor(nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0)}
+                    value={panelCmapFor(colorTargetPanel)}
                     onChange={(e) => setCmapForPanel(
-                      nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                      colorTargetPanel,
                       e.target.value,
                     )}
                     MenuProps={themedFastMenuProps}
                     sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }}
-                    inputProps={{ "aria-label": nPanels > 1 ? (colorShared ? "Shared colormap for all panels" : "Hovered or selected panel colormap") : "Image colormap" }}
+                    inputProps={{ "aria-label": nPanels > 1 ? (colorShared ? "Shared colormap for all panels" : "Selected panel colormap") : "Image colormap" }}
                   >
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name} dense>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
@@ -16543,13 +16586,10 @@ function Show3D() {
                               if (debug) debug.lastHistogramInputAt = performance.now();
                               panelHistogramPreviewPctRef.current.set(panel, [min, max]);
                               const commitPanelRange = () => {
+                                setPanelRangePercentages(panel, min, max, linkContrast);
                                 if (autoContrast) {
-                                  freezeCurrentPanelContrastAsManual(panel, { min, max });
                                   manualImageRangeBeforeAutoRef.current = null;
                                   setAutoContrast(false);
-                                } else {
-                                  updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
-                                  setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
                                 }
                                 const live = playRef.current;
                                 live.autoContrast = false;

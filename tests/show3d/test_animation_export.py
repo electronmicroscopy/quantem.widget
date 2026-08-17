@@ -1,0 +1,538 @@
+from __future__ import annotations
+
+import json
+import pathlib
+from io import BytesIO
+
+import numpy as np
+from PIL import Image
+
+from quantem.widget import Show3D
+from quantem.widget.render import gif as gif_utils
+
+
+def _stack(offset: float = 0.0) -> np.ndarray:
+    yy, xx = np.mgrid[:12, :14].astype(np.float32)
+    frames = []
+    for i in range(4):
+        frames.append(np.sin((xx + i) / 3.0) + np.cos((yy - i) / 4.0) + offset)
+    return np.stack(frames).astype(np.float32)
+
+
+def test_show3d_save_gif_single_panel(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        _stack(),
+        cmap="viridis",
+        fps=8,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_gif(tmp_path / "single.gif", quality="high", playback="forward")
+
+    assert out.exists()
+    with Image.open(out) as img:
+        assert img.is_animated
+        assert img.n_frames == 4
+        assert img.size == (14, 12)
+
+
+def test_show3d_save_gif_multi_panel_grid_respects_hidden_panels(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        _stack(0),
+        _stack(1000),
+        _stack(2000),
+        panel_titles=["raw", "denoised", "residual"],
+        hidden_panels=["denoised"],
+        max_cols=2,
+        panel_gap=3,
+        cmap="magma",
+        fps=8,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_gif(tmp_path / "multi.gif", quality="high", playback="forward")
+
+    assert out.exists()
+    with Image.open(out) as img:
+        assert img.is_animated
+        assert img.n_frames == 4
+        # Two visible 14x12 panels in one row with a 3 px gap.
+        assert img.size == (14 * 2 + 3, 12)
+
+
+def test_show3d_animation_grid_uses_dark_background_by_default() -> None:
+    widget = Show3D(
+        np.zeros((2, 4, 4), dtype=np.float32),
+        np.ones((2, 4, 4), dtype=np.float32),
+        max_cols=2,
+        panel_gap=2,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="dark",
+    )[0]
+
+    assert frame.getpixel((4, 0)) == (12, 12, 12)
+
+
+def test_show3d_animation_grid_does_not_add_borders_when_unset() -> None:
+    widget = Show3D(
+        np.zeros((1, 4, 4), dtype=np.float32),
+        np.ones((1, 4, 4), dtype=np.float32),
+        max_cols=2,
+        inter_panel_gap_px=0,
+        gallery_outer_border_px=0,
+        panel_inner_border_px=0,
+        cmap="viridis",
+        vmin=0,
+        vmax=1,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="black",
+    )[0].convert("RGB")
+
+    assert frame.size == (8, 4)
+    # C1: no implicit gutter or frame is inserted between adjacent panels.
+    assert frame.getpixel((3, 0)) != (0, 0, 0)
+    assert frame.getpixel((4, 0)) != (0, 0, 0)
+    assert frame.getpixel((3, 0)) != frame.getpixel((4, 0))
+
+
+def test_show3d_animation_titles_keep_publication_minimum_size(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_compose_panel_grid(images, **kwargs):
+        captured["title_font_size"] = kwargs["title_font_size"]
+        captured["panel_gap"] = kwargs["panel_gap"]
+        return images[0]
+
+    monkeypatch.setattr(gif_utils, "compose_panel_grid", fake_compose_panel_grid)
+    widget = Show3D(
+        np.zeros((2, 64, 64), dtype=np.float32),
+        panel_titles=["raw"],
+        panel_title_font_size=9,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=True,
+    )
+
+    widget._render_animation_frames(
+        quality="low",
+        playback="forward",
+        show_frame_labels=False,
+        background="black",
+        downsample=4,
+    )
+
+    assert captured["title_font_size"] == gif_utils.MIN_TITLE_FONT_SIZE
+
+
+def test_show3d_animation_grid_chrome_layers_are_independent() -> None:
+    widget = Show3D(
+        np.zeros((1, 4, 4), dtype=np.float32),
+        np.ones((1, 4, 4), dtype=np.float32),
+        max_cols=2,
+        inter_panel_gap_px=2,
+        inter_panel_gap_color="#112233",
+        gallery_outer_border_px=3,
+        gallery_outer_border_color="#000000",
+        panel_inner_border_px=1,
+        panel_inner_border_color="#ff00ff",
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="white",
+    )[0].convert("RGB")
+
+    assert frame.size == (4 * 2 + 2 + 6, 4 + 6)
+    assert frame.getpixel((0, 0)) == (0, 0, 0)
+    assert frame.getpixel((3 + 4, 4)) == (17, 34, 51)
+    assert frame.getpixel((3, 3)) == (255, 0, 255)
+
+
+def test_show3d_save_gif_bounce_order_omits_duplicate_endpoints(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_gif(tmp_path / "bounce.gif", quality="high", playback="bounce")
+
+    with Image.open(out) as img:
+        assert img.n_frames == 6
+
+
+def test_show3d_save_gif_respects_frame_cap_and_max_edge(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_gif(
+        tmp_path / "slides.gif",
+        quality="high",
+        frame_start=1,
+        frame_stop=4,
+        max_frames=2,
+        max_edge_px=7,
+    )
+
+    with Image.open(out) as img:
+        assert img.n_frames == 2
+        assert img.size == (7, 6)
+
+
+def test_show3d_save_mp4_uses_panel_only_renderer(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        captured["n_frames"] = len(frames)
+        captured["size"] = frames[0].size
+        captured["fps"] = fps
+        captured["crf"] = crf
+        path = pathlib.Path(path)
+        path.write_bytes(b"mp4")
+        return path
+
+    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    widget = Show3D(
+        _stack(0),
+        _stack(1000),
+        panel_titles=["raw", "denoised"],
+        max_cols=1,
+        panel_gap=4,
+        fps=12,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_mp4(tmp_path / "multi.mp4", quality="high", crf=21)
+
+    assert out.read_bytes() == b"mp4"
+    assert captured == {
+        "n_frames": 4,
+        "size": (14, 12 * 2 + 4),
+        "fps": 12.0,
+        "crf": 21,
+    }
+
+
+def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
+    captured: list[tuple[list[str] | None, list[str] | None]] = []
+
+    def fake_compose_panel_grid(images, **kwargs):
+        captured.append((kwargs["panel_titles"], kwargs["frame_labels"]))
+        return images[0]
+
+    monkeypatch.setattr(gif_utils, "compose_panel_grid", fake_compose_panel_grid)
+    widget = Show3D(
+        _stack(),
+        _stack(1000),
+        panel_titles=["raw", "denoised"],
+        panel_frame_labels=[
+            ["raw frame 1", "raw frame 2", "raw frame 3", "raw frame 4"],
+            ["den frame 1", "den frame 2", "den frame 3", "den frame 4"],
+        ],
+        show_controls=False,
+        show_scale_bar=False,
+    )
+
+    widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="dark",
+    )
+    assert captured[-1] == (["raw", "denoised"], None)
+
+    widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=True,
+        background="dark",
+    )
+    assert captured[-1] == (
+        ["raw · raw frame 4 4/4", "denoised · den frame 4 4/4"],
+        None,
+    )
+
+
+def test_show3d_gif_multi_panel_draws_live_style_overlays() -> None:
+    yy, xx = np.mgrid[:64, :64].astype(np.float32)
+    stack = np.stack([
+        np.exp(-((xx - 24 - idx) ** 2 + (yy - 30) ** 2) / 90.0)
+        for idx in range(3)
+    ]).astype(np.float32)
+    widget = Show3D(
+        stack,
+        stack * 0.7,
+        panel_titles=["Raw", "Smoothed"],
+        panel_frame_labels=[
+            ["scan 001", "scan 002", "scan 003"],
+            ["scan 001", "scan 002", "scan 003"],
+        ],
+        sampling=0.5,
+        units="nm",
+        max_cols=2,
+        panel_gap=4,
+        cmap="inferno",
+        show_controls=False,
+        show_panel_titles=True,
+        show_scale_bar=True,
+        show_zoom_indicator=True,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=True,
+        background="black",
+    )[0]
+
+    arr = np.asarray(frame.convert("RGB"))
+    white = np.all(arr > 245, axis=2)
+    assert white[:14].sum() > 8  # centered top labels
+    assert white[-24:, :42].sum() > 5  # bottom-left 1.0x zoom readout
+    assert white[-18:, -52:].sum() > 20  # bottom-right scale bar and label
+
+
+def test_show3d_uint16_animation_exports_keep_media_contract(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    yy, xx = np.mgrid[:48, :64].astype(np.float32)
+    frames = []
+    for idx in range(5):
+        image = (
+            0.45 * np.sin((xx + idx) / 4.0)
+            + 0.35 * np.cos((yy - idx) / 5.0)
+            + np.exp(-((xx - 28 - idx) ** 2 + (yy - 22) ** 2) / 60.0)
+        )
+        scaled = (image - image.min()) / max(1e-6, image.max() - image.min())
+        frames.append(np.round(scaled * 65535).astype(np.uint16))
+    stack = np.stack(frames)
+    widget = Show3D(
+        stack,
+        stack // 2,
+        panel_titles=["a raw", "b half"],
+        panel_frame_labels=[["t0", "t1", "t2", "t3", "t4"]] * 2,
+        sampling=0.5,
+        units="nm",
+        max_cols=2,
+        inter_panel_gap_px=2,
+        inter_panel_gap_color="#000000",
+        panel_inner_border_px=1,
+        panel_inner_border_color="#000000",
+        cmap="magma",
+        fps=8,
+        show_controls=False,
+        show_panel_titles=True,
+        show_scale_bar=True,
+        show_zoom_indicator=False,
+    )
+
+    gif_path = widget.save_gif(
+        tmp_path / "uint16.gif",
+        quality="high",
+        fps=8,
+        show_frame_labels=True,
+        background="black",
+    )
+
+    assert gif_path.exists()
+    with Image.open(gif_path) as img:
+        assert img.is_animated
+        assert img.n_frames == 5
+        assert img.size == (64 * 2 + 2, 48)
+
+    captured: dict[str, object] = {}
+
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        captured["n_frames"] = len(frames)
+        captured["size"] = frames[0].size
+        captured["fps"] = fps
+        captured["crf"] = crf
+        path = pathlib.Path(path)
+        path.write_bytes(b"mp4")
+        return path
+
+    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    mp4_path = widget.save_mp4(
+        tmp_path / "uint16.mp4",
+        quality="high",
+        fps=8,
+        crf=16,
+        show_frame_labels=True,
+        background="black",
+    )
+
+    assert mp4_path.read_bytes() == b"mp4"
+    assert captured == {
+        "n_frames": 5,
+        "size": (64 * 2 + 2, 48),
+        "fps": 8.0,
+        "crf": 16,
+    }
+
+
+def test_show3d_frontend_gif_export_request_creates_payload() -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+    filename = "frontend.gif"
+
+    widget.export_request = json.dumps({
+        "id": "gif-request",
+        "mode": "gif",
+        "quality": "low",
+        "filename": filename,
+        "frame_start": 1,
+        "frame_stop": 4,
+        "max_frames": 2,
+        "fps": 5,
+        "downsample": 2,
+        "download": True,
+    })
+
+    assert widget.export_payload_id == "gif-request"
+    assert widget.export_filename == filename
+    assert widget.export_payload.startswith(b"GIF")
+    with Image.open(BytesIO(widget.export_payload)) as img:
+        assert img.n_frames == 2
+    assert widget.export_status.startswith(f"Ready {filename}")
+    assert "2 frames" in widget.export_status
+    assert "2x downsample" in widget.export_status
+
+
+def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_save_mp4(self, path, **_kwargs):
+        captured.update(_kwargs)
+        path = pathlib.Path(path)
+        path.write_bytes(b"fake mp4")
+        return path
+
+    monkeypatch.setattr(Show3D, "save_mp4", fake_save_mp4)
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+    filename = "frontend.mp4"
+
+    widget.export_request = json.dumps({
+        "id": "mp4-request",
+        "mode": "mp4",
+        "quality": "low",
+        "filename": filename,
+        "frame_start": 1,
+        "frame_stop": 4,
+        "max_frames": 2,
+        "fps": 5,
+        "max_edge_px": 512,
+        "preset": "slides",
+        "slides_preset": True,
+        "download": True,
+    })
+
+    assert widget.export_payload_id == "mp4-request"
+    assert widget.export_filename == filename
+    assert widget.export_payload == b"fake mp4"
+    assert widget.export_status.startswith(f"Ready {filename}")
+    assert captured["quality"] == "low"
+    assert captured["crf"] == 24
+    assert captured["frame_start"] == 1
+    assert captured["frame_stop"] == 4
+    assert captured["max_frames"] == 2
+    assert captured["fps"] == 5.0
+    assert captured["max_edge_px"] == 512
+    assert captured["slides_preset"] is True
+
+
+def test_show3d_animation_export_rejects_unknown_quality() -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    widget.export_request = json.dumps({
+        "id": "bad-quality",
+        "mode": "gif",
+        "quality": "giant",
+        "filename": "bad.gif",
+        "download": True,
+    })
+
+    assert widget.export_status.startswith("Export failed:")
+    assert "animation quality" in widget.export_status
+
+
+def test_show3d_save_animation_preview_writes_media_and_repr(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        path = pathlib.Path(path)
+        path.write_bytes(b"mp4")
+        return path
+
+    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    preview = widget.save_animation_preview(
+        tmp_path,
+        stem="native_preview",
+        quality="low",
+    )
+
+    assert set(preview.paths) == {"GIF low", "MP4 low"}
+    assert (tmp_path / "native_preview.gif").exists()
+    assert (tmp_path / "native_preview.mp4").read_bytes() == b"mp4"
+    html = preview._repr_html_()
+    assert "native_preview.gif" in html
+    assert "native_preview.mp4" in html
+    assert "<img" in html
+    assert "<video" in html

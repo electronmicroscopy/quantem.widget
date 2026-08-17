@@ -59,10 +59,10 @@ QT_RUN_WIDGET_VISUAL_TESTS=1 python -m pytest -q tests/test_widget_visual_jupyte
 
 if [[ "$show4dstem" -eq 1 ]]; then
   echo "== Show4DSTEM WebGPU live Jupyter smoke =="
-  QT_RUN_JUPYTER_WEBGPU_TESTS=1 python -m pytest -q tests/test_show4dstem_webgpu_live_jupyter.py -s
+  QT_RUN_JUPYTER_WEBGPU_TESTS=1 python -m pytest -q tests/show4dstem/test_webgpu_live_jupyter.py -s
 
   echo "== Show4DSTEM exported HTML WebGPU smoke =="
-  QT_RUN_BROWSER_TESTS=1 python -m pytest -q tests/test_show4dstem_webgpu_browser.py -s
+  QT_RUN_BROWSER_TESTS=1 python -m pytest -q tests/show4dstem/test_webgpu_browser.py -s
 fi
 
 if [[ "$full" -eq 1 ]]; then

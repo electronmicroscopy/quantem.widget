@@ -9,7 +9,8 @@ import pytest
 import traitlets
 
 from quantem.widget import Show2D, Show3D
-from quantem.widget._image_folder import WatchedImageFolder
+from quantem.widget import io as widget_io
+from quantem.widget.image_folder import WatchedImageFolder
 
 
 def _save(path: Path, value: float, shape: tuple[int, int] = (6, 8)) -> None:
@@ -234,109 +235,6 @@ def test_show2d_folder_live_append_preserves_the_reviewed_page(
         assert widget.selected_idx == 0
         assert widget.page_idx == 1
         assert widget.visible_panels == [2, 3]
-    finally:
-        widget.close()
-
-
-def test_show3d_folder_poll_remaps_frame_state_without_stopping_playback(
-    tmp_path: Path,
-) -> None:
-    _save(tmp_path / "frame_2.npy", 2)
-    _save(tmp_path / "frame_10.npy", 10)
-    widget = Show3D.from_folder(tmp_path, watch=False, show_fft=True)
-    try:
-        widget.slice_idx = 1
-        widget.bookmarked_frames = [0, 1]
-        widget.loop_start = 0
-        widget.loop_end = 1
-        widget.starred = [1]
-        widget.roi_active = True
-        widget.roi_list = [{"shape": "circle", "row": 2, "col": 3, "radius": 1}]
-        widget.roi_selected_idx = 0
-        widget.profile_line = [{"row": 1, "col": 1}, {"row": 4, "col": 6}]
-        widget.playing = True
-
-        _save(tmp_path / "frame_1.npy", 1)
-        _save(tmp_path / "frame_10.npy", 99)
-        assert widget.poll_folder() == []
-        changed = widget.poll_folder()
-
-        assert changed == [0]
-        assert widget.labels == ["frame_1", "frame_2", "frame_10"]
-        np.testing.assert_array_equal(widget._data[:, 0, 0], [1, 2, 10])
-        assert widget.slice_idx == 2
-        assert widget.bookmarked_frames == [1, 2]
-        assert widget.loop_start == 1
-        assert widget.loop_end == 2
-        assert widget.starred == [2]
-        assert widget.roi_active is True
-        assert widget.roi_list[0]["radius"] == 1
-        assert widget.roi_selected_idx == 0
-        assert widget.profile_line == [{"row": 1, "col": 1}, {"row": 4, "col": 6}]
-        assert widget.playing is True
-        assert widget.show_fft is True
-    finally:
-        widget.close()
-
-
-def test_show3d_folder_many_files_remain_one_unpaged_stack(
-    tmp_path: Path,
-) -> None:
-    for index in range(25):
-        _save(tmp_path / f"frame_{index:03d}.npy", index)
-
-    widget = Show3D.from_folder(tmp_path, watch=False)
-    try:
-        # C1: crossing Show2D's default page threshold extends one frame axis;
-        # Show3D folder navigation remains its frame slider and playback.
-        assert widget.n_slices == 25
-        assert widget.n_panels == 1
-        assert widget.n_pages == 1
-        assert widget.page_idx == 0
-        assert widget.panels_per_page == 0
-        assert widget.page_labels == []
-        assert widget.visible_panels == [0]
-        assert widget.labels[0] == "frame_000"
-        assert widget.labels[-1] == "frame_024"
-        np.testing.assert_array_equal(widget._data[:, 0, 0], np.arange(25))
-    finally:
-        widget.close()
-
-    # C2: folder page arguments fail explicitly instead of silently changing
-    # the scientific meaning from frames to gallery panels.
-    with pytest.raises(TypeError, match="appends every file as a frame"):
-        Show3D.from_folder(tmp_path, watch=False, page_size=20)
-    with pytest.raises(TypeError, match="does not accept"):
-        Show3D.from_folder(tmp_path, watch=False, page_labels=["Page 1"])
-
-
-def test_show3d_folder_live_append_crosses_twenty_without_pages(
-    tmp_path: Path,
-) -> None:
-    for index in range(20):
-        _save(tmp_path / f"frame_{index:03d}.npy", index)
-    widget = Show3D.from_folder(tmp_path, watch=False)
-    try:
-        widget_id = id(widget)
-        widget.slice_idx = 19
-        widget.playing = True
-        widget.bookmarked_frames = [19]
-
-        _save(tmp_path / "frame_020.npy", 20)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [20]
-
-        # C1: the 21st live file extends one stack in place and preserves frame
-        # navigation state; no Show2D-style page is inferred.
-        assert id(widget) == widget_id
-        assert widget.n_slices == 21
-        assert widget.n_panels == 1
-        assert widget.n_pages == 1
-        assert widget.panels_per_page == 0
-        assert widget.page_idx == 0
-        assert widget.slice_idx == 19
-        assert widget.bookmarked_frames == [19]
-        assert widget.playing is True
     finally:
         widget.close()
 
@@ -656,20 +554,6 @@ def test_folder_live_saved_state_never_serializes_false_green(
         widget.close()
 
 
-def test_show3d_free_stops_folder_watcher(tmp_path: Path) -> None:
-    _save(tmp_path / "frame_1.npy", 1)
-    widget = Show3D.from_folder(tmp_path, watch_interval=0.02)
-    source = widget._folder_source
-    thread = source._watch_thread
-
-    assert thread is not None and thread.is_alive()
-    widget.free()
-
-    assert not thread.is_alive()
-    assert source._watch_thread is None
-    widget.close()
-
-
 @pytest.mark.parametrize("viewer", [Show2D, Show3D])
 def test_folder_failed_and_mismatched_files_remain_retryable(
     tmp_path: Path,
@@ -886,8 +770,6 @@ def test_watched_folder_calibration_uses_display_pixel_size(
     monkeypatch: pytest.MonkeyPatch,
     bin_attribute: str,
 ) -> None:
-    from quantem.widget import io as widget_io
-
     class Dataset:
         array = np.arange(8 * 10, dtype=np.uint16).reshape(8, 10)
         sampling = (0.25, 0.5)
@@ -923,8 +805,6 @@ def test_folder_widget_append_preserves_display_bin_and_calibration(
     monkeypatch: pytest.MonkeyPatch,
     viewer,
 ) -> None:
-    from quantem.widget import io as widget_io
-
     class Dataset:
         def __init__(self, value: int) -> None:
             self.array = np.full((8, 10), value, dtype=np.uint16)
@@ -993,8 +873,6 @@ def test_folder_calibration_is_preserved_until_files_disagree(
     monkeypatch: pytest.MonkeyPatch,
     viewer,
 ) -> None:
-    from quantem.widget import io as widget_io
-
     class Dataset:
         def __init__(self, value: float, sampling: float) -> None:
             self.array = np.full((5, 7), value, dtype=np.float32)

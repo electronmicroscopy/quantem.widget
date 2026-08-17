@@ -18,6 +18,7 @@ _warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
 
 _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     "ChooseLattice": ("quantem.widget.choose_lattice", "ChooseLattice"),
+    "Mask2D": ("quantem.widget.mask2d", "Mask2D"),
     "Show1D": ("quantem.widget.show1d", "Show1D"),
     "Show2D": ("quantem.widget.show2d", "Show2D"),
     "Show3D": ("quantem.widget.show3d", "Show3D"),

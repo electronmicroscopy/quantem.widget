@@ -3,9 +3,23 @@
 [![TestPyPI](https://img.shields.io/pypi/v/quantem-widget?pypiBaseUrl=https://test.pypi.org&label=TestPyPI)](https://test.pypi.org/project/quantem-widget/)
 
 Interactive, GPU-accelerated visualization widgets for 4D-STEM and electron
-microscopy. Use them in Jupyter or open data directly from the command line;
-NumPy, PyTorch, CuPy, CUDA, Apple Silicon, and browser WebGPU workflows are
-supported.
+microscopy. Use them in Jupyter notebooks, as local HTML files, or from the
+command line. NumPy, PyTorch, CuPy, CUDA, Apple Silicon, and browser WebGPU
+workflows are supported.
+
+![Show4DSTEM WebGPU demo with a diffraction pattern and live virtual detector image](docs/_static/show4dstem-serin-gold.gif)
+
+**Demo: Show4DSTEM HTML with WebGPU.** Explore live diffraction-pattern and
+virtual-detector views locally in a browser on a personal laptop or supported
+phone, without a Python kernel or remote compute server. Thanks to Serin Lee for
+sharing this liquid-cell Au nanoparticle 4D-STEM dataset. Check Serin's 4D-STEM
+and 5D-STEM segmentation and clustering work
+([paper](https://academic.oup.com/mam/article-abstract/32/3/ozag044/8701498))
+and the source data ([Zenodo](https://zenodo.org/records/18167694)).
+
+**[Start with the documentation](https://electronmicroscopy.github.io/quantem.widget/)**
+to load ARINA 4D-STEM data in Jupyter, open `Show4DSTEM`, and explore the
+interactive widgets.
 
 > `quantem.widget` is currently a prototype on
 > [TestPyPI](https://test.pypi.org/project/quantem-widget/) and is built on the
@@ -21,45 +35,13 @@ pip install -i https://test.pypi.org/simple/ \
 See the [installation guide](https://electronmicroscopy.github.io/quantem.widget/install.html)
 for backend setup, Colab instructions, and verification.
 
-## Quick start
-
-Open an image or microscopy dataset without writing a notebook:
-
-```bash
-quantem show image.tif
-quantem show3d ./frames/
-quantem show4dstem ./masters/
-```
-
-Or construct widgets directly in Python:
-
-```python
-import numpy as np
-from quantem.widget import Show2D, Show4DSTEM
-
-Show2D(np.random.random((512, 512)))
-Show4DSTEM(np.random.random((64, 64, 128, 128)))
-```
-
-For real 4D-STEM data, load a master file onto the available GPU:
-
-```python
-from quantem.gpu.io import load
-from quantem.widget import Show4DSTEM
-
-Show4DSTEM(load("scan_master.h5"))
-```
-
-The [command-line guide](https://electronmicroscopy.github.io/quantem.widget/cli.html)
-and [tutorials](https://electronmicroscopy.github.io/quantem.widget/tutorials/download_data.html)
-cover data loading, HTML export, public example datasets, and complete workflows.
-
 ## Widgets
 
 | Widget | Use it for | Learn more |
 |---|---|---|
 | `Show1D` | Scientific traces, reconstruction metrics, and live monitors | [API](https://electronmicroscopy.github.io/quantem.widget/api/show1d.html) |
 | `Show2D` | Images, contrast, FFTs, ROIs, profiles, and scale bars | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show2d.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show2d.html) |
+| `Mask2D` | Draw one rectangle, square, or circle and use its Boolean mask directly in Python | [guide and API](https://electronmicroscopy.github.io/quantem.widget/api/mask2d.html) |
 | `Show3D` | Scrub and play through image or volume stacks | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3d.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3d.html) |
 | `Show3DSlices` | Inspect orthogonal slices through a 3D volume | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3dslices.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3dslices.html) |
 | `Show4DSTEM` | Live virtual detectors, multi-dataset review, and WebGPU HTML export | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem.html) · [export guide](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem_export.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show4dstem.html) |

@@ -112,6 +112,17 @@ def test_large_file_guard_rejects_large_data_artifact(tmp_path: Path) -> None:
     assert "data/rendered artifact" in result.stdout
 
 
+def test_large_file_guard_allows_show4dstem_readme_demo() -> None:
+    result = _run(
+        sys.executable,
+        "scripts/check_large_files.py",
+        "docs/_static/show4dstem-serin-gold.gif",
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "Approved size exception" in result.stdout
+
+
 def test_automation_documentation_names_entrypoints() -> None:
     doc = (ROOT / "docs/maintainer/automation.md").read_text(encoding="utf-8")
 
