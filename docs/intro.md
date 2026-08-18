@@ -73,6 +73,7 @@ paint - see [Load and I/O](api/io).
 | `Show4DSTEM` | 4D-STEM: live virtual detectors, multi-master review, and WebGPU HTML export | [tutorial](tutorials/show4dstem) · [export](tutorials/show4dstem_export) · [API](api/show4dstem) |
 | `ShowPtycho` | Ptychography aberration review: phase, FFT, BF-count tradeoffs, and WebGPU folder export | [API](api/showptycho) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
+| `ChooseLattice` | Pick an origin and two lattice vectors on a 2D image | [tutorial](tutorials/choose_lattice) · [API](api/choose-lattice) |
 | `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
 The [Tutorials](tutorials/download_data) walk through each widget on real public

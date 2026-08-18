@@ -43,12 +43,15 @@ Common entry points:
 | Tutorial | Colab | Source notebook |
 |---|---|---|
 | Example Data | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) |
+| Show1D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show1d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show1d.ipynb) |
 | Show2D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) |
 | Show3D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) |
 | Show3DSlices | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) |
 | Show4DSTEM | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) |
 | ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
+| Choose Lattice | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) |
 | ShowFolder | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) |
+| IO/GPU | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) |
 | HTML and file export | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
 
 ## Backends
@@ -67,6 +70,9 @@ Common entry points:
 
 ```python
 import quantem.widget as qw
+from quantem.gpu.io import load
+
 print(qw.__version__)
-print(qw.__all__)   # public widgets, load(), DPC helpers, detector helpers
+print(qw.__all__)  # public widgets and helpers
+print(load)        # 4D-STEM loader lives in quantem.gpu.io, not quantem.widget
 ```

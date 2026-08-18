@@ -6,6 +6,10 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Installation, Colab tutorial cells, and the verify snippet now install the
+  TestPyPI wheel and import `load` from `quantem.gpu.io`. `quantem
+  showdiffraction --demo` is documented as needing the public Fe3O4 hub folder,
+  which is not in the current dataset snapshot.
 - ShowDiffraction detection denoise: center refinement and spot/ring detection
   now run on a denoised view of the frame (`detect_denoise`, default `"auto"`:
   Anscombe for sparse counting data, light Gaussian for moderate-SNR data,

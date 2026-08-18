@@ -16,7 +16,7 @@ quantem showptycho scan_master.h5               # raw 4D-STEM master -> full-BF 
 quantem showptycho ./masters/                    # master folder     -> ShowPtycho project catalog
 quantem showfolder ./session/                  # microscopy folder  -> ShowFolder notebook/HTML
 quantem showdiffraction pattern.npy            # diffraction        -> analyzed ShowDiffraction HTML
-quantem showdiffraction --demo                 # real Fe3O4 SAED    -> the full pipeline, no data needed
+quantem showdiffraction --demo                 # Fe3O4 SAED from the public hub (when uploaded)
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
 quantem github tutorial_github.ipynb --no-execute # optional static copy for GitHub preview
 ```
@@ -64,11 +64,14 @@ HTML then opens with the interactive analyzer and measurement tables.
 quantem showdiffraction pattern.npy                  # detect + fit rings, no phase
 quantem showdiffraction pattern.npy --phase Au       # calibrate + index against a library phase
 quantem showdiffraction pattern.dm4 --exclude-radius 70   # skip an amorphous halo
-quantem showdiffraction --demo                       # real Fe3O4 nanoparticle SAED end-to-end
+quantem showdiffraction --demo                       # Fe3O4 SAED from bobleesj/quantem-data
 ```
 
-`--demo` downloads the tutorial pattern from the public dataset hub (or uses a
-packaged copy) and runs the pipeline against the Fe3O4 library phase. Use
+`--demo` downloads `widget-tutorials/showdiffraction/fe3o4-saed/small` from the
+public hub. That folder is not in the current dataset snapshot, so the command
+exits with a missing-path error until the fixture is uploaded (the packaged
+fallback file is also not in the wheel). Use a local pattern file until then.
+Use
 `--k-pixel-size` when the detector calibration is already known (it is kept even
 with `--phase`, which then only indexes), `--no-auto` to open the raw pattern
 untouched, and `--max-rings` to cap detection. Reading `.dm3`/`.dm4` needs the
