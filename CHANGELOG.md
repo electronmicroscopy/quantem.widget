@@ -6,6 +6,12 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add `ShowBragg`, an interactive front end for the `quantem.diffraction`
+  Bragg-disk workflow: template building, per-position correlation probing,
+  disk detection tuned on a sampled subset then run over the full scan, a
+  Bragg vector map with numbered candidates, basis selection by candidate
+  index or direct placement, and a per-position lattice fit handed off to
+  `StrainMap`.
 - Installation, Colab tutorial cells, and the verify snippet now install the
   TestPyPI wheel and import `load` from `quantem.gpu.io`. `quantem
   showdiffraction --demo` is documented as needing the public Fe3O4 hub folder,

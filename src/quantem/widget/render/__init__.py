@@ -1,5 +1,6 @@
 """Rendering/export helpers shared by widget classes."""
 
+from quantem.widget.render.frame import frame_to_rgb, rgb_to_png_bytes
 from quantem.widget.render.thumbnail import (
     save_thumbnail,
     thumbnail_bytes,
@@ -8,6 +9,8 @@ from quantem.widget.render.thumbnail import (
 )
 
 __all__ = [
+    "frame_to_rgb",
+    "rgb_to_png_bytes",
     "save_thumbnail",
     "thumbnail_bytes",
     "thumbnail_image",

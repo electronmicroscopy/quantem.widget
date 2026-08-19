@@ -14,11 +14,19 @@ import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
 import Button from "@mui/material/Button";
 import { useTheme } from "../theme";
-import { extractBytes, preserveRestoredWidgetModelsOnSave } from "../format";
+import { preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
+import {
+  canvasPoint,
+  clamp,
+  drawImage,
+  imageToScreen,
+  screenToImage,
+  usePngBitmap,
+  zoomAt,
+  type ImageViewport,
+} from "../imageView";
 
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 20;
 const CANVAS_SIZE = 512;
 const CANVAS_BORDER_PX = 1;
 const HIT_PX = 10;
@@ -37,10 +45,6 @@ const compactButton = {
 type Point = [number, number]; // [row, col] in original image pixels
 type DragMode = "none" | "pan" | "point";
 
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, value));
-}
-
 function ChooseLattice() {
   const model = useModel();
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -56,38 +60,19 @@ function ChooseLattice() {
   const [pointLabels] = useModelState<string[]>("point_labels");
   const [points, setPoints] = useModelState<Point[]>("points");
 
-  // Decode the PNG payload once per change into a drawable bitmap.
-  const [image, setImage] = React.useState<ImageBitmap | HTMLImageElement | null>(null);
-  React.useEffect(() => {
-    const bytes = extractBytes(frameBytes);
-    if (bytes.length === 0) {
-      setImage(null);
-      return;
-    }
-    let cancelled = false;
-    const blob = new Blob([bytes as unknown as BlobPart], { type: "image/png" });
-    if (typeof createImageBitmap === "function") {
-      createImageBitmap(blob).then((bmp) => { if (!cancelled) setImage(bmp); });
-    } else {
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => { if (!cancelled) setImage(img); URL.revokeObjectURL(url); };
-      img.src = url;
-    }
-    return () => { cancelled = true; };
-  }, [frameBytes]);
+  const image = usePngBitmap(frameBytes);
 
   // View state: zoom + pan (CSS px, canvas-centered).
   const [zoom, setZoom] = React.useState(1);
   const [panX, setPanX] = React.useState(0);
   const [panY, setPanY] = React.useState(0);
 
-  // displayScale maps original image pixels -> CSS px at zoom=1.
-  const displayScale = height > 0 && width > 0
-    ? CANVAS_SIZE / Math.max(height, width)
-    : 1;
   const canvasW = CANVAS_SIZE;
   const canvasH = CANVAS_SIZE;
+  const viewport: ImageViewport = React.useMemo(
+    () => ({ height, width, canvas: CANVAS_SIZE, zoom, panX, panY }),
+    [height, width, zoom, panX, panY],
+  );
 
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const uiRef = React.useRef<HTMLCanvasElement>(null);
@@ -116,13 +101,7 @@ function ChooseLattice() {
     ctx.fillStyle = themeColors.bg;
     ctx.fillRect(0, 0, canvasW, canvasH);
     if (!image || !width || !height) return;
-    const cx = canvasW / 2;
-    const cy = canvasH / 2;
-    const drawW = width * displayScale * zoom;
-    const drawH = height * displayScale * zoom;
-    const x = cx - drawW / 2 + panX;
-    const y = cy - drawH / 2 + panY;
-    ctx.drawImage(image, x, y, drawW, drawH);
+    drawImage(ctx, image, viewport);
     // Confirm the decoded bitmap on the next compositing frame. Static docs
     // can mount while Chrome is still promoting the canvas layer; without a
     // second paint that one-shot draw can remain a white presentation frame.
@@ -132,42 +111,33 @@ function ChooseLattice() {
       if (!current || !currentCtx) return;
       currentCtx.fillStyle = themeColors.bg;
       currentCtx.fillRect(0, 0, canvasW, canvasH);
-      currentCtx.drawImage(image, x, y, drawW, drawH);
+      drawImage(currentCtx, image, viewport);
     });
     return () => window.cancelAnimationFrame(confirmFrame);
-  }, [image, width, height, displayScale, zoom, panX, panY, canvasW, canvasH, themeColors.bg]);
+  }, [image, width, height, viewport, canvasW, canvasH, themeColors.bg]);
 
   // Convert a mouse event to original-image (row, col) coordinates.
   const screenToImg = React.useCallback((e: { clientX: number; clientY: number }): Point => {
     const canvas = canvasRef.current;
     if (!canvas) return [0, 0];
-    const rect = canvas.getBoundingClientRect();
-    const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const cx = canvasW / 2;
-    const cy = canvasH / 2;
-    const col = (mouseCanvasX - cx - panX) / (displayScale * zoom) + width / 2;
-    const row = (mouseCanvasY - cy - panY) / (displayScale * zoom) + height / 2;
-    return [row, col];
-  }, [canvasW, canvasH, panX, panY, displayScale, zoom, width, height]);
+    const [x, y] = canvasPoint(canvas, e);
+    return screenToImage(viewport, x, y);
+  }, [viewport]);
 
-  const imgToScreen = React.useCallback((row: number, col: number): [number, number] => {
-    const cx = canvasW / 2;
-    const cy = canvasH / 2;
-    const x = cx + (col - width / 2) * displayScale * zoom + panX;
-    const y = cy + (row - height / 2) * displayScale * zoom + panY;
-    return [x, y];
-  }, [canvasW, canvasH, panX, panY, displayScale, zoom, width, height]);
+  const imgToScreen = React.useCallback(
+    (row: number, col: number): [number, number] => imageToScreen(viewport, row, col),
+    [viewport],
+  );
 
   const hitTestPoint = React.useCallback((row: number, col: number): number => {
-    const hitArea = HIT_PX / (displayScale * zoom);
+    const hitArea = HIT_PX / ((canvasW / Math.max(height, width)) * zoom);
     const list = points || [];
     for (let i = list.length - 1; i >= 0; i--) {
       const [pr, pc] = list[i];
       if (Math.hypot(row - pr, col - pc) <= hitArea) return i;
     }
     return -1;
-  }, [points, displayScale, zoom]);
+  }, [points, canvasW, height, width, zoom]);
 
   // Wheel: cursor-anchored zoom. Page-scroll prevention is handled by a
   // native non-passive listener below (React's synthetic onWheel is passive,
@@ -175,18 +145,11 @@ function ChooseLattice() {
   const handleWheel = (e: React.WheelEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const cx = canvasW / 2;
-    const cy = canvasH / 2;
-    const mouseImageX = (mouseCanvasX - cx - panX) / zoom + cx;
-    const mouseImageY = (mouseCanvasY - cy - panY) / zoom + cy;
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newZoom = clamp(zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM);
-    setPanX(mouseCanvasX - (mouseImageX - cx) * newZoom - cx);
-    setPanY(mouseCanvasY - (mouseImageY - cy) * newZoom - cy);
-    setZoom(newZoom);
+    const [x, y] = canvasPoint(canvas, e);
+    const next = zoomAt(viewport, x, y, e.deltaY);
+    setPanX(next.panX);
+    setPanY(next.panY);
+    setZoom(next.zoom);
   };
 
   const resetView = React.useCallback(() => {
