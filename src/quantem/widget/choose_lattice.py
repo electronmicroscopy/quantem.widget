@@ -12,9 +12,9 @@ import pathlib
 from typing import Any, Sequence
 
 import anywidget
-import matplotlib
 import numpy as np
 import traitlets
+from quantem.widget.render import frame_to_rgb, rgb_to_png_bytes
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
 
@@ -176,8 +176,8 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
             )
         self._data = frame
 
-        rgb = _frame_to_rgb(frame, cmap=cmap, vmin=vmin, vmax=vmax, log_scale=log_scale)
-        png_bytes = _rgb_to_png_bytes(rgb)
+        rgb = frame_to_rgb(frame, cmap=cmap, vmin=vmin, vmax=vmax, log_scale=log_scale)
+        png_bytes = rgb_to_png_bytes(rgb)
 
         self._configure_static_fallback(
             notebook_preview_format=notebook_preview_format,
