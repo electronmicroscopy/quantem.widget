@@ -10,7 +10,8 @@ new `rcN` heading when that rc is published to TestPyPI.
   cross-widget refactors) and incremental in-widget fixes, and add a
   `widget-tutorials/` upload page for the public
   [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data)
-  dataset.
+  dataset. A copyable agent prompt opens that Hugging Face Community
+  pull request after `python -m check_meta` prints `ok`.
 - Installation, Colab tutorial cells, and the verify snippet now install the
   TestPyPI wheel and import `load` from `quantem.gpu.io`. `quantem
   showdiffraction --demo` is documented as needing the public Fe3O4 hub folder,
