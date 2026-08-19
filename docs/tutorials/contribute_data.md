@@ -4,7 +4,8 @@ How to add files, including the Hugging Face token
 (`hf auth login`):
 [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
 A coding agent can open that Community pull request. Copy the prompt
-[Add tutorial data](../agent-prompts.md#add-tutorial-data-hugging-face-pull-request).
+[Add tutorial data](https://huggingface.co/datasets/bobleesj/quantem-data#coding-agents)
+from the dataset card.
 The human creates the Write token and attests permission. The agent runs
 `hf upload ... --create-pr` after `python -m check_meta` prints `ok`.
 

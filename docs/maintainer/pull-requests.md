@@ -48,6 +48,6 @@ Tutorial fixtures for notebooks live in the public Hugging Face dataset
 [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data)
 under `widget-tutorials/`. Upload and download commands are on that dataset
 card. A coding agent opens that Community pull request with
-[Add tutorial data](../agent-prompts.md#add-tutorial-data-hugging-face-pull-request).
+[Add tutorial data](https://huggingface.co/datasets/bobleesj/quantem-data#coding-agents).
 The GitHub loader pull request is in
 [Contribute tutorial data](../tutorials/contribute_data.md).
