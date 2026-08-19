@@ -101,7 +101,7 @@ New public widgets and cross-widget refactors need an issue or maintainer
 discussion first. In-widget bug fixes and features do not.
 
 Inspect the worktree, branches, and remotes; preserve unrelated user changes.
-Fetch the authoritative upstream main branch before comparing or creating the
+Fetch the authoritative upstream main branch before you compare or create the
 feature branch. Follow the repository's branch-naming rules; if none are
 present, use a short creation-date prefix such as aug-8-show2d-contrast.
 
