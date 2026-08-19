@@ -1,3 +1,8 @@
+New public widgets and shared-helper refactors need an issue or maintainer
+discussion first. Bug fixes and features that stay inside one existing widget
+can open a pull request directly. See
+[pull request classes](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/pull-requests.md).
+
 ### What problem does it solve?
 
 <!--

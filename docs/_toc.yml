@@ -14,6 +14,8 @@ parts:
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
+      - file: tutorials/contribute_data
+        title: Contribute tutorial data
       - file: tutorials/show4dstem
         sections:
           - file: tutorials/show4dstem_single
@@ -88,6 +90,8 @@ parts:
       - file: maintainer/index
         title: Maintainer guide
         sections:
+          - file: maintainer/pull-requests
+            title: Pull requests
           - file: maintainer/docs-design
             title: Docs design rules
           - file: changelog

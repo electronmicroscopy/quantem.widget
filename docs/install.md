@@ -23,6 +23,10 @@ pip install -i https://test.pypi.org/simple/ \
     "quantem.widget[hub]"
 ```
 
+Widget tutorial fixtures live under `widget-tutorials/` on
+[bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
+Upload and download commands are on that dataset card.
+
 ## Google Colab
 
 Each tutorial notebook can open directly in Colab from the badge at the top of

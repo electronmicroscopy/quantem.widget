@@ -51,9 +51,13 @@ widget = Show1D.from_example("ducky", size="small")
 widget
 ```
 
-The public Hugging Face dataset is organized under `widget-tutorials/`. Reused
-sources live once under `shared/`; widget-specific monitor runs or session
-folders live under the widget name.
+The public Hugging Face dataset
+([bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data))
+is organized under `widget-tutorials/`. Reused sources live once under
+`shared/`; widget-specific monitor runs or session folders live under the
+widget name. Upload and download commands are on that dataset card. The
+GitHub loader pull request is in
+[Contribute tutorial data](../tutorials/contribute_data.md).
 
 ```text
 widget-tutorials/{widget-or-shared}/{example}/{size}/...
@@ -66,9 +70,14 @@ widget-tutorials/show1d/ducky/small/show1d_monitor.jsonl
 widget-tutorials/show1d/ducky/small/snapshots/*.npy
 widget-tutorials/shared/gold-haadf/full/data.npy
 widget-tutorials/show4dstem/gold-128-bin8/full/data.npy
-widget-tutorials/showdiffraction/fe3o4-saed/small/data.npy
+widget-tutorials/show4dstem/gold-512-bin4/full/data.npy
+widget-tutorials/show4dstem/gold-512-bin8/full/data.npy
 widget-tutorials/showfolder/gold-haadf-session/small/*.emd
 ```
+
+`showdiffraction_fe3o4()` expects
+`widget-tutorials/showdiffraction/fe3o4-saed/small/data.npy`. That folder is
+not in the current hub snapshot.
 
 This keeps widget tutorial payloads grouped together instead of placing many
 example files at the top level of the shared dataset repository. `show2d_gold`

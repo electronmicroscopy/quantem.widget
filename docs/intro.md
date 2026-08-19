@@ -130,5 +130,12 @@ https://doi.org/10.1093/mam/ozag053.941.
 
 - **Questions or bugs:** open an issue at
   [github.com/electronmicroscopy/quantem.widget/issues](https://github.com/electronmicroscopy/quantem.widget/issues).
-- **Maintained by** the Ophus group. Contributions and feedback are welcome via
-  pull request or issue.
+- **New widgets and cross-widget refactors:** discuss first (issue or
+  maintainer). In-widget bug fixes can open a pull request directly. See
+  [Pull requests](maintainer/pull-requests.md) and
+  [CONTRIBUTING.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md).
+- **Tutorial data:** public
+  [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
+  Upload and download commands are on that dataset card. The GitHub loader
+  pull request is in [Contribute tutorial data](tutorials/contribute_data.md).
+- **Maintained by** the Ophus group.

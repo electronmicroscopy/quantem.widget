@@ -1,6 +1,6 @@
 # Creating a widget
 
-This guide shows how to add a new interactive viewer or tool to `quantem.widget`. Instructions for agentic-driven development are on the [Agent-assisted development](../agent-prompts) page, and the workflow for setup, test, and PRs is in [CONTRIBUTING.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md).
+This guide shows how to add a new interactive viewer or tool to `quantem.widget`. A new widget needs an issue or maintainer discussion first ([Pull requests](../maintainer/pull-requests.md)). Instructions for agentic-driven development are on the [Agent-assisted development](../agent-prompts) page, and the workflow for setup, test, and incremental PRs is in [CONTRIBUTING.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md).
 
 Let's use `Ruler2D` as an example, a widget where the user places two endpoints on a 2D image and reads back a calibrated distance.
 
@@ -30,6 +30,11 @@ npm run sync:webgpu
 Always edit the file in `quantem.gpu`, never the generated copy.
 
 ## Before you start
+
+A new public widget is a discuss-first change. Open an issue or confirm with a
+maintainer that the widget belongs in this package before choosing a base class
+or writing React code. Incremental fixes and features that stay inside one
+existing widget skip this step. See [Pull requests](../maintainer/pull-requests.md).
 
 Before choosing a base class or writing React code, define what the widget is supposed to do.
 

@@ -16,6 +16,17 @@ Use one small branch for one issue or documentation goal. Describe the user
 problem before the implementation, and keep unrelated experiments or cleanup
 out of the branch.
 
+Adding a new widget, or a refactor that other widgets will import, starts with
+an issue or a maintainer discussion. A bug fix or a feature that stays inside
+one existing widget can go straight to a pull request. The two classes are in
+the [pull request guide](docs/maintainer/pull-requests.md).
+
+Tutorial fixtures for notebooks belong under `widget-tutorials/` in the public
+[bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data)
+dataset. Upload and download commands are on that dataset card. The GitHub
+loader pull request is in
+[Contribute tutorial data](docs/tutorials/contribute_data.md).
+
 Once review begins, do not force-push. Add follow-up commits so GitHub preserves
 inline comments and the reviewer can inspect only the changes since their last
 visit. The project squash-merges completed work.

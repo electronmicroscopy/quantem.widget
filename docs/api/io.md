@@ -570,9 +570,10 @@ owns it. Shut down that kernel from JupyterLab or stop the Python process.
 
 The shared Hugging Face dataset repo
 ([bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data),
-MIT license) is the one place tutorial and reference data lives — its dataset
-card intentionally holds no instructions and points back to this page. The
-upload protocol is three steps:
+MIT license) is the one place tutorial and reference data lives. Upload and
+download commands, including Hugging Face pull requests, are on that dataset
+card. This section is the `quantem.widget.io` helper reference for
+maintainers who already have write access. The upload steps are:
 
 1. **Install the hub extra and log in once.** Uploading needs a Hugging Face
    account and a write token from
@@ -580,23 +581,29 @@ upload protocol is three steps:
 
    ```bash
    pip install "quantem.widget[hub]"
-   hf auth login   # paste the write token
+   hf auth login   # paste a Write token; answer n to git credential
    ```
+
+   Token steps for a Community pull request (no write access) are on the
+   dataset card. A Read token cannot open a PR. Ignore any hint to run
+   `git config --global credential.helper store`.
 
 2. **Upload with the bucket + sidecar convention.** The repo has two trees:
 
    - `widget-tutorials/<widget>/<dataset>/<size>/` — the baseline tutorial
      bundles behind `quantem.widget.datasets` (sizes `small`/`medium`/
-     `large`/`full`). To contribute a tutorial bundle, pass
-     `folder="widget-tutorials/<widget>"` and `name="<dataset>/full"`.
+     `large`/`full`). Contributors add these with a Hugging Face pull
+     request, not `quantem.widget.io.upload`. See
+     [Contribute tutorial data](../tutorials/contribute_data.md).
      Datasets shared by several widgets (the gold HAADF feeds both Show2D
      and Show3D) live under `widget-tutorials/shared/`.
    - `4dstem/` and `haadf/` — full-size originals for power users. A folder
      of Arina `*_master.h5` files goes under `4dstem/`, a single image file
      under `haadf/` (those are also the defaults for a directory vs a file).
 
-   Always pass `meta=` so downstream widgets get calibration — it is written
-   as a `meta.json` sidecar next to your data:
+   For `4dstem/` and `haadf/`, pass `meta=` so the helper writes a
+   `quantem_meta.json` sidecar. Tutorial loaders read `meta.json` from the
+   staged `widget-tutorials/` folder instead:
 
    ```python
    from quantem.widget.io import upload
@@ -610,10 +617,10 @@ upload protocol is three steps:
    )
    ```
 
-   No write access to the shared repo? Either open an issue on
-   [quantem.widget](https://github.com/electronmicroscopy/quantem.widget/issues) to get
-   added, or pass `repo="you/your-data"` to use your own HF dataset repo with
-   the same layout — every download helper accepts the same `repo=` override.
+   Write access to `bobleesj/quantem-data` is for maintainers. Contributors
+   open a Hugging Face pull request on the dataset card, then a GitHub pull
+   request for the named loader
+   ([Contribute tutorial data](../tutorials/contribute_data.md)).
 
 3. **Verify like a user would.** List, download to a fresh path, and open it
    in the widget before announcing the dataset:

@@ -95,12 +95,15 @@ Prepare a focused quantem.widget pull request for:
 
 <issue URL or concise goal>
 
-First read AGENTS.md, CONTRIBUTING.md, the pull-request template, and any
-instructions nearest the changed files. Inspect the worktree, branches, and
-remotes; preserve unrelated user changes. Fetch the authoritative upstream
-main branch before comparing or creating the feature branch. Follow the
-repository's branch-naming rules; if none are present, use a short creation-date
-prefix such as aug-8-show2d-contrast.
+First read AGENTS.md, CONTRIBUTING.md, docs/maintainer/pull-requests.md, the
+pull-request template, and any instructions nearest the changed files.
+New public widgets and cross-widget refactors need an issue or maintainer
+discussion first. In-widget bug fixes and features do not.
+
+Inspect the worktree, branches, and remotes; preserve unrelated user changes.
+Fetch the authoritative upstream main branch before comparing or creating the
+feature branch. Follow the repository's branch-naming rules; if none are
+present, use a short creation-date prefix such as aug-8-show2d-contrast.
 
 Keep one scientific or documentation goal in the PR. Stage named files only.
 Exclude private data, machine-specific paths, notebook outputs, generated HTML,
