@@ -138,6 +138,7 @@ function ImageCanvas({
   overlay,
   markers,
   onMoveMarker,
+  onCommitMarker,
   onPick,
   caption,
 }: {
@@ -147,6 +148,7 @@ function ImageCanvas({
   overlay?: (ctx: CanvasRenderingContext2D, viewport: ImageViewport) => void;
   markers?: Marker[];
   onMoveMarker?: (index: number, row: number, col: number) => void;
+  onCommitMarker?: (index: number, row: number, col: number) => void;
   onPick?: (row: number, col: number) => void;
   caption?: string;
 }) {
@@ -275,7 +277,17 @@ function ImageCanvas({
   const handleMouseUp = (e: React.MouseEvent) => {
     const drag = dragRef.current;
     dragRef.current = null;
-    if (!drag || drag.moved || drag.marker >= 0) return;
+    if (!drag) return;
+    if (drag.marker >= 0) {
+      const [row, col] = toImage(e);
+      onCommitMarker?.(
+        drag.marker,
+        clamp(row, 0, height - 1),
+        clamp(col, 0, width - 1),
+      );
+      return;
+    }
+    if (drag.moved) return;
     const [row, col] = toImage(e);
     onPick?.(row, col);
   };
@@ -464,18 +476,24 @@ function ShowBragg() {
     [candidates],
   );
 
+  const [dragPreview, setDragPreview] = React.useState<[number, number, number] | null>(null);
+
   const basisMarkers: Marker[] = React.useMemo(() => {
     if (originRc.length !== 2) return [];
     const tips = [originRc, g1Rc, g2Rc];
     return tips.flatMap((rc, i) => {
       if (rc.length !== 2) return [];
+      if (dragPreview && dragPreview[0] === i) {
+        return [{ row: dragPreview[1], col: dragPreview[2], color: BASIS_COLORS[i], label: BASIS_LABELS[i] }];
+      }
       const row = i === 0 ? rc[0] : originRc[0] + rc[0];
       const col = i === 0 ? rc[1] : originRc[1] + rc[1];
       return [{ row, col, color: BASIS_COLORS[i], label: BASIS_LABELS[i] }];
     });
-  }, [originRc, g1Rc, g2Rc]);
+  }, [originRc, g1Rc, g2Rc, dragPreview]);
 
   const setRoleVector = (index: number, row: number, col: number) => {
+    setDragPreview(null);
     if (index === 0) {
       setOriginIndex(-1);
       setOriginRc([row, col]);
@@ -626,13 +644,18 @@ function ShowBragg() {
               onChange={setTemplateEdge}
               colors={colors}
             />
-            <Button
-              size="small"
-              sx={{ ...compactButton, color: colors.accent, alignSelf: "flex-start" }}
-              onClick={() => setTemplateSubtractMean(!templateSubtractMean)}
-            >
-              subtract mean: {templateSubtractMean ? "on" : "off"}
-            </Button>
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={Boolean(templateSubtractMean)}
+                  onChange={(e) => setTemplateSubtractMean(e.target.checked)}
+                />
+              }
+              label="Subtract Mean"
+              slotProps={{ typography: { sx: { fontSize: 11, color: colors.text } } }}
+              sx={{ alignSelf: "flex-start", ml: 0 }}
+            />
           </Stack>
           )}
 
@@ -711,7 +734,7 @@ function ShowBragg() {
             disabled={busy}
             onClick={() => send({ type: "preview_detect" })}
           >
-            Preview on grid
+            Preview Grid
           </Button>
           <Button
             size="small"
@@ -719,7 +742,7 @@ function ShowBragg() {
             disabled={busy}
             onClick={() => send({ type: "run_detect" })}
           >
-            {detectionState === "running" ? "Detecting..." : "Run full detection"}
+            {detectionState === "running" ? "Detecting..." : "Run Detection"}
           </Button>
         </Stack>
         )}
@@ -736,7 +759,7 @@ function ShowBragg() {
       <Panel
         title="4. Bragg vector map"
         colors={colors}
-        blocked={hasPeaks ? undefined : "Run full detection to accumulate the Bragg vector map."}
+        blocked={hasPeaks ? undefined : "Run Detection to accumulate the Bragg vector map."}
       >
         <Stack direction="row" spacing={2} alignItems="flex-start" flexWrap="wrap">
           {controlsVisible && (
@@ -748,7 +771,7 @@ function ShowBragg() {
               disabled={busy}
               onClick={() => send({ type: "compute_bvm" })}
             >
-              Recompute map
+              Recompute Map
             </Button>
           </Stack>
           )}
@@ -766,7 +789,7 @@ function ShowBragg() {
       <Panel
         title="5. Basis"
         colors={colors}
-        blocked={hasPeaks ? undefined : "Run full detection before choosing basis vectors."}
+        blocked={hasPeaks ? undefined : "Run Detection before choosing basis vectors."}
       >
         <Stack direction="row" spacing={2} alignItems="flex-start" flexWrap="wrap">
           {controlsVisible && (
@@ -810,7 +833,7 @@ function ShowBragg() {
                 setG2Rc([]);
               }}
             >
-              Reset to automatic
+              Reset Basis
             </Button>
 
             <Box sx={{ fontFamily: "monospace", fontSize: 11 }}>
@@ -833,7 +856,8 @@ function ShowBragg() {
             colors={colors}
             overlay={drawCandidates}
             markers={basisMarkers}
-            onMoveMarker={setRoleVector}
+            onMoveMarker={(i, row, col) => setDragPreview([i, row, col])}
+            onCommitMarker={setRoleVector}
             onPick={pickCandidate}
             caption={`click a numbered candidate to set ${activeRole}, or drag a marker`}
           />
@@ -862,7 +886,7 @@ function ShowBragg() {
             disabled={busy}
             onClick={() => send({ type: "run_fit" })}
           >
-            {fitting ? "Fitting..." : "Run fit"}
+            {fitting ? "Fitting..." : "Run Fit"}
           </Button>
         </Stack>
         )}
