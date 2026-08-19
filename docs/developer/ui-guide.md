@@ -28,12 +28,12 @@ Show3D(
 
 | Name | Widgets | Meaning |
 |---|---|---|
-| `show_title` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Show or hide the top title row. |
-| `show_controls` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Expose controls at all. Set `False` for a permanently clean display with no GUI recovery button. |
-| `controls_collapsed` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Start with controls hidden. Show4DSTEM exposes this as programmatic/state control only; other widgets may also show a top `Controls` button. |
-| `collapse_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically collapse controls. |
-| `expand_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically expand controls. |
-| `toggle_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically toggle collapsed controls. |
+| `show_title` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Show or hide the top title row. |
+| `show_controls` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Expose controls at all. Set `False` for a permanently clean display with no GUI recovery button. |
+| `controls_collapsed` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Start with controls hidden. Show4DSTEM exposes this as programmatic/state control only; other widgets may also show a top `Controls` button. |
+| `collapse_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Programmatically collapse controls. |
+| `expand_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Programmatically expand controls. |
+| `toggle_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowBragg | Programmatically toggle collapsed controls. |
 | `show_stats` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction | Show or hide mean/min/max/std readouts where the widget renders or computes them. |
 | `show_panel_titles` | Show2D, Show3D | Show labels on individual image/volume panels. |
 | `panel_title_font_size` | Show2D, Show3D | Font size for per-panel labels. |

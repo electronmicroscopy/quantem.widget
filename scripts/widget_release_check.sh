@@ -72,6 +72,7 @@ if len(wheels) != 1:
 wheel = wheels[0]
 required = {
     "quantem/widget/static/chooselattice.js",
+    "quantem/widget/static/showbragg.js",
     "quantem/widget/static/show1d.js",
     "quantem/widget/static/show2d.js",
     "quantem/widget/static/show3d.js",
