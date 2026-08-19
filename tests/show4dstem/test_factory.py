@@ -61,6 +61,36 @@ def test_public_show4dstem_import_uses_factory() -> None:
     assert Show4DSTEM is factory.Show4DSTEM
 
 
+def test_frontend_ready_resends_initial_scientific_views() -> None:
+    """A late notebook mount receives both image panels without tutorial glue."""
+    widget = Show4DSTEMBase(
+        np.ones((2, 3, 8, 8), dtype=np.uint16),
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+    sent: list[str] = []
+    widget.send_state = sent.append
+
+    widget._handle_frontend_ready_msg(
+        widget,
+        {"type": "show4dstem_frontend_ready", "version": 1},
+        [],
+    )
+
+    assert sent == [
+        "virtual_image_bytes",
+        "vi_product_labels",
+        "vi_product_map_frames",
+        "vi_product_maps_bytes",
+        "vi_preset_labels",
+        "vi_preset_map_frames",
+        "vi_preset_maps_bytes",
+        "frame_bytes",
+        "compare_virtual_image_bytes",
+    ]
+    widget.close()
+
+
 def test_master_file_contract_rejects_not_ready_inspection(monkeypatch) -> None:
     report = SimpleNamespace(
         ready=False,

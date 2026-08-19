@@ -102,20 +102,34 @@ def __dir__() -> list[str]:
 
 
 def profile() -> None:
-    """Print the runtime environment: quantem + quantem.widget versions, where quantem is
-    imported from, the torch device, and Python. Call it at the top of a notebook so the
-    reader (and any bug report or shared HTML) records exactly what produced the results -
-    versions drift, and "which build / which branch" is the first question every time."""
+    """Print the installed QuantEM stack and active compute environment.
+
+    Use this single report in notebooks and bug reports instead of printing
+    individual package versions. It records the widget, GPU, and core QuantEM
+    versions together with the active Torch device and Python version.
+
+    Examples
+    --------
+    >>> import quantem.widget as qw
+    >>> qw.profile()
+    """
     import platform
+
     print(f"quantem.widget  {__version__}")
     try:
+        print(f"quantem.gpu     {version('quantem.gpu')}")
+    except PackageNotFoundError:
+        print("quantem.gpu     (not installed)")
+    try:
         import quantem
+
         print(f"quantem         {getattr(quantem, '__version__', '?')}")
         print(f"  loaded from   {quantem.__file__}")
     except ImportError:
         print("quantem         (not importable)")
     try:
         import torch
+
         if torch.cuda.is_available():
             dev = f"cuda ({torch.cuda.get_device_name(0)})"
         elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():

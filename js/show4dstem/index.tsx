@@ -2647,6 +2647,14 @@ function Show4DSTEM() {
   React.useEffect(() => {
     try {
       model.send({
+        type: "show4dstem_frontend_ready",
+        version: 1,
+      });
+    } catch {
+      // A closing notebook comm has no mounted UI left to initialize.
+    }
+    try {
+      model.send({
         type: "compare_page_paint_capability",
         version: 1,
         active: true,

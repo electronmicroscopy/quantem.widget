@@ -23,7 +23,8 @@ def main():
     # the install must NOT resolve to an editable source tree
     import quantem.widget as w
     src = os.path.dirname(w.__file__)
-    print(f"quantem.widget {w.__version__} from {src}")
+    w.profile()
+    print(f"widget loaded from {src}")
     assert "site-packages" in src, f"not a clean install: {src}"
 
     from quantem.gpu.io import load

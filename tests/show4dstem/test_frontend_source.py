@@ -22,6 +22,17 @@ def test_show4dstem_preset_clicks_sync_without_comm_guard() -> None:
     assert "saveChangesIfLiveComm();" in preset_block
 
 
+def test_show4dstem_frontend_announces_when_it_is_ready() -> None:
+    """A mounted output asks Python for its initial scientific image buffers."""
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    source = (repo_root / "js" / "show4dstem" / "index.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'type: "show4dstem_frontend_ready"' in source
+    assert "version: 1" in source
+
+
 def test_show4dstem_file_open_exports_keep_local_h5_folder_grant_visible() -> None:
     """C2: file-opened H5 exports must expose the no-server folder grant path."""
     repo_root = pathlib.Path(__file__).resolve().parents[2]

@@ -29,14 +29,22 @@ Each tutorial notebook can open directly in Colab from the badge at the top of
 the notebook. Colab uses the same files that build these docs, so there is no
 separate Colab copy to maintain.
 
-If the package is not already available in the Colab runtime, run this once near
-the top of the notebook:
+Each Colab-ready tutorial has one collapsed **Install QuantEM** cell. Its two
+plain steps download and run the shared `scripts/install_colab.py` installer, which
+resolves only the newest `quantem.widget` and `quantem.gpu` wheel URLs from
+TestPyPI. Normal dependencies still come from PyPI, and Colab's loaded NumPy
+and Numba versions are preserved. After installation, the cell calls
+`quantem.widget.profile()` automatically so the notebook records the installed
+QuantEM versions and active compute environment. Do not use TestPyPI as
+Colab's package index or upgrade NumPy inside the running kernel: either can
+leave the process with incompatible compiled extension modules.
 
-```bash
-%pip install -i https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    quantem.widget
-```
+Show4DSTEM also selects its kernel-backed compute path in Colab because Colab's
+output iframe does not expose WebGPU. When that iframe mounts, the widget asks
+the kernel for its first diffraction and virtual-image buffers again. The
+tutorial can therefore use the normal, final `viewer` expression without
+special display calls, sleeps, or state-resend code. Other notebook and
+exported-HTML contexts keep the browser-compute path.
 
 Common entry points:
 
@@ -70,9 +78,6 @@ Common entry points:
 
 ```python
 import quantem.widget as qw
-from quantem.gpu.io import load
 
-print(qw.__version__)
-print(qw.__all__)  # public widgets and helpers
-print(load)        # 4D-STEM loader lives in quantem.gpu.io, not quantem.widget
+qw.profile()
 ```

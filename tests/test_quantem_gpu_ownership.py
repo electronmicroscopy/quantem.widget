@@ -5,10 +5,12 @@ import json
 import re
 from pathlib import Path
 
+from IPython.core.inputtransformer2 import TransformerManager
+
 
 def test_widget_has_no_duplicate_gpu_or_io_public_api() -> None:
-    import quantem.widget as widget
     import quantem.widget.io as widget_io
+    from quantem import widget
 
     repo = Path(__file__).resolve().parents[1]
     widget_package = repo / "src" / "quantem" / "widget"
@@ -109,13 +111,15 @@ def test_tutorial_notebook_code_is_valid_and_uses_gpu_owned_io() -> None:
                 offenders.append(f"{path.name}:cell-{cell_index}")
             if cell.get("cell_type") != "code":
                 continue
-            tree = ast.parse(source, filename=f"{path}:cell-{cell_index}")
+            python_source = TransformerManager().transform_cell(source)
+            tree = ast.parse(python_source, filename=f"{path}:cell-{cell_index}")
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom):
-                    if node.module == "quantem.widget" and any(
-                        name.name == "load" for name in node.names
-                    ):
-                        offenders.append(f"{path.name}:cell-{cell_index}")
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "quantem.widget"
+                    and any(name.name == "load" for name in node.names)
+                ):
+                    offenders.append(f"{path.name}:cell-{cell_index}")
                 if (
                     isinstance(node, ast.Attribute)
                     and node.attr == "load"
@@ -126,6 +130,126 @@ def test_tutorial_notebook_code_is_valid_and_uses_gpu_owned_io() -> None:
                 ):
                     offenders.append(f"{path.name}:cell-{cell_index}")
     assert offenders == []
+
+
+def test_colab_tutorials_use_one_short_latest_rc_setup() -> None:
+    """Every Colab notebook presents the same compact latest-RC setup step."""
+
+    repo = Path(__file__).resolve().parents[1]
+    colab_installers: list[tuple[str, str, str | None]] = []
+    colab_notebooks: set[str] = set()
+    for path in sorted((repo / "docs" / "tutorials").glob("*.ipynb")):
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        notebook_source = "\n".join(
+            "".join(cell.get("source", []))
+            for cell in notebook.get("cells", [])
+        )
+        if "colab.research.google.com" in notebook_source:
+            colab_notebooks.add(path.name)
+        for cell in notebook.get("cells", []):
+            source = "".join(cell.get("source", []))
+            if "scripts/install_colab.py" in source:
+                colab_installers.append((path.name, source, cell.get("id")))
+
+    installer_notebooks = [name for name, _source, _id in colab_installers]
+    assert set(installer_notebooks) == colab_notebooks
+    assert len(installer_notebooks) == len(colab_notebooks)
+    for notebook_name, source, cell_id in colab_installers:
+        assert cell_id
+        assert "https://test.pypi.org/simple/" not in source, notebook_name
+        assert source.startswith(
+            '# @title Install QuantEM { display-mode: "form" }'
+        ), notebook_name
+        assert "scripts/install_colab.py" in source, notebook_name
+        setup_lines = [line for line in source.splitlines() if line.strip()]
+        expected_lines = 5 if notebook_name == "showdiffraction.ipynb" else 4
+        assert len(setup_lines) == expected_lines, notebook_name
+        assert "from urllib.request import urlopen" not in source, notebook_name
+        assert "__import__" not in source, notebook_name
+        assert "exec(" not in source, notebook_name
+        assert "%run install_quantem.py" in source, notebook_name
+
+
+def test_shared_colab_installer_resolves_only_hashed_quantem_wheels() -> None:
+    """The shared installer keeps TestPyPI out of dependency resolution."""
+
+    repo = Path(__file__).resolve().parents[1]
+    source = (repo / "scripts" / "install_colab.py").read_text(encoding="utf-8")
+
+    assert "https://test.pypi.org/pypi/{project}/json" in source
+    assert '_latest_testpypi_wheel_url("quantem.widget")' in source
+    assert '_latest_testpypi_wheel_url("quantem.gpu")' in source
+    assert 'f"numpy=={np.__version__}"' in source
+    assert 'f"numba=={numba_version}"' in source
+    assert 'f"quantem.gpu[movie] @ {gpu_wheel}"' in source
+    assert "from quantem.widget import profile" in source
+    assert "profile()" in source
+    assert "version('quantem.widget')" not in source
+    assert "version('quantem.gpu')" not in source
+    assert "#sha256={digest}" in source
+    assert "--extra-index-url" not in source
+    assert "--index-url" not in source
+
+
+def test_show4dstem_colab_uses_kernel_compute_without_webgpu() -> None:
+    """Colab uses Python compute through the same simple notebook API."""
+
+    repo = Path(__file__).resolve().parents[1]
+    notebook = json.loads(
+        (repo / "docs" / "tutorials" / "show4dstem.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook.get("cells", [])
+    )
+    assert 'offline="google.colab" not in modules' in source
+    assert "IPython.display" not in source
+    assert "display(viewer)" not in source
+    assert "asyncio.sleep" not in source
+    assert "viewer.send_state" not in source
+    last_code_cell = next(
+        cell
+        for cell in reversed(notebook["cells"])
+        if cell.get("cell_type") == "code"
+    )
+    assert "".join(last_code_cell["source"]).rstrip().endswith("viewer")
+
+
+def test_show4dstem_colab_guides_a_three_minute_widget_experiment() -> None:
+    """The Colab tutorial leads directly from Run all to three UI actions."""
+
+    repo = Path(__file__).resolve().parents[1]
+    notebook = json.loads(
+        (repo / "docs" / "tutorials" / "show4dstem.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    cells = notebook["cells"]
+    introduction = "".join(cells[0]["source"])
+    experiment = "".join(cells[3]["source"])
+    conclusion = "".join(cells[5]["source"])
+    code_cells = [
+        "".join(cell["source"])
+        if isinstance(cell["source"], list)
+        else cell["source"]
+        for cell in cells
+        if cell["cell_type"] == "code"
+    ]
+
+    assert introduction.startswith("# Explore 4D-STEM in three minutes")
+    assert "Runtime → Run all" in introduction
+    assert len(introduction.split()) < 60
+    assert [source.splitlines()[0] for source in code_cells] == [
+        '# @title Install QuantEM { display-mode: "form" }',
+        '# @title 2. Load a small real dataset { display-mode: "form" }',
+        '# @title 3. Open the explorer { display-mode: "form" }',
+    ]
+    for action in ("Choose a scan point", "Compare angles", "Measure a line"):
+        assert action in experiment
+    assert "Profile" in experiment
+    assert "Reset" in experiment
+    assert "No Python call is required" in conclusion
 
 
 def test_public_docs_do_not_contain_private_deployment_identifiers() -> None:

@@ -163,7 +163,7 @@ python -m pip install \
   quantem-widget==0.0.1rc1
 python - <<'PY'
 import quantem.widget as qw
-print(qw.__version__)
+qw.profile()
 from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS
 print("widgets import ok")
 PY

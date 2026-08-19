@@ -2066,6 +2066,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._folder_update_paint_timeout_seconds = 30.0
         self._folder_update_paint_timeout: threading.Timer | None = None
         self._folder_update_paint_timeout_generation = 0
+        self.on_msg(self._handle_frontend_ready_msg)
         self.on_msg(self._handle_compare_page_paint_msg)
         self._compare_cache_pages = max(0, int(compare_cache_pages))
         self._compare_cache_max_bytes = (
@@ -2263,30 +2264,49 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         except Exception:
             return
 
-        def _resend():
-            for name in (
-                "virtual_image_bytes",
-                "vi_product_labels",
-                "vi_product_map_frames",
-                "vi_product_maps_bytes",
-                "vi_preset_labels",
-                "vi_preset_map_frames",
-                "vi_preset_maps_bytes",
-                "frame_bytes",
-                "compare_virtual_image_bytes",
-            ):
-                try:
-                    self.send_state(name)
-                except Exception:
-                    pass
-
         # Two delays: 0.3s covers a fast local mount, 1.5s covers a slow mount
-        # (Colab, heavy install) where the frontend connects later.
+        # (Colab, heavy install) where the frontend connects later. The explicit
+        # frontend-ready message is the deterministic path; these remain a fallback
+        # for older exported frontends that do not send the message.
         for delay in (0.3, 1.5):
             try:
-                loop.call_later(delay, _resend)
+                loop.call_later(delay, self._resend_view_state)
             except Exception:
                 pass
+
+    def _resend_view_state(self) -> None:
+        """Send the current rendered buffers to a newly mounted frontend."""
+        for name in (
+            "virtual_image_bytes",
+            "vi_product_labels",
+            "vi_product_map_frames",
+            "vi_product_maps_bytes",
+            "vi_preset_labels",
+            "vi_preset_map_frames",
+            "vi_preset_maps_bytes",
+            "frame_bytes",
+            "compare_virtual_image_bytes",
+        ):
+            try:
+                self.send_state(name)
+            except Exception:
+                # A notebook output can disappear while the comm is sending.
+                pass
+
+    def _handle_frontend_ready_msg(
+        self,
+        _widget: Any,
+        content: dict[str, Any],
+        _buffers: list[Any],
+    ) -> None:
+        """Re-send rendered state when a browser output finishes mounting."""
+        if not isinstance(content, dict):
+            return
+        if (
+            content.get("type") == "show4dstem_frontend_ready"
+            and content.get("version") == 1
+        ):
+            self._resend_view_state()
 
     # Soft guide on the packed stack, NOT a hard limit. The true
     # constraints are client RAM (decoded stack + GPU buffer ~= 2x this) and, for

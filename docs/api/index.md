@@ -14,6 +14,20 @@ Widget pages have two halves:
 2. **Interactive controls** - the UI elements the widget exposes and the synced
    trait each one drives.
 
+## Environment report
+
+Use one standard report when recording a notebook environment or asking for
+help:
+
+```python
+import quantem.widget as qw
+
+qw.profile()
+```
+
+It reports the installed QuantEM packages, active Torch device, and Python
+version. Colab tutorial installers call it automatically.
+
 ## Doubles as a UI-test spec
 
 The *Interactive controls* tables are the contract an automated agent drives the
