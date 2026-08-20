@@ -12,9 +12,10 @@ import pathlib
 from typing import Any, Sequence
 
 import anywidget
-import matplotlib
 import numpy as np
 import traitlets
+from quantem.widget.render import frame_to_rgb, rgb_to_png_bytes
+from quantem.widget.utils.traits import reject_unknown_kwargs
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
 
@@ -34,45 +35,6 @@ def _core_image_dataset_types() -> tuple[type[Any], ...]:
         else:
             _CORE_IMAGE_DATASET_TYPES = (Dataset2d,)
     return _CORE_IMAGE_DATASET_TYPES
-
-
-def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
-    """Raise TypeError for any kwarg that isn't a declared trait (catches typos)."""
-    traits = set(cls.class_trait_names())
-    unknown = [k for k in kwargs if k not in traits]
-    if unknown:
-        key = sorted(unknown)[0]
-        raise TypeError(f"{cls.__name__}() got unexpected keyword argument {key!r}.")
-
-
-def _frame_to_rgb(
-    frame: np.ndarray,
-    *,
-    cmap: str,
-    vmin: float | None,
-    vmax: float | None,
-    log_scale: bool,
-) -> np.ndarray:
-    """Colormap a 2D float frame into a uint8 (H, W, 3) RGB array."""
-    values = frame.astype(np.float64, copy=False)
-    if log_scale:
-        values = np.log1p(np.clip(values - np.nanmin(values), 0, None))
-    lo = float(np.nanpercentile(values, 1)) if vmin is None else float(vmin)
-    hi = float(np.nanpercentile(values, 99)) if vmax is None else float(vmax)
-    if hi <= lo:
-        hi = lo + 1.0
-    normalized = np.clip((values - lo) / (hi - lo), 0.0, 1.0)
-    colormap = matplotlib.colormaps[cmap]
-    rgba = colormap(normalized)
-    return (rgba[..., :3] * 255).astype(np.uint8)
-
-
-def _rgb_to_png_bytes(rgb: np.ndarray) -> bytes:
-    import io
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.fromarray(rgb, mode="RGB").save(buf, format="PNG")
-    return buf.getvalue()
 
 
 class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
@@ -155,7 +117,7 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_max_px: int = 512,
         **kwargs,
     ) -> None:
-        _reject_unknown_kwargs(type(self), kwargs)
+        reject_unknown_kwargs(type(self), kwargs)
         super().__init__(**kwargs)
 
         core_image_dataset_types = _core_image_dataset_types()
@@ -176,8 +138,8 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
             )
         self._data = frame
 
-        rgb = _frame_to_rgb(frame, cmap=cmap, vmin=vmin, vmax=vmax, log_scale=log_scale)
-        png_bytes = _rgb_to_png_bytes(rgb)
+        rgb = frame_to_rgb(frame, cmap=cmap, vmin=vmin, vmax=vmax, log_scale=log_scale)
+        png_bytes = rgb_to_png_bytes(rgb)
 
         self._configure_static_fallback(
             notebook_preview_format=notebook_preview_format,
