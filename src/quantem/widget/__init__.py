@@ -101,61 +101,49 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 
-def profile(*, verbose: bool = True) -> None:
+def profile(*, check_updates: bool = False) -> None:
     """Print the installed QuantEM stack and active compute environment.
 
     Use this single report in notebooks and bug reports instead of printing
     individual package versions. It records the widget, GPU, and core QuantEM
-    versions together with the active Torch device and Python version. In the
-    default verbose mode it also identifies editable development checkouts and
-    checks the latest TestPyPI release, so stale RC metadata is hard to miss.
+    versions together with the active Torch device and Python version. The
+    default report is local and does not contact package indexes or Git remotes.
 
     Parameters
     ----------
-    verbose : bool, default True
-        Print source/update details and a plain-language environment verdict,
-        including tracking-branch and TestPyPI checks. Pass ``False`` for a
-        compact, fully offline report.
+    check_updates : bool, default False
+        Compare installed widget and GPU metadata with TestPyPI. This opt-in
+        check needs network access.
 
     Examples
     --------
     >>> import quantem.widget as qw
     >>> qw.profile()
-    quantem.widget  0.0.1rc36
-      install       published package (current)
-
-    An editable checkout is labelled explicitly::
-
-    >>> qw.profile()
-    quantem.widget  0.0.1rc30
-      install       DEVELOPMENT MODE (editable)
-      source        /path/to/quantem.widget
-      WARNING       metadata rc30 trails latest TestPyPI rc36
     """
     import platform
+
     from quantem.widget._profile import print_distribution_status
 
     print(f"quantem.widget  {__version__}")
-    if verbose:
-        print_distribution_status(
-            "quantem.widget",
-            __version__,
-        )
+    print_distribution_status(
+        "quantem.widget",
+        __version__,
+        check_updates=check_updates,
+    )
     try:
         gpu_version = version("quantem.gpu")
         print(f"quantem.gpu     {gpu_version}")
-        if verbose:
-            print_distribution_status(
-                "quantem.gpu",
-                gpu_version,
-            )
+        print_distribution_status(
+            "quantem.gpu",
+            gpu_version,
+            check_updates=check_updates,
+        )
     except PackageNotFoundError:
         print("quantem.gpu     (not installed)")
     try:
         import quantem
 
         print(f"quantem         {getattr(quantem, '__version__', '?')}")
-        print(f"  loaded from   {quantem.__file__}")
     except ImportError:
         print("quantem         (not importable)")
     try:

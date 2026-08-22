@@ -1,138 +1,121 @@
-"""Private environment diagnostics used by :func:`quantem.widget.profile`."""
-
-from __future__ import annotations
+"""Private helpers for :func:`quantem.widget.profile`."""
 
 import json
-from importlib.metadata import distribution
-from pathlib import Path
 import subprocess
+from importlib.metadata import PackageNotFoundError, distribution
+from importlib.util import find_spec
+from pathlib import Path
 from urllib.parse import unquote, urlparse
-import urllib.request
+from urllib.request import Request, urlopen
 
 from packaging.version import Version
 
 
 def _editable_source(distribution_name: str) -> Path | None:
-    """Return the source checkout for a PEP 610 editable installation."""
+    """Return the source recorded for a PEP 610 editable installation."""
     try:
         raw = distribution(distribution_name).read_text("direct_url.json")
-        if not raw:
-            return None
-        direct_url = json.loads(raw)
-        url = direct_url.get("url", "")
-        if not direct_url.get("dir_info", {}).get("editable"):
-            return None
-        parsed = urlparse(url)
-        if parsed.scheme != "file":
-            return None
-        return Path(unquote(parsed.path)).resolve()
-    except Exception:
-        # profile() is diagnostic: malformed optional metadata must not stop a
-        # notebook from reporting the rest of its environment.
+    except (PackageNotFoundError, OSError):
+        return None
+    if not raw:
         return None
 
-
-def _git(source: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(source), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=8,
-    ).stdout.strip()
-
-
-def _print_checkout_status(source: Path) -> None:
     try:
-        head = _git(source, "rev-parse", "--short=12", "HEAD")
-        branch = _git(source, "branch", "--show-current") or "detached"
-        tracking = _git(source, "rev-parse", "--abbrev-ref", "@{upstream}")
+        direct_url = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(direct_url, dict):
+        return None
+    if not direct_url.get("dir_info", {}).get("editable"):
+        return None
 
-        try:
-            remote, remote_branch = tracking.split("/", 1)
-            _git(source, "fetch", "--quiet", remote, remote_branch)
-        except Exception as exc:
-            print(f"  note          remote refresh unavailable ({exc})")
+    parsed = urlparse(direct_url.get("url", ""))
+    if parsed.scheme != "file":
+        return None
+    return Path(unquote(parsed.path)).resolve()
 
-        ahead, behind = map(
-            int,
-            _git(
-                source,
-                "rev-list",
-                "--left-right",
-                "--count",
-                f"HEAD...{tracking}",
-            ).split(),
+
+def _loaded_path(module_name: str) -> Path | None:
+    """Return the path of the module Python will actually import."""
+    try:
+        spec = find_spec(module_name)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    return Path(spec.origin).resolve()
+
+
+def _git(source: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
-        if behind:
-            state = f"BEHIND by {behind} commit(s)"
-        elif ahead:
-            state = f"ahead by {ahead} commit(s)"
-        else:
-            state = "current"
-        print(f"  checkout      {branch} @ {head}; {state} vs {tracking}")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip()
 
-        if _git(source, "status", "--porcelain"):
-            print("  note          working tree has local changes (preserved)")
-    except Exception as exc:
-        print(f"  checkout      status check failed ({exc})")
+
+def _print_checkout(source: Path) -> None:
+    head = _git(source, "rev-parse", "--short=12", "HEAD")
+    branch = _git(source, "branch", "--show-current")
+    changes = _git(source, "status", "--porcelain")
+    if head is None or branch is None or changes is None:
+        return
+
+    state = "; local changes" if changes else ""
+    print(f"  checkout      {branch or 'detached'} @ {head}{state}")
 
 
 def _latest_testpypi_version(distribution_name: str) -> str:
     package = distribution_name.replace(".", "-")
-    request = urllib.request.Request(
+    request = Request(
         f"https://test.pypi.org/pypi/{package}/json",
         headers={"User-Agent": "quantem.widget profile()"},
     )
-    with urllib.request.urlopen(request, timeout=4) as response:
+    with urlopen(request, timeout=4) as response:
         return json.load(response)["info"]["version"]
 
 
-def _print_release_status(
-    distribution_name: str,
-    installed: str,
-    *,
-    development_mode: bool,
-) -> None:
+def _print_update(distribution_name: str, installed: str) -> None:
     try:
         latest = _latest_testpypi_version(distribution_name)
         installed_version = Version(installed)
         latest_version = Version(latest)
-        print(f"  TestPyPI      latest {latest}")
+    except (KeyError, OSError, ValueError):
+        print("  release       update check unavailable")
+        return
 
-        if installed_version < latest_version:
-            subject = "metadata" if development_mode else "installed version"
-            action = (
-                "editable source may contain newer code"
-                if development_mode
-                else "upgrade before relying on new APIs"
-            )
-            print(
-                f"  WARNING       {subject} {installed} trails latest TestPyPI "
-                f"{latest}; {action}"
-            )
-        elif installed_version > latest_version:
-            print("  note          development version is newer than TestPyPI")
-        else:
-            print("  release       current")
-    except Exception as exc:
-        print(f"  release       update check unavailable ({exc})")
-
-
-def print_distribution_status(distribution_name: str, installed: str) -> None:
-    """Print install mode, source freshness, and published-release status."""
-    source = _editable_source(distribution_name)
-    development_mode = source is not None
-
-    if development_mode:
-        print("  install       DEVELOPMENT MODE (editable)")
-        print(f"  source        {source}")
-        _print_checkout_status(source)
+    print(f"  TestPyPI      latest {latest}")
+    if installed_version < latest_version:
+        print(f"  WARNING       installed metadata {installed} trails {latest}")
+    elif installed_version > latest_version:
+        print("  release       newer than TestPyPI")
     else:
-        print("  install       published package")
+        print("  release       current")
 
-    _print_release_status(
-        distribution_name,
-        installed,
-        development_mode=development_mode,
-    )
+
+def print_distribution_status(
+    distribution_name: str,
+    installed: str,
+    *,
+    check_updates: bool,
+) -> None:
+    """Print install mode and optional TestPyPI status."""
+    source = _editable_source(distribution_name)
+    loaded = _loaded_path(distribution_name)
+
+    if source is None:
+        print("  install       published package")
+    elif loaded is not None and not loaded.is_relative_to(source):
+        print("  install       source override (differs from installed metadata)")
+    else:
+        print("  install       editable checkout")
+        _print_checkout(source)
+
+    if check_updates:
+        _print_update(distribution_name, installed)
