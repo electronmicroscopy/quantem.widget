@@ -216,6 +216,21 @@ def test_recover_predicted_rings_rescues_missed_reflection():
     assert [x["hkl"] for x in sorted(w.rings, key=lambda y: y["radius_px"])] == list(hkls)
 
 
+def test_filtered_frames_are_cached_per_mode():
+    dp, _ = _spot_dp()
+    counts = np.random.default_rng(5).poisson(dp * 0.05).astype(np.float32)
+
+    w = ShowDiffraction(counts, detect_denoise="anscombe", verbose=False)
+    first = w._detection_frame()
+    assert w._detection_frame() is first
+
+    w.detect_denoise = "gaussian"
+    assert w._detection_frame() is not first
+
+    w._ingest_data(counts[None])
+    assert w._detection_frame() is not first
+
+
 def test_detect_denoise_state_and_validation():
     dp, _ = _spot_dp()
     w = ShowDiffraction(dp.astype(np.float32), detect_denoise="gaussian", verbose=False)

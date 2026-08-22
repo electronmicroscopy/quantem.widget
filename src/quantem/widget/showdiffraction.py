@@ -2166,6 +2166,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.load_state_dict(self._resolve_state(state))
 
     def _ingest_data(self, data):
+        self._filter_cache = {}
         array = to_numpy(data)
         is_integer = np.issubdtype(array.dtype, np.integer)
         array = array.astype(np.float32)
@@ -2287,7 +2288,17 @@ class ShowDiffraction(anywidget.AnyWidget):
         mode = self._resolve_detect_denoise(frame)
         if mode == "none":
             return frame
-        return apply_display_filter(frame, mode=mode, sigma=2.0)
+        return self._filtered_frame(mode)
+
+    def _filtered_frame(self, mode: str) -> np.ndarray:
+        key = (int(self.frame_idx), mode)
+        cached = self._filter_cache.get(key)
+        if cached is None:
+            cached = apply_display_filter(self._displayed_frame(), mode=mode, sigma=2.0)
+            if len(self._filter_cache) >= 8:
+                self._filter_cache.pop(next(iter(self._filter_cache)))
+            self._filter_cache[key] = cached
+        return cached
 
     def _resolve_detect_denoise(self, frame: np.ndarray) -> str:
         mode = self.detect_denoise
@@ -2317,7 +2328,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         if self.show_detection_view:
             frame = self._detection_frame()
         elif self.denoise != "none":
-            frame = apply_display_filter(self._displayed_frame(), mode=self.denoise, sigma=2.0)
+            frame = self._filtered_frame(self.denoise)
         else:
             frame = self._displayed_frame()
         self.dp_stats = [
