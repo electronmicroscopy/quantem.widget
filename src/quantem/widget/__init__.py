@@ -64,6 +64,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     "SupportsHtmlExport": ("quantem.widget.export", "SupportsHtmlExport"),
     "supports_html_export": ("quantem.widget.export", "supports_html_export"),
     "device_info": ("quantem.widget.info", "device_info"),
+    "profile": ("quantem.widget.info", "profile"),
     "WidgetProfile": ("quantem.widget._timing", "WidgetProfile"),
     "format_timing_table": ("quantem.widget._timing", "format_timing_table"),
     "format_widget_render_timing": (
@@ -99,82 +100,6 @@ def __dir__() -> list[str]:
     """Include explicit lazy exports in interactive discovery."""
 
     return sorted(set(globals()) | set(_LAZY_EXPORTS))
-
-
-def profile(*, check_updates: bool = False) -> None:
-    """Print the installed QuantEM stack and active compute environment.
-
-    Use this single report in notebooks and bug reports instead of printing
-    individual package versions. It records the widget, GPU, and core QuantEM
-    versions together with the active Torch device and Python version. The
-    default report is local and does not contact package indexes or Git remotes.
-
-    Parameters
-    ----------
-    check_updates : bool, default False
-        Compare installed widget and GPU metadata with TestPyPI. This opt-in
-        check needs network access.
-
-    Examples
-    --------
-    >>> import quantem.widget as qw
-    >>> qw.profile()
-    """
-    import platform
-
-    from quantem.widget._profile import print_distribution_status
-
-    print(f"quantem.widget  {__version__}")
-    print_distribution_status(
-        "quantem.widget",
-        __version__,
-        check_updates=check_updates,
-    )
-    try:
-        gpu_version = version("quantem.gpu")
-        print(f"quantem.gpu     {gpu_version}")
-        print_distribution_status(
-            "quantem.gpu",
-            gpu_version,
-            check_updates=check_updates,
-        )
-    except PackageNotFoundError:
-        print("quantem.gpu     (not installed)")
-    try:
-        import quantem
-
-        print(f"quantem         {getattr(quantem, '__version__', '?')}")
-    except ImportError:
-        print("quantem         (not importable)")
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            dev = f"cuda ({torch.cuda.get_device_name(0)})"
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            dev = "mps (Apple)"
-        else:
-            dev = "cpu"
-        print(f"torch           {torch.__version__}  device={dev}")
-        if torch.cuda.is_available():
-            # Show EVERY visible GPU + how many are visible, so the reader knows up front
-            # whether the next merge / recon fits and on WHICH card - no surprise mid-run.
-            # torch live-vs-reserved is the leak signal: if "live" climbs across repeated
-            # calls, refs are still pinned (del them, then free_gpu() returns the pool).
-            import os
-            n = torch.cuda.device_count()
-            print(f"GPUs            {n} visible (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')})")
-            for i in range(n):
-                free, total = torch.cuda.mem_get_info(i)
-                print(f"  GPU{i}          {(total - free) / 1e9:5.1f} used / {total / 1e9:.0f} GB  ({free / 1e9:.0f} free)  <- run free_gpu() if low")
-            print(f"  torch pool    {torch.cuda.memory_allocated() / 1e9:.1f} live / {torch.cuda.memory_reserved() / 1e9:.1f} reserved GB")
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            cur = torch.mps.current_allocated_memory() / 1e9 if hasattr(torch.mps, "current_allocated_memory") else 0.0
-            drv = torch.mps.driver_allocated_memory() / 1e9 if hasattr(torch.mps, "driver_allocated_memory") else 0.0
-            print(f"VRAM (MPS)      {cur:.1f} live / {drv:.1f} driver GB")
-    except ImportError:
-        print("torch           (not importable)")
-    print(f"python          {platform.python_version()}")
 
 
 def free_gpu(verbose: bool = True) -> float:
