@@ -7,7 +7,7 @@ def test_profile_reports_the_installed_quantem_stack(capsys) -> None:
     """A notebook records every QuantEM package through one profile call."""
     import quantem.widget as qw
 
-    qw.profile()
+    qw.profile(verbose=False)
 
     output = capsys.readouterr().out
     assert "quantem.widget" in output
@@ -15,6 +15,27 @@ def test_profile_reports_the_installed_quantem_stack(capsys) -> None:
     assert "quantem" in output
     assert "torch" in output
     assert "python" in output
+    assert "install" not in output
+
+
+def test_profile_warns_when_editable_metadata_trails_release(monkeypatch, capsys) -> None:
+    """Development mode explains stale metadata instead of claiming it is latest."""
+    import io
+    import json
+    import quantem.widget as qw
+
+    def response(*args, **kwargs):
+        return io.BytesIO(json.dumps({"info": {"version": "99.0rc1"}}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", response)
+
+    qw.profile(verbose=True)
+
+    output = capsys.readouterr().out
+    assert "TestPyPI      latest 99.0rc1" in output
+    assert "WARNING" in output
+    assert "trails latest TestPyPI" in output
+    assert output.count("TestPyPI      latest 99.0rc1") == 2
 
 
 def test_documented_environment_checks_use_widget_profile() -> None:
