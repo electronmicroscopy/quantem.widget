@@ -51,6 +51,83 @@ def test_github_widget_cell_detector_includes_showeds():
     assert "ShowEDS(" in cli._WIDGET_CELL
 
 
+def test_scientific_pixel_gate_rejects_uniform_canvas(tmp_path):
+    from PIL import Image
+
+    blank = tmp_path / "blank.png"
+    Image.new("RGB", (64, 64), "white").save(blank)
+
+    assert not cli._image_has_scientific_pixels(blank.read_bytes())
+
+
+def test_scientific_pixel_gate_rejects_blank_canvas_with_resize_handle(tmp_path):
+    from PIL import Image
+
+    blank = tmp_path / "blank-with-handle.png"
+    image = Image.new("RGB", (128, 128), "white")
+    for row in range(4):
+        for col in range(4):
+            image.putpixel((64 + col, 120 + row), (66, 153, 225))
+    image.save(blank)
+
+    assert not cli._image_has_scientific_pixels(blank.read_bytes())
+
+
+def test_scientific_pixel_gate_accepts_image_content(tmp_path):
+    from PIL import Image
+
+    content = tmp_path / "content.png"
+    image = Image.new("L", (64, 64))
+    image.putdata([(row * 4 + col * 2) % 256 for row in range(64) for col in range(64)])
+    image.save(content)
+
+    assert cli._image_has_scientific_pixels(content.read_bytes())
+
+
+def test_promote_static_fallback_marks_single_github_preview():
+    cell = {
+        "cell_type": "code",
+        "source": ["viewer"],
+        "outputs": [{
+            "output_type": "display_data",
+            "metadata": {"quantem.widget": {"static_fallback": True}},
+            "data": {"image/jpeg": "fallback"},
+        }],
+    }
+
+    assert cli._promote_static_fallback(cell)
+    metadata = cell["outputs"][0]["metadata"]["quantem.widget"]
+    assert metadata == {"github_static_preview": True}
+    assert cli._cell_has_static_preview_output(cell)
+
+
+def test_promote_static_fallback_does_not_mutate_stream_outputs():
+    stream = {
+        "output_type": "stream",
+        "name": "stdout",
+        "text": "progress",
+    }
+    cell = {
+        "cell_type": "code",
+        "source": ["viewer"],
+        "outputs": [
+            stream,
+            {
+                "output_type": "display_data",
+                "metadata": {"quantem.widget": {"static_fallback": True}},
+                "data": {"image/jpeg": "fallback"},
+            },
+        ],
+    }
+
+    assert cli._promote_static_fallback(cell)
+    assert stream == {
+        "output_type": "stream",
+        "name": "stdout",
+        "text": "progress",
+    }
+
+
 def test_github_widget_cell_detector_uses_runtime_widget_output_for_public_api():
     cell = {
         "cell_type": "code",
@@ -240,6 +317,65 @@ def test_github_prepare_reuses_existing_full_ui_output(tmp_path, monkeypatch):
     assert "image/jpeg" in text
     assert text.count("github_full_ui") == 1
     assert "application/vnd.jupyter.widget-state+json" not in text
+
+
+def test_github_prepare_prefers_static_scientific_preview(tmp_path, monkeypatch):
+    notebook = tmp_path / "show2d_github.ipynb"
+    notebook.write_text(
+        json.dumps({
+            "cells": [{
+                "cell_type": "code",
+                "execution_count": 1,
+                "metadata": {},
+                "source": ["viewer"],
+                "outputs": [
+                    {
+                        "output_type": "display_data",
+                        "metadata": {},
+                        "data": {
+                            "application/vnd.jupyter.widget-view+json": {
+                                "model_id": "root"
+                            }
+                        },
+                    },
+                    {
+                        "output_type": "display_data",
+                        "metadata": {
+                            "quantem.widget": {"static_fallback": True}
+                        },
+                        "data": {"image/jpeg": "scientific-preview"},
+                    },
+                ],
+            }],
+            "metadata": {
+                "widgets": {cli._WIDGET_STATE_MIME: {"state": {}}}
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }),
+        encoding="utf-8",
+    )
+
+    def fail_capture(*args, **kwargs):
+        raise AssertionError("native static preview should avoid browser capture")
+
+    monkeypatch.setattr(cli, "_capture_notebook_widget_uis", fail_capture)
+    args = type("Args", (), {
+        "path": str(notebook),
+        "no_execute": True,
+        "quality": 90,
+        "max_width": 1200,
+        "timeout": 600,
+    })()
+
+    assert cli._prepare_github(args) == 0
+    prepared = json.loads(notebook.read_text(encoding="utf-8"))
+    outputs = prepared["cells"][0]["outputs"]
+    assert len(outputs) == 1
+    assert outputs[0]["data"] == {"image/jpeg": "scientific-preview"}
+    assert outputs[0]["metadata"]["quantem.widget"] == {
+        "github_static_preview": True
+    }
 
 
 # ---------------------------------------------------------------------------

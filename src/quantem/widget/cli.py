@@ -591,6 +591,19 @@ def _cell_has_full_ui_output(cell: dict) -> bool:
     return False
 
 
+def _cell_has_static_preview_output(cell: dict) -> bool:
+    """Return true when a verified static scientific preview was embedded."""
+    for out in cell.get("outputs", []):
+        data = out.get("data") or {}
+        metadata = out.get("metadata") or {}
+        quantem_metadata = metadata.get("quantem.widget") or {}
+        if any(key.startswith("image/") for key in data) and quantem_metadata.get(
+            "github_static_preview"
+        ) is True:
+            return True
+    return False
+
+
 def _github_widget_cells(nb: dict) -> list[dict]:
     """Find widget cells from runtime output first, with source as a fallback.
 
@@ -607,6 +620,7 @@ def _github_widget_cells(nb: dict) -> list[dict]:
         and (
             _cell_has_widget_view_output(cell)
             or _cell_has_full_ui_output(cell)
+            or _cell_has_static_preview_output(cell)
             or any(widget in "".join(cell.get("source", [])) for widget in _WIDGET_CELL)
         )
     ]
@@ -618,11 +632,66 @@ def _github_capture_cells(nb: dict) -> list[dict]:
         cell
         for cell in _github_widget_cells(nb)
         if not _cell_has_full_ui_output(cell)
+        and not _cell_has_static_preview_output(cell)
         and (
             _cell_has_widget_view_output(cell)
             or not _cell_has_image_output(cell)
         )
     ]
+
+
+def _image_has_scientific_pixels(image_bytes: bytes) -> bool:
+    """Reject effectively blank canvas captures while tolerating any colormap.
+
+    The full widget screenshot contains controls, labels, and borders, so it can
+    look nonblank even when WebGPU failed to present the scientific raster. This
+    helper is intentionally run on each canvas screenshot, not the surrounding
+    UI. A nearly uniform canvas is not useful evidence and falls back to the
+    widget's Python-rendered notebook preview.
+    """
+    from io import BytesIO
+    from PIL import Image, ImageStat
+
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image.thumbnail((256, 256), Image.Resampling.BILINEAR)
+    if image.width < 2 or image.height < 2:
+        return False
+
+    # A range gate catches flat white/black captures. The standard-deviation
+    # and dominant-color gates reject canvases containing only a few
+    # antialiasing, resize-handle, or overlay pixels.
+    channel_range = max(high - low for low, high in image.getextrema())
+    channel_stddev = max(ImageStat.Stat(image).stddev)
+    palette = image.quantize(colors=32)
+    counts = palette.getcolors(maxcolors=32) or []
+    dominant_fraction = max(
+        (count for count, _ in counts), default=image.width * image.height
+    )
+    dominant_fraction /= image.width * image.height
+    return (
+        channel_range >= 12
+        and channel_stddev >= 2.0
+        and dominant_fraction <= 0.97
+    )
+
+
+def _promote_static_fallback(cell: dict) -> bool:
+    """Mark the widget's Python-rendered sibling as the GitHub preview."""
+    for out in cell.get("outputs", []):
+        data = out.get("data") or {}
+        metadata = out.get("metadata") or {}
+        quantem_metadata = metadata.get("quantem.widget") or {}
+        if quantem_metadata.get("static_fallback") is not True:
+            continue
+        if not any(key.startswith("image/") for key in data):
+            continue
+        quantem_metadata = out.setdefault("metadata", {}).setdefault(
+            "quantem.widget", {}
+        )
+        quantem_metadata.pop("static_fallback", None)
+        quantem_metadata["github_static_preview"] = True
+        return True
+    return False
 
 
 def _widget_view_model_ids(cell: dict) -> list[str]:
@@ -718,11 +787,11 @@ def _capture_notebook_widget_uis(
     notebook: pathlib.Path,
     nb: dict,
     capture_cells: list[dict],
-) -> list[bytes]:
+) -> list[bytes | None]:
     """Render and capture widget cells independently to bound temporary HTML size."""
     import subprocess
 
-    shots: list[bytes] = []
+    shots: list[bytes | None] = []
     with tempfile.TemporaryDirectory(
         prefix=f".{notebook.stem}-github-ui-", dir=notebook.parent
     ) as folder:
@@ -807,11 +876,12 @@ def _prune_widget_fallbacks(nb: dict) -> int:
 
 
 def _validate_github_widget_outputs(widget_cells: list[dict]) -> None:
-    """Require one browser-captured UI and no duplicate widget render per cell."""
+    """Require one nonblank GitHub preview and no duplicate widget render."""
 
     problems = []
     for index, cell in enumerate(widget_cells, start=1):
         full_ui = []
+        static_previews = []
         fallbacks = 0
         widget_views = 0
         for out in cell.get("outputs", []):
@@ -823,19 +893,24 @@ def _validate_github_widget_outputs(widget_cells: list[dict]) -> None:
                 key.startswith("image/") for key in data
             ):
                 full_ui.append(out)
+            if quantem_metadata.get("github_static_preview") is True and any(
+                key.startswith("image/") for key in data
+            ):
+                static_previews.append(out)
             if quantem_metadata.get("static_fallback") is True:
                 fallbacks += 1
             if _WIDGET_VIEW_MIME in data:
                 widget_views += 1
-        if len(full_ui) != 1 or fallbacks or widget_views:
+        if len(full_ui) + len(static_previews) != 1 or fallbacks or widget_views:
             problems.append(
                 f"cell {index}: full_ui={len(full_ui)}, "
+                f"static_previews={len(static_previews)}, "
                 f"fallbacks={fallbacks}, widget_views={widget_views}"
             )
     if problems:
         raise ValueError(
-            "GitHub notebook preparation requires exactly one browser-captured "
-            "widget UI per widget cell and no fallback duplicates: "
+            "GitHub notebook preparation requires exactly one nonblank widget "
+            "preview per widget cell and no fallback duplicates: "
             + "; ".join(problems)
         )
 
@@ -884,7 +959,7 @@ def _compress_large_raster_outputs(
     return changed
 
 
-def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
+def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes | None]:
     """Screenshot each widget's FULL UI (toolbar + toggles + panels + histograms) from the
     rendered live-widget HTML, deterministically, via Playwright on the real GPU. The widget
     UI is React+MUI+WebGPU, so a browser engine is required; Playwright manages the lifecycle
@@ -892,7 +967,7 @@ def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
     os.environ.setdefault("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/nvidia_icd.json")
     os.environ.setdefault("DISPLAY", ":1")
     from playwright.sync_api import sync_playwright
-    shots: list[bytes] = []
+    shots: list[bytes | None] = []
     launch_kwargs = {}
     for candidate in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         executable = shutil.which(candidate)
@@ -940,7 +1015,31 @@ def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
             if el.locator("canvas").count() > 0:
                 el.scroll_into_view_if_needed()
                 page.wait_for_timeout(700)
-                shots.append(el.screenshot())
+                canvases = el.locator("canvas:visible")
+                canvas_entries = []
+                for index in range(canvases.count()):
+                    canvas = canvases.nth(index)
+                    box = canvas.bounding_box()
+                    if box:
+                        canvas_entries.append((canvas, box["width"] * box["height"]))
+                largest_area = max((area for _, area in canvas_entries), default=0.0)
+                scientific_canvases = [
+                    canvas
+                    for canvas, area in canvas_entries
+                    if largest_area and area >= 0.25 * largest_area
+                ]
+                canvas_has_pixels = any(
+                    _image_has_scientific_pixels(canvas.screenshot())
+                    for canvas in scientific_canvases
+                )
+                if canvas_has_pixels:
+                    shots.append(el.screenshot())
+                else:
+                    print(
+                        "  warning: widget canvas contains no scientific pixels; "
+                        "using its static notebook preview"
+                    )
+                    shots.append(None)
         browser.close()
     if len(shots) != n_expected:
         print(f"  warning: captured {len(shots)} widget UIs for {n_expected} widget cells")
@@ -948,15 +1047,17 @@ def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
 
 
 def _prepare_github(args: argparse.Namespace) -> int:
-    """Make a widget notebook GitHub/VS-Code-displayable: embed a screenshot of each widget's
-    FULL live UI (toolbar+toggles+panels) - because the whole reason to use the widget over
-    ``show_2d`` is the UI, so the static render shows it (captured deterministically via
-    Playwright on the real GPU). Drops the offline ``metadata.widgets`` state (tens of MB;
-    GitHub won't render it and can't run widgets anyway) and JPEG-encodes each render (noisy
-    science images compress ~10x). Keeps every other output (matplotlib PNGs, prints).
+    """Make a widget notebook display correctly on GitHub and in VS Code.
 
-    The interactive widget still comes from re-running the notebook or ``quantem html``. Needs
-    Playwright + a real GPU (NVIDIA Vulkan ICD + a display); errors clearly if unavailable."""
+    Prefer each widget's Python-rendered scientific preview. It is independent
+    of WebGPU presentation and therefore cannot silently publish a white or
+    black browser canvas. Widgets without a native preview use a browser-captured
+    full UI only after the canvas passes a scientific-pixel check. Offline widget
+    state is removed because GitHub cannot hydrate it.
+
+    Re-running the source notebook or using ``quantem html`` remains the path to
+    the interactive widget.
+    """
     import json
     import shutil
     import subprocess
@@ -979,19 +1080,38 @@ def _prepare_github(args: argparse.Namespace) -> int:
     capture_cells = _github_capture_cells(nb)
     max_width = getattr(args, "max_width", 1200)
     recompressed = _recompress_full_ui_outputs(nb, args.quality, max_width)
+    static_count = sum(_promote_static_fallback(cell) for cell in capture_cells)
+    capture_cells = [
+        cell for cell in capture_cells if not _cell_has_static_preview_output(cell)
+    ]
     if capture_cells:
         try:
             print(f"capturing {len(capture_cells)} widget UI(s) on the GPU ...")
             shots = _capture_notebook_widget_uis(notebook, nb, capture_cells)
+            full_ui_count = 0
             for cell, png in zip(capture_cells, shots):
-                _embed_jpeg(cell, png, args.quality, max_width)
-            mode = f"{len(shots)} full-UI screenshots"
+                if png is not None:
+                    _embed_jpeg(cell, png, args.quality, max_width)
+                    full_ui_count += 1
+                else:
+                    raise ValueError(
+                        "widget canvas was blank and the widget provided no static "
+                        "scientific preview; rerun after fixing its preview renderer"
+                    )
+            mode = (
+                f"{full_ui_count} full-UI screenshot(s), "
+                f"{static_count} verified static preview(s)"
+            )
         except (ImportError, RuntimeError, OSError) as err:
             raise ValueError(
                 "full-UI capture needs Playwright + a real GPU (NVIDIA Vulkan ICD + a display): "
                 f"{err}") from err
     elif widget_cells:
-        mode = f"{len(widget_cells)} existing image output(s)"
+        mode = (
+            f"{static_count} verified static preview(s)"
+            if static_count
+            else f"{len(widget_cells)} existing image output(s)"
+        )
     else:
         mode = "no widget cells - state stripped only"
     fallbacks = _prune_widget_fallbacks(nb)
