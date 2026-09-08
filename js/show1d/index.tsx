@@ -204,6 +204,7 @@ type Show1DInitialInteractiveState = {
   trialFilterText: string;
   topTrialCount: number;
   plotHeightPx: number;
+  plotWidthPx: number;
   sidePanelWidthPx: number;
   snapshotPanelWidthPx: number;
   focusedTrace: number;
@@ -2698,6 +2699,11 @@ function Show1DWidget() {
   const controlsVisible = Boolean(showControls) && !Boolean(controlsCollapsed);
   const [lineWidth] = useModelState<number>("line_width");
   const [plotHeightPx, setPlotHeightPx] = useModelState<number>("plot_height_px");
+  const [plotWidthPx, setPlotWidthPx] = useModelState<number>("plot_width_px");
+  const [maxWidth] = useModelState<number>("max_width");
+  const [resizePreview, setResizePreview] = React.useState<{
+    height: number; width?: number; sideWidth?: number;
+  } | null>(null);
   const [sidePanelWidthPx, setSidePanelWidthPx] = useModelState<number>("side_panel_width_px");
   const [focusedTrace, setFocusedTrace] = useModelState<number>("focused_trace");
   const [xRange, setXRange] = useModelState<number[]>("x_range");
@@ -3183,7 +3189,7 @@ function Show1DWidget() {
     MIN_SIDE_PANEL_WIDTH,
     MAX_SIDE_PANEL_WIDTH,
   ));
-  const sidePanelWidth = Math.round(clampValue(requestedSidePanelWidth, MIN_SIDE_PANEL_WIDTH, availableSidePanelWidth));
+  const sidePanelWidth = Math.round(clampValue(resizePreview?.sideWidth ?? requestedSidePanelWidth, MIN_SIDE_PANEL_WIDTH, availableSidePanelWidth));
   const availableSnapshotViewportWidth = Math.round(clampValue(
     Math.min(MAX_SNAPSHOT_VIEWPORT_WIDTH, sidePanelWidth),
     MIN_SNAPSHOT_VIEWPORT_WIDTH,
@@ -3484,48 +3490,67 @@ function Show1DWidget() {
       nonPlotWidth: Math.max(0, gridWidth - plotRect.width - (sidePanelVisible ? sidePanelWidth : 0)),
     };
     event.currentTarget.setPointerCapture(pointerId);
+    let frame = 0;
+    let pending: { height: number; width?: number; sideWidth?: number } | null = null;
+    const availableWidth = rootRef.current?.parentElement?.getBoundingClientRect().width ?? gridWidth;
+    const widthLimit = Math.min(availableWidth, maxWidth > 0 ? maxWidth : availableWidth);
     const handleWindowPointerMove = (moveEvent: PointerEvent) => {
       const start = plotResizeStartRef.current;
       if (plotResizePointerIdRef.current !== pointerId || !start) return;
       moveEvent.preventDefault();
       const dx = moveEvent.clientX - start.x;
       const dy = moveEvent.clientY - start.y;
-      setPlotHeightPx(Math.round(clampValue(start.plotHeight + dy, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)));
-      if (!sidePanelVisible) return;
-      const minPlotWidth = MIN_PLOT_WIDTH;
-      const minSidePanelWidth = MIN_SIDE_PANEL_WIDTH;
-      const maxSidePanelWidth = Math.min(MAX_SIDE_PANEL_WIDTH, start.gridWidth - start.nonPlotWidth - minPlotWidth);
-      const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
-      if (maxSidePanelWidth < minSidePanelWidth || maxPlotWidth < minPlotWidth) return;
-      const nextPlotWidth = clampValue(start.plotWidth + dx, minPlotWidth, maxPlotWidth);
-      const nextSidePanelWidth = clampValue(
-        start.gridWidth - start.nonPlotWidth - nextPlotWidth,
-        minSidePanelWidth,
-        maxSidePanelWidth,
-      );
-      setSidePanelWidthUserAdjusted(true);
-      setSidePanelWidthPx(Math.round(nextSidePanelWidth));
-      if (showSnapshots && hasSnapshots) {
-        setSnapshotPanelWidthPx(Math.round(nextSidePanelWidth));
+      pending = { height: Math.round(clampValue(start.plotHeight + dy, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)) };
+      if (!sidePanelVisible) {
+        pending.width = Math.round(clampValue(start.gridWidth + dx, Math.min(MIN_PLOT_WIDTH, widthLimit), widthLimit));
+      } else {
+        const minPlotWidth = MIN_PLOT_WIDTH;
+        const minSidePanelWidth = MIN_SIDE_PANEL_WIDTH;
+        const maxSidePanelWidth = Math.min(MAX_SIDE_PANEL_WIDTH, start.gridWidth - start.nonPlotWidth - minPlotWidth);
+        const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
+        if (maxSidePanelWidth >= minSidePanelWidth && maxPlotWidth >= minPlotWidth) {
+          const nextPlotWidth = clampValue(start.plotWidth + dx, minPlotWidth, maxPlotWidth);
+          pending.sideWidth = Math.round(clampValue(
+            start.gridWidth - start.nonPlotWidth - nextPlotWidth,
+            minSidePanelWidth,
+            maxSidePanelWidth,
+          ));
+        }
       }
+      // Browser-local preview: never send model updates for raw pointer moves.
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;
+        setResizePreview(pending);
+      });
     };
     const handleWindowPointerUp = (upEvent: PointerEvent) => {
       if (plotResizePointerIdRef.current !== pointerId) return;
       upEvent.preventDefault();
+      if (pending) {
+        setPlotHeightPx(pending.height);
+        if (pending.width !== undefined) setPlotWidthPx(pending.width);
+        if (pending.sideWidth !== undefined) {
+          setSidePanelWidthUserAdjusted(true);
+          setSidePanelWidthPx(pending.sideWidth);
+          if (showSnapshots && hasSnapshots) setSnapshotPanelWidthPx(pending.sideWidth);
+        }
+      }
       plotResizeCleanupRef.current?.();
+      setResizePreview(null);
       plotResizeCleanupRef.current = null;
     };
     window.addEventListener("pointermove", handleWindowPointerMove, { capture: true });
     window.addEventListener("pointerup", handleWindowPointerUp, { capture: true });
     window.addEventListener("pointercancel", handleWindowPointerUp, { capture: true });
     plotResizeCleanupRef.current = () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", handleWindowPointerMove, { capture: true });
       window.removeEventListener("pointerup", handleWindowPointerUp, { capture: true });
       window.removeEventListener("pointercancel", handleWindowPointerUp, { capture: true });
       plotResizePointerIdRef.current = null;
       plotResizeStartRef.current = null;
     };
-  }, [hasSnapshots, setPlotHeightPx, setSidePanelWidthPx, setSnapshotPanelWidthPx, showSnapshots, sidePanelVisible, sidePanelWidth]);
+  }, [hasSnapshots, maxWidth, setPlotHeightPx, setPlotWidthPx, setSidePanelWidthPx, setSnapshotPanelWidthPx, showSnapshots, sidePanelVisible, sidePanelWidth]);
 
   const setSnapshotViewportWidth = React.useCallback((width: number) => {
     const maximumResizableWidth = Math.min(
@@ -3678,6 +3703,7 @@ function Show1DWidget() {
         trialFilterText: String(trialFilterText || ""),
         topTrialCount: Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0)),
         plotHeightPx: Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT,
+        plotWidthPx: Number.isFinite(plotWidthPx) ? plotWidthPx : 0,
         sidePanelWidthPx: Number.isFinite(sidePanelWidthPx) ? sidePanelWidthPx : 360,
         snapshotPanelWidthPx: Number.isFinite(snapshotPanelWidthPx) ? snapshotPanelWidthPx : 0,
         focusedTrace: Number.isFinite(focusedTrace) ? focusedTrace : -1,
@@ -3718,6 +3744,7 @@ function Show1DWidget() {
     imageCmap,
     logScale,
     plotHeightPx,
+    plotWidthPx,
     selectedSnapshotGroupIdx,
     selectedSnapshotIdx,
     showLegend,
@@ -4578,6 +4605,7 @@ function Show1DWidget() {
     setTrialFilterText(initial.trialFilterText);
     setTopTrialCount(initial.topTrialCount);
     setPlotHeightPx(initial.plotHeightPx);
+    setPlotWidthPx(initial.plotWidthPx);
     setSidePanelWidthPx(initial.sidePanelWidthPx);
     setSnapshotPanelWidthPx(initial.snapshotPanelWidthPx);
     setSidePanelWidthUserAdjusted(false);
@@ -4676,6 +4704,7 @@ function Show1DWidget() {
       || trialFilterText !== initial.trialFilterText
       || topTrialCount !== initial.topTrialCount
       || plotHeightPx !== initial.plotHeightPx
+      || (plotWidthPx || 0) !== initial.plotWidthPx
       || sidePanelWidthPx !== initial.sidePanelWidthPx
       || snapshotPanelWidthPx !== initial.snapshotPanelWidthPx
       || sidePanelWidthUserAdjusted
@@ -4714,6 +4743,7 @@ function Show1DWidget() {
     imageCmap,
     logScale,
     plotHeightPx,
+    plotWidthPx,
     resetBaselineReady,
     selectedSnapshotGroupIdx,
     selectedSnapshotIdx,
@@ -4918,13 +4948,13 @@ function Show1DWidget() {
       + (showStats ? 130 : 0)
     : 0;
   const plotNonCanvasHeightEstimate = showLegend && visibleTraceIndices.length > 0 ? 54 : 12;
-  const effectivePlotHeight = snapshotOverview && !plotHeightExplicit
+  const effectivePlotHeight = resizePreview?.height ?? (snapshotOverview && !plotHeightExplicit
     ? Math.round(clampValue(
       Math.max(plotHeight, snapshotPanelContentHeight - plotNonCanvasHeightEstimate),
       260,
       MAX_PLOT_HEIGHT,
     ))
-    : plotHeight;
+    : plotHeight);
   const statsPanel = showStats && visibleTraceIndices.length > 0 ? (
     <Box data-testid="show1d-stats-table" sx={{ width: "100%", mb: 0.5 }}>
       <Box
@@ -5333,8 +5363,8 @@ function Show1DWidget() {
       ref={rootRef}
       data-testid="show1d-root"
       sx={{
-        width: "100%",
-        maxWidth: "100%",
+        width: (resizePreview?.width ?? plotWidthPx) > 0 ? `${resizePreview?.width ?? plotWidthPx}px` : "100%",
+        maxWidth: maxWidth > 0 ? `min(100%, ${maxWidth}px)` : "100%",
         bgcolor: themeColors.bg,
         color: themeColors.text,
         border: "none",

@@ -9,6 +9,22 @@ import numpy as np
 from quantem.widget.show1d import Show1D, sample_line_profile
 
 
+def test_show1d_resize_dimensions_survive_state_and_html_clone() -> None:
+    widget = Show1D(np.arange(12), plot_width_px=640, max_width=900,
+                    plot_height_px=280, show_stats=False, show_review=False,
+                    save_state=True)
+    original = widget._data.copy()
+    widget.plot_width_px = 720
+    widget.plot_height_px = 340
+    state = widget.get_state()
+    assert state["plot_width_px"] == 720
+    assert state["max_width"] == 900
+    assert state["plot_height_px"] == 340
+    clone = widget._clone_for_html_export(downsample=1)
+    assert (clone.plot_width_px, clone.plot_height_px, clone.max_width) == (720, 340, 900)
+    np.testing.assert_array_equal(widget._data, original)
+
+
 def _wait_until(predicate, *, timeout_s: float = 5.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:

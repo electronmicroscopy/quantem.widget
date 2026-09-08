@@ -1,5 +1,15 @@
 # Show1D
 
+## Resizing a scientific curve
+
+Use `plot_width_px=700`, `plot_height_px=300`, and `max_width=900` to set a
+bounded initial size. Width values of zero keep the existing responsive layout.
+The bottom-right corner handle resizes a standalone curve horizontally and
+vertically. With a snapshot/stats side panel, horizontal dragging redistributes
+the plot and side-panel space. Preview stays in the browser during dragging;
+width and height are saved on release and retained in widget state and HTML
+exports. The Reset toolbar action restores the initial plot dimensions.
+
 Interactive 1D traces for live reconstruction metrics, line profiles, and
 linked image snapshots. Use it for loss curves, Adam/optimizer diagnostics,
 joint-time ptychography comparisons, and image-derived profiles that need a

@@ -265,6 +265,10 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         button in the frontend.
     plot_height_px, side_panel_width_px : int, optional
         Initial plot height and snapshot/stats side-panel width in pixels.
+    plot_width_px, max_width : int, optional
+        Viewer width and maximum width in pixels. Zero preserves responsive
+        full width. A standalone plot's corner handle changes width and height;
+        with a side panel, horizontal dragging reallocates space between panels.
     image_cmap : str, default "viridis"
         Colormap used for profile and snapshot images.
     review_mode : {"trace", "optimization"}, optional
@@ -381,6 +385,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     controls_collapsed = traitlets.Bool(False).tag(sync=True)
     line_width = traitlets.Float(1.5).tag(sync=True)
     plot_height_px = traitlets.Int(390).tag(sync=True)
+    plot_width_px = traitlets.Int(0, min=0).tag(sync=True)
+    max_width = traitlets.Int(0, min=0).tag(sync=True)
     side_panel_width_px = traitlets.Int(360).tag(sync=True)
     focused_trace = traitlets.Int(-1).tag(sync=True)
     x_range = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -602,6 +608,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         controls_collapsed: bool | None = None,
         line_width: float = 1.5,
         plot_height_px: int = 390,
+        plot_width_px: int = 0,
+        max_width: int = 0,
         side_panel_width_px: int = 360,
         profile_image: Any = None,
         profile_line: Sequence[Sequence[float]] | None = None,
@@ -720,6 +728,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         self.controls_collapsed = bool(ui["controls_collapsed"])
         self.line_width = float(line_width)
         self.plot_height_px = max(220, min(_MAX_PLOT_HEIGHT_PX, int(plot_height_px)))
+        self.plot_width_px = plot_width_px
+        self.max_width = max_width
         self.side_panel_width_px = max(300, min(_MAX_SIDE_PANEL_WIDTH_PX, int(side_panel_width_px)))
         self.profile_width = max(1, int(profile_width))
         self.image_cmap = self._normalise_image_cmap(image_cmap)
@@ -2283,6 +2293,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             y_label=self.y_label or "loss",
             log_scale=self.log_scale,
             plot_height_px=self.plot_height_px,
+            plot_width_px=self.plot_width_px,
+            max_width=self.max_width,
             side_panel_width_px=self.side_panel_width_px,
             image_cmap=self.image_cmap,
             snapshot_contrast_preset=self.snapshot_contrast_preset,
@@ -2440,6 +2452,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             "controls_collapsed": self.controls_collapsed,
             "line_width": self.line_width,
             "plot_height_px": self.plot_height_px,
+            "plot_width_px": self.plot_width_px,
+            "max_width": self.max_width,
             "side_panel_width_px": self.side_panel_width_px,
             "focused_trace": self.focused_trace,
             "x_range": list(self.x_range),
@@ -3754,6 +3768,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             controls_collapsed=self.controls_collapsed,
             line_width=self.line_width,
             plot_height_px=self.plot_height_px,
+            plot_width_px=self.plot_width_px,
+            max_width=self.max_width,
             side_panel_width_px=self.side_panel_width_px,
             image_cmap=self.image_cmap,
             snapshot_contrast_preset=self.snapshot_contrast_preset,
