@@ -6,6 +6,10 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Show4DSTEM compares native diffraction patterns side by side in live
+  Multiple view, with shared scan-region reductions and live detector dragging.
+  Playback controls are reserved for Single view.
+
 - Add `Plot2D` for scalar maps with calibrated Cartesian axes, colormap
   selection, viewport controls, and editable Matplotlib figure export.
 

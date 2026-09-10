@@ -42,6 +42,8 @@ import {
 } from "../.generated/engine/io/backends/webgpu/local-h5";
 import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device/webgpu";
 import { LazyShow4DSTEM } from "./lazy";
+import { AllDiffractionGrid } from "./AllDiffractionGrid";
+import { latestRegion } from "./latestRegion";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
 import { downloadBlob, extractBytes, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
@@ -1490,6 +1492,8 @@ function cropSingleROI(
 }
 
 interface CompareVirtualGridProps {
+  kind?: "virtual" | "diffraction";
+  scanRegion?: {mode: string; row: number; col: number; radius: number; width: number; height: number};
   bytes: DataView | null | undefined;
   count: number;
   indices: number[];
@@ -1544,6 +1548,8 @@ interface CompareVirtualGridProps {
 }
 
 function CompareVirtualGrid({
+  kind = "virtual",
+  scanRegion,
   bytes,
   count,
   indices,
@@ -1591,6 +1597,10 @@ function CompareVirtualGrid({
   onGpuPaint,
   onGpuRendererReady,
 }: CompareVirtualGridProps) {
+  const positionRafRef = React.useRef(0);
+  const panDragRef = React.useRef<{col:number; row:number; panX:number; panY:number} | null>(null);
+  const pendingPositionRef = React.useRef<[number, number]>([0, 0]);
+  React.useEffect(() => () => cancelAnimationFrame(positionRafRef.current), []);
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuRenderGenerationRef = React.useRef(0);
@@ -1717,9 +1727,9 @@ function CompareVirtualGrid({
           gap: 0,
           bgRgb: 0,
           transforms: panels.map(() => ({
-            zoom: compareZoom,
-            panX: comparePanX,
-            panY: comparePanY,
+            zoom: 1,
+            panX: 0,
+            panY: 0,
           })),
           smooth,
         },
@@ -1754,7 +1764,7 @@ function CompareVirtualGrid({
       if (painted > 0) onGpuPaint?.(painted);
     })();
     return panels.length;
-  }, [colormap, comparePanX, comparePanY, compareZoom, gpuEngine, gpuRanges, gpuSlots, onGpuPaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+  }, [colormap, gpuEngine, gpuRanges, gpuSlots, onGpuPaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
     onGpuRendererReady?.(renderGpuSlotsNow);
@@ -1877,7 +1887,7 @@ function CompareVirtualGrid({
   }, [autoContrast, colormap, gpuEngine, gpuSlots, gpuVersion, onFreshVisiblePaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
-    if (!gpuEngine || !gpuSlots) return;
+    if (!gpuEngine || !gpuSlots || kind === "diffraction") return;
     const gpuEntries = renderEntries
       .map((entry, localIdx) => ({
         frame: entry.frame,
@@ -1929,6 +1939,7 @@ function CompareVirtualGrid({
       if (painted > 0) onGpuPaint?.(painted);
     })();
   }, [
+    kind,
     colormap,
     gpuEngine,
     gpuSlots,
@@ -2063,7 +2074,17 @@ function CompareVirtualGrid({
     const tileY = ((clientY - rect.top) / rect.height) * shapeRows;
     const col = Math.round(Math.max(0, Math.min(shapeCols - 1, (tileX - comparePanX) / compareZoom)));
     const row = Math.round(Math.max(0, Math.min(shapeRows - 1, (tileY - comparePanY) / compareZoom)));
-    onPositionChange(row, col, commit);
+    pendingPositionRef.current = [row, col];
+    if (commit) {
+      cancelAnimationFrame(positionRafRef.current);
+      positionRafRef.current = 0;
+      onPositionChange(row, col, true);
+    } else if (!positionRafRef.current) {
+      positionRafRef.current = requestAnimationFrame(() => {
+        positionRafRef.current = 0;
+        onPositionChange(...pendingPositionRef.current, false);
+      });
+    }
   }, [comparePanX, comparePanY, compareZoom, onPositionChange, shapeCols, shapeRows]);
 
   React.useLayoutEffect(() => {
@@ -2109,8 +2130,15 @@ function CompareVirtualGrid({
         isDraggingPosition,
         idx === 0,
       );
+      if (scanRegion && scanRegion.mode !== "off") {
+        ctx?.clearRect(0, 0, overlay.width, overlay.height);
+        if (showScaleBar) drawScaleBarHiDPI(overlay, dpr, compareZoom, pixelSize || 1, pixelUnit || "px", shapeCols);
+        drawViRoiOverlayHiDPI(overlay, dpr, scanRegion.mode,
+          scanRegion.row, scanRegion.col, scanRegion.radius, scanRegion.width, scanRegion.height,
+          compareZoom, comparePanX, comparePanY, shapeCols, shapeRows, isDraggingPosition, false, false);
+      }
     });
-  }, [comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar]);
+  }, [comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar, scanRegion]);
 
   if (renderEntries.length === 0) {
     return (
@@ -2124,6 +2152,14 @@ function CompareVirtualGrid({
 
   return (
     <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
+      <Box sx={{display:"flex",alignItems:"center",gap:1,color:themeColors.textMuted,fontSize:10}}>
+        <span>Scroll to zoom · Shift-drag to pan</span>
+        <Button size="small" sx={{fontSize:10,minWidth:0}} onClick={() => {
+          compareViewRef.current.zoom=1;compareViewRef.current.panX=0;compareViewRef.current.panY=0;
+          setCompareZoom(1);setComparePanX(0);setComparePanY(0);
+        }}>Reset</Button>
+        <span>{compareZoom.toFixed(1)}×</span>
+      </Box>
       {cacheBadge && (
         <Box
           role="status"
@@ -2193,7 +2229,9 @@ function CompareVirtualGrid({
               key={`${frame}-${localIdx}`}
               ref={(node: HTMLDivElement | null) => { tileRefs.current[localIdx] = node; }}
               role="button"
-              aria-label={`Show4DSTEM multiple panel ${frame + 1}${panelPresentation.labelSuffix}`}
+              aria-label={`Show4DSTEM ${kind === "diffraction" ? "diffraction" : "multiple"} panel ${frame + 1}${panelPresentation.labelSuffix}`}
+              data-comparison-zoom={compareZoom}
+              data-comparison-pan={`${comparePanX},${comparePanY}`}
               aria-busy={panelPresentation.busy}
               aria-disabled={panelPresentation.disabled}
               data-show4dstem-panel-cache={panelPresentation.cached ? "cached" : loaded ? "fresh" : "empty"}
@@ -2204,23 +2242,41 @@ function CompareVirtualGrid({
                 const target = event.target instanceof Element ? event.target : null;
                 if (!loaded || reorderMode || target?.closest("button")) return;
                 try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+                if (event.shiftKey) {
+                  panDragRef.current={col:event.clientX,row:event.clientY,panX:comparePanX,panY:comparePanY};
+                  return;
+                }
                 isDraggingPositionRef.current = true;
                 setIsDraggingPosition(true);
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
                 onSelect(frame);
               }}
               onPointerMove={(event) => {
+                const pan = panDragRef.current;
+                if (pan) {
+                  event.preventDefault();
+                  const rect=event.currentTarget.getBoundingClientRect();
+                  const view=compareViewRef.current;
+                  view.panX=pan.panX+(event.clientX-pan.col)*shapeCols/rect.width;
+                  view.panY=pan.panY+(event.clientY-pan.row)*shapeRows/rect.height;
+                  if (!view.raf) view.raf=requestAnimationFrame(() => {
+                    view.raf=0;setComparePanX(view.panX);setComparePanY(view.panY);
+                  });
+                  return;
+                }
                 if (!isDraggingPositionRef.current || reorderMode) return;
                 event.preventDefault();
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
               }}
               onPointerUp={(event) => {
+                if (panDragRef.current) {panDragRef.current=null;return;}
                 if (!isDraggingPositionRef.current) return;
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
                 isDraggingPositionRef.current = false;
                 setIsDraggingPosition(false);
               }}
               onPointerCancel={(event) => {
+                if (panDragRef.current) {panDragRef.current=null;return;}
                 if (!isDraggingPositionRef.current) return;
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
                 isDraggingPositionRef.current = false;
@@ -2360,6 +2416,7 @@ function CompareVirtualGrid({
                 }}
               />
               <canvas
+                data-quantem-scientific-output={kind === "diffraction" ? "show4dstem-comparison-diffraction" : undefined}
                 ref={(node) => {
                   gpuCanvasRefs.current[localIdx] = node;
                 }}
@@ -2665,6 +2722,8 @@ function Show4DSTEM() {
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
   const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
+  const [compareDiffractionBytes] = useModelState<DataView>("compare_diffraction_bytes");
+  const [compareDiffractionIndices] = useModelState<number[]>("compare_diffraction_indices");
   const [compareGroupMode, setCompareGroupMode] = useModelState<string>("compare_group_mode");
   const [comparePageIdx, setComparePageIdx] = useModelState<number>("compare_page_idx");
   const [comparePageCount] = useModelState<number>("compare_page_count");
@@ -3176,6 +3235,15 @@ function Show4DSTEM() {
   const [localViRoiCenterCol, setLocalViRoiCenterCol] = React.useState(viRoiCenterCol || 0);
   const [viRoiDpBytes] = useModelState<DataView>("vi_roi_dp_bytes");
   const [viRoiReduce, setViRoiReduce] = useModelState<string>("vi_roi_reduce");
+  const regionRequests = React.useMemo(() => latestRegion((row, col) => {
+    model.set("vi_roi_center", [row, col]);
+    model.save_changes();
+  }, model.get("vi_roi_center") || []), [model]);
+  React.useEffect(() => {
+    const acknowledge = () => regionRequests.acknowledge();
+    model.on("change:vi_roi_receipt", acknowledge);
+    return () => { model.off("change:vi_roi_receipt", acknowledge); regionRequests.clear(); };
+  }, [model, regionRequests]);
   const [webgpuDpcReady, setWebgpuDpcReady] = React.useState(false);
   const [viGpuVersion, setViGpuVersion] = React.useState(0);
   const [viGpuRetainedReady, setViGpuRetainedReady] = React.useState(false);
@@ -4767,7 +4835,11 @@ function Show4DSTEM() {
             // Do not turn a progressive refresh into an all-volume decode.
             // A completed panel keeps its GPU display slot even after the
             // native uint16 source volume has been evicted.
-            if (getVol && !volIsResident(idx)) continue;
+            // A settled/initial refresh must materialise every visible panel so
+            // later detector drags can update the whole comparison grid live.
+            // During the drag itself, keep the existing no-paging rule and only
+            // touch volumes that are already resident.
+            if (interactiveDrag && getVol && !volIsResident(idx)) continue;
             const panelCompute = getVol ? await getVol(idx) : compute;
             if (!(panelCompute instanceof DetectorCompute)) continue;
             batchComputes.push(panelCompute);
@@ -6027,9 +6099,8 @@ function Show4DSTEM() {
     });
     return items;
   }, [activeComparePageCount, activeComparePageIdx]);
-  const frameSliderLabel = compareMode ? "Panel" : frameDimLabel;
-  const frameSliderAriaLabel = compareMode ? "Show4DSTEM active multiple panel" : `Show4DSTEM ${frameDimLabel.toLowerCase()}`;
-  const [comparePagePlaying, setComparePagePlaying] = React.useState(false);
+  const frameSliderLabel = frameDimLabel;
+  const frameSliderAriaLabel = `Show4DSTEM ${frameDimLabel.toLowerCase()}`;
   const compareGridWidth = compareGridPreviewWidth ?? (compareGridWidthPx > 0 ? compareGridWidthPx : COMPARE_GRID_DEFAULT_WIDTH);
   React.useEffect(() => {
     if (!compareMode || compareAllGroups) {
@@ -6037,13 +6108,9 @@ function Show4DSTEM() {
       setCompareDraggingFrame(null);
       setComparePendingMoveFrame(null);
       setCompareGridPreviewWidth(null);
-      setComparePagePlaying(false);
       compareGridResizeCleanupRef.current?.();
     }
   }, [compareAllGroups, compareMode]);
-  React.useEffect(() => {
-    if (activeComparePageCount <= 1 || compareAllGroups) setComparePagePlaying(false);
-  }, [activeComparePageCount, compareAllGroups]);
   const compareHiddenCount = React.useMemo(() => {
     const seen = new Set<number>();
     (compareHiddenPanels || []).forEach((idx) => {
@@ -6170,7 +6237,6 @@ function Show4DSTEM() {
     setCompareStarredPanels([]);
     setCompareGroupMode("paged");
     setComparePageIdx(0);
-    setComparePagePlaying(false);
     setComparePendingMoveFrame(null);
     setCompareDraggingFrame(null);
     setCompareHiddenMenuAnchor(null);
@@ -6607,6 +6673,10 @@ function Show4DSTEM() {
 
   // Path animation timer
   React.useEffect(() => {
+    if (compareMode) {
+      if (pathPlaying) setPathPlaying(false);
+      return;
+    }
     if (!pathPlaying || pathLength === 0) return;
 
     const timer = setInterval(() => {
@@ -6625,7 +6695,7 @@ function Show4DSTEM() {
     }, pathIntervalMs);
 
     return () => clearInterval(timer);
-  }, [pathPlaying, pathLength, pathIntervalMs, pathLoop, setPathIndex, setPathPlaying]);
+  }, [compareMode, pathPlaying, pathLength, pathIntervalMs, pathLoop, setPathIndex, setPathPlaying]);
 
   // Frame animation timer (5D time/tilt series)
   const frameBounceDir = React.useRef(1);
@@ -6634,6 +6704,10 @@ function Show4DSTEM() {
   }, [frameReverse]);
 
   React.useEffect(() => {
+    if (compareMode) {
+      if (framePlaying) setFramePlaying(false);
+      return;
+    }
     if (!framePlaying || nFrames <= 1) return;
 
     const intervalMs = 1000 / Math.max(0.1, frameFps);
@@ -6663,24 +6737,7 @@ function Show4DSTEM() {
     }, intervalMs);
 
     return () => clearInterval(timer);
-  }, [framePlaying, nFrames, frameFps, frameLoop, frameReverse, frameBoomerang, setFrameIdx, setFramePlaying]);
-
-  React.useEffect(() => {
-    if (!comparePagePlaying || activeComparePageCount <= 1) return;
-    const timer = setInterval(() => {
-      setComparePageIdx((prev: number) => {
-        const current = Math.max(0, Math.min(activeComparePageCount - 1, Math.round(Number(prev) || 0)));
-        const next = current + 1;
-        if (next >= activeComparePageCount) {
-          setComparePagePlaying(false);
-          return current;
-        }
-        return next;
-      });
-    }, 700);
-
-    return () => clearInterval(timer);
-  }, [activeComparePageCount, comparePagePlaying, setComparePageIdx]);
+  }, [compareMode, framePlaying, nFrames, frameFps, frameLoop, frameReverse, frameBoomerang, setFrameIdx, setFramePlaying]);
 
   // Initialize WebGPU FFT on mount
   React.useEffect(() => {
@@ -6780,7 +6837,7 @@ function Show4DSTEM() {
           handled = true;
           break;
         case " ": // Space bar
-          if (pathLength > 0) {
+          if (!compareMode && pathLength > 0) {
             setPathPlaying(!pathPlaying);
             handled = true;
           }
@@ -6815,7 +6872,7 @@ function Show4DSTEM() {
       e.stopPropagation();
     }
   }, [
-    frameIdx, isTypingTarget, nFrames, pathLength,
+    compareMode, frameIdx, isTypingTarget, nFrames, pathLength,
     pathPlaying, posCol, posRow, setFrameIdx, setPathPlaying, setPosCol, setPosRow, shapeCols, shapeRows,
   ]);
 
@@ -6845,9 +6902,9 @@ function Show4DSTEM() {
 
   // Sync VI ROI local state
   React.useEffect(() => {
-    if (!isDraggingViRoi && !isDraggingViRoiResize) {
-      setLocalViRoiCenterRow(viRoiCenterRow || shapeRows / 2);
-      setLocalViRoiCenterCol(viRoiCenterCol || shapeCols / 2);
+    if (!isDraggingViRoi && !isDraggingViRoiResize && !regionRequests.isPending()) {
+      setLocalViRoiCenterRow(viRoiCenterRow ?? shapeRows / 2);
+      setLocalViRoiCenterCol(viRoiCenterCol ?? shapeCols / 2);
     }
   }, [viRoiCenterRow, viRoiCenterCol, isDraggingViRoi, isDraggingViRoiResize, shapeRows, shapeCols]);
 
@@ -10439,7 +10496,6 @@ function Show4DSTEM() {
                           aria-label={`Use ${label.toLowerCase()} Show4DSTEM multiple groups`}
                           aria-pressed={active}
                           onClick={() => {
-                            setComparePagePlaying(false);
                             setCompareGroupMode(value);
                           }}
                           sx={{
@@ -10464,29 +10520,11 @@ function Show4DSTEM() {
                     aria-label="Previous Show4DSTEM multiple group"
                     disabled={activeComparePageIdx <= 0}
                     onClick={() => {
-                      setComparePagePlaying(false);
                       requestComparePage(activeComparePageIdx - 1);
                     }}
                     sx={{ color: activeComparePageIdx <= 0 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
                   >
                     <FastRewindIcon sx={{ fontSize: 15 }} />
-                  </IconButton>
-                  <IconButton
-                    size="small"
-                    aria-label={comparePagePlaying ? "Pause Show4DSTEM multiple groups" : "Play Show4DSTEM multiple groups"}
-                    onClick={() => {
-                      if (comparePagePlaying) {
-                        setComparePagePlaying(false);
-                        return;
-                      }
-                      if (activeComparePageIdx >= activeComparePageCount - 1) {
-                        requestComparePage(0);
-                      }
-                      setComparePagePlaying(true);
-                    }}
-                    sx={{ color: comparePagePlaying ? themeColors.accent : themeColors.textMuted, p: 0.2 }}
-                  >
-                    {comparePagePlaying ? <PauseIcon sx={{ fontSize: 15 }} /> : <PlayArrowIcon sx={{ fontSize: 15 }} />}
                   </IconButton>
                   <Box
                     role="group"
@@ -10519,7 +10557,6 @@ function Show4DSTEM() {
                           aria-label={`Show Show4DSTEM multiple group ${item + 1}`}
                           aria-pressed={active}
                           onClick={() => {
-                            setComparePagePlaying(false);
                             requestComparePage(item);
                           }}
                           sx={{
@@ -10543,7 +10580,6 @@ function Show4DSTEM() {
                     aria-label="Next Show4DSTEM multiple group"
                     disabled={activeComparePageIdx >= activeComparePageCount - 1}
                     onClick={() => {
-                      setComparePagePlaying(false);
                       requestComparePage(activeComparePageIdx + 1);
                     }}
                     sx={{ color: activeComparePageIdx >= activeComparePageCount - 1 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
@@ -10659,8 +10695,49 @@ function Show4DSTEM() {
           </Stack>
 
           {/* VI Canvas */}
+          {compareMode && compareDpMode === "all" && <AllDiffractionGrid
+            bytes={compareDiffractionBytes} indices={compareDiffractionIndices || []}
+            rows={detRows} cols={detCols}
+            selectionLabel={viRoiMode === "off" ? "Point" : `${optionLabel(viRoiReduce || "mean")} over shared ${viRoiMode} ROI`}
+            renderGrid={({engine, slots, ranges}) => <CompareVirtualGrid
+              kind="diffraction" bytes={undefined} count={compareDiffractionIndices.length}
+              indices={compareDiffractionIndices} gpuSlots={slots} gpuRanges={ranges}
+              gpuEngine={engine} labels={frameLabels || []} activeIdx={frameIdx}
+              shapeRows={detRows} shapeCols={detCols} cols={compareCols || 0}
+              colormap={dpColormap} scaleMode={dpScaleMode} vminPct={dpVminPct}
+              vmaxPct={dpVmaxPct} autoContrast={false} smooth={false}
+              cursorRow={localKRow} cursorCol={localKCol} status=""
+              themeColors={themeColors} panelChromeVisible={panelChromeVisible}
+              showScaleBar={showScaleBar} pixelSize={kCalibrated ? kPixelSize : 1}
+              pixelUnit={kCalibrated ? kPixelUnit : "px"}
+              panelOrder={comparePanelOrder || []} hidden={compareHiddenPanels || []}
+              starred={compareStarredPanels || []} reorderMode={compareReorderMode}
+              draggingFrame={compareDraggingFrame} pendingMoveFrame={comparePendingMoveFrame}
+              maxWidthPx={compareGridWidth} panelGapPx={comparePanelGapPx}
+              onResizeStart={handleCompareGridResizeStart} onSelect={setFrameIdx}
+              onToggleStar={toggleCompareStar} onHide={hideCompareFrame}
+              onReorderFrame={moveCompareFrame} onDragFrameChange={setCompareDraggingFrame}
+              onPendingMoveFrameChange={setComparePendingMoveFrame}
+              onPositionChange={(row, col, commit) => {
+                setLocalKRow(row); setLocalKCol(col);
+                // All diffraction panels edit the same live virtual detector.
+                // CompareVirtualGrid already coalesces pointer moves with rAF;
+                // use the primary detector's preview and finalization paths.
+                dpRoiInteractiveRef.current = true;
+                model.set("roi_active", true);
+                queueRoiCenter(row, col);
+                if (commit) {
+                  finishDpRoiInteraction();
+                } else {
+                  requestCompareViLive();
+                }
+              }}
+            />}
+          />}
           {compareMode ? (
             <CompareVirtualGrid
+              scanRegion={{mode:viRoiMode, row:localViRoiCenterRow, col:localViRoiCenterCol,
+                radius:viRoiRadius || 5, width:viRoiWidth || 10, height:viRoiHeight || 10}}
               bytes={displayedCompareVirtualImageBytes}
               count={comparePanelCount || 0}
               indices={comparePanelIndices || []}
@@ -10705,7 +10782,12 @@ function Show4DSTEM() {
               onReorderFrame={moveCompareFrame}
               onDragFrameChange={setCompareDraggingFrame}
               onPendingMoveFrameChange={setComparePendingMoveFrame}
-              onPositionChange={updateScanPosition}
+              onPositionChange={(row, col, commit) => {
+                if (viRoiMode === "off") { updateScanPosition(row, col, commit); return; }
+                setLocalViRoiCenterRow(row); setLocalViRoiCenterCol(col);
+                if (offline) {model.set("vi_roi_center", [row, col]);model.save_changes();}
+                else regionRequests.request(row, col);
+              }}
               onFreshVisiblePaint={acknowledgeFreshComparePagePaint}
               onGpuPaint={(panelCount) => publishLiveCompareViStats("paint", { paintedPanels: panelCount })}
               onGpuRendererReady={(renderNow) => {
@@ -10818,7 +10900,7 @@ function Show4DSTEM() {
                     {/* Row 1: ROI selector */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                       <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI</Typography>
-                      <Select value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Select inputProps={{"aria-label":"Scan region"}} value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="off">Off</MenuItem>
                         <MenuItem value="circle">Circle</MenuItem>
                         <MenuItem value="square">Square</MenuItem>
@@ -10841,7 +10923,7 @@ function Show4DSTEM() {
                               </Typography>
                             </>
                           )}
-                          <Select value={viRoiReduce || "mean"} onChange={(e) => setViRoiReduce(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                          <Select inputProps={{"aria-label":"Scan region reduction"}} value={viRoiReduce || "mean"} onChange={(e) => setViRoiReduce(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
                             <MenuItem value="mean">Mean</MenuItem>
                             <MenuItem value="sum">Sum</MenuItem>
                             <MenuItem value="max">Max</MenuItem>
@@ -11188,6 +11270,7 @@ function Show4DSTEM() {
               >
                 <MenuItem value="average">Average</MenuItem>
                 <MenuItem value="selected">Selected</MenuItem>
+                <MenuItem value="all">All (live)</MenuItem>
               </Select>
               <Tooltip title={compareAllGroups ? "Switch to Paged to reorder panels" : compareReorderMode ? "Finish reordering" : "Reorder multiple panels"}>
                 <IconButton
@@ -11222,6 +11305,7 @@ function Show4DSTEM() {
               </Button>
             </>
           )}
+          {!compareMode && <>
           <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameSliderLabel}:</Typography>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" aria-label="Show4DSTEM play frames backward" onClick={() => { setFrameReverse(true); setFramePlaying(true); }} sx={{ color: frameReverse && framePlaying ? themeColors.accent : themeColors.textMuted, p: 0.25 }}>
@@ -11239,8 +11323,9 @@ function Show4DSTEM() {
           </Stack>
           <Slider value={frameIdx} onChange={(_, v) => { setFramePlaying(false); setFrameIdx(v as number); }} min={0} max={Math.max(0, nFrames - 1)} size="small" aria-label={frameSliderAriaLabel} sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
           <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameIdx + 1}/${nFrames}`}</Typography>
+          </>}
         </Box>
-        <Box sx={{ ...controlRow, mt: `${SPACING.XS}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+        {!compareMode && <Box sx={{ ...controlRow, mt: `${SPACING.XS}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
           <Slider value={frameFps} min={1} max={30} step={1} onChange={(_, v) => setFrameFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: 35, flexShrink: 0 }} />
           <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, minWidth: 14, flexShrink: 0 }}>{Math.round(frameFps)}</Typography>
@@ -11248,11 +11333,11 @@ function Show4DSTEM() {
           <Switch size="small" checked={frameLoop} onChange={() => setFrameLoop(!frameLoop)} sx={{ ...switchStyles.small, flexShrink: 0 }} />
           <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Bounce</Typography>
           <Switch size="small" checked={frameBoomerang} onChange={() => setFrameBoomerang(!frameBoomerang)} sx={{ ...switchStyles.small, flexShrink: 0 }} />
-        </Box>
+        </Box>}
       </>)}
 
       {/* Path animation slider */}
-      {controlsVisible && pathLength > 0 && (
+      {controlsVisible && !compareMode && pathLength > 0 && (
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" onClick={() => setPathPlaying(!pathPlaying)} sx={{ color: themeColors.accent, p: 0.25 }}>
