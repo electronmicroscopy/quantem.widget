@@ -233,10 +233,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ``compare_max_panels`` panels at a time. ``"all"`` collapses all
         visible groups into one dense grid while still computing lazy datasets
         in page-sized batches.
-    compare_dp_mode : {"average", "selected"}, default "average"
+    compare_dp_mode : {"average", "selected", "all"}, default "average"
         Diffraction panel source in compare mode. ``"average"`` displays the
         mean diffraction pattern at the current scan position across visible
         ready compare panels. ``"selected"`` displays the active frame/dataset.
+        ``"all"`` adds a native pattern for each visible comparison dataset,
+        with shared absolute contrast and the same scan position. This mode
+        currently requires a live kernel and hardware WebGPU rendering; it is
+        not a kernel-free export mode. The primary panel retains detector tools.
     compare_cache_pages : int, default 16
         Number of reduced compare-grid virtual-image pages to keep in host
         memory. This caches BF/ABF/ADF/HAADF thumbnails across page changes and
@@ -487,6 +491,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # sum scales with area (quantitative counts), max picks brightest position per detector pixel.
     vi_roi_reduce = traitlets.Unicode("mean").tag(sync=True)
     vi_roi_dp_bytes = traitlets.Bytes(b"").tag(sync=True)  # Reduced DP from VI ROI
+    # Completed center and backend elapsed time allow bounded live requests,
+    # including positions whose diffraction values happen to be identical.
+    vi_roi_receipt = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -593,6 +600,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     compare_page_idx = traitlets.Int(0).tag(sync=True)
     compare_page_count = traitlets.Int(1).tag(sync=True)
     compare_dp_mode = traitlets.Unicode("average").tag(sync=True)
+    compare_diffraction_bytes = traitlets.Bytes(b"").tag(sync=True)
+    compare_diffraction_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     compare_panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(
         sync=True
     )
@@ -665,9 +674,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         mode = str(value or "average").strip().lower().replace("-", "_")
         aliases = {"avg": "average", "mean": "average", "current": "selected"}
         mode = aliases.get(mode, mode)
-        if mode not in {"average", "selected"}:
+        if mode not in {"average", "selected", "all"}:
             raise ValueError(
-                f"compare_dp_mode must be 'average' or 'selected', got {value!r}"
+                f"compare_dp_mode must be 'average', 'selected', or 'all', got {value!r}"
             )
         return mode
 
@@ -2177,6 +2186,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Initialize VI ROI center to scan center with reasonable default sizes
         self.vi_roi_center_row = float(self.shape_rows / 2)
         self.vi_roi_center_col = float(self.shape_cols / 2)
+        self.vi_roi_center = [self.vi_roi_center_row, self.vi_roi_center_col]
         # Set initial ROI size based on scan dimension
         default_roi_size = max(
             3, min(self.shape_rows, self.shape_cols) * DEFAULT_VI_ROI_RATIO
@@ -2285,6 +2295,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "vi_preset_map_frames",
             "vi_preset_maps_bytes",
             "frame_bytes",
+            "compare_diffraction_bytes",
+            "compare_diffraction_indices",
             "compare_virtual_image_bytes",
         ):
             try:
@@ -5727,6 +5739,50 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # js/stats.ts does mean/min/max/std on the Float32Array directly,
         # avoiding 4 sync trait round-trips per scan-position click).
         self.frame_bytes = payload
+        if self.vi_roi_mode != "off":
+            self._compute_vi_roi_dp()
+        else:
+            self._publish_all_diffraction()
+
+    def _publish_all_diffraction(self, scan_indices=None):
+        """Publish each visible method independently for one shared selection."""
+        if self.view_mode == "multiple" and self.compare_dp_mode == "all":
+            indices = list(self.compare_panel_indices)
+            if scan_indices is None:
+                frames = [self._diffraction_frame_for_index(index) for index in indices]
+            else:
+                from quantem.gpu.detector import prepare
+
+                frames = []
+                source = getattr(self, "_cuda_compute_data", None)
+                if source is None:
+                    source = self._data
+                for index in indices:
+                    datasets = getattr(source, "datasets", None)
+                    if datasets is not None:
+                        data = datasets[index]
+                    elif type(source).__name__ == "Dataset5dstem":
+                        data = source.frame(index)
+                    else:
+                        data = source[index] if self.n_frames > 1 else source
+                    session = prepare(data)
+                    try:
+                        frames.append(session.reduce_frames(scan_indices, self.vi_roi_reduce))
+                    finally:
+                        session.close()
+            if frames:
+                # Only the requested native patterns travel to the browser.
+                # The full source cube remains resident and unchanged.
+                frames = [frame.detach().to(dtype=torch.float32).cpu().numpy()
+                          if isinstance(frame, torch.Tensor) else np.asarray(frame, dtype=np.float32)
+                          for frame in frames]
+                with self.hold_sync():
+                    self.compare_diffraction_indices = indices
+                    self.compare_diffraction_bytes = np.stack(frames).tobytes()
+        else:
+            with self.hold_sync():
+                self.compare_diffraction_bytes = b""
+                self.compare_diffraction_indices = []
 
     def _diffraction_frame_for_index(self, frame_idx: int):
         """Return one diffraction pattern at the current scan position."""
@@ -5972,6 +6028,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _on_vi_roi_center_change(self, change=None):
         """Apply compound (row, col) update atomically (avoids split-trait race)."""
+        started = time.perf_counter()
         if change and "new" in change:
             row, col = change["new"]
             self.unobserve(
@@ -5984,13 +6041,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         if self.vi_roi_mode == "off":
             self.vi_roi_dp_bytes = b""
-            return
-        self._compute_vi_roi_dp()
+            self._publish_all_diffraction()
+        else:
+            self._compute_vi_roi_dp()
+        revision = self.vi_roi_receipt[3] + 1 if self.vi_roi_receipt else 1
+        self.vi_roi_receipt = [
+            self.vi_roi_center_row, self.vi_roi_center_col,
+            (time.perf_counter() - started) * 1000, float(revision),
+        ]
 
     def _on_vi_roi_change(self, change=None):
         """Recompute reduced DP when VI ROI or reduction changes."""
         if self.vi_roi_mode == "off":
             self.vi_roi_dp_bytes = b""
+            self._publish_all_diffraction()
             return
         self._compute_vi_roi_dp()
 
@@ -6025,6 +6089,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         n_positions = int(mask.sum())
         if n_positions == 0:
             self.vi_roi_dp_bytes = b""
+            with self.hold_sync():
+                self.compare_diffraction_bytes = b""
+                self.compare_diffraction_indices = []
             return
         # Flat scan indices inside the ROI, reduced (mean/sum/max) by the
         # compute backend (CUDA RawKernel, raw Metal for chunk-backed frames, or
@@ -6035,6 +6102,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         dp = self._compute.reduce_frames(indices, self.vi_roi_reduce)
         self.vi_roi_dp_bytes = np.ascontiguousarray(dp, dtype=np.float32).tobytes()
+        self._publish_all_diffraction(indices)
 
     def _create_circular_mask(self, cx: float, cy: float, radius: float):
         """Create circular mask (boolean tensor on device)."""
@@ -9581,7 +9649,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         det_pixels = int(self._det_shape[0] * self._det_shape[1])
         target_device = data_4d.device
-        mask_bool = mask.to(device=target_device, dtype=torch.bool).reshape(-1)
+        mask_bool = torch.as_tensor(mask, device=target_device, dtype=torch.bool).reshape(-1)
         selected = int(mask_bool.sum().item())
         if selected <= 0:
             return torch.zeros(
@@ -9622,7 +9690,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         )
         target_device = data_4d.device
-        mask_f = mask.to(target_device).float()
+        mask_f = torch.as_tensor(mask, device=target_device, dtype=torch.float32)
         rows_per_chunk = self._chunk_rows()
         out = torch.zeros(self._scan_shape, dtype=torch.float32, device=target_device)
         for i in range(0, data_4d.shape[0], rows_per_chunk):

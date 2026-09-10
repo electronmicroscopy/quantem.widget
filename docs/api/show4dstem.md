@@ -1,5 +1,23 @@
 # Show4DSTEM
 
+## Compare diffraction patterns side by side
+
+For a live notebook with several datasets, use
+`Show4DSTEM(stack, view_mode="multiple", compare_dp_mode="all")`.
+Each visible dataset shows its native diffraction pattern at the same scan
+position. Circle, Square or Rect scan selection with Mean compares each
+dataset over identical scan positions, never an average across datasets.
+Dragging the detector in any diffraction tile updates the shared virtual
+detector and all virtual images before release.
+
+The diffraction grid shares the virtual-image grid's zoom, pan, reset,
+scale bars and column layout. Playback is available in Single view only.
+The `all` mode requires a live kernel; standalone export is not qualified for
+this layout. Existing `selected` and `average` modes remain available.
+Packed sources require their own reduction support and are not established
+by this dense-array feature. See the
+[interaction contract](../maintainer/all-diffraction-comparison.md).
+
 Public import:
 
 ```python

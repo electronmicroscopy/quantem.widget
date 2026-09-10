@@ -1,5 +1,21 @@
 # Show4DSTEM Storyboard
 
+### S4D-21: Compare Native Patterns With Shared Live Controls
+
+- Open a live multiple-dataset viewer with `compare_dp_mode="all"`.
+- Select a scan point and confirm that every diffraction tile follows it.
+- Select Circle/Mean in scan space; drag while holding the pointer and confirm
+  that all patterns update over the same region before release.
+- Drag in each diffraction tile and confirm that the common virtual detector
+  and every virtual image update before release. Repeat with Point and Annular.
+- Change columns, zoom, Shift-drag pan and reset; retain calibrated or pixel
+  scale bars and shared contrast. FFT/profile remain primary-panel tools.
+- Switch Single to Multiple during playback. Playback must stop and its controls
+  disappear; returning to Single must remain paused.
+- Check signed-array preservation independently of the display transform.
+  Do not count these live dense-array checks as packed, portable HTML, physical
+  phone or 120-FPS qualification.
+
 Use with [Storyboard](storyboard).
 
 MacBook support is a first-class Show4DSTEM target, not an afterthought. For
