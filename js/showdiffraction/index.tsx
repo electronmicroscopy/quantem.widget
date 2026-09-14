@@ -568,6 +568,9 @@ function ShowDiffraction() {
   const [, setRingRemoveRequest] = useModelState<number>("_ring_remove_request");
   const [dpColormap, setDpColormap] = useModelState<string>("dp_colormap");
   const [dpScaleMode, setDpScaleMode] = useModelState<string>("dp_scale_mode");
+  const [displayDenoise, setDisplayDenoise] = useModelState<string>("denoise");
+  const [detectDenoise, setDetectDenoise] = useModelState<string>("detect_denoise");
+  const [showDetectionView, setShowDetectionView] = useModelState<boolean>("show_detection_view");
   const [dpInvert, setDpInvert] = useModelState<boolean>("dp_invert");
   const [dpVminPct, setDpVminPct] = useModelState<number>("dp_vmin_pct");
   const [dpVmaxPct, setDpVmaxPct] = useModelState<number>("dp_vmax_pct");
@@ -1732,6 +1735,14 @@ function ShowDiffraction() {
                 <MenuItem value="log" sx={{ fontSize: 10 }}>Log</MenuItem>
                 <MenuItem value="sqrt" sx={{ fontSize: 10 }}>Sqrt</MenuItem>
               </Select>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Denoise</Typography>
+              <Select size="small" value={displayDenoise} onChange={(e) => setDisplayDenoise(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={topToolbarMenuProps} title="Display-only denoise">
+                {["none", "gaussian", "anscombe", "nlm", "tv"].map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
+              </Select>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Detect</Typography>
+              <Select size="small" value={detectDenoise} onChange={(e) => setDetectDenoise(String(e.target.value))} sx={{ ...themedSelect, minWidth: 70 }} MenuProps={topToolbarMenuProps} title="Detection preprocessing">
+                {["auto", "none", "gaussian", "anscombe"].map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
+              </Select>
               {centerMode === "manual" && (
                 <Typography sx={{ ...typography.value, color: themeColors.accent }}>click to set</Typography>
               )}
@@ -1891,6 +1902,7 @@ function ShowDiffraction() {
               ["Azim", "Azimuthal profile", showAzimuthal, () => setShowAzimuthal(!showAzimuthal)],
               ["HKL", "hkl labels", showHkl, () => setShowHkl(!showHkl)],
               ["Mask View", "Mask overlay", showMask, () => setShowMask(!showMask)],
+              ["Detect View", "Detection frame view", showDetectionView, () => setShowDetectionView(!showDetectionView)],
               ["Invert", "Invert colormap", dpInvert, () => setDpInvert(!dpInvert)],
               ["Stats", "Statistics", showStats, () => setShowStats(!showStats)],
               ["Quality", "Analysis quality", showQc, toggleQuality],
