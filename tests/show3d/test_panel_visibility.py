@@ -182,7 +182,7 @@ def test_show3d_paged_frontend_preserves_view_transform() -> None:
     assert "sourcePanelIndices" in packed_transform
 
     manual_commit_helper = frontend.split("const commitSlice = (idx: number) => {", 1)[1].split(
-        "const handleLoopSliderMouseDown",
+        "const handleLoopSliderPointerDownCapture",
         1,
     )[0]
     assert "setLiveSliceIdx(next)" in manual_commit_helper

@@ -478,9 +478,7 @@ displayed Show2D gallery to add each completed EMD as a full-resolution panel,
 without rerunning the cell, creating another widget, or losing the curation and
 measurement state of images already present.
 
-**Primary widgets**: ``Show2D.from_folder(...)`` in live JupyterLab. ShowFolder
-is a separate cached-preview and selection workflow; a ShowFolder refresh or a
-standalone HTML snapshot does not prove this direct full-resolution watcher.
+**Primary widgets**: ``Show2D.from_folder(...)`` in live JupyterLab. A standalone HTML snapshot does not prove the live full-resolution watcher.
 
 **Data to use**: Genuine compatible Velox image EMD files from one acquisition
 session, copied through atomic rename into a temporary watched folder. Use at

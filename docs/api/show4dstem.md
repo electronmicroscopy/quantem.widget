@@ -90,6 +90,23 @@ CLI `--backend webgpu --html` folder export for large standalone HDF5 review.
 
 ## Backend ownership
 
+Fit the diffraction disk once and supply the same geometry to the viewer and
+virtual detectors. For example, inspect a bounded region as a GPU tensor:
+
+```python
+from quantem.gpu import detector
+
+data = load(path)
+patterns = data[100:164, 100:164]
+mean_dp = detector.mean(patterns)
+center, radius = detector.fit_probe(mean_dp)
+Show4DSTEM(patterns, center=center, bf_radius=radius)
+```
+
+The center is `(row, column)` and the radius is in detector pixels. Supplying
+both skips the viewer's automatic disk estimation. `fit_probe` estimates disk
+geometry, not the complex probe or its aberrations.
+
 Show4DSTEM has two different acceleration surfaces:
 
 - **Live Python-backed viewers** use the data object returned by ``load(...)``.
@@ -199,7 +216,7 @@ preset, and matching future-process opens reuse cached results.
 loading every master just to average the diffraction panel.
 
 This path uses the original master data at the requested `det_bin` and `dtype`.
-It does not use ShowFolder's cached thumbnails. Set `det_bin=1` and keep the
+Set `det_bin=1` and keep the
 count-preserving dtype when full detector resolution is required.
 
 For folders with tens or hundreds of masters, `page_size` is the number of
@@ -345,7 +362,7 @@ widget.clear_preview_cache()
 ```
 
 `clear_preview_cache()` removes this folder/configuration's persistent preview
-namespace. It does not clear ShowFolder's thumbnail cache and does not free raw
+namespace. It does not free raw
 GPU memory. An active widget may repopulate the namespace when another standard
 preset or page is computed; construct it with `preview_cache=False` when the
 namespace must stay disabled. Maintainer verification follows

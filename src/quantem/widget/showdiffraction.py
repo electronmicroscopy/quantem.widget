@@ -21,6 +21,7 @@ from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
 from scipy.signal.windows import tukey
 
+from quantem.gpu.io.models import Dataset4dstemGPU
 from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.display_filter import apply_display_filter
@@ -1012,7 +1013,7 @@ def normalize_data_input(
 ):
     """Unwrap Dataset-like input into array, title, and calibrations."""
     k_calibrated = False
-    if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
+    if isinstance(data, Dataset4dstemGPU):
         metadata = data.metadata or {}
         if pixel_size is None and metadata.get("pixel_size") is not None:
             pixel_size = float(metadata["pixel_size"])
@@ -1686,7 +1687,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     data : np.ndarray or torch.Tensor
         2D ``(det_rows, det_cols)`` single pattern or 3D
         ``(n_frames, det_rows, det_cols)`` stack of patterns. A quantem dataset
-        or io ``LoadResult`` is also accepted and unwrapped. 4D input raises.
+        or io ``Dataset4dstemGPU`` is also accepted and unwrapped. 4D input raises.
     k_pixel_size : float, optional
         k-space sampling in 1/Å per pixel. Marks the pattern calibrated.
     pixel_size : float, optional

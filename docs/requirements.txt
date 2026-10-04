@@ -7,3 +7,6 @@ jupyter-book>=1.0,<2
 # click handlers; _static/nav-toggle-fix.js rewires the visible button and
 # scripts/check_docs_nav_toggle.py guards the built pages in CI.
 ipywidgets
+# PlanPtycho tutorial builds SrTiO3 with ase and projects it with abTEM
+abtem>=1.0
+spglib>=2

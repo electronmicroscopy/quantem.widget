@@ -498,7 +498,7 @@ def test_show3d_many_panel_zoom_uses_the_resident_gpu_transform_path():
     """Many-panel zoom samples the packed resident stack without retransfers."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
     colormaps = (
-        ROOT / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
+        ROOT / "js" / ".generated" / "engine" / "display" / "backends" / "webgpu" / "colormaps.ts"
     ).read_text(encoding="utf-8")
 
     assert "const renderGpuPackedPanelTransformSlice" in show3d
@@ -515,7 +515,6 @@ def test_show3d_many_panel_zoom_uses_the_resident_gpu_transform_path():
     assert "params.smooth_sample == 1u" in colormaps
     assert "pu[11] = shouldSmoothDirectSample(opts.smooth" in colormaps
     assert 'return drawCanvasTransformFallback("canvas-packed-transform");' in show3d
-
 
 
 def test_show3d_smooth_repaints_the_resident_gpu_stack_without_reupload():
@@ -612,7 +611,6 @@ def test_show3d_stress_runner_covers_single_file_resident_exports():
     assert "canvas became blank after zoom/pan stress" in script
     assert "scripts/widget_show3d_stress.py" in docs
     assert "one-time WebGPU upload" in docs
-
 
 
 def test_show3d_filtered_playback_waits_for_cached_display_frames():
@@ -737,7 +735,6 @@ def test_show3d_uses_one_embedded_resident_transport_contract():
     assert "gpuFrameCacheUploaded" in show3d_js
 
 
-
 def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
     """C1: user selects FFT Bottom, expect FFT below even for one panel."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
@@ -826,7 +823,6 @@ def test_show3d_sidecar_and_range_server_paths_are_removed():
     assert "offlineStackUrl" not in frontend
     assert "Failed to load sidecar stack" not in frontend
     assert not (ROOT / "scripts" / "serve_sidecar_range.py").exists()
-
 
 
 def test_show3d_playback_row_bookmarks_current_frame_contract():
@@ -1031,7 +1027,6 @@ def test_widget_performance_docs_cover_widget_stories_and_fft_cache():
         "Show4DSTEM",
         "ShowEDS",
         "ShowDiffraction",
-        "ShowFolder",
     ):
         assert f"| {widget} |" in performance
 

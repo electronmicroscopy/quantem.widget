@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 import torch
 
+from quantem.gpu.io.models import Dataset4dstemGPU
+
 from quantem.widget.show4dstem import Show4DSTEM
 
 
@@ -464,7 +466,7 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
         nonlocal calls
         calls += 1
         idx = masters.index(Path(path))
-        return SimpleNamespace(
+        return Dataset4dstemGPU(
             data=torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16),
             metadata={},
         )
@@ -504,7 +506,7 @@ def test_from_folder_second_widget_paints_cache_before_raw_refresh(
         nonlocal calls
         calls += 1
         idx = masters.index(Path(path))
-        return SimpleNamespace(
+        return Dataset4dstemGPU(
             data=torch.full((4, 4, 8, 8), idx + 1, dtype=torch.uint16),
             metadata={},
         )
@@ -605,7 +607,7 @@ def test_running_folder_reloads_replaced_master_instead_of_host_cache(
         source = Path(path)
         value = int(source.read_bytes()[0])
         calls.append((source.name, value))
-        return SimpleNamespace(
+        return Dataset4dstemGPU(
             data=torch.full((3, 3, 8, 8), value, dtype=torch.uint16),
             metadata={},
         )

@@ -49,8 +49,8 @@ for backend setup, Colab instructions, and verification.
 | `ShowPtycho` | Interactive SSB phase and aberration review | [API](https://electronmicroscopy.github.io/quantem.widget/api/showptycho.html) |
 | `ShowDiffraction` | Measure diffraction spots, rings, spacing, and angles | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/showdiffraction.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/showdiffraction.html) |
 | `ChooseLattice` | Select an origin and lattice vectors | [API](https://electronmicroscopy.github.io/quantem.widget/api/choose-lattice.html) |
+| `PlanPtycho` | Check multislice ptychography settings against a known crystal before the experiment | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/planptycho.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/planptycho.html) |
 | `ShowEDS` | Explore linked EDS/EELS maps and spectra | — |
-| `ShowFolder` | Browse, group, and select microscopy session files | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/showfolder.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/showfolder.html) |
 
 ## Documentation
 
@@ -100,3 +100,6 @@ can all belong in
 
 Questions and bug reports belong in the
 [issue tracker](https://github.com/electronmicroscopy/quantem.widget/issues).
+
+Opt-in [experimental ANS sources](docs/developer/experimental-ans.md) support
+GPU-resident Show4DSTEM with documented format and performance limits.

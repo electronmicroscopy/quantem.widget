@@ -3963,8 +3963,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     ) -> None:
         """Replace the displayed image stack without rebuilding the widget.
 
-        This is the light-weight live-update path used by ShowFolder watched
-        selections. It preserves display controls such as colormap, contrast,
+        This updates a live image selection. It preserves display controls such as colormap, contrast,
         FFT/profile toggles, and gallery layout, while resetting per-panel state
         tied to the previous image count or dimensions.
         """

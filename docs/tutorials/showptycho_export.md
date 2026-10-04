@@ -8,7 +8,7 @@ you tune aberrations.
 
 If you just want the interactive widget inside a notebook, see
 [ShowPtycho in Jupyter](showptycho.md) instead. This page assumes you already
-have a **fitted** `ssb` (solved with `ssb.fit(trials=200,
+have a **fitted** `ssb` (solved with `ssb.find_aberrations(trials=200,
 refinement="nelder-mead")`; an unfitted export uses only the supplied starting
 aberrations).
 
@@ -17,7 +17,7 @@ aberrations).
 ```python
 from quantem.widget import ShowPtycho
 
-# ssb is already fitted: result = ssb.fit(trials=200, refinement="nelder-mead")
+# ssb is already fitted: result = ssb.find_aberrations(trials=200, refinement="nelder-mead")
 w = ShowPtycho(ssb, source_file="scan_master.h5", save_dir="out/")
 w.export("out/", title="my sample SSB")
 ```

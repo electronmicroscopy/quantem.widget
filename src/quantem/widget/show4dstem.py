@@ -431,6 +431,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # on-demand byte-range frame reads.
     _h5_url = traitlets.Unicode("").tag(sync=True)
     _h5_urls = traitlets.Unicode("").tag(sync=True)
+    # Browser-resident lossless (rANS) series folder: the WebGPU frontend decodes
+    # on the GPU and never uploads per interaction. Set by the rANS export.
+    _rans_url = traitlets.Unicode("").tag(sync=True)
+    _rans_format = traitlets.Unicode("detector-rans-v1").tag(sync=True)
+    _rans_files = traitlets.Unicode("[]").tag(sync=True)
+    _rans_dtype = traitlets.Unicode("uint16").tag(sync=True)
     _h5_uint8_lossless = traitlets.Bool(False).tag(sync=True)
     # Lazy mode: a sidecar bundle URL (radial profile + CoM + frame index + data files). The JS
     # derives the virtual image from the ~100 MB profile in VRAM and lazy-fetches CBED frames from
@@ -612,6 +618,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         sync=True
     )
     compare_virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # Optional complete resident-batch metadata. Empty dictionaries retain the
+    # existing float32 comparison path; resident owners publish dtype explicitly.
+    resident_batch_info = traitlets.Dict(default_value={}).tag(sync=True)
+    resident_stream = traitlets.Dict(default_value={}).tag(sync=True)
     compare_panel_count = traitlets.Int(0).tag(sync=True)
     compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(
         sync=True
@@ -1132,9 +1142,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # Scalar pins the coefficient; tuple keeps the production search
             # range from SSB.optimize defaults. Locking C12 pins phi12 too:
             # astigmatism is a magnitude+angle pair.
+            # nm: the SSB public API is nm (C10 +-40 nm, C12 0-10 nm = the backends' default physical span)
             optimize_aberrations = {
-                "C10_nm": locked_c10 if lock_c10 else (-400.0, 400.0),
-                "C12_nm": locked_c12 if lock_c12 else (0.0, 100.0),
+                "C10_nm": locked_c10 if lock_c10 else (-40.0, 40.0),
+                "C12_nm": locked_c12 if lock_c12 else (0.0, 10.0),
                 "phi12_deg": locked_phi12_deg if lock_c12 else (-90.0, 90.0),
             }
 
@@ -1385,6 +1396,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         offline_dtype: str = "uint8",
         h5_url: str | None = None,
         h5_urls: Sequence[str] | None = None,
+        rans_url: str | None = None,
+        rans_count: int = 1,
+        rans_format: str = "detector-rans-v1",
+        rans_files: Sequence[str] | None = None,
+        rans_dtype: str = "uint16",
         lazy_url: str | None = None,
         lazy_urls: Sequence[str] | None = None,
         h5_uint8_lossless: bool = False,
@@ -1534,7 +1550,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # browser VRAM and create indistinguishable compare panels.
         if webgpu_h5_urls and webgpu_lazy_urls:
             raise ValueError("Use h5_urls= or lazy_urls=, not both.")
-        webgpu_source_count = len(webgpu_lazy_urls) or len(webgpu_h5_urls)
+        if rans_format not in {"detector-rans-v1", "qem-v1", "source112-tans1024-pair-v1"}:
+            raise ValueError("Select detector-rans-v1, qem-v1, or source112-tans1024-pair-v1.")
+        if rans_format == "source112-tans1024-pair-v1":
+            if (not rans_url or not isinstance(rans_count, (int, np.integer))
+                    or not 1 <= rans_count <= 66
+                    or (tuple(scan_shape) if scan_shape is not None else ()) != (512, 512)
+                    or (tuple(detector_shape) if detector_shape is not None else ()) != (192, 192)
+                    or rans_dtype != "uint16"):
+                raise ValueError(
+                    "Source112 requires 1 to 66 native uint16 acquisitions with "
+                    "scan_shape=(512, 512) and detector_shape=(192, 192)."
+                )
+        if rans_format == "qem-v1":
+            if not rans_url or not rans_files or len(rans_files) != int(rans_count):
+                raise ValueError("QEM requires a folder hint and one local filename per acquisition.")
+            if rans_dtype not in {"uint8", "uint16"}:
+                raise ValueError("QEM requires its native uint8 or uint16 dtype.")
+        if rans_url and (webgpu_h5_urls or webgpu_lazy_urls):
+            raise ValueError("Use rans_url= alone; it is a complete browser-resident source.")
+        webgpu_source_count = len(webgpu_lazy_urls) or len(webgpu_h5_urls) or (int(rans_count) if rans_url else 0)
         if webgpu_source_count:
             webgpu_h5_urls = list(dict.fromkeys(webgpu_h5_urls))
             if scan_shape is None:
@@ -1557,7 +1592,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         # Extract underlying array / tensor + auto-calibrate from Dataset input
         # (duck-typed via the dual-slot private attributes _tensor / _array).
-        if not webgpu_h5_urls:
+        if not webgpu_h5_urls and not rans_url:
             is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(
                 data, "frame"
             )
@@ -1658,7 +1693,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._path_points: list[tuple[int, int]] = []
         # Suppress per-trait recompute during apply_preset batch writes
         self._suppress_roi_recompute = False
-        # The public factory unwraps LoadResult explicitly. This implementation
+        # The public factory unwraps Dataset explicitly. This implementation
         # receives the typed GPU data payload.
         self._webgpu_h5_source = bool(webgpu_source_count)
         self._cuda_compute_data = None
@@ -1695,7 +1730,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 data = torch.from_dlpack(data)
             # Torch tensor input keeps its device (lets user pin a specific GPU via
             # `data.cuda(1)`). NumPy / Dataset input gets default-validated device.
-            if is_dataset5dstem:
+            is_resident_data = getattr(self, "_resident_source", None) is data
+            if is_resident_data:
+                # Only small UI coordinates/display products use Torch CPU.
+                # Scientific operations stay on the explicitly owned CUDA executor.
+                self._device = torch.device("cpu")
+                self._data_pre = data
+                data_np = None
+            elif is_dataset5dstem:
                 self._device = data.device
                 self._data_pre = data
                 data_np = None
@@ -1760,7 +1802,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         elif self._data_pre is not None:
             self._data = (
                 self._data_pre
-                if is_dataset5dstem or self._data_pre.device == self._device
+                if is_dataset5dstem or is_resident_data or self._data_pre.device == self._device
                 else self._data_pre.to(self._device)
             )
             del self._data_pre
@@ -1863,6 +1905,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._offline_codec = offline_codec
             self._h5_url = webgpu_h5_urls[0] if len(webgpu_h5_urls) == 1 else ""
             self._h5_urls = json.dumps(webgpu_h5_urls) if len(webgpu_h5_urls) > 1 else ""
+            self._rans_url = str(rans_url) if rans_url else ""
+            self._rans_format = rans_format
+            self._rans_files = json.dumps(list(rans_files or []))
+            self._rans_dtype = rans_dtype
             self._lazy_url = webgpu_lazy_urls[0] if len(webgpu_lazy_urls) == 1 else ""
             self._lazy_urls = (
                 json.dumps(webgpu_lazy_urls) if len(webgpu_lazy_urls) > 1 else ""
@@ -1971,6 +2017,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.gpu_memory_label = (
                 "Browser WebGPU lazy source"
                 if webgpu_lazy_urls
+                else "Browser WebGPU lossless encoded source"
+                if rans_url
                 else "Browser WebGPU HDF5 source"
             )
             self.memory_warning = ""
@@ -1991,6 +2039,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             first_frame = self._data
         first_frame_sample = first_frame[0] if first_frame.ndim >= 3 else first_frame
+        if isinstance(first_frame_sample, np.ndarray):
+            first_frame_sample = torch.from_numpy(np.array(first_frame_sample, copy=True))
         if not torch.is_floating_point(first_frame_sample):
             first_frame_sample = first_frame_sample.float()
         self.dp_global_min = max(float(first_frame_sample.min()), MIN_LOG_VALUE)
@@ -2973,6 +3023,24 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     self.shape_rows, self.shape_cols, self.det_rows, self.det_cols
                 )
             )
+            if getattr(frame4, "_bounded_detector_source", False):
+                # HTML export explicitly requests an output array. Read small
+                # device windows; do not expand the encoded acquisition on GPU.
+                arr = np.empty((self.shape_rows, self.shape_cols,
+                                self.det_rows // det_bin, self.det_cols // det_bin), np.float32)
+                frame_bytes = self.det_rows * self.det_cols * 4
+                columns_per_read = max(1, min(self.shape_cols, (32 << 20) // frame_bytes))
+                for row in range(self.shape_rows):
+                    for col in range(0, self.shape_cols, columns_per_read):
+                        stop = min(col + columns_per_read, self.shape_cols)
+                        slab = frame4.read(scan_region=(row, row + 1, col, stop)).float()
+                        if det_bin > 1:
+                            slab = slab.reshape(1, stop - col,
+                                self.det_rows // det_bin, det_bin,
+                                self.det_cols // det_bin, det_bin).mean(dim=(3, 5))
+                        arr[row:row + 1, col:stop] = slab.cpu().numpy()
+                arr = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
+                return _finish_export_chunk(arr, round_values=scan_bin > 1 or det_bin > 1)
             if det_bin <= 1:
                 arr = frame4.detach().to("cpu").numpy()
                 arr = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
@@ -3848,7 +3916,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         panel_px = int(self.panel_width_px or max_px)
         panel_px = max(64, min(panel_px, int(max_px)))
-        gap = max(2, int(panel_px * 0.015))
+        # same gap as the live view (0 by default); a forced white stripe between
+        # the scan image and the pattern read as a rendering defect
+        gap = max(0, int(self.compare_panel_gap_px))
         title_h = 0
         title = str(self.title or "").strip()
         font = ImageFont.load_default()
@@ -5096,10 +5166,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
 
         draw = ImageDraw.Draw(image, mode="RGBA")
-        font = ImageFont.load_default()
+        # Show2D's static overlay geometry (16 px label, 5 px bar, 4 px label gap,
+        # 12 px margin) in the widget's sans family, so 4D and 2D renders match;
+        # PIL's default bitmap font is 10 px and does not scale with the panel
+        from matplotlib import font_manager
+
+        from quantem.widget.show2d import _static_overlay_font
+
+        font = ImageFont.truetype(
+            font_manager.findfont(font_manager.FontProperties(family=_static_overlay_font())), 16
+        )
         width, height = image.size
-        margin = max(8, int(min(width, height) * 0.04))
-        thickness = max(2, int(height * 0.01))
+        margin = 12
+        thickness = 5
         target_bar_px = max(36, int(width * 0.15))
         target_physical = float(target_bar_px) * float(pixel_size)
         nice_physical = self._round_to_nice_value(target_physical)
@@ -9127,7 +9206,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 return
             mask = self._current_detector_mask()
             images = self._compare_virtual_images_for_display_indices(indices, mask)
-            if not images:
+            if len(images) == 0:
                 self._set_gpu_memory_warning(
                     action="compute any multiple-panel virtual images",
                     requested=len(indices),
@@ -9152,9 +9231,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 )
             else:
                 self._clear_gpu_memory_warning()
-            stack = np.ascontiguousarray(np.stack(images, axis=0), dtype=np.float32)
+            # Resident backends can return one contiguous batch directly. Avoid
+            # splitting it into images and stacking the same allocation again.
+            stack = np.ascontiguousarray(images, dtype=np.float32)
+            payload = stack.tobytes()
             with self.hold_trait_notifications():
-                self.compare_virtual_image_bytes = stack.tobytes()
+                self.compare_virtual_image_bytes = payload
                 self.compare_panel_count = len(shown_indices)
                 self.compare_panel_indices = shown_indices
                 self.compare_status = self._compare_status_for_indices(
@@ -9166,7 +9248,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     partial_reason=partial_reason,
                 )
             self._store_cached_compare_preset(
-                stack.tobytes(),
+                payload,
                 tuple(shown_indices),
                 self.compare_status,
             )
@@ -9675,6 +9757,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         return out.reshape(self._scan_shape)
 
     def _masked_sum_tensor_for_frame_data(self, data, mask) -> torch.Tensor | None:
+        if getattr(data, '_bounded_detector_source', False):
+            from quantem.gpu.detector import prepare
+
+            return prepare(data).masked_sum(mask, output='native')
         sparse = self._sparse_masked_sum_tensor_for_frame_data(data, mask)
         if sparse is not None:
             return sparse
@@ -9812,6 +9898,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             row = int(max(0, min(round(cy), self._det_shape[0] - 1)))
             col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
+            if getattr(data, '_bounded_detector_source', False):
+                mask = torch.zeros(self._det_shape, dtype=torch.bool, device=data.device)
+                mask[row, col] = True
+                return self._masked_sum_tensor_for_frame_data(data, mask).cpu().numpy()
             if data.ndim == 4:
                 vi = data[:, :, row, col]
             else:

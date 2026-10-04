@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quantem.widget"
-version = "0.0.1rc30"
+version = "0.0.1rc39"
 description = "Interactive custom Python widgets for electron microscopy"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "quantem>=0.1.8",
-    "quantem.gpu[movie]>=0.0.1rc6",
+    "quantem.gpu[movie]>=0.0.1rc11",
     "anywidget>=0.11.0",
     # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
     "jupyterlab_widgets>=3.0.10",
@@ -40,6 +40,8 @@ dependencies = [
 # Not published on PyPI yet so cannot be a hard depedency
 # pip install quantem.widget[hub] once available
 hub = ["quantem.data>=0.0.1rc1"]
+# PlanPtycho builds crystals from CIF / Materials Project (spglib: primitive -> conventional cell) and projects them with abTEM (brings ase)
+crystal = ["abtem>=1.0", "spglib>=2"]
 test = [
     "ipykernel>=6",
     "pytest>=8",
@@ -51,6 +53,9 @@ testpaths = ["tests"]
 
 [project.scripts]
 quantem = "quantem.widget.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantem"]

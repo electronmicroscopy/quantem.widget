@@ -1,6 +1,19 @@
+import { useScanPositionState } from "./scanPositionState";
+import { captureGpuCanvas } from "./captureGpuCanvas";
+import { ResidentDpDisplay, type ResidentPatternSource, type DpDisplayOptions } from "./residentDp";
+import { createLatestFrameQueue } from "./latestFrameQueue";
+import { liveRoiGeometry } from "./roiRadiusDrag";
+import { createDpPointerOwner } from "./dpPointerOwner";
 /// <reference types="@webgpu/types" />
+import { residentDisplayValues, residentRawValues, residentScalarType, residentDivisor, type ResidentBatchInfo, type ResidentValues } from "./batchValues";
+import { useResidentTransport } from "./residentTransport";
+import { useResidentPerformance, useResidentRenderTiming, useResidentChanges } from "./residentPerformance";
 import * as React from "react";
 import { createRender, useModelState, useModel } from "@anywidget/react";
+import { CompareBatchCanvas } from "./batchCanvas";
+import { readSettledCompareHistogram } from "./settledHistogram";
+import { sharedCanvasLayout } from "./sharedCanvasLayout";
+import { source112MeanDelta, sameDetectorMaskSupport, countImagesForRender, createComparePaintScheduler, type CompareCountImages, type CompareGpuRenderer } from "./source112MeanDelta";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -22,7 +35,7 @@ import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
-import { COLORMAPS, GPUColormapEngine, applyColormap } from "../colormaps";
+import { COLORMAPS, GPUColormapEngine, applyColormap, type Uint32ImageView } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, reciprocalCoordinatesFromShiftedOffset } from "../fft";
 import { findFFTPeakWebGPU, sampleLineProfileWebGPU } from "../geometry";
 import {
@@ -40,7 +53,9 @@ import {
   setShow4DSTEMLocalFiles,
   show4DSTEMHasLocalFiles,
 } from "../.generated/engine/io/backends/webgpu/local-h5";
-import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device/webgpu";
+import { getGPUInfo, isSoftwareGPUAdapter, getGPUDevice } from "../.generated/engine/device/webgpu";
+import { Source112ResidentSet } from "../.generated/engine/detector/compute/webgpu/source112";
+import { RansResidentSet, isRansBatch } from "../.generated/engine/detector/compute/webgpu/rans";
 import { LazyShow4DSTEM } from "./lazy";
 import { AllDiffractionGrid } from "./AllDiffractionGrid";
 import { latestRegion } from "./latestRegion";
@@ -1253,7 +1268,7 @@ function Histogram({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
@@ -1491,9 +1506,12 @@ function cropSingleROI(
   return { cropped, cropW, cropH };
 }
 
+const EMPTY_COMPARE_PANELS: Float32Array[] = [];
+
 interface CompareVirtualGridProps {
   kind?: "virtual" | "diffraction";
   scanRegion?: {mode: string; row: number; col: number; radius: number; width: number; height: number};
+  batchInfo?: ResidentBatchInfo;
   bytes: DataView | null | undefined;
   count: number;
   indices: number[];
@@ -1518,6 +1536,7 @@ interface CompareVirtualGridProps {
   cursorRow: number;
   cursorCol: number;
   status: string;
+  sourceLoading?: boolean;
   themeColors: ReturnType<typeof useTheme>["colors"];
   panelChromeVisible: boolean;
   showScaleBar: boolean;
@@ -1544,12 +1563,14 @@ interface CompareVirtualGridProps {
     paintedIndices: number[],
   ) => void;
   onGpuPaint?: (panelCount: number) => void;
-  onGpuRendererReady?: (renderNow: (() => number) | null) => void;
+  onGpuRenderError?: (error: unknown) => void;
+  onGpuRendererReady?: (renderNow: CompareGpuRenderer | null) => void;
 }
 
-function CompareVirtualGrid({
+const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   kind = "virtual",
   scanRegion,
+  batchInfo,
   bytes,
   count,
   indices,
@@ -1572,6 +1593,7 @@ function CompareVirtualGrid({
   cursorRow,
   cursorCol,
   status,
+  sourceLoading = false,
   themeColors,
   panelChromeVisible,
   showScaleBar,
@@ -1595,15 +1617,35 @@ function CompareVirtualGrid({
   onPositionChange,
   onFreshVisiblePaint,
   onGpuPaint,
+  onGpuRenderError,
   onGpuRendererReady,
 }: CompareVirtualGridProps) {
   const positionRafRef = React.useRef(0);
   const panDragRef = React.useRef<{col:number; row:number; panX:number; panY:number} | null>(null);
   const pendingPositionRef = React.useRef<[number, number]>([0, 0]);
   React.useEffect(() => () => cancelAnimationFrame(positionRafRef.current), []);
+  const batchModel = useModel();
+  const batchCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const batchGridRef = React.useRef<HTMLDivElement | null>(null);
+  const batchRendererRef = React.useRef<Awaited<ReturnType<typeof CompareBatchCanvas.create>> | null>(null);
+  const [batchReady, setBatchReady] = React.useState(false);
+  const [batchFailed, setBatchFailed] = React.useState(false);
+  const residentSource = kind !== "diffraction" && Boolean(batchModel.get("_rans_url"));
+  const sharedGpuEnabled = Boolean(residentSource && gpuEngine && gpuSlots?.size && !progressivePage && !reorderMode);
+  const [sharedGpuReady, setSharedGpuReady] = React.useState(false);
+  const sharedGpuReadyRef = React.useRef(false);
+  const sharedContextRef = React.useRef<GPUCanvasContext | null>(null);
+  const sharedLayoutRef = React.useRef<ReturnType<typeof sharedCanvasLayout>>(null);
+  const scalarType = residentScalarType(batchInfo);
+  const integerCounts = scalarType !== "<f4";
+  const batchEnabled = Boolean(!sharedGpuEnabled && batchInfo?.request_id && !progressivePage && !autoContrast && bytes && count > 0);
+  useResidentRenderTiming(batchEnabled, "grid_render_to_commit_ms");
+  const batchTimingRef = React.useRef({ received: 0, requested: new Map<string, number>(), lastPaint: 0, lastId: -1 });
+  const batchWorkRef = React.useRef({ busy: false, pending: null as (() => Promise<void>) | null });
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuRenderGenerationRef = React.useRef(0);
+  const gpuCanvasContextsRef = React.useRef<(GPUCanvasContext | null)[]>([]);
   const canvasDrawCacheRef = React.useRef(new Map<number, {
     canvas: HTMLCanvasElement;
     panel: Float32Array;
@@ -1622,16 +1664,54 @@ function CompareVirtualGrid({
   const [comparePanY, setComparePanY] = React.useState(0);
   const compareViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
   const panelPixels = Math.max(1, shapeRows * shapeCols);
+  // The exact source view survives display normalization and GPU uploads. Pointer
+  // readouts borrow it; they never read a rounded Float32 display intermediate.
+  const rawBatch = React.useMemo(() => bytes && batchInfo?.request_id
+    ? residentRawValues(bytes, batchInfo) : null, [bytes, batchInfo]);
+  const rawReadoutRef = React.useRef<{values: ResidentValues | null; indices: number[]; rows: number; cols: number}>({values:null,indices:[],rows:0,cols:0});
+  rawReadoutRef.current = {values:rawBatch,indices,rows:shapeRows,cols:shapeCols};
+  const readoutRefs = React.useRef<(HTMLSpanElement | null)[]>([]);
+  const readoutRafRef = React.useRef(0);
+  const updateRawReadout = React.useCallback((localIdx: number, frame: number, tile: HTMLDivElement, x: number, y: number) => {
+    if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current);
+    readoutRafRef.current = requestAnimationFrame(() => {
+      readoutRafRef.current = 0;
+      const node = readoutRefs.current[localIdx];
+      if (!node) return;
+      const {values,indices:frames,rows,cols} = rawReadoutRef.current;
+      const rect = tile.getBoundingClientRect();
+      const view = compareViewRef.current;
+      const col = Math.floor(((x-rect.left)/rect.width*cols-view.panX)/view.zoom);
+      const row = Math.floor(((y-rect.top)/rect.height*rows-view.panY)/view.zoom);
+      const source = frames.indexOf(frame);
+      if (!values || source < 0 || row < 0 || row >= rows || col < 0 || col >= cols) {
+        node.style.opacity = "0";
+        return;
+      }
+      node.textContent = `(${row}, ${col}) ${values[(source*rows+row)*cols+col]}`;
+      node.style.opacity = "1";
+    });
+  }, []);
+  const hideRawReadout = React.useCallback((localIdx: number) => {
+    if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current);
+    readoutRafRef.current = 0;
+    const node = readoutRefs.current[localIdx];
+    if (node) node.style.opacity = "0";
+  }, []);
+  React.useEffect(() => () => { if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current); }, []);
+
   const panels = React.useMemo(() => {
-    if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * 4) {
+    if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * (scalarType === "<u2" ? 2 : 4)) {
       return [] as Float32Array[];
     }
-    const raw = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+    // Raw integer batches remain on the GPU during interaction.
+    if (integerCounts && batchEnabled && !batchFailed) return EMPTY_COMPARE_PANELS;
+    const raw = residentDisplayValues(bytes, batchInfo);
     return Array.from({ length: count }, (_, idx) => {
       const start = idx * panelPixels;
-      return raw.slice(start, start + panelPixels);
+      return raw.subarray(start, start + panelPixels);
     });
-  }, [bytes, count, panelPixels]);
+  }, [bytes, count, panelPixels, scalarType, integerCounts, batchEnabled, batchFailed, batchInfo]);
   const sourceIndices = progressivePage ? progressivePage.expectedIndices : (indices || []);
   const [previewIndices, setPreviewIndices] = React.useState<number[] | null>(null);
   const panelByFrame = React.useMemo(
@@ -1680,15 +1760,112 @@ function CompareVirtualGrid({
       .map((frame) => ({
         frame,
         panel: panelByFrame.get(frame),
-        gpuLoaded: Boolean(gpuSlots?.has(frame) && gpuRanges?.has(frame) && gpuEngine),
+        gpuLoaded: Boolean((integerCounts && batchEnabled && !batchFailed) || (gpuSlots?.has(frame) && gpuEngine && (residentSource || gpuRanges?.has(frame)))),
       }))
-      .filter((entry) => Boolean(progressivePage) || entry.panel !== undefined || entry.gpuLoaded);
-  }, [gpuEngine, gpuRanges, gpuSlots, gpuVersion, panelByFrame, progressivePage, renderIndices, scaleMode]);
+      // Reserve loading tiles so a ready image does not move beneath a drag.
+      .filter((entry) => sourceLoading || Boolean(progressivePage) || entry.panel !== undefined || entry.gpuLoaded);
+  }, [integerCounts, batchEnabled, batchFailed, gpuEngine, gpuRanges, gpuSlots, gpuVersion, panelByFrame, progressivePage, residentSource, sourceLoading, renderIndices, scaleMode]);
 
-  const renderGpuSlotsNow = React.useCallback((): number => {
+  const countImagesRef = React.useRef<CompareCountImages | null>(null);
+  const comparePaintScheduler = React.useMemo(() => createComparePaintScheduler(), []);
+  const latestComparePaintRef = React.useRef<() => void>(() => {});
+  React.useLayoutEffect(() => () => {
+    comparePaintScheduler.cancel();
+    countImagesRef.current = null;
+  }, [comparePaintScheduler]);
+  const renderGpuSlotsNow = React.useCallback((counts?: CompareCountImages | null | "invalidate", deferPaint = false): number => {
+    if (counts === "invalidate") {
+      comparePaintScheduler.cancel();
+      const previous = countImagesRef.current;
+      countImagesRef.current = null;
+      // Queue a stable float snapshot before another ROI operation overwrites
+      // the shared count buffer. Its divisor still belongs to these old counts.
+      countImagesForRender(previous, false);
+      return 0;
+    }
+    // Null means a settled/full update already refreshed the stable float slots.
+    if (counts === null) {
+      comparePaintScheduler.cancel();
+      countImagesRef.current = null;
+      return 0;
+    }
+    if (!deferPaint) comparePaintScheduler.cancel();
+    if (counts) countImagesRef.current = counts;
+    const sharedReady = Boolean(sharedGpuEnabled && gpuEngine && gpuSlots && sharedLayoutRef.current && batchCanvasRef.current
+      && sharedLayoutRef.current.rectangles.length === renderEntries.length);
+    // New hot counts fall back in their caller. Previously retained views must
+    // refresh floats before a legacy/missing-canvas repaint can use those slots.
+    if (counts && !sharedReady) {
+      comparePaintScheduler.cancel();
+      countImagesRef.current = null;
+      return 0;
+    }
+    if (counts && deferPaint) {
+      if (!counts.isCurrent() || !sharedContextRef.current
+        || !renderEntries.every(entry => gpuSlots!.has(entry.frame) && counts.images.has(entry.frame))) {
+        comparePaintScheduler.cancel();
+        countImagesRef.current = null;
+        return 0;
+      }
+      // Retain the newest area immediately after its count submission. At RAF,
+      // drawing uses these current views; no await separates selection/submission.
+      comparePaintScheduler.schedule(() => { latestComparePaintRef.current(); }, error => {
+        const previous = countImagesRef.current;
+        countImagesRef.current = null;
+        try { countImagesForRender(previous, false); }
+        catch { /* Preserve the render error if the device also rejects fallback. */ }
+        onGpuRenderError?.(error);
+      });
+      return renderEntries.length;
+    }
+    countImagesRef.current = countImagesForRender(countImagesRef.current, sharedReady);
     if (!gpuEngine || !gpuSlots) return 0;
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
     gpuEngine.uploadLUT(colormap, lut);
+    if (sharedGpuEnabled) {
+      const layout = sharedLayoutRef.current;
+      const canvas = batchCanvasRef.current;
+      if (!layout || !canvas || layout.rectangles.length !== renderEntries.length) return 0;
+      if (!sharedContextRef.current || canvas.width !== layout.width || canvas.height !== layout.height) {
+        sharedContextRef.current = gpuEngine.configureCanvas(canvas, layout.width, layout.height);
+      }
+      const context = sharedContextRef.current;
+      if (!context) {
+        if (!counts) countImagesRef.current?.refreshFloat();
+        countImagesRef.current = null;
+        return 0;
+      }
+      const slots: number[] = [];
+      const rectangles: typeof layout.rectangles = [];
+      const currentCounts = countImagesRef.current;
+      const countViews = currentCounts ? new Map<number, Uint32ImageView>() : undefined;
+      let missingCountView = false;
+      renderEntries.forEach((entry, i) => {
+        const slot = gpuSlots.get(entry.frame);
+        if (slot === undefined) return;
+        slots.push(slot); rectangles.push(layout.rectangles[i]);
+        if (countViews) {
+          const view = currentCounts!.images.get(entry.frame);
+          if (view) countViews.set(slot, view);
+          else missingCountView = true;
+        }
+      });
+      if (missingCountView) {
+        countImagesRef.current = null;
+        if (!counts) currentCounts!.refreshFloat();
+        else return 0;
+      }
+      const painted = gpuEngine.renderSlotsDirectWithGpuRangeToCanvas(slots, rectangles, context, vminPct, vmaxPct, scaleMode === "log", {
+        width: layout.width, height: layout.height, bgRgb: 0, counts: countImagesRef.current ? countViews : undefined,
+        transform: { zoom: compareZoom, panX: comparePanX, panY: comparePanY }, smooth,
+      });
+      if (painted > 0) {
+        if (!sharedGpuReadyRef.current) { sharedGpuReadyRef.current = true; setSharedGpuReady(true); }
+        onGpuPaint?.(painted);
+      }
+      return painted;
+    }
+    if (!residentSource) {
     const generation = ++gpuRenderGenerationRef.current;
     const panels: {
       canvas: HTMLCanvasElement;
@@ -1764,7 +1941,53 @@ function CompareVirtualGrid({
       if (painted > 0) onGpuPaint?.(painted);
     })();
     return panels.length;
-  }, [colormap, gpuEngine, gpuRanges, gpuSlots, onGpuPaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+    }
+    const slots: number[] = [];
+    const contexts: GPUCanvasContext[] = [];
+    renderEntries.forEach((entry, localIdx) => {
+      const slot = gpuSlots.get(entry.frame);
+      const canvas = gpuCanvasRefs.current[localIdx];
+      if (slot === undefined || !canvas) return;
+      if (
+        canvas.width !== shapeCols
+        || canvas.height !== shapeRows
+        || !gpuCanvasContextsRef.current[localIdx]
+      ) {
+        gpuCanvasContextsRef.current[localIdx] = gpuEngine.configureCanvas(canvas, shapeCols, shapeRows);
+      }
+      const ctx = gpuCanvasContextsRef.current[localIdx];
+      if (!ctx) return;
+      slots.push(slot);
+      contexts.push(ctx);
+    });
+    const painted = gpuEngine.renderSlotsDirectWithGpuRangeToCanvases(
+      slots, contexts, vminPct, vmaxPct, scaleMode === "log", {
+        width: shapeCols, height: shapeRows, bgRgb: 0,
+        transform: { zoom: compareZoom, panX: comparePanX, panY: comparePanY }, smooth,
+      },
+    );
+    if (painted > 0) onGpuPaint?.(painted);
+    return painted;
+  }, [colormap, comparePaintScheduler, comparePanX, comparePanY, compareZoom, gpuEngine, gpuRanges, gpuSlots, onGpuPaint, onGpuRenderError, renderEntries, residentSource, scaleMode, shapeCols, shapeRows, sharedGpuEnabled, smooth, vmaxPct, vminPct]);
+
+  React.useLayoutEffect(() => {
+    latestComparePaintRef.current = () => { renderGpuSlotsNow(); };
+  }, [renderGpuSlotsNow]);
+
+  React.useLayoutEffect(() => {
+    if (sharedGpuEnabled) {
+      gpuCanvasContextsRef.current.forEach(context => context?.unconfigure());
+      gpuCanvasContextsRef.current = [];
+    }
+    sharedGpuReadyRef.current = false;
+    setSharedGpuReady(false);
+    return () => {
+      sharedContextRef.current?.unconfigure();
+      sharedContextRef.current = null;
+      sharedLayoutRef.current = null;
+      sharedGpuReadyRef.current = false;
+    };
+  }, [gpuEngine, sharedGpuEnabled]);
 
   React.useEffect(() => {
     onGpuRendererReady?.(renderGpuSlotsNow);
@@ -1774,6 +1997,108 @@ function CompareVirtualGrid({
   React.useEffect(() => {
     renderGpuSlotsNow();
   }, [gpuVersion, renderGpuSlotsNow]);
+
+  React.useEffect(() => {
+    const receive = () => { batchTimingRef.current.received = performance.now(); };
+    const request = () => {
+      const inner = batchModel.get("roi_mode") === "annular" ? batchModel.get("roi_radius_inner") : 0;
+      const key = JSON.stringify([batchModel.get("roi_center"), inner, batchModel.get("roi_radius")]);
+      const requests = batchTimingRef.current.requested;
+      requests.set(key, performance.now());
+      if (requests.size > 512) requests.delete(requests.keys().next().value!);
+    };
+    batchModel.on("change:compare_virtual_image_bytes", receive);
+    batchModel.on("change:roi_center change:roi_mode change:roi_radius_inner change:roi_radius", request);
+    return () => {
+      batchModel.off("change:compare_virtual_image_bytes", receive);
+      batchModel.off("change:roi_center change:roi_mode change:roi_radius_inner change:roi_radius", request);
+    };
+  }, [batchModel]);
+
+  React.useEffect(() => {
+    if (!batchEnabled || !batchCanvasRef.current) return;
+    let disposed = false;
+    const canvas = batchCanvasRef.current;
+    const started = performance.now();
+    setBatchFailed(false);
+    void CompareBatchCanvas.create(canvas, count, shapeRows, shapeCols, scalarType).then(renderer => {
+      if (disposed) { renderer.destroy(); return; }
+      batchRendererRef.current = renderer;
+      canvas.dataset.adapter = renderer.adapter;
+      canvas.dataset.initializationMs = String(performance.now()-started);
+      setBatchReady(true);
+    }).catch(error => {
+      canvas.dataset.batchError = String(error);
+      setBatchFailed(true);
+      batchModel.send({ type: "resident_batch_error", error: String(error) });
+    });
+    return () => { disposed = true; batchRendererRef.current?.destroy(); batchRendererRef.current = null; setBatchReady(false); };
+  }, [batchEnabled, count, shapeRows, shapeCols, scalarType, batchModel]);
+
+  React.useEffect(() => {
+    if (!batchReady || !bytes || !batchEnabled) return;
+    const work = batchWorkRef.current;
+    work.pending = async () => {
+      const renderer = batchRendererRef.current;
+      const canvas = batchCanvasRef.current;
+      const grid = batchGridRef.current;
+      if (!renderer || !canvas || !grid) return;
+      const rect = grid.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      const rectangles = new Float32Array(renderEntries.length * 4);
+      const sources = new Uint32Array(renderEntries.length);
+      renderEntries.forEach(({frame}, i) => {
+        const tile = tileRefs.current[i]!.getBoundingClientRect();
+        rectangles.set([(tile.left-rect.left)*dpr,(tile.top-rect.top)*dpr,tile.width*dpr,tile.height*dpr], i*4);
+        sources[i] = indices.indexOf(frame);
+      });
+      const timing = batchTimingRef.current;
+      const received = batchInfo?.received_performance_ms ?? timing.received;
+      const requestKey = JSON.stringify([batchInfo?.center, batchInfo?.inner, batchInfo?.outer]);
+      const requested = timing.requested.get(requestKey);
+      const result = await renderer.render(bytes, rectangles, sources, COLORMAPS[colormap] || COLORMAPS.inferno,
+        { log: scaleMode === "log", auto: autoContrast, min: vminPct, max: vmaxPct, zoom: compareZoom, panX: comparePanX, panY: comparePanY, smooth, dtype: scalarType, divisor: residentDivisor(batchInfo), normalizationOffset: batchInfo?.normalization_offset });
+      if (batchInfo?.validate_display && "readRanges" in renderer) {
+        batchModel.send({type:"resident_display_validation",request_id:batchInfo.request_id,
+          ranges:renderer.readRanges(),logarithmic:scaleMode==="log"});
+      }
+      // GPU completion and a following animation frame are observable browser
+      // milestones. Neither is a physical monitor scanout timestamp.
+      requestAnimationFrame(() => {
+        if (!canvas.isConnected) return;
+        const now = performance.now();
+        const fresh = batchInfo?.request_id !== timing.lastId;
+        const sample = { ...result, fresh, request_id: batchInfo?.request_id,
+          worker_superseded: batchInfo?.worker_superseded,
+          mask_sha256: batchInfo?.detector_mask_sha256,
+          receive_to_frame_ms: received ? now-received : null,
+          request_to_frame_ms: requested !== undefined ? now-requested : null,
+          fresh_interval_ms: fresh && timing.lastPaint ? now-timing.lastPaint : null,
+          frame_time_ms: now, frame_epoch_ms: performance.timeOrigin + now,
+          request_epoch_ms: requested !== undefined ? performance.timeOrigin + requested : null,
+          source_shape: [count,shapeRows,shapeCols] };
+        canvas.dataset.batchPaint = JSON.stringify(sample);
+        if (fresh) { timing.lastPaint = now; timing.lastId = batchInfo?.request_id ?? -1; batchModel.send({type:"resident_batch_paint", ...sample}); }
+      });
+    };
+    const drain = async () => {
+      if (work.busy) return;
+      work.busy = true;
+      try {
+        while (work.pending) { const job = work.pending; work.pending = null; await job(); }
+      } catch (error) {
+        if (batchCanvasRef.current) batchCanvasRef.current.dataset.batchError = String(error);
+        batchModel.send({type:"resident_batch_error", error:String(error)});
+        setBatchReady(false);
+        setBatchFailed(true);
+      } finally { work.busy = false; }
+    };
+    void drain();
+  }, [batchReady,batchEnabled,bytes,batchInfo,renderEntries,indices,colormap,scaleMode,autoContrast,vminPct,vmaxPct,compareZoom,comparePanX,comparePanY,smooth,overlayVersion,count,shapeRows,shapeCols,batchModel]);
 
   const movePreviewFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
     if (dragFrame === targetFrame) return;
@@ -1788,6 +2113,7 @@ function CompareVirtualGrid({
   }, [displayIndices]);
 
   React.useEffect(() => {
+    if (batchEnabled && !batchFailed) return;
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
     if (gpuEngine) gpuEngine.uploadLUT(colormap, lut);
     const styleKey = [
@@ -1849,6 +2175,23 @@ function CompareVirtualGrid({
       ctx.putImageData(imageData, 0, 0);
       canvasDrawCacheRef.current.set(frame, { canvas, panel, styleKey });
     });
+    if (batchInfo?.request_id && renderEntries.length === count) {
+      const requestId = batchInfo.request_id;
+      requestAnimationFrame(() => {
+        const timing = batchTimingRef.current;
+        if (timing.lastId === requestId) return;
+        const now = performance.now();
+        const key = JSON.stringify([batchInfo.center,batchInfo.inner,batchInfo.outer]);
+        const requested = timing.requested.get(key);
+        batchModel.send({type:"resident_batch_paint",fresh:true,request_id:requestId,
+          mask_sha256:batchInfo.detector_mask_sha256,panels:count,adapter:"CPU canvas fallback",
+          receive_to_frame_ms:timing.received?now-timing.received:null,
+          request_to_frame_ms:requested!==undefined?now-requested:null,
+          fresh_interval_ms:timing.lastPaint?now-timing.lastPaint:null,
+          frame_time_ms:now,source_shape:[count,shapeRows,shapeCols]});
+        timing.lastId=requestId;timing.lastPaint=now;
+      });
+    }
     const expected = progressivePage?.expectedIndices ?? [];
     const drawnExpectedIndices = expected.filter((frame) => {
       const currentPanel = panelByFrame.get(frame);
@@ -1884,7 +2227,7 @@ function CompareVirtualGrid({
         });
       });
     }
-  }, [autoContrast, colormap, gpuEngine, gpuSlots, gpuVersion, onFreshVisiblePaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+  }, [batchInfo, batchModel, count, batchEnabled, batchReady, batchFailed, autoContrast, colormap, gpuEngine, gpuSlots, gpuVersion, onFreshVisiblePaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
     if (!gpuEngine || !gpuSlots || kind === "diffraction") return;
@@ -1969,6 +2312,25 @@ function CompareVirtualGrid({
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
+  React.useLayoutEffect(() => {
+    if (!sharedGpuEnabled || !gpuEngine) return;
+    const grid = batchGridRef.current;
+    if (!grid) return;
+    const measure = () => {
+      const tiles = renderEntries.map((_, i) => tileRefs.current[i]);
+      if (tiles.some(tile => !tile)) return;
+      sharedLayoutRef.current = sharedCanvasLayout(grid.getBoundingClientRect(),
+        tiles.map(tile => tile!.getBoundingClientRect()), shapeRows, shapeCols,
+        gpuEngine.getDevice().limits.maxTextureDimension2D);
+      renderGpuSlotsNow();
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    tileRefs.current.slice(0, renderEntries.length).forEach(tile => { if (tile) observer.observe(tile); });
+    return () => observer.disconnect();
+  }, [gpuEngine, sharedGpuEnabled, renderEntries, renderGpuSlotsNow, gridCols, gridGapPx, shapeRows, shapeCols, overlayVersion]);
+
   const resizeGripSx = React.useMemo(() => ({
     position: "absolute",
     bottom: 0,
@@ -2098,6 +2460,9 @@ function CompareVirtualGrid({
   }, [gridCols, mobileGridCols, renderEntries.length]);
 
   React.useEffect(() => {
+    let raf = 0;
+    const paint = () => {
+    raf = 0;
     const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
     renderEntries.forEach(({ panel, gpuLoaded }, idx) => {
       const overlay = overlayRefs.current[idx];
@@ -2112,7 +2477,7 @@ function CompareVirtualGrid({
       const ctx = overlay.getContext("2d");
       ctx?.clearRect(0, 0, overlay.width, overlay.height);
       if (!panel && !gpuLoaded) return;
-      if (showScaleBar) {
+      if (showScaleBar && cssWidth >= 96) {
         const unit = pixelSize > 0 ? pixelUnit || "px" : "px";
         const pxSize = pixelSize > 0 ? pixelSize : 1;
         drawScaleBarHiDPI(overlay, dpr, compareZoom, pxSize, unit, shapeCols);
@@ -2120,15 +2485,15 @@ function CompareVirtualGrid({
       drawViPositionMarker(
         overlay,
         dpr,
-        cursorRow,
-        cursorCol,
+        kind === "diffraction" ? cursorRow : Number(batchModel.get("pos_row")),
+        kind === "diffraction" ? cursorCol : Number(batchModel.get("pos_col")),
         compareZoom,
         comparePanX,
         comparePanY,
         shapeCols,
         shapeRows,
         isDraggingPosition,
-        idx === 0,
+        idx === 0 && cssWidth >= 96,
       );
       if (scanRegion && scanRegion.mode !== "off") {
         ctx?.clearRect(0, 0, overlay.width, overlay.height);
@@ -2138,81 +2503,30 @@ function CompareVirtualGrid({
           compareZoom, comparePanX, comparePanY, shapeCols, shapeRows, isDraggingPosition, false, false);
       }
     });
-  }, [comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar, scanRegion]);
+    };
+    const changed = () => { if (!raf) raf = requestAnimationFrame(paint); };
+    paint();
+    batchModel.on("change:pos_row", changed); batchModel.on("change:pos_col", changed);
+    return () => { if (raf) cancelAnimationFrame(raf); batchModel.off("change:pos_row", changed); batchModel.off("change:pos_col", changed); };
+  }, [batchModel, kind, comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar, scanRegion]);
 
-  if (renderEntries.length === 0) {
-    return (
-      <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.bgAlt, px: 1, py: 2 }}>
-        <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
-          {status || "Multiple grid is waiting for multiple frames or datasets."}
-        </Typography>
-      </Box>
-    );
-  }
-
-  return (
-    <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
-      <Box sx={{display:"flex",alignItems:"center",gap:1,color:themeColors.textMuted,fontSize:10}}>
-        <span>Scroll to zoom · Shift-drag to pan</span>
-        <Button size="small" sx={{fontSize:10,minWidth:0}} onClick={() => {
-          compareViewRef.current.zoom=1;compareViewRef.current.panX=0;compareViewRef.current.panY=0;
-          setCompareZoom(1);setComparePanX(0);setComparePanY(0);
-        }}>Reset</Button>
-        <span>{compareZoom.toFixed(1)}×</span>
-      </Box>
-      {cacheBadge && (
-        <Box
-          role="status"
-          aria-live="polite"
-          data-testid="show4dstem-compare-cache-status"
-          data-show4dstem-cache-tone={cacheBadge.tone}
-          sx={{
-            display: "inline-flex",
-            alignItems: "center",
-            minHeight: 20,
-            mb: 0.5,
-            px: 0.75,
-            py: 0.25,
-            border: `1px solid ${cacheBadge.tone === "warning" ? "#d97706" : cacheBadge.tone === "fresh" ? "#16a34a" : themeColors.border}`,
-            borderRadius: "10px",
-            bgcolor: cacheBadge.tone === "warning"
-              ? "rgba(217,119,6,0.12)"
-              : cacheBadge.tone === "fresh"
-                ? "rgba(22,163,74,0.1)"
-                : themeColors.controlBg,
-            color: cacheBadge.tone === "warning"
-              ? "#d97706"
-              : cacheBadge.tone === "fresh"
-                ? "#16a34a"
-                : themeColors.textMuted,
-            fontSize: 10,
-            fontWeight: 600,
-            lineHeight: 1.2,
-          }}
-        >
-          {cacheBadge.label}
-        </Box>
-      )}
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${gridCols}, minmax(128px, 1fr))`,
-          gap: `${gridGapPx}px`,
-          maxWidth: "100%",
-          "@media (max-width: 700px)": {
-            gridTemplateColumns: `repeat(${mobileGridCols}, minmax(0, 1fr))`,
-            gap: `${gridGapPx}px`,
-          },
-        }}
-      >
-        {renderEntries.map(({ frame, panel, gpuLoaded }, localIdx) => {
+  useResidentChanges(batchEnabled, "panel_tile_dependency", {
+    renderEntries, panels, panelByFrame, indices, progressivePage, sourceLoading, activeIdx, labels, starred, draggingFrame,
+    pendingMoveFrame, themeColors, reorderMode, handleCompareDoubleClick,
+    updatePositionFromPointer, updateRawReadout, hideRawReadout, onSelect, onPendingMoveFrameChange, onReorderFrame,
+    displayIndices, onDragFrameChange, movePreviewFrame, batchReady, sharedGpuReady, shapeCols, shapeRows,
+    imageLeft, imageTop, imageWidth, imageHeight, smooth, panelChromeVisible,
+    onToggleStar, onHide, onResizeStart, mobileGridCols, gridCols, resizeGripSx, kind,
+  });
+  // Keep panel controls and overlay DOM stable when only the exact batch changes.
+  const panelTiles = React.useMemo(() => renderEntries.map(({ frame, panel, gpuLoaded }, localIdx) => {
           const loaded = panel !== undefined || gpuLoaded;
           const panelPresentation = progressiveComparePanelPresentation(
             progressivePage ?? null,
             frame,
             loaded,
           );
-          const waiting = !loaded && (progressivePage?.loading ?? false);
+          const waiting = !loaded && (sourceLoading || (progressivePage?.loading ?? false));
           const placeholderText = waiting ? "Loading" : "Unavailable";
           const active = frame === activeIdx;
           const label = labels && labels.length > frame ? labels[frame] : `Dataset ${frame + 1}`;
@@ -2264,10 +2578,12 @@ function CompareVirtualGrid({
                   });
                   return;
                 }
+                updateRawReadout(localIdx, frame, event.currentTarget, event.clientX, event.clientY);
                 if (!isDraggingPositionRef.current || reorderMode) return;
                 event.preventDefault();
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
               }}
+              onPointerLeave={() => hideRawReadout(localIdx)}
               onPointerUp={(event) => {
                 if (panDragRef.current) {panDragRef.current=null;return;}
                 if (!isDraggingPositionRef.current) return;
@@ -2352,7 +2668,8 @@ function CompareVirtualGrid({
               }}
               sx={{
                 position: "relative",
-                bgcolor: "#000",
+                bgcolor: batchReady || sharedGpuReady ? "transparent" : "#000",
+                containerType: "inline-size",
                 border: "none",
                 boxSizing: "border-box",
                 outline: "none",
@@ -2398,6 +2715,10 @@ function CompareVirtualGrid({
                 } : {}),
               }}
             >
+              <span ref={node => { readoutRefs.current[localIdx] = node; }}
+                data-show4dstem-exact-readout={frame}
+                style={{position:"absolute",left:4,bottom:4,zIndex:4,pointerEvents:"none",opacity:0,
+                  color:"white",background:"rgba(0,0,0,.55)",fontSize:11,padding:"1px 3px",fontVariantNumeric:"tabular-nums"}} />
               <canvas
                 data-quantem-scientific-output={`show4dstem-compare-${frame}`}
                 ref={(node) => { canvasRefs.current[localIdx] = node; }}
@@ -2411,7 +2732,7 @@ function CompareVirtualGrid({
                   height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
                   pointerEvents: "none",
-                  opacity: panel || gpuLoaded ? 1 : 0,
+                  opacity: batchReady || sharedGpuReady ? 0 : panel || gpuLoaded ? 1 : 0,
                   transition: "opacity 160ms ease",
                 }}
               />
@@ -2430,7 +2751,7 @@ function CompareVirtualGrid({
                   height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
                   pointerEvents: "none",
-                  opacity: gpuLoaded ? 1 : 0,
+                  opacity: gpuLoaded && !sharedGpuReady ? 1 : 0,
                   zIndex: 2,
                 }}
               />
@@ -2470,8 +2791,8 @@ function CompareVirtualGrid({
                 sx={{
                   position: "absolute",
                   top: 6,
-                  left: 28,
-                  right: 28,
+                  left: "min(28px, 10%)",
+                  right: "min(28px, 10%)",
                   px: 0.5,
                   color: "rgba(255,255,255,0.95)",
                   fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -2486,10 +2807,19 @@ function CompareVirtualGrid({
                   pointerEvents: "none",
                   userSelect: "none",
                   zIndex: 2,
+                  "& .show4dstem-full-tile-label": { display: "inline" },
+                  "& .show4dstem-compact-tile-label": { display: "none" },
+                  "@container (max-width: 96px)": {
+                    top: 3,
+                    fontSize: 9,
+                    "& .show4dstem-full-tile-label": { display: "none" },
+                    "& .show4dstem-compact-tile-label": { display: "inline" },
+                  },
                 }}
                 title={label}
               >
-                {label}
+                <span className="show4dstem-full-tile-label">{label}</span>
+                <span className="show4dstem-compact-tile-label">{frame + 1}</span>
               </Box>
               {loaded && panelChromeVisible && reorderMode && (
                 <Box
@@ -2613,11 +2943,93 @@ function CompareVirtualGrid({
               )}
             </Box>
           );
-        })}
+        }), [
+    renderEntries, progressivePage, sourceLoading, activeIdx, labels, starred, draggingFrame,
+    pendingMoveFrame, themeColors, reorderMode, handleCompareDoubleClick,
+    updatePositionFromPointer, updateRawReadout, hideRawReadout, onSelect, onPendingMoveFrameChange, onReorderFrame,
+    displayIndices, onDragFrameChange, movePreviewFrame, batchReady, sharedGpuReady, shapeCols, shapeRows,
+    imageLeft, imageTop, imageWidth, imageHeight, smooth, panelChromeVisible,
+    onToggleStar, onHide, onResizeStart, mobileGridCols, gridCols, resizeGripSx, kind, compareZoom, comparePanX, comparePanY,
+  ]);
+
+  if (renderEntries.length === 0) {
+    return (
+      <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.bgAlt, px: 1, py: 2 }}>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+          {status || "Multiple grid is waiting for multiple frames or datasets."}
+        </Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, color: themeColors.textMuted, fontSize: 10 }}>
+        <span>Scroll to zoom · Shift-drag to pan</span>
+        <Button size="small" sx={{ fontSize: 10, minWidth: 0 }} onClick={() => {
+          compareViewRef.current.zoom = 1;
+          compareViewRef.current.panX = 0;
+          compareViewRef.current.panY = 0;
+          setCompareZoom(1);
+          setComparePanX(0);
+          setComparePanY(0);
+        }}>Reset</Button>
+        <span>{compareZoom.toFixed(1)}×</span>
+      </Box>
+      {cacheBadge && (
+        <Box
+          role="status"
+          aria-live="polite"
+          data-testid="show4dstem-compare-cache-status"
+          data-show4dstem-cache-tone={cacheBadge.tone}
+          sx={{
+            display: "inline-flex",
+            alignItems: "center",
+            minHeight: 20,
+            mb: 0.5,
+            px: 0.75,
+            py: 0.25,
+            border: `1px solid ${cacheBadge.tone === "warning" ? "#d97706" : cacheBadge.tone === "fresh" ? "#16a34a" : themeColors.border}`,
+            borderRadius: "10px",
+            bgcolor: cacheBadge.tone === "warning"
+              ? "rgba(217,119,6,0.12)"
+              : cacheBadge.tone === "fresh"
+                ? "rgba(22,163,74,0.1)"
+                : themeColors.controlBg,
+            color: cacheBadge.tone === "warning"
+              ? "#d97706"
+              : cacheBadge.tone === "fresh"
+                ? "#16a34a"
+                : themeColors.textMuted,
+            fontSize: 10,
+            fontWeight: 600,
+            lineHeight: 1.2,
+          }}
+        >
+          {cacheBadge.label}
+        </Box>
+      )}
+      <Box
+        ref={batchGridRef}
+        sx={{
+          position: "relative",
+          display: "grid",
+          gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`,
+          gap: `${gridGapPx}px`,
+          maxWidth: "100%",
+          "@media (max-width: 700px)": {
+            gridTemplateColumns: `repeat(${mobileGridCols}, minmax(0, 1fr))`,
+            gap: `${gridGapPx}px`,
+          },
+        }}
+      >
+        <canvas key={sharedGpuEnabled ? "resident" : "batch"} ref={batchCanvasRef} data-quantem-scientific-output="show4dstem-compare-batch" data-resident-transport={sharedGpuEnabled ? "webgpu-resident" : batchInfo?.transport || "jupyter"}
+          style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",opacity:batchReady || sharedGpuReady?1:0,imageRendering:smooth?"auto":"pixelated"}} />
+        {panelTiles}
       </Box>
     </Box>
   );
-}
+});
 
 // ============================================================================
 // Main Component
@@ -2636,8 +3048,9 @@ function Show4DSTEM() {
   const [detRows] = useModelState<number>("det_rows");
   const [detCols] = useModelState<number>("det_cols");
 
-  const [posRow, setPosRow] = useModelState<number>("pos_row");
-  const [posCol, setPosCol] = useModelState<number>("pos_col");
+  const liveScanDisplayRef = React.useRef(false);
+  const [[posRow, posCol], setPosRow, setPosCol] = useScanPositionState(model, liveScanDisplayRef);
+  const dpPositionLabelRef = React.useRef<HTMLSpanElement | null>(null);
   const [roiCenterCol, setRoiCenterCol] = useModelState<number>("roi_center_col");
   const [roiCenterRow, setRoiCenterRow] = useModelState<number>("roi_center_row");
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -2679,7 +3092,7 @@ function Show4DSTEM() {
 
   // ROI state
   const [roiRadiusModel, setRoiRadius] = useModelState<number>("roi_radius");
-  const [roiRadiusInner, setRoiRadiusInner] = useModelState<number>("roi_radius_inner");
+  const [roiRadiusInnerModel, setRoiRadiusInner] = useModelState<number>("roi_radius_inner");
   const [roiMode, setRoiMode] = useModelState<string>("roi_mode");
   const [roiWidth, setRoiWidth] = useModelState<number>("roi_width");
   const [roiHeight, setRoiHeight] = useModelState<number>("roi_height");
@@ -2717,8 +3130,38 @@ function Show4DSTEM() {
   const [viewMode, setViewMode] = useModelState<string>("view_mode");
   const [compareLayout] = useModelState<string>("compare_layout");
   const [compareCols, setCompareCols] = useModelState<number>("compare_cols");
-  const [compareVirtualImageBytes] = useModelState<DataView>("compare_virtual_image_bytes");
+  const [compareWireBytes] = useModelState<DataView>("compare_virtual_image_bytes");
   const [comparePanelCount] = useModelState<number>("compare_panel_count");
+  const [residentBatchMetadata] = useModelState<CompareVirtualGridProps["batchInfo"]>("resident_batch_info");
+  const [residentStreamConfig] = useModelState<{url?:string;enabled?:boolean;generation?:string}>("resident_stream");
+  useResidentPerformance(model, Boolean(residentStreamConfig?.enabled));
+  const {bytes: compareVirtualImageBytes,info: residentBatchInfo} = useResidentTransport(model,residentStreamConfig,compareWireBytes,residentBatchMetadata);
+  React.useEffect(() => {
+    let lastReceived = "";
+    let lastReceivedPayload: DataView | undefined;
+    const received = () => {
+      const info = model.get("resident_batch_info");
+      const payload = model.get("compare_virtual_image_bytes") as DataView | undefined;
+      if (info?.delivery_ack !== "received" || !payload || payload.byteLength !== info.bytes) return;
+      const key = `${info.generation}:${info.request_id}`;
+      if (key === lastReceived || payload === lastReceivedPayload) return;
+      lastReceived = key;
+      lastReceivedPayload = payload;
+      // The received ArrayBuffer belongs to the browser. CPU pinned storage
+      // may now be reused while this immutable browser batch renders.
+      model.send({type: "resident_batch_received", request_id: info.request_id,
+        generation: info.generation, byte_length: payload.byteLength,
+        received_epoch_ms: Date.now(), received_performance_ms: performance.now()});
+    };
+    model.on("change:compare_virtual_image_bytes", received);
+    model.on("change:resident_batch_info", received);
+    received();
+    return () => {
+      model.off("change:compare_virtual_image_bytes", received);
+      model.off("change:resident_batch_info", received);
+    };
+  }, [model]);
+
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
   const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
@@ -3012,8 +3455,6 @@ function Show4DSTEM() {
   const [localPosCol, setLocalPosCol] = React.useState(posCol);
   const scanPositionPendingRef = React.useRef<[number, number] | null>(null);
   const scanPositionRafRef = React.useRef<number | null>(null);
-  const scanPositionTimerRef = React.useRef<number | null>(null);
-  const scanPositionLastSyncRef = React.useRef(0);
   const scanPositionOptimisticRef = React.useRef<[number, number] | null>(null);
   const scanPositionCurrentRef = React.useRef<[number, number]>([Math.round(posRow), Math.round(posCol)]);
   const writeQueuedScanPosition = React.useCallback(() => {
@@ -3022,10 +3463,15 @@ function Show4DSTEM() {
     const [row, col] = pending;
     scanPositionPendingRef.current = null;
     scanPositionCurrentRef.current = [row, col];
+    if (liveScanDisplayRef.current) {
+      if (dpPositionLabelRef.current) dpPositionLabelRef.current.textContent = `DP at (${row}, ${col})`;
+    } else {
+      setLocalPosRow(row);
+      setLocalPosCol(col);
+    }
     model.set("pos_row", row);
     model.set("pos_col", col);
     model.save_changes();
-    scanPositionLastSyncRef.current = performance.now();
   }, [model]);
   const writeRoiCenterModel = React.useCallback((row: number, col: number) => {
     model.set("roi_center_row", row);
@@ -3040,23 +3486,14 @@ function Show4DSTEM() {
     if (current[0] === row && current[1] === col) return;
     scanPositionPendingRef.current = [row, col];
     scanPositionOptimisticRef.current = [row, col];
-    if (scanPositionTimerRef.current === null && scanPositionRafRef.current === null) {
-      const elapsed = performance.now() - scanPositionLastSyncRef.current;
-      const delay = Math.max(0, 33 - elapsed);
-      scanPositionTimerRef.current = window.setTimeout(() => {
-        scanPositionTimerRef.current = null;
-        scanPositionRafRef.current = requestAnimationFrame(() => {
-          scanPositionRafRef.current = null;
-          writeQueuedScanPosition();
-        });
-      }, delay);
+    if (scanPositionRafRef.current === null) {
+      scanPositionRafRef.current = requestAnimationFrame(() => {
+        scanPositionRafRef.current = null;
+        writeQueuedScanPosition();
+      });
     }
   }, [writeQueuedScanPosition]);
   const flushScanPosition = React.useCallback(() => {
-    if (scanPositionTimerRef.current !== null) {
-      window.clearTimeout(scanPositionTimerRef.current);
-      scanPositionTimerRef.current = null;
-    }
     if (scanPositionRafRef.current !== null) {
       cancelAnimationFrame(scanPositionRafRef.current);
       scanPositionRafRef.current = null;
@@ -3065,9 +3502,6 @@ function Show4DSTEM() {
   }, [writeQueuedScanPosition]);
   React.useEffect(() => {
     return () => {
-      if (scanPositionTimerRef.current !== null) {
-        window.clearTimeout(scanPositionTimerRef.current);
-      }
       if (scanPositionRafRef.current !== null) {
         cancelAnimationFrame(scanPositionRafRef.current);
         scanPositionRafRef.current = null;
@@ -3075,74 +3509,101 @@ function Show4DSTEM() {
     };
   }, []);
   const [isDraggingDP, setIsDraggingDP] = React.useState(false);
+  const dpPointerOwner = React.useMemo(() => createDpPointerOwner(), []);
   // rAF coalescing for ROI drag: collapse rapid mousemove events into ≤1
   // Python comm message per animation frame. Without this, drag fires 60+
   // events/sec at >100ms Python compute each → queue piles up → laggy UX.
   const roiCenterPendingRef = React.useRef<[number, number] | null>(null);
+  const drawDpLiveRef = React.useRef<((center?: [number, number]) => void) | null>(null);
+  const isResidentCompareDrag = React.useCallback(() => Boolean(model.get("_rans_url"))
+    && ["multiple", "compare"].includes(String(model.get("view_mode")))
+    && Number(model.get("n_frames")) > 1
+    && normaliseViSource(model.get("vi_source")) === "roi", [model]);
   const roiCenterRafRef = React.useRef<number | null>(null);
-  const flushRoiCenter = React.useCallback(() => {
+  const flushRoiCenter = React.useCallback((paint = true) => {
     if (roiCenterPendingRef.current) {
       const [r, c] = roiCenterPendingRef.current;
-      writeRoiCenterModel(r, c);
-      roiCenterPendingRef.current = null;
+      if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
+        // The GPU consumes this center directly; publish traits when the drag settles.
+        if (paint) drawDpLiveRef.current?.([r, c]);
+      } else {
+        writeRoiCenterModel(r, c);
+        roiCenterPendingRef.current = null;
+        setLocalKRow(r);
+        setLocalKCol(c);
+      }
     }
-    roiCenterRafRef.current = null;
-  }, [writeRoiCenterModel]);
+    if (paint) roiCenterRafRef.current = null;
+  }, [isResidentCompareDrag, writeRoiCenterModel]);
   const queueRoiCenter = React.useCallback((row: number, col: number) => {
     roiCenterPendingRef.current = [row, col];
     if (roiCenterRafRef.current === null) {
-      roiCenterRafRef.current = requestAnimationFrame(flushRoiCenter);
+      roiCenterRafRef.current = requestAnimationFrame(() => flushRoiCenter());
     }
   }, [flushRoiCenter]);
-  // rAF coalescing for ROI RADIUS drag — same reason as center: a no-bin BF/DF
-  // recompute is ~100ms in Python, and a resize-drag fires 60+ mousemoves/sec.
-  // Without coalescing every move becomes a queued comm message + recompute, so
-  // the image lags ~1s behind the cursor. Collapse to <=1 radius per frame.
-  // Local radius drives the ring/handle render INSTANTLY during a resize drag, so
-  // the ring tracks the cursor with no snap-back, while the model trait (which
-  // triggers the ~100ms Python recompute) is sent at most once per recompute.
-  const [localRoiRadius, setLocalRoiRadius] = React.useState<number | null>(null);
-  // Effective radius used by ALL render/hit-test code below: the live local value
-  // while dragging, else the model value. Keeps the ring glued to the cursor.
-  const roiRadius = localRoiRadius != null ? localRoiRadius : roiRadiusModel;
-  // Coalesce radius writes with requestAnimationFrame, always flushing the LATEST
-  // radius (issue #751). Do NOT gate sends on virtual_image_bytes: the old guard
-  // waited for the VI bytes to change before sending the next radius, so if a send
-  // didn't land changed bytes the final drag value stayed local and Python never
-  // recomputed — the hand-drag resize silently did nothing. rAF flush is robust:
-  // one Python recompute per frame, last-value-wins, no stuck in-flight guard.
+  // Both circular handles preserve latest geometry for resident computation;
+  // Imperative ring paints and nonresident model writes remain RAF-coalesced.
+  const roiRadius = roiRadiusModel;
+  const roiRadiusInner = roiRadiusInnerModel;
   const roiRadiusPendingRef = React.useRef<number | null>(null);
+  const roiRadiusInnerPendingRef = React.useRef<number | null>(null);
   const roiRadiusRafRef = React.useRef<number | null>(null);
-  const flushRoiRadius = React.useCallback(() => {
-    if (roiRadiusPendingRef.current !== null) {
-      const r = roiRadiusPendingRef.current;
+  const flushRoiRadius = React.useCallback((paint = true) => {
+    if (paint && roiRadiusRafRef.current !== null) cancelAnimationFrame(roiRadiusRafRef.current);
+    if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
+      // Keep the refs current for every scientific update. Publish final traits
+      // after release; ring repaint is independent of scientific submission.
+      if (paint) drawDpLiveRef.current?.();
+    } else {
+      const updates: Record<string, number> = {};
+      if (roiRadiusPendingRef.current !== null) updates.roi_radius = roiRadiusPendingRef.current;
+      if (roiRadiusInnerPendingRef.current !== null) updates.roi_radius_inner = roiRadiusInnerPendingRef.current;
       roiRadiusPendingRef.current = null;
-      model.set("roi_radius", r);
-      model.save_changes();
+      roiRadiusInnerPendingRef.current = null;
+      if (Object.keys(updates).length) {
+        for (const [name, radius] of Object.entries(updates)) model.set(name, radius);
+        model.save_changes();
+      }
     }
-    roiRadiusRafRef.current = null;
-  }, [model]);
-  const sendRoiRadius = React.useCallback((radius: number) => {
-    roiRadiusPendingRef.current = radius;
-    if (roiRadiusRafRef.current === null) {
-      roiRadiusRafRef.current = requestAnimationFrame(flushRoiRadius);
-    }
+    if (paint) roiRadiusRafRef.current = null;
+  }, [isResidentCompareDrag, model]);
+  const sendRoiRadius = React.useCallback((radius: number, boundary: "inner" | "outer" = "outer") => {
+    if (boundary === "inner") roiRadiusInnerPendingRef.current = radius;
+    else roiRadiusPendingRef.current = radius;
+    if (roiRadiusRafRef.current === null) roiRadiusRafRef.current = requestAnimationFrame(() => flushRoiRadius());
   }, [flushRoiRadius]);
+  React.useEffect(() => () => {
+    if (roiRadiusRafRef.current !== null) cancelAnimationFrame(roiRadiusRafRef.current);
+    roiRadiusPendingRef.current = null;
+    roiRadiusInnerPendingRef.current = null;
+  }, []);
   const dpRoiInteractiveRef = React.useRef(false);
   const requestViFinalizeRef = React.useRef<(() => void) | null>(null);
   const requestCompareViLiveRef = React.useRef<(() => void) | null>(null);
   const compareViLiveRafRef = React.useRef<number | null>(null);
+  const compareViLiveMicrotaskRef = React.useRef<(() => void) | null>(null);
   const compareViLiveInFlightRef = React.useRef(false);
   const compareViLivePendingRef = React.useRef(false);
   const requestDpFrameLiveRef = React.useRef<(() => void) | null>(null);
   const dpFrameLiveRafRef = React.useRef<number | null>(null);
   const requestCompareViLive = React.useCallback(() => {
+    if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
+      if (compareViLiveMicrotaskRef.current) return;
+      const dispatch = () => {
+        if (compareViLiveMicrotaskRef.current !== dispatch) return;
+        compareViLiveMicrotaskRef.current = null;
+        requestCompareViLiveRef.current?.();
+      };
+      compareViLiveMicrotaskRef.current = dispatch;
+      queueMicrotask(dispatch);
+      return;
+    }
     if (compareViLiveRafRef.current !== null) return;
     compareViLiveRafRef.current = requestAnimationFrame(() => {
       compareViLiveRafRef.current = null;
       requestCompareViLiveRef.current?.();
     });
-  }, []);
+  }, [isResidentCompareDrag]);
   const requestDpFrameLive = React.useCallback(() => {
     if (dpFrameLiveRafRef.current !== null) return;
     dpFrameLiveRafRef.current = requestAnimationFrame(() => {
@@ -3163,6 +3624,7 @@ function Show4DSTEM() {
   const finishDpRoiInteraction = React.useCallback(() => {
     const wasInteractive = dpRoiInteractiveRef.current;
     dpRoiInteractiveRef.current = false;
+    compareViLiveMicrotaskRef.current = null;
     if (compareViLiveRafRef.current !== null) {
       cancelAnimationFrame(compareViLiveRafRef.current);
       compareViLiveRafRef.current = null;
@@ -3248,14 +3710,33 @@ function Show4DSTEM() {
   const [viGpuVersion, setViGpuVersion] = React.useState(0);
   const [viGpuRetainedReady, setViGpuRetainedReady] = React.useState(false);
   const viGpuImageRef = React.useRef<ViGpuImage | null>(null);
-  // GPU-resident compare panels: frame index -> engine colormap slot. Only a
-  // small settled min/max reduction is read back; scientific image pixels stay
-  // on the GPU and the interactive drag path reuses the cached range.
+  const dpGpuCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const dpGpuDisplayRef = React.useRef<ResidentDpDisplay | null>(null);
+  const dpGpuOptionsRef = React.useRef<DpDisplayOptions | null>(null);
+  const [dpGpuReady, setDpGpuReady] = React.useState(false);
+  const [dpGpuPending, setDpGpuPending] = React.useState(false);
+  const clearDpGpuDisplay = () => {
+    liveScanDisplayRef.current = false;
+    dpGpuDisplayRef.current?.destroy();
+    dpGpuDisplayRef.current = null;
+    setDpGpuReady(false);
+  };
+
+  // GPU-resident compare panels: frame index -> engine colormap slot. Written by
+  // the interactive compare recompute (no readback), consumed by the grid painter.
   const [compareGpuVersion, setCompareGpuVersion] = React.useState(0);
   const compareGpuSlotsRef = React.useRef(new Map<number, number>());
   const compareGpuRangesRef = React.useRef(new Map<number, { min: number; max: number }>());
   const compareGpuHistogramGenRef = React.useRef(0);
-  const compareGpuRenderNowRef = React.useRef<(() => number) | null>(null);
+  const compareHistogramPendingSettleRef = React.useRef(false);
+  const beginDpRoiInteraction = React.useCallback(() => {
+    if (!dpRoiInteractiveRef.current) {
+      compareGpuHistogramGenRef.current++;
+      compareHistogramPendingSettleRef.current = true;
+    }
+    dpRoiInteractiveRef.current = true;
+  }, []);
+  const compareGpuRenderNowRef = React.useRef<CompareGpuRenderer | null>(null);
   const compareIncrementalRef = React.useRef<{
     mask: Uint32Array;
     buffers: Map<number, GPUBuffer>;
@@ -3306,7 +3787,7 @@ function Show4DSTEM() {
       addedPixels: detail.addedPixels ?? 0,
       removedPixels: detail.removedPixels ?? 0,
       updatedAtMs: Math.round(now),
-      note: "computeFps counts fresh GPU virtual-image buffers only; paintFps counts WebGPU canvas presents, including repeated presents of the latest buffer.",
+      note: "computeFps counts fresh GPU virtual-image buffers only; paintFps counts WebGPU render submissions, including repeats of the latest image; it does not measure physical presentation.",
     };
     const statsWindow = window as unknown as {
       __sh4dLiveViStats?: Record<string, unknown>;
@@ -3359,6 +3840,7 @@ function Show4DSTEM() {
   // so the browser masked-sum (u32 accumulate) is bit-exact to the kernel.
   const [offline] = useModelState<boolean>("offline");
   const [offlineBackendLoading, setOfflineBackendLoading] = React.useState(false);
+  const [residentSeriesLoading, setResidentSeriesLoading] = React.useState(false);
   const [offlineBackendStatus, setOfflineBackendStatus] = React.useState("");
   const [offlineBackendError, setOfflineBackendError] = React.useState("");
   const h5SourceAvailable = Boolean(
@@ -3367,6 +3849,11 @@ function Show4DSTEM() {
     || model.get("_lazy_url")
     || model.get("_lazy_urls")
   );
+  const ransSourceAvailable = Boolean(model.get("_rans_url"));
+  const qemSource = model.get("_rans_format") === "qem-v1";
+  const source112Source = model.get("_rans_format") === "source112-tans1024-pair-v1";
+  const [ransLocalFiles, setRansLocalFiles] = React.useState<File[] | null>(null);
+  const [ransLocalDirectory, setRansLocalDirectory] = React.useState<Parameters<typeof RansResidentSet.loadLocal>[1] | null>(null);
   const [h5LocalFilesGranted, setH5LocalFilesGranted] = React.useState(show4DSTEMHasLocalFiles());
   const [h5LocalSourceStatus, setH5LocalSourceStatus] = React.useState("");
   const h5LocalInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -3385,16 +3872,32 @@ function Show4DSTEM() {
   const onH5LocalInput = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files ? Array.from(event.target.files) : [];
     if (!files.length) return;
+    if (ransSourceAvailable) {
+      setRansLocalDirectory(null);
+      setRansLocalFiles(files);
+      setH5LocalSourceStatus("Local lossless source selected");
+      return;
+    }
     setShow4DSTEMLocalFiles(files);
     setH5LocalFilesGranted(true);
     setH5LocalSourceStatus(`${files.length} local HDF5 file${files.length === 1 ? "" : "s"} granted`);
-  }, []);
+  }, [ransSourceAvailable]);
   const grantH5LocalFiles = React.useCallback(async () => {
     setH5LocalSourceStatus("");
+    if (qemSource || source112Source) {
+      h5LocalInputRef.current?.click();
+      return;
+    }
     const picker = (globalThis as Show4DSTEMWindow).showDirectoryPicker;
     if (picker) {
       try {
         const handle = await picker.call(globalThis, { mode: "read", startIn: "downloads" });
+        if (ransSourceAvailable) {
+          setRansLocalFiles(null);
+          setRansLocalDirectory(handle as Parameters<typeof RansResidentSet.loadLocal>[1]);
+          setH5LocalSourceStatus("Local lossless source selected");
+          return;
+        }
         const files = await collectShow4DSTEMLocalH5Files(
           handle as Parameters<typeof collectShow4DSTEMLocalH5Files>[0],
         );
@@ -3411,7 +3914,7 @@ function Show4DSTEM() {
       }
     }
     h5LocalInputRef.current?.click();
-  }, []);
+  }, [qemSource, source112Source, ransSourceAvailable]);
   React.useEffect(() => {
     if (!offline) {
       setWebgpuDpcReady(false);
@@ -3421,6 +3924,7 @@ function Show4DSTEM() {
       return;
     }
     let disposed = false;
+    const sourceLoadAbort = new AbortController();
     let detach: (() => void) | null = null;
     setOfflineBackendLoading(true);
     setOfflineBackendError("");
@@ -3470,6 +3974,29 @@ function Show4DSTEM() {
       })();
       const h5Url = model.get("_h5_url") as string | undefined;
       const h5UrlsJson = model.get("_h5_urls") as string | undefined;
+      const ransUrl = (model.get("_rans_url") as string | undefined) || "";
+      let ransSet: RansResidentSet | Source112ResidentSet | null = null;
+      let refreshResidentProgress: (() => void) | null = null;
+      let interactionUntil = 0;
+      const noteInteraction = (event: PointerEvent) => {
+        if (event.buttons) interactionUntil = performance.now() + 150;
+      };
+      const yieldToInteraction = async () => {
+        while (performance.now() < interactionUntil) {
+          sourceLoadAbort.signal.throwIfAborted();
+          await new Promise(resolve => setTimeout(resolve, 16));
+        }
+      };
+      const sourceDetectorMask = (
+        state: Parameters<typeof buildDetectorMask>[0], rows: number, cols: number,
+      ): Uint32Array => {
+        const mask = buildDetectorMask(state, rows, cols);
+        // Counts and presentation means must use the same admitted detector area.
+        if (ransSet instanceof Source112ResidentSet) {
+          for (const pixel of ransSet.badPx) mask[pixel] = 0;
+        }
+        return mask;
+      };
       const h5Urls = (() => {
         if (!h5UrlsJson) return [] as string[];
         try {
@@ -3501,6 +4028,13 @@ function Show4DSTEM() {
       const h5ResidentLimit = h5UsesNativeU16 && !h5AllowU16MultiResident
         ? 1
         : h5RequestedResidentLimit;
+      if ((qemSource || source112Source) && !ransLocalFiles?.length) {
+        if (!disposed) {
+          setOfflineBackendStatus(source112Source ? "Select the complete encoded data folder to load all 66 acquisitions" : "Select the exported QEM files to load the lossless source");
+          setOfflineBackendLoading(false);
+        }
+        return;
+      }
       if (requireLocalH5Files && (h5Url || h5Urls.length) && !show4DSTEMHasLocalFiles()) {
         if (!disposed) {
           setOfflineBackendStatus("Waiting for local HDF5 files");
@@ -3860,6 +4394,73 @@ function Show4DSTEM() {
         const initialIdx = Math.max(0, Math.min(urls.length - 1, model.get("frame_idx") | 0));
         const lz = await getVol(initialIdx);
         compute = lz as unknown as DetectorCompute;
+      } else if (ransUrl) {
+        // Browser-resident lossless series: encoded rANS streams live in GPU
+        // buffers and every detector change decodes only the changed columns.
+        const ransDevice = await getGPUDevice();
+        if (!ransDevice) throw new Error("WebGPU device unavailable for the rANS resident source");
+        void ransDevice.lost.then(info => {
+          if (disposed) return;
+          setOfflineBackendStatus("");
+          setOfflineBackendError(`The resident GPU source was lost. ${info.message || "The device is no longer available."} Reload the viewer and select the data folder again.`);
+        });
+        window.addEventListener("pointermove", noteInteraction, {passive: true, signal: sourceLoadAbort.signal});
+        window.addEventListener("pointerdown", noteInteraction, {passive: true, signal: sourceLoadAbort.signal});
+        const status = (text: string) => { if (!disposed) setOfflineBackendStatus(text); };
+        let canonicalFiles: File[] = [];
+        if (qemSource) {
+          const expected = JSON.parse(String(model.get("_rans_files") || "[]")) as string[];
+          canonicalFiles = expected.map(name => {
+            const file = ransLocalFiles?.find(candidate => candidate.name === name);
+            if (!file) throw new Error(`Missing ${name}. Select all exported QEM files together.`);
+            return file;
+          });
+          if (!canonicalFiles.length) throw new Error("This viewer has no QEM files configured. Export it again from the source files.");
+        }
+        ransSet = model.get("_rans_format") === "source112-tans1024-pair-v1"
+          ? await Source112ResidentSet.loadFiles(ransDevice, ransLocalFiles || [], status, sourceLoadAbort.signal, {
+              representation: 'huffman64', progressive: true,
+              maxAcquisitions: Math.max(1, Number(model.get("n_frames") || 1)),
+              yieldToInteraction,
+              onProgress: source => {
+                if (disposed) return;
+                setResidentSeriesLoading(source.loadedAcquisitions < source.acquisitionCount);
+                for (let i = 0; i < source.loadedAcquisitions; i++)
+                  volCache.set(i, source.computes[i] as unknown as DetectorCompute);
+                latestResidentVolumeIndex = source.loadedAcquisitions - 1;
+                refreshResidentProgress?.();
+              },
+            })
+          : qemSource
+          ? await RansResidentSet.loadCountANSFiles(ransDevice, canonicalFiles, status,
+              JSON.parse(String(model.get("_offline_bad_px") || "[]")) as number[])
+          : ransLocalDirectory
+          ? await RansResidentSet.loadLocal(ransDevice, ransLocalDirectory, status)
+          : ransLocalFiles
+            ? await RansResidentSet.loadFiles(ransDevice, ransLocalFiles, status)
+            : await RansResidentSet.load(ransDevice, ransUrl, status);
+        if (disposed) { ransSet.dispose(); return; }
+        const expectedShape = [scanRows, scanCols, detR, detC];
+        if ((ransSet.shape && ransSet.shape.some((size, i) => size !== expectedShape[i]))
+            || (qemSource && ransSet.nativeDtype !== model.get("_rans_dtype"))) {
+          ransSet.dispose();
+          throw new Error("Selected source geometry or native dtype differs from this viewer. Select the files exported with this viewer.");
+        }
+        computes = ransSet.computes as unknown as DetectorCompute[];
+        volumeCount = computes.length;
+        const readyCount = ransSet instanceof Source112ResidentSet ? ransSet.loadedAcquisitions : computes.length;
+        computes.slice(0, readyCount).forEach((c, i) => volCache.set(i, c));
+        getVol = async (idx: number) => volCache.get(Math.max(0, Math.min(computes.length - 1, idx))) ?? null;
+        if (ransSet instanceof Source112ResidentSet) {
+          h5VolumePreload = ransSet.completion.then(() => { h5VolumePreloadDone = true; });
+          void h5VolumePreload.catch(error => { if (!disposed) { setResidentSeriesLoading(false); setOfflineBackendError(`Loading stopped: ${String(error)}. Ready acquisitions remain available.`); } });
+        }
+        compute = volCache.get(model.get("frame_idx") | 0) ?? computes[0];
+        latestResidentVolumeIndex = readyCount - 1;
+        (globalThis as { __QT_RANS_PROFILE?: unknown }).__QT_RANS_PROFILE = {
+          volumes: computes.length, payloadBytes: ransSet.payloadBytes, loadMs: ransSet.loadMs, checkpointMs: ransSet.checkpointMs,
+          acquisitionMode: ransSet.acquisitionMode, timeToResidentReadyMs: ransSet.readyMs, loadProfile: ransSet.loadProfile,
+        };
       } else if (h5Urls.length) {
         volumeCount = h5Urls.length;
         getVol = async (idx: number) => {
@@ -4270,7 +4871,7 @@ function Show4DSTEM() {
           radiusInner: 0,
         };
       };
-      const maskForRoiGeometry = (geometry: WarmRoiGeometry): Uint32Array => buildDetectorMask({
+      const maskForRoiGeometry = (geometry: WarmRoiGeometry): Uint32Array => sourceDetectorMask({
         get: (name: string) => {
           if (name === "roi_center_row") return geometry.centerRow;
           if (name === "roi_center_col") return geometry.centerCol;
@@ -4393,6 +4994,19 @@ function Show4DSTEM() {
         dpcBufferQueue = queued.then(() => undefined, () => undefined);
         return await queued;
       };
+      const invalidateResidentComparePaint = () => {
+        if (!ransSet) return;
+        compareGpuRenderNowRef.current?.("invalidate");
+        // A non-compare sum may change the authoritative support too. The next
+        // compare must re-establish its mask rather than skip an old equal pose.
+        compareIncrementalRef.current = null;
+      };
+      const displayRoiBuffer = (engine: GPUColormapEngine, slot: number, buffer: GPUBuffer) => {
+        // Source112 retains these reusable buffers across panel selection/reorder.
+        // A display slot may release its own resources without destroying the source.
+        if (ransSet instanceof Source112ResidentSet) engine.borrowBuffer(slot, buffer, scanCols, scanRows);
+        else engine.adoptBuffer(slot, buffer, scanCols, scanRows);
+      };
       const computeRoiBufferImage = (
         backend: DetectorCompute,
         mask: Uint32Array,
@@ -4404,13 +5018,14 @@ function Show4DSTEM() {
         if (!engine || typeof maybeVi.maskedSumBuffer !== "function") {
           return false;
         }
+        invalidateResidentComparePaint();
         const t0 = performance.now();
         const { buffer, n } = maybeVi.maskedSumBuffer(mask);
         if (n === 0) {
           buffer.destroy();
           return false;
         }
-        engine.adoptBuffer(VI_GPU_SLOT, buffer, scanCols, scanRows);
+        displayRoiBuffer(engine, VI_GPU_SLOT, buffer);
         viGpuImageRef.current = {
           source: "roi",
           slot: VI_GPU_SLOT,
@@ -4471,7 +5086,7 @@ function Show4DSTEM() {
           productBatch,
         });
         if (!product) return null;
-        if (generation !== viRecomputeGen) {
+        if (disposed || generation !== viRecomputeGen) {
           product.buffer.destroy();
           return null;
         }
@@ -4543,7 +5158,7 @@ function Show4DSTEM() {
         const source = normaliseViSource(model.get("vi_source"));
         const product = viProductFrameView(model, scanRows, scanCols, source);
         if (product) {
-          if (generation !== viRecomputeGen) return;
+          if (disposed || generation !== viRecomputeGen) return;
           clearViGpuDisplay();
           publishVirtualImageBytes(product);
           recordViProfile(source, "product", startedAt, generation);
@@ -4552,7 +5167,7 @@ function Show4DSTEM() {
         if (source === "roi") {
           const preset = viPresetFrameView(model, scanRows, scanCols);
           if (preset) {
-            if (generation !== viRecomputeGen) return;
+            if (disposed || generation !== viRecomputeGen) return;
             clearViGpuDisplay();
             publishVirtualImageBytes(preset);
             recordViProfile(source, "preset_product", startedAt, generation);
@@ -4565,14 +5180,14 @@ function Show4DSTEM() {
           }
           if (!compute) return;
           const displayed = await computeDpcBufferImage(compute!, source);
-          if (generation !== viRecomputeGen) return;
+          if (disposed || generation !== viRecomputeGen) return;
           if (!displayed) {
             clearViGpuDisplay();
           } else {
             recordViProfile(source, "dpc_gpu_display", startedAt, generation);
             void (async () => {
               const dpc = await computeDpcImage(compute!, source);
-              if (generation !== viRecomputeGen || !dpc) return;
+              if (disposed || generation !== viRecomputeGen || !dpc) return;
               setWarmCacheEntry({
                 source,
                 label: viSourceLabel(source),
@@ -4586,7 +5201,7 @@ function Show4DSTEM() {
             return;
           }
           const dpc = await computeDpcImage(compute!, source);
-          if (generation !== viRecomputeGen) return;
+          if (disposed || generation !== viRecomputeGen) return;
           if (dpc) {
             setWarmCacheEntry({
               source,
@@ -4602,15 +5217,17 @@ function Show4DSTEM() {
           }
           return;
         }
-        const mask = buildDetectorMask(model, detR, detC);
+        const mask = sourceDetectorMask(model, detR, detC);
         const roiKey = roiWarmCacheKey(currentRoiGeometry());
-        if (serveWarmCacheEntry(roiKey, "roi", startedAt, generation)) {
+        // A resident source already owns the exact image; keep its direct GPU
+        // display on view switches instead of reviving a CPU snapshot layer.
+        if (!(ransSet instanceof Source112ResidentSet) && serveWarmCacheEntry(roiKey, "roi", startedAt, generation)) {
           return;
         }
         const preferH5ProductFirst = (globalThis as { __QT_H5_PRODUCT_FIRST_VI?: unknown }).__QT_H5_PRODUCT_FIRST_VI === true;
         if (preferH5ProductFirst || !compute) {
           const h5Product = await computeH5ProductFirstRoi(mask, generation);
-          if (generation !== viRecomputeGen) return;
+          if (disposed || generation !== viRecomputeGen) return;
           if (h5Product) {
             setWarmCacheEntry({
               source: "roi",
@@ -4630,13 +5247,14 @@ function Show4DSTEM() {
         if (!displayed) {
           clearViGpuDisplay();
         }
-        if (generation !== viRecomputeGen) return;
+        if (disposed || generation !== viRecomputeGen) return;
         if (displayed && dpRoiInteractiveRef.current) {
           recordViProfile(source, "masked_sum_gpu_display_interactive", startedAt, generation);
           return;
         }
+        invalidateResidentComparePaint();
         const vi = await compute!.maskedSum(mask);
-        if (generation !== viRecomputeGen) return;
+        if (disposed || generation !== viRecomputeGen) return;
         setWarmCacheEntry({
           source: "roi",
           label: String(model.get("roi_mode") || "ROI"),
@@ -4649,7 +5267,7 @@ function Show4DSTEM() {
         recordViProfile(source, displayed ? "masked_sum_gpu_display" : "masked_sum", startedAt, generation);
       };
       const warmStandardViCache = async () => {
-        if (viWarmupStarted || disposed || !compute) {
+        if (viWarmupStarted || disposed || !compute || ransSet) {
           return warmCacheSummary();
         }
         viWarmupStarted = true;
@@ -4731,6 +5349,8 @@ function Show4DSTEM() {
         });
       };
       let compareViGen = 0;
+      let compareGpuCompletion: Promise<void> = Promise.resolve();
+      let compareGpuInFlight = 0;
       const comparePageState = () => {
         const total = Math.max(0, Number(model.get("n_frames") || 0));
         const mode = String(model.get("view_mode") || "single");
@@ -4813,6 +5433,8 @@ function Show4DSTEM() {
         model.set("compare_panel_indices", indices);
       };
       const recomputeCompareVI = async () => {
+        if (disposed) return;
+        const gen = ++compareViGen;
         const indices = compareVisibleIndices();
         if (!indices.length) return;
         const source = normaliseViSource(model.get("vi_source"));
@@ -4825,7 +5447,10 @@ function Show4DSTEM() {
           const engine0 = compute ? ensureViGpuColormap(compute) : null;
           if (!engine0) return false;
           const computeStartedAt = performance.now();
-          const mask0 = buildDetectorMask(model, detR, detC);
+          const liveCenter = interactiveDrag && ransSet ? roiCenterPendingRef.current : null;
+          const mask0 = sourceDetectorMask(liveRoiGeometry(model, liveCenter,
+            interactiveDrag && ransSet ? roiRadiusPendingRef.current : null,
+            interactiveDrag && ransSet ? roiRadiusInnerPendingRef.current : null), detR, detC);
           let slotCursor = 0;
           const batchComputes: DetectorCompute[] = [];
           const batchSlots: number[] = [];
@@ -4841,7 +5466,8 @@ function Show4DSTEM() {
             // touch volumes that are already resident.
             if (interactiveDrag && getVol && !volIsResident(idx)) continue;
             const panelCompute = getVol ? await getVol(idx) : compute;
-            if (!(panelCompute instanceof DetectorCompute)) continue;
+            if (disposed || gen !== compareViGen) return false;
+            if (!panelCompute || (!(panelCompute instanceof DetectorCompute) && !isRansBatch([panelCompute]))) continue;
             batchComputes.push(panelCompute);
             batchSlots.push(slot);
             batchFrames.push(idx);
@@ -4856,6 +5482,8 @@ function Show4DSTEM() {
             let path: string;
             let addedPixels = 0;
             let removedPixels = 0;
+            let normalizedSource112Delta = false;
+            let directPaintQueued = false;
             if (
               interactiveDrag
               && previous
@@ -4863,15 +5491,22 @@ function Show4DSTEM() {
               && previous.mask.length === mask0.length
               && batchFrames.every((frame) => previous.buffers.has(frame))
             ) {
-              const addedMask = new Uint32Array(mask0.length);
-              const removedMask = new Uint32Array(mask0.length);
-              for (let i = 0; i < mask0.length; i++) {
-                const next = mask0[i] !== 0;
-                const prev = previous.mask[i] !== 0;
-                if (next && !prev) { addedMask[i] = 1; addedPixels++; }
-                else if (!next && prev) { removedMask[i] = 1; removedPixels++; }
+              const nativeCounts = ransSet instanceof Source112ResidentSet;
+              // Source112 computes its own ranked deltas. Only an exact support
+              // comparison is needed here to preserve the no-change fast path.
+              const addedMask = nativeCounts ? null : new Uint32Array(mask0.length);
+              const removedMask = nativeCounts ? null : new Uint32Array(mask0.length);
+              let unchanged = nativeCounts && sameDetectorMaskSupport(mask0, previous.mask);
+              if (addedMask && removedMask) {
+                for (let i = 0; i < mask0.length; i++) {
+                  const next = mask0[i] !== 0;
+                  const prev = previous.mask[i] !== 0;
+                  if (next && !prev) { addedMask[i] = 1; addedPixels++; }
+                  else if (!next && prev) { removedMask[i] = 1; removedPixels++; }
+                }
+                unchanged = addedPixels === 0 && removedPixels === 0;
               }
-              if (addedPixels === 0 && removedPixels === 0) {
+              if (unchanged) {
                 publishLiveCompareViStats("delta-skip", {
                   ms: performance.now() - computeStartedAt,
                   adoptedPanels: 0,
@@ -4880,7 +5515,22 @@ function Show4DSTEM() {
                 return true;
               }
               const prevBuffers = batchFrames.map((frame) => previous.buffers.get(frame)!);
-              const delta = DetectorCompute.maskedSumDeltaBuffersBatch(batchComputes, prevBuffers, addedMask, removedMask);
+              // Native source112 owns exact counts separately from these display
+              // copies; render exact means directly when the shared canvas is ready.
+              normalizedSource112Delta = ransSet instanceof Source112ResidentSet;
+              const delta = ransSet instanceof Source112ResidentSet
+                ? source112MeanDelta(ransSet, mask0, prevBuffers, area => {
+                    const resident = ransSet;
+                    const views = resident.imageViewsU32(batchFrames, area);
+                    const accepted = compareGpuRenderNowRef.current?.({
+                      images: new Map(batchFrames.map((frame, i) => [frame, views[i]])),
+                      isCurrent: () => !disposed && ransSet === resident,
+                      refreshFloat: () => { if (!disposed && ransSet === resident) resident.normalizeDisplayBuffers(prevBuffers, area); },
+                    }, true) ?? 0;
+                    directPaintQueued = accepted === batchFrames.length;
+                    return directPaintQueued;
+                  })
+                : DetectorCompute.maskedSumDeltaBuffersBatch(batchComputes, prevBuffers, addedMask!, removedMask!);
               buffers = delta.buffers;
               path = delta.path;
               addedPixels = delta.addedPixels;
@@ -4890,14 +5540,19 @@ function Show4DSTEM() {
               buffers = full.buffers;
               path = full.path;
             }
+            if (ransSet && !normalizedSource112Delta) {
+              const area = Math.max(1, mask0.reduce((n, value) => n + (value ? 1 : 0), 0));
+              ransSet.normalizeDisplayBuffers(buffers, area);
+            }
+            if (!directPaintQueued) compareGpuRenderNowRef.current?.(null);
             const nextBuffers = new Map<number, GPUBuffer>();
             for (let i = 0; i < buffers.length; i++) {
-              engine0.adoptBuffer(batchSlots[i], buffers[i], scanCols, scanRows);
+              displayRoiBuffer(engine0, batchSlots[i], buffers[i]);
               nextBuffers.set(batchFrames[i], buffers[i]);
               adopted++;
             }
             const rangesReady = batchFrames.every((frame) => compareGpuRangesRef.current.has(frame));
-            if (!interactiveDrag || !rangesReady) {
+            if (!ransSet && (!interactiveDrag || !rangesReady)) {
               const ranges = await engine0.computeRangeBatch(batchSlots);
               rangeReadbackBytes = batchSlots.length * Math.ceil((scanRows * scanCols) / 256) * 2 * 4;
               ranges.forEach((range, index) => {
@@ -4906,26 +5561,43 @@ function Show4DSTEM() {
               });
             }
             compareIncrementalRef.current = {
-              mask: new Uint32Array(mask0),
+              // mask0 belongs to this update; source112 copies it internally.
+              mask: normalizedSource112Delta ? mask0 : new Uint32Array(mask0),
               buffers: nextBuffers,
               indicesKey,
             };
-            const paintedNow = interactiveDrag ? (compareGpuRenderNowRef.current?.() ?? 0) : 0;
-            if (interactiveDrag) {
-              await engine0.getDevice().queue.onSubmittedWorkDone().catch(() => {});
-            }
-            publishLiveCompareViStats(path, {
-              ms: performance.now() - computeStartedAt,
-              adoptedPanels: adopted,
-              requestedPanels: indices.length,
-              addedPixels,
-              removedPixels,
-              paintedPanels: paintedNow,
-              rangeReadbackBytes,
-            });
+            // A queued RAF is not a paint. Fresh science completions remain
+            // independent; the canvas reports actual paints via onGpuPaint.
+            const paintedNow = !directPaintQueued && interactiveDrag ? (compareGpuRenderNowRef.current?.() ?? 0) : 0;
+            compareGpuCompletion = engine0.getDevice().queue.onSubmittedWorkDone();
+            if (interactiveDrag && !ransSet) await compareGpuCompletion;
+            if (disposed || gen !== compareViGen) return false;
+            const completed = () => {
+              if (disposed) return;
+              publishLiveCompareViStats(path, {
+                ms: performance.now() - computeStartedAt,
+                adoptedPanels: adopted,
+                requestedPanels: indices.length,
+                addedPixels,
+                removedPixels,
+                paintedPanels: paintedNow,
+                rangeReadbackBytes,
+              });
+            };
+            if (ransSet && interactiveDrag) {
+              void compareGpuCompletion.then(completed, error => {
+                if (!disposed) setOfflineBackendError(String(error));
+              });
+            } else completed();
           }
-          if (adopted) bumpCompareGpuVersion();
-          if (batchFrames.length) {
+          if (adopted && !interactiveDrag) {
+            // A quick release alone does not make float slots current. Their
+            // settled normalization must be queued before histograms resume.
+            if (!disposed && gen === compareViGen && !dpRoiInteractiveRef.current)
+              compareHistogramPendingSettleRef.current = false;
+            bumpCompareGpuVersion();
+          }
+          if (batchFrames.length && !interactiveDrag) {
             progressiveCompareGenerationRef.current = null;
             setProgressiveComparePage(null);
             model.set("compare_panel_count", indices.length);
@@ -4933,7 +5605,23 @@ function Show4DSTEM() {
           }
           return adopted > 0 || interactiveDrag;
         };
-        if (await updateRoiCompareGpuSlots()) return;
+        if (await updateRoiCompareGpuSlots()) {
+          if (ransSet && !interactiveDrag && gen === compareViGen && !disposed
+              && (!(ransSet instanceof Source112ResidentSet) || ransSet.loadedAcquisitions === ransSet.acquisitionCount)) {
+            const mask = sourceDetectorMask(model, detR, detC);
+            const area = Math.max(1, mask.reduce((n, value) => n + (value ? 1 : 0), 0));
+            const pixels = scanRows * scanCols;
+            const settled = new Float32Array(indices.length * pixels);
+            for (let slot = 0; slot < indices.length; slot++) {
+              const counts = await ransSet.readImage(indices[slot]);
+              if (disposed || gen !== compareViGen || dpRoiInteractiveRef.current) return;
+              for (let p = 0; p < pixels; p++) settled[slot * pixels + p] = counts[p] / area;
+            }
+            publishDirectCompareStack(new DataView(settled.buffer), indices.length, indices);
+          }
+          return;
+        }
+        if (disposed || gen !== compareViGen) return;
         if (interactiveDrag) {
           // No engine (CPU compute fallback): keep the old throttled bytes path.
           const now = performance.now();
@@ -4954,7 +5642,6 @@ function Show4DSTEM() {
           publishDirectCompareStack(presetStack, indices.length, indices);
           return;
         }
-        const gen = ++compareViGen;
         const panelPixels = scanRows * scanCols;
         const stackLength = indices.length * panelPixels;
         if (!comparePersistentStack || comparePersistentStack.length !== stackLength) {
@@ -4966,9 +5653,9 @@ function Show4DSTEM() {
             const idx = indices[slot];
             if (interactiveDrag && !volIsResident(idx)) continue;   // keep previous pixels
             const panelCompute = getVol ? await getVol(idx) : compute;
-            if (gen !== compareViGen || !panelCompute) return;
+            if (disposed || gen !== compareViGen || !panelCompute) return;
             const dpc = await computeDpcImage(panelCompute, source);
-            if (gen !== compareViGen || !dpc) return;
+            if (disposed || gen !== compareViGen || !dpc) return;
             stack.set(dpc, slot * panelPixels);
           }
           settleCompareGpuSlots();
@@ -4977,7 +5664,7 @@ function Show4DSTEM() {
           publishDirectCompareStack(new DataView(stack.slice().buffer), indices.length, indices);
           return;
         }
-        const mask = buildDetectorMask(model, detR, detC);
+        const mask = sourceDetectorMask(model, detR, detC);
         let maskArea = 0;
         for (let i = 0; i < mask.length; i++) maskArea += mask[i] ? 1 : 0;
         maskArea = Math.max(1, maskArea);
@@ -4985,16 +5672,17 @@ function Show4DSTEM() {
           const idx = indices[slot];
           if (interactiveDrag && !volIsResident(idx)) continue;   // keep previous pixels
           const panelCompute = getVol ? await getVol(idx) : compute;
-          if (gen !== compareViGen || !panelCompute) return;
+          if (disposed || gen !== compareViGen || !panelCompute) return;
+          invalidateResidentComparePaint();
           const vi = await panelCompute.maskedSum(mask);
-          if (gen !== compareViGen) return;
+          if (disposed || gen !== compareViGen) return;
           for (let p = 0; p < panelPixels; p++) {
             stack[slot * panelPixels + p] = vi[p] / maskArea;
           }
         }
         settleCompareGpuSlots();
-          // fresh copy: reusing the persistent stack's ArrayBuffer identity makes this
-          // model.set a silent no-op (no change event -> stats/export/save-state stale)
+        // fresh copy: reusing the persistent stack's ArrayBuffer identity makes this
+        // model.set a silent no-op (no change event -> stats/export/save-state stale)
         publishDirectCompareStack(new DataView(stack.slice().buffer), indices.length, indices);
       };
       const recomputeVisibleVirtualImages = async () => {
@@ -5006,8 +5694,9 @@ function Show4DSTEM() {
         await recomputeVI();
       };
       (window as unknown as { __sh4d: unknown }).__sh4d = { model, recomputeVI, recomputeCompareVI,
-        detMask: () => buildDetectorMask(model, detR, detC),
-        deriveOnly: async () => { const vi = await compute!.maskedSum(buildDetectorMask(model, detR, detC)); return vi.length; },
+        residentSource: () => ransSet,
+        detMask: () => sourceDetectorMask(model, detR, detC),
+        deriveOnly: async () => { invalidateResidentComparePaint(); const vi = await compute!.maskedSum(sourceDetectorMask(model, detR, detC)); return vi.length; },
         rawChecksums: async (scanIndices: number[] = [0, Math.floor((scanRows * scanCols) / 2), scanRows * scanCols - 1]) => {
           const checksum = (compute as unknown as { checksumFrames?: (indices: number[]) => Promise<unknown> })?.checksumFrames;
           if (typeof checksum !== "function") return null;
@@ -5074,7 +5763,7 @@ function Show4DSTEM() {
           model.set("vi_scale_mode", logScale ? "log" : "linear");
           model.save_changes();
 
-          const mask = buildDetectorMask(model, detR, detC);
+          const mask = sourceDetectorMask(model, detR, detC);
           let maskPixels = 0;
           for (let i = 0; i < mask.length; i++) if (mask[i]) maskPixels++;
           const prepStartedAt = performance.now();
@@ -5118,7 +5807,7 @@ function Show4DSTEM() {
             const { buffers, path } = DetectorCompute.maskedSumBuffersBatch(loaded, mask);
             for (let i = 0; i < buffers.length; i++) {
               const slot = COMPARE_GPU_SLOT_BASE + i;
-              engine.adoptBuffer(slot, buffers[i], scanCols, scanRows);
+              displayRoiBuffer(engine, slot, buffers[i]);
               slots.push(slot);
               adopted++;
             }
@@ -5242,7 +5931,7 @@ function Show4DSTEM() {
 
           const results = [] as Record<string, unknown>[];
           try {
-            dpRoiInteractiveRef.current = true;
+            beginDpRoiInteraction();
             for (let iter = 0; iter < centers.length; iter++) {
               const [row, col] = centers[iter];
               const startedAt = performance.now();
@@ -5253,13 +5942,13 @@ function Show4DSTEM() {
               } finally {
                 suppressViTraitRecompute = false;
               }
-              const computeStats = ((window as unknown as {
-                __sh4dLiveCompareStats?: Record<string, unknown>;
-              }).__sh4dLiveCompareStats) || {};
               const computeSubmittedMs = performance.now() - startedAt;
               const waitStartedAt = performance.now();
               await device.queue.onSubmittedWorkDone().catch(() => {});
               const computeGpuDoneMs = performance.now() - waitStartedAt;
+              const computeStats = ((window as unknown as {
+                __sh4dLiveCompareStats?: Record<string, unknown>;
+              }).__sh4dLiveCompareStats) || {};
               let paintStats = null as Record<string, unknown> | null;
               if (render) {
                 await waitForFrame();
@@ -5344,7 +6033,7 @@ function Show4DSTEM() {
           const loadedIndices = [] as number[];
           for (const idx of indices) {
             const panelCompute = getVol ? await getVol(idx) : compute;
-            if (panelCompute instanceof DetectorCompute) {
+            if (panelCompute && (panelCompute instanceof DetectorCompute || isRansBatch([panelCompute]))) {
               loaded.push(panelCompute);
               loadedIndices.push(idx);
             }
@@ -5373,7 +6062,7 @@ function Show4DSTEM() {
               engine.configureCanvas(canvas, scanCols, scanRows),
             );
           }
-          const maskForCenter = (row: number, col: number) => buildDetectorMask({
+          const maskForCenter = (row: number, col: number) => sourceDetectorMask({
             get: (name: string) => {
               if (name === "roi_mode") return mode;
               if (name === "roi_center_row") return row;
@@ -5426,7 +6115,7 @@ function Show4DSTEM() {
               const renderStartedAt = performance.now();
               for (let i = 0; i < buffers.length; i++) {
                 const slot = COMPARE_GPU_SLOT_BASE + 128 + i;
-                engine.adoptBuffer(slot, buffers[i], scanCols, scanRows);
+                displayRoiBuffer(engine, slot, buffers[i]);
                 const ctx = contexts[i];
                 if (!ctx) continue;
                 const ok = engine.renderSlotDirectWithGpuRangeToCanvas(
@@ -5491,7 +6180,7 @@ function Show4DSTEM() {
           return payload;
         },
         roiBufferOnly: async () => {
-          const mask = buildDetectorMask(model, detR, detC);
+          const mask = sourceDetectorMask(model, detR, detC);
           const t0 = performance.now();
           const displayed = computeRoiBufferImage(compute!, mask);
           await ensureViGpuColormap(compute!)?.getDevice().queue.onSubmittedWorkDone().catch(() => {});
@@ -5504,7 +6193,7 @@ function Show4DSTEM() {
           };
         },
         h5ProductFirstRoi: async () => {
-          const mask = buildDetectorMask(model, detR, detC);
+          const mask = sourceDetectorMask(model, detR, detC);
           const generation = ++viRecomputeGen;
           const t0 = performance.now();
           const result = await computeH5ProductFirstRoi(mask, generation);
@@ -5584,25 +6273,53 @@ function Show4DSTEM() {
         rd: () => ({ mode: model.get("roi_mode"), r: model.get("roi_radius"), ri: model.get("roi_radius_inner"),
           cr: model.get("roi_center_row"), cc: model.get("roi_center_col"), active: model.get("roi_active") }) };
       requestCompareViLiveRef.current = () => {
-        if (compareViLiveInFlightRef.current) {
+        if (compareViLiveInFlightRef.current || compareGpuInFlight >= 2) {
           compareViLivePendingRef.current = true;
           return;
         }
-        flushRoiCenter();
-        flushRoiRadius();
+        compareViLivePendingRef.current = false;
+        flushRoiCenter(false);
+        // Keep scientific geometry current without repainting between display frames.
+        flushRoiRadius(false);
         compareViLiveInFlightRef.current = true;
-        void recomputeVisibleVirtualImages().finally(() => {
+        void (async () => {
+          if (ransSet && compareVisibleIndices().length && normaliseViSource(model.get("vi_source")) === "roi") {
+            // The visible grid owns this detector update. Updating the hidden
+            // single view first splits the common mask history into two jobs.
+            compareGpuInFlight++;
+            try {
+              await recomputeCompareVI();
+            } catch (error) {
+              compareGpuInFlight--;
+              throw error;
+            }
+            const completion = compareGpuCompletion;
+            void completion.finally(() => {
+              compareGpuInFlight--;
+              if (compareViLivePendingRef.current && dpRoiInteractiveRef.current && !disposed) requestCompareViLive();
+            }).catch(error => { if (!disposed) setOfflineBackendError(String(error)); });
+          } else {
+            await recomputeVisibleVirtualImages();
+          }
+        })().catch(error => {
+          if (!disposed) setOfflineBackendError(String(error));
+        }).finally(() => {
+          if (disposed) return;
           compareViLiveInFlightRef.current = false;
-          if (compareViLivePendingRef.current && dpRoiInteractiveRef.current) {
+          if (compareViLivePendingRef.current && dpRoiInteractiveRef.current && compareGpuInFlight < 2) {
             compareViLivePendingRef.current = false;
             requestCompareViLive();
-          } else {
+          } else if (!dpRoiInteractiveRef.current) {
             compareViLivePendingRef.current = false;
           }
         });
       };
       requestViFinalizeRef.current = () => {
-        void recomputeVisibleVirtualImages();
+        void (async () => {
+          await compareGpuCompletion;
+          if (disposed || dpRoiInteractiveRef.current) return;
+          await recomputeVisibleVirtualImages();
+        })().catch(error => { if (!disposed) setOfflineBackendError(String(error)); });
       };
       const recomputeDP = async () => {
         const mode = model.get("vi_roi_mode");
@@ -5616,12 +6333,42 @@ function Show4DSTEM() {
       // the offline stack, so the DP follows the probe offline too.
       const detSize = detR * detC;
       const sample = (gp: number) => compute!.mode === 1 ? cpuStack![gp] : (cpuStack![gp * 2] | (cpuStack![gp * 2 + 1] << 8));
-      const recomputeFrame = async () => {
+      const computeFrame = async (isCurrent: () => boolean) => {
         const pr = Math.max(0, Math.min(scanRows - 1, model.get("pos_row") | 0));
         const pc = Math.max(0, Math.min(scanCols - 1, model.get("pos_col") | 0));
         const scanIdx = pr * scanCols + pc;
         const mode = String(model.get("view_mode") || "single");
         const dpMode = String(model.get("compare_dp_mode") || "average");
+        if (ransSet instanceof Source112ResidentSet && dpGpuCanvasRef.current && dpGpuOptionsRef.current
+            && (!model.get("vi_roi_mode") || model.get("vi_roi_mode") === "off")) {
+          const average = (mode === "multiple" || mode === "compare") && dpMode !== "selected";
+          let indices = average ? compareAverageDpIndices() : [Math.max(0, Math.min(ransSet.acquisitionCount - 1, model.get("frame_idx") | 0))];
+          if (average && !h5VolumePreloadDone) {
+            indices = latestResidentVolumeIndex != null && volIsResident(latestResidentVolumeIndex)
+              ? [latestResidentVolumeIndex] : indices.filter(idx => volIsResident(idx));
+          }
+          if (indices.length && indices.every(idx => volIsResident(idx))) {
+            const sources = indices.map(idx => ransSet!.computes[idx]) as unknown as ResidentPatternSource[];
+            const device = sources[0].getDevice();
+            let display = dpGpuDisplayRef.current;
+            if (!display || display.device !== device) {
+              clearDpGpuDisplay();
+              display = new ResidentDpDisplay(dpGpuCanvasRef.current, device, dpGpuOptionsRef.current,
+                setDpGpuPending, error => { if (!disposed) setOfflineBackendError(String(error)); });
+              dpGpuDisplayRef.current = display;
+            }
+            liveScanDisplayRef.current = mode === "multiple" || mode === "compare";
+            display.show(sources, scanIdx, frame => {
+              if (!isCurrent() || model.get("pos_row") !== pr || model.get("pos_col") !== pc) return;
+              model.set("frame_bytes", new DataView(frame.buffer));
+              model.save_changes();
+            });
+            setDpGpuReady(true);
+            return;
+          }
+        }
+        if (dpGpuDisplayRef.current) clearDpGpuDisplay();
+
         if ((mode === "multiple" || mode === "compare") && dpMode !== "selected" && getVol) {
           const indices = compareAverageDpIndices();
           if (indices.length) {
@@ -5644,6 +6391,7 @@ function Show4DSTEM() {
             }
             if (count > 0) {
               for (let k = 0; k < detSize; k++) averaged[k] /= count;
+              if (!isCurrent()) return;
               model.set("frame_bytes", new DataView(averaged.buffer));
               (window as unknown as { __show4dstemLatestDp?: unknown }).__show4dstemLatestDp = {
                 scanIdx,
@@ -5659,25 +6407,28 @@ function Show4DSTEM() {
         }
         // bslz4 / chunked stacks have no CPU copy -> extract the frame on the GPU.
         if (!compute) return;
+        const frameIndex = Math.max(0, Math.min((volumeCount || volMetas.length || 1) - 1, model.get("frame_idx") | 0));
+        const frameSource = getVol ? await getVol(frameIndex) : compute;
+        if (!frameSource || !isCurrent()) return;
         const frame = cpuStack
           ? (() => { const f = new Float32Array(detSize); const base = scanIdx * detSize; for (let k = 0; k < detSize; k++) f[k] = sample(base + k); return f; })()
-          : await compute!.frameAt(scanIdx);
+          : await frameSource.frameAt(scanIdx);
+        if (!isCurrent()) return;
         model.set("frame_bytes", new DataView(frame.buffer)); model.save_changes();
       };
+      const frameQueue = createLatestFrameQueue(computeFrame, error => {
+        if (!disposed) setOfflineBackendError(String(error));
+      });
+      const recomputeFrame = frameQueue.request;
       requestDpFrameLiveRef.current = () => {
         void recomputeFrame();
       };
       if (h5VolumePreload) {
         void h5VolumePreload.then(() => {
-          const refreshLoadedH5Views = () => {
-            if (disposed) return;
-            void recomputeCompareVI();
-            void recomputeFrame();
-          };
-          refreshLoadedH5Views();
-          requestAnimationFrame(() => {
-            requestAnimationFrame(refreshLoadedH5Views);
-          });
+          if (disposed) return;
+          frameQueue.invalidate();
+          void recomputeCompareVI();
+          void recomputeFrame();
         }).catch((error) => {
           console.warn("Show4DSTEM HDF5 volume preload refresh failed", error);
         });
@@ -5695,10 +6446,11 @@ function Show4DSTEM() {
       const onDP = () => {
         if (splittingViCenter) return;
         void recomputeDP();
+        void recomputeFrame();
       };
       const onPos = () => { void recomputeFrame(); };
-      const onCompareFrameSource = () => { void recomputeFrame(); };
-      const onCompareGridSource = () => { void recomputeCompareVI(); void recomputeFrame(); };
+      const onCompareFrameSource = () => { dpGpuDisplayRef.current?.invalidate(); frameQueue.invalidate(); void recomputeFrame(); };
+      const onCompareGridSource = () => { dpGpuDisplayRef.current?.invalidate(); frameQueue.invalidate(); void recomputeCompareVI(); void recomputeFrame(); };
       const activateCurrentVolume = async () => {
         if (!getVol) return true;
         const nVolumes = volumeCount || volMetas.length || 1;
@@ -5712,6 +6464,7 @@ function Show4DSTEM() {
       if (initialVolumeLoad) {
         void initialVolumeLoad.then((cc) => {
           if (!cc || disposed) return;
+          frameQueue.invalidate();
           compute = cc;
           publishComputeDpcReady(cc);
           void (async () => {
@@ -5734,6 +6487,8 @@ function Show4DSTEM() {
         });
       }
       const recomputeActiveView = async () => {
+        dpGpuDisplayRef.current?.invalidate();
+        frameQueue.invalidate();
         const ready = await activateCurrentVolume();
         if (!ready || disposed) return;
         void recomputeVI();
@@ -5744,6 +6499,8 @@ function Show4DSTEM() {
       // 5D multi-volume: the slider picks the active dataset; decode-on-scrub (LRU).
       let frameGen = 0;
       const onFrame = async () => {
+        dpGpuDisplayRef.current?.invalidate();
+        frameQueue.invalidate();
         const gen = ++frameGen;                  // ignore a stale decode if the user keeps scrubbing
         const ready = await activateCurrentVolume();
         if (gen !== frameGen || !ready) return;   // a newer scroll superseded this one
@@ -5836,6 +6593,8 @@ function Show4DSTEM() {
         model.off("change:roi_center", onRoiCenter);
         model.off("change:vi_roi_center", onViCenter);
         model.off("change:_preset_request", onPreset);
+        frameQueue.close();
+        clearDpGpuDisplay();
         model.off("change:pos_row", onPos);
         model.off("change:pos_col", onPos);
         model.off("change:compare_dp_mode", onCompareFrameSource);
@@ -5847,13 +6606,18 @@ function Show4DSTEM() {
         model.off("change:frame_idx", onFrame);
         model.off("change:view_mode", recomputeActiveView);
         computes.forEach((c) => c.dispose());          // single / non-lazy resident set
+      ransSet?.dispose();
         volCache.forEach((c) => c.dispose()); volCache.clear();  // every cached lazy volume
         inlineVolCache.forEach((c) => c.dispose()); inlineVolCache.clear();
+      };
+      refreshResidentProgress = () => {
+        if (model.get("compare_dp_mode") !== "selected") frameQueue.invalidate();
+        void recomputeVI(); void recomputeCompareVI(); recomputeFrame();
       };
       await recomputeVI();  // initial virtual image, no interaction needed
       await recomputeCompareVI();
       if (!initialVolumeLoad && !disposed) {
-        setOfflineBackendStatus("");
+        if (!(ransSet instanceof Source112ResidentSet)) setOfflineBackendStatus("");
         setOfflineBackendLoading(false);
       }
       // Fit the BF disk from the mean diffraction pattern before the presets warm.
@@ -5951,8 +6715,23 @@ function Show4DSTEM() {
     });
     return () => {
       disposed = true;
+      compareGpuHistogramGenRef.current++;
+      compareHistogramPendingSettleRef.current = true;
+      compareGpuRenderNowRef.current?.(null);
+      if (roiRadiusRafRef.current !== null) cancelAnimationFrame(roiRadiusRafRef.current);
+      roiRadiusRafRef.current = null;
+      roiRadiusPendingRef.current = null;
+      roiRadiusInnerPendingRef.current = null;
+      sourceLoadAbort.abort();
       requestViFinalizeRef.current = null;
       requestCompareViLiveRef.current = null;
+      compareViLiveMicrotaskRef.current = null;
+      compareViLiveInFlightRef.current = false;
+      compareViLivePendingRef.current = false;
+      if (compareViLiveRafRef.current !== null) {
+        cancelAnimationFrame(compareViLiveRafRef.current);
+        compareViLiveRafRef.current = null;
+      }
       requestDpFrameLiveRef.current = null;
       setWebgpuDpcReady(false);
       setOfflineBackendLoading(false);
@@ -5961,7 +6740,7 @@ function Show4DSTEM() {
       clearViGpuDisplay();
       detach?.();
     };
-  }, [clearViGpuDisplay, ensureViGpuColormap, h5LocalFilesGranted, h5SourceAvailable, offline, requestCompareViLive, requestDpFrameLive, requireLocalH5Files]);
+  }, [beginDpRoiInteraction, clearViGpuDisplay, qemSource, source112Source, ensureViGpuColormap, h5LocalFilesGranted, h5SourceAvailable, offline, ransLocalDirectory, ransLocalFiles, requestCompareViLive, requestDpFrameLive, requireLocalH5Files]);
   // dp_stats are computed in JS from frameBytes (Python side no longer
   // syncs a dp_stats trait — saves 4 trait sync round-trips per click).
   const [viStats, setViStats] = React.useState<number[]>([0, 0, 0, 0]);
@@ -6572,7 +7351,23 @@ function Show4DSTEM() {
   }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Cursor readout state
-  const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number; panel: string } | null>(null);
+  const [cursorInfo, commitCursorInfo] = React.useState<{ row: number; col: number; value: number; panel: string; exact?: boolean } | null>(null);
+  const pendingCursorInfoRef = React.useRef<typeof cursorInfo>(null);
+  const cursorRafRef = React.useRef<number | null>(null);
+  const setCursorInfo = React.useCallback((next: React.SetStateAction<typeof cursorInfo>) => {
+    pendingCursorInfoRef.current = typeof next === "function" ? next(pendingCursorInfoRef.current) : next;
+    if (cursorRafRef.current !== null) return;
+    cursorRafRef.current = requestAnimationFrame(() => {
+      cursorRafRef.current = null;
+      const pending = pendingCursorInfoRef.current;
+      commitCursorInfo(previous => previous === pending || (previous && pending &&
+        previous.row === pending.row && previous.col === pending.col &&
+        previous.value === pending.value && previous.panel === pending.panel) ? previous : pending);
+    });
+  }, []);
+  React.useEffect(() => () => {
+    if (cursorRafRef.current !== null) cancelAnimationFrame(cursorRafRef.current);
+  }, []);
 
   // DP Line profile state
   const [profileActive, setProfileActive] = React.useState(false);
@@ -6604,6 +7399,15 @@ function Show4DSTEM() {
   const viProfileBaseImageRef = React.useRef<ImageData | null>(null);
   const viProfileLayoutRef = React.useRef<{ padLeft: number; plotW: number; padTop: number; plotH: number; gMin: number; gMax: number; totalDist: number; xUnit: string } | null>(null);
   const rawViDataRef = React.useRef<Float32Array | null>(null);
+  const residentSelectedRawRef = React.useRef<ResidentValues | null>(null);
+  const residentSelectedRaw = React.useMemo(() => {
+    if (!residentBatchInfo?.request_id || !compareVirtualImageBytes || residentScalarType(residentBatchInfo) === "<f4") return null;
+    const source = residentRawValues(compareVirtualImageBytes,residentBatchInfo);
+    const slot = (comparePanelIndices ?? []).indexOf(frameIdx);
+    return slot >= 0 ? source.subarray(slot*shapeRows*shapeCols,(slot+1)*shapeRows*shapeCols) : null;
+  }, [residentBatchInfo,compareVirtualImageBytes,comparePanelIndices,frameIdx,shapeRows,shapeCols]);
+  residentSelectedRawRef.current = residentSelectedRaw;
+
   const viClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const [draggingViProfileEndpoint, setDraggingViProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingViProfileLine, setIsDraggingViProfileLine] = React.useState(false);
@@ -6633,6 +7437,22 @@ function Show4DSTEM() {
   const [dpHistogramData, setDpHistogramData] = React.useState<Float32Array | null>(null);
   const [viHistogramData, setViHistogramData] = React.useState<Float32Array | null>(null);
   const [viHistogramBins, setViHistogramBins] = React.useState<Float32Array | null>(null);
+  const viSummaryRefs = React.useRef<(HTMLElement | null)[]>([]);
+  const [viSummaryVisible, setViSummaryVisible] = React.useState(false);
+  const [viSummaryBytes, setViSummaryBytes] = React.useState<DataView | null>(null);
+  const viSummaryPending = Boolean(residentBatchInfo && compareMode && viSummaryBytes !== displayedCompareVirtualImageBytes);
+  React.useEffect(() => {
+    if (!residentBatchInfo || !compareMode) return;
+    if (typeof IntersectionObserver === "undefined") { setViSummaryVisible(true); return; }
+    const visible = new Map<Element, boolean>();
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => visible.set(entry.target, entry.isIntersecting));
+      setViSummaryVisible(Array.from(visible.values()).some(Boolean));
+    });
+    viSummaryRefs.current.forEach(node => { if (node) observer.observe(node); });
+    return () => observer.disconnect();
+  }, [Boolean(residentBatchInfo),compareMode,showStats,controlsVisible]);
+
 
   // DP stats computed JS-side from frame_bytes (was Python trait pre-refactor;
   // moving to JS skips 4 sync trait round-trips per scan-position click).
@@ -6810,7 +7630,7 @@ function Show4DSTEM() {
 
   const handleRootMouseDownCapture = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement | null;
-    if (target?.closest("canvas")) rootRef.current?.focus();
+    if (target?.closest("canvas")) rootRef.current?.focus({ preventScroll: true });
   }, []);
 
   const handleKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -6894,8 +7714,6 @@ function Show4DSTEM() {
   }, [posRow, posCol, isDraggingVI]);
 
   const updateScanPosition = React.useCallback((row: number, col: number, commit = false) => {
-    setLocalPosRow(row);
-    setLocalPosCol(col);
     queueScanPosition(row, col);
     if (commit) flushScanPosition();
   }, [flushScanPosition, queueScanPosition]);
@@ -6914,7 +7732,24 @@ function Show4DSTEM() {
   const dpUiRef = React.useRef<HTMLCanvasElement>(null);  // High-DPI UI overlay for scale bar
   const dpOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const dpImageDataRef = React.useRef<ImageData | null>(null);
-  const virtualGpuSnapshotSerialRef = React.useRef(0);
+  dpGpuOptionsRef.current = {width: detCols, height: detRows, colormap: dpColormap,
+    log: dpScaleMode === "log", minPct: dpVminPct, maxPct: dpVmaxPct,
+    min: traitDpVmin, max: traitDpVmax, zoom: dpZoom, panX: dpPanX, panY: dpPanY};
+  React.useLayoutEffect(() => {
+    if (dpGpuOptionsRef.current) dpGpuDisplayRef.current?.updateOptions(dpGpuOptionsRef.current);
+  }, [detRows, detCols, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, traitDpVmin, traitDpVmax, dpZoom, dpPanX, dpPanY]);
+
+  const virtualGpuCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const virtualGpuCaptureRef = React.useRef<(() => Promise<HTMLCanvasElement>) | null>(null);
+  const virtualGpuContextRef = React.useRef<{ engine: GPUColormapEngine; context: GPUCanvasContext } | null>(null);
+  const attachVirtualGpuCanvas = React.useCallback((canvas: HTMLCanvasElement | null) => {
+    if (virtualGpuCanvasRef.current !== canvas) {
+      virtualGpuContextRef.current?.context.unconfigure();
+      virtualGpuContextRef.current = null;
+      virtualGpuCaptureRef.current = null;
+      virtualGpuCanvasRef.current = canvas;
+    }
+  }, []);
   const virtualCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const virtualOverlayRef = React.useRef<HTMLCanvasElement>(null);
   const viUiRef = React.useRef<HTMLCanvasElement>(null);  // High-DPI UI overlay for scale bar
@@ -7029,15 +7864,16 @@ function Show4DSTEM() {
 
   React.useEffect(() => {
     if (!compareMode) return;
+    // The complete native image batch is drawn independently. Its offscreen
+    // summary must not scan/copy every scientific value on each drag frame.
+    // When a summary becomes visible, compute it exactly from the latest batch.
+    if (residentBatchInfo && !viSummaryVisible) return;
     const expectedFloats = Math.max(0, (comparePanelCount || 0) * shapeRows * shapeCols);
-    if (!displayedCompareVirtualImageBytes || expectedFloats === 0 || displayedCompareVirtualImageBytes.byteLength < expectedFloats * 4) {
+    if (!displayedCompareVirtualImageBytes || expectedFloats === 0 || displayedCompareVirtualImageBytes.byteLength < expectedFloats * (residentBatchInfo?.dtype === "<u2" && activeViSource === "roi" ? 2 : 4)) {
       return;
     }
-    const rawData = new Float32Array(
-      displayedCompareVirtualImageBytes.buffer,
-      displayedCompareVirtualImageBytes.byteOffset,
-      expectedFloats,
-    );
+    const rawData = residentDisplayValues(displayedCompareVirtualImageBytes,
+      activeViSource === "roi" ? residentBatchInfo : undefined);
     const s = computeStats(rawData);
     setViStats([s.mean, s.min, s.max, s.std]);
     if (viSourceUsesSymmetricRange(activeViSource)) {
@@ -7059,10 +7895,12 @@ function Show4DSTEM() {
     }
     setViHistogramBins(null);
     setViHistogramData(scaledData);
-  }, [activeViSource, compareMode, comparePanelCount, displayedCompareVirtualImageBytes, shapeCols, shapeRows, viScaleMode]);
+    setViSummaryBytes(displayedCompareVirtualImageBytes);
+  }, [residentBatchInfo,viSummaryVisible,activeViSource, compareMode, comparePanelCount, displayedCompareVirtualImageBytes, shapeCols, shapeRows, viScaleMode]);
 
   React.useEffect(() => {
     if (!compareMode || activeViSource !== "roi") return;
+    if (dpRoiInteractiveRef.current || compareHistogramPendingSettleRef.current) return;
     const engine = viGpuColormapRef.current;
     if (!engine) return;
     const slotIndices = visibleCompareHistogramFrames
@@ -7072,51 +7910,21 @@ function Show4DSTEM() {
 
     let cancelled = false;
     const generation = ++compareGpuHistogramGenRef.current;
+    const isCurrent = () => !cancelled
+      && generation === compareGpuHistogramGenRef.current
+      && !dpRoiInteractiveRef.current && !compareHistogramPendingSettleRef.current;
     const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const rawRanges = await engine.computeRangeBatch(slotIndices);
-          if (cancelled || generation !== compareGpuHistogramGenRef.current) return;
-          const logScale = viScaleMode === "log";
-          const ranges = rawRanges
-            .map((range) => {
-              if (!Number.isFinite(range.min) || !Number.isFinite(range.max)) return null;
-              if (!logScale) return range;
-              return {
-                min: Math.log1p(Math.max(0, range.min)),
-                max: Math.log1p(Math.max(0, range.max)),
-              };
-            })
-            .filter((range): range is { min: number; max: number } => Boolean(range));
-          if (ranges.length === 0) return;
-          let dmin = Number.POSITIVE_INFINITY;
-          let dmax = Number.NEGATIVE_INFINITY;
-          ranges.forEach((range) => {
-            if (range.min < dmin) dmin = range.min;
-            if (range.max > dmax) dmax = range.max;
-          });
-          if (!Number.isFinite(dmin) || !Number.isFinite(dmax)) return;
-          if (dmax <= dmin) dmax = dmin + 1e-12;
-          const histograms = await engine.computeHistogramBatch(
-            slotIndices,
-            slotIndices.map(() => ({ min: dmin, max: dmax })),
-            logScale,
-          );
-          if (cancelled || generation !== compareGpuHistogramGenRef.current || histograms.length === 0) return;
-          const merged = new Float32Array(256);
-          histograms.forEach((histogram) => {
-            for (let i = 0; i < Math.min(256, histogram.length); i++) {
-              merged[i] += Number(histogram[i]) || 0;
-            }
-          });
-          setViDataMin(dmin);
-          setViDataMax(dmax);
+      void readSettledCompareHistogram(engine, slotIndices, viScaleMode === "log", isCurrent)
+        .then(summary => {
+          if (!summary || !isCurrent()) return;
+          setViDataMin(summary.min);
+          setViDataMax(summary.max);
           setViHistogramData(null);
-          setViHistogramBins(merged);
-        } catch (error) {
-          console.warn("Show4DSTEM multiple histogram update failed", error);
-        }
-      })();
+          setViHistogramBins(summary.bins);
+        })
+        .catch(error => {
+          if (isCurrent()) console.warn("Show4DSTEM multiple histogram update failed", error);
+        });
     }, 120);
 
     return () => {
@@ -7171,7 +7979,10 @@ function Show4DSTEM() {
       offscreen.height = detRows;
       dpImageDataRef.current = null;
     }
-    const offCtx = offscreen.getContext("2d");
+    // These small CPU-colored canvases need CPU backing: on the verified
+    // Chrome/NVIDIA raster path, default 2D writes can stay fully transparent
+    // while the context reports no loss. Select the backing on first use.
+    const offCtx = offscreen.getContext("2d", { willReadFrequently: true });
     if (!offCtx) return;
 
     let imgData = dpImageDataRef.current;
@@ -7193,22 +8004,29 @@ function Show4DSTEM() {
     const offscreen = dpOffscreenRef.current;
     if (!offscreen || !dpCanvasRef.current) return;
     const canvas = dpCanvasRef.current;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.translate(dpPanX, dpPanY);
-    ctx.scale(dpZoom, dpZoom);
-    ctx.drawImage(offscreen, 0, 0);
-    ctx.restore();
+    const identity = dpZoom === 1 && dpPanX === 0 && dpPanY === 0;
+    const pixels = dpImageDataRef.current;
+    if (identity && pixels && pixels.width === canvas.width && pixels.height === canvas.height) {
+      // Exact pixel copy at identity view avoids unnecessary resampling.
+      ctx.putImageData(pixels, 0, 0);
+    } else {
+      ctx.save();
+      ctx.translate(dpPanX, dpPanY);
+      ctx.scale(dpZoom, dpZoom);
+      ctx.drawImage(offscreen, 0, 0);
+      ctx.restore();
+    }
   }, [dpOffscreenVersion, dpZoom, dpPanX, dpPanY]);
 
   // Render DP overlay - just clear (ROI shapes now drawn on high-DPI UI canvas)
   React.useEffect(() => {
     if (!dpOverlayRef.current) return;
     const canvas = dpOverlayRef.current;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     // All visual overlays (crosshair, ROI shapes, scale bar) are now on dpUiRef for crisp rendering
@@ -7222,7 +8040,6 @@ function Show4DSTEM() {
       && viGpuImageRef.current
       && activeViSource === viGpuImageRef.current.source
     ) {
-      setViGpuRetainedReady(false);
       return;
     }
 
@@ -7301,8 +8118,8 @@ function Show4DSTEM() {
     setViOffscreenVersion(v => v + 1);
   }, [activeViSource, compareMode, displayedVirtualImageBytes, shapeRows, shapeCols, viGpuVersion, viColormap, viVminPct, viVmaxPct, viScaleMode, traitViVmin, traitViVmax, viAutoContrast]);
 
-  // WebGPU virtual-image display path: the reduction output stays as a GPUBuffer
-  // and the colormap shader renders it to a dedicated canvas layer. The
+  // Present resident reductions directly, including while the pointer is held.
+  // Offscreen bitmap snapshots can be black and can lag the latest detector. The
   // virtual_image_bytes trait is still populated afterward so stats, FFT,
   // profile, COPY fallback, and non-WebGPU paths keep working.
   React.useEffect(() => {
@@ -7374,60 +8191,41 @@ function Show4DSTEM() {
     engine.uploadLUT(viColormap, lut);
     const renderStart = performance.now();
     let displayRange = "cpu";
-    let durableFrame: Promise<ImageBitmap | null> | null = null;
-    if (vmin != null && vmax != null) {
-      durableFrame = engine.renderPanelSlotsToImageBitmapAsync(
-        [gpuImage.slot],
-        { vmin, vmax },
-        viScaleMode === "log",
-        {
-          width: shapeCols,
-          height: shapeRows,
-          panelCount: 1,
-          cols: 1,
-          rows: 1,
-          gap: 0,
-          bgRgb: 0,
-          transforms: [{ zoom: viZoom, panX: viPanX, panY: viPanY }],
-          smooth: viSmooth,
-        },
-      );
-    } else if (gpuImage.rangeMode === "gpu") {
-      displayRange = "gpu";
-      const renderOpts = {
-        width: shapeCols,
-        height: shapeRows,
-        bgRgb: 0,
-        transform: { zoom: viZoom, panX: viPanX, panY: viPanY },
-        smooth: viSmooth,
-      };
-      durableFrame = engine.renderSlotDirectWithGpuRangeToImageBitmapAsync(
-        gpuImage.slot,
-        viVminPct,
-        viVmaxPct,
-        viScaleMode === "log",
-        renderOpts,
-      );
+    const canvas = virtualGpuCanvasRef.current;
+    if (!canvas) return;
+    let target = virtualGpuContextRef.current;
+    if (!target || target.engine !== engine || canvas.width !== shapeCols || canvas.height !== shapeRows) {
+      target?.context.unconfigure();
+      const context = engine.configureCanvas(canvas, shapeCols, shapeRows);
+      if (!context) { setViGpuRetainedReady(false); return; }
+      context.configure({device: engine.getDevice(), format: navigator.gpu.getPreferredCanvasFormat(),
+        alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC});
+      target = { engine, context };
+      virtualGpuContextRef.current = target;
     }
-    if (durableFrame) {
-      const snapshotSerial = ++virtualGpuSnapshotSerialRef.current;
-      void durableFrame.then(bitmap => {
-        if (!bitmap) return;
-        try {
-          if (snapshotSerial !== virtualGpuSnapshotSerialRef.current) return;
-          const retained = virtualCanvasRef.current;
-          const retainedCtx = retained?.getContext("2d");
-          if (!retained || !retainedCtx) return;
-          retainedCtx.clearRect(0, 0, retained.width, retained.height);
-          retainedCtx.drawImage(bitmap, 0, 0, retained.width, retained.height);
-          setViGpuRetainedReady(true);
-        } finally {
-          bitmap.close();
-        }
-      }).catch(error => {
-        setViGpuRetainedReady(false);
-        console.warn("[Show4DSTEM] Could not retain the presented WebGPU virtual image", error);
-      });
+    const render = () => {
+      let rendered = false;
+      if (vmin != null && vmax != null) {
+        rendered = engine.renderPanelSlotsDirectToCanvas(
+          [gpuImage.slot], { vmin, vmax }, viScaleMode === "log", target.context,
+          { width: shapeCols, height: shapeRows, panelCount: 1, cols: 1, rows: 1,
+            gap: 0, bgRgb: 0,
+            transforms: [{ zoom: viZoom, panX: viPanX, panY: viPanY }], smooth: viSmooth },
+        );
+      } else if (gpuImage.rangeMode === "gpu") {
+        displayRange = "gpu";
+        rendered = engine.renderSlotDirectWithGpuRangeToCanvas(
+          gpuImage.slot, viVminPct, viVmaxPct, viScaleMode === "log", target.context,
+          { width: shapeCols, height: shapeRows, bgRgb: 0,
+            transform: { zoom: viZoom, panX: viPanX, panY: viPanY }, smooth: viSmooth },
+        );
+      }
+      return rendered;
+    };
+    virtualGpuCaptureRef.current = () => captureGpuCanvas(engine.getDevice(), target.context, render);
+    const rendered = render();
+    setViGpuRetainedReady(rendered);
+    if (rendered) {
       publishShow4DSTEMViDisplay({
         source: gpuImage.source,
         gpuBufferToDisplay: true,
@@ -7754,10 +8552,15 @@ function Show4DSTEM() {
   // ─────────────────────────────────────────────────────────────────────────
   
   // DP scale bar + crosshair + ROI overlay + profile line (high-DPI)
-  React.useEffect(() => {
+  const drawDpUi = React.useCallback((center?: [number, number]) => {
+    center ??= dpRoiInteractiveRef.current ? roiCenterPendingRef.current ?? undefined : undefined;
+    // Read the same pending radii as mask construction, including repaints
+    // caused by zoom/exposure while a handle is held. React commits on release.
+    const outer = dpRoiInteractiveRef.current ? roiRadiusPendingRef.current ?? roiRadius : roiRadius;
+    const inner = dpRoiInteractiveRef.current ? roiRadiusInnerPendingRef.current ?? roiRadiusInner : roiRadiusInner;
     if (!dpUiRef.current) return;
     const canvas = dpUiRef.current;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
     // Draw scale bar first when enabled.
     const kUnit = kCalibrated ? kPixelUnit : "px";
@@ -7767,11 +8570,11 @@ function Show4DSTEM() {
     // showing the BF/ADF circle there is misleading.
     if (roiVirtualDetectorActive) {
       if (roiMode === "point") {
-        drawDpCrosshairHiDPI(dpUiRef.current, DPR, localKCol, localKRow, dpZoom, dpPanX, dpPanY, detCols, detRows, isDraggingDP, roiColors);
+        drawDpCrosshairHiDPI(dpUiRef.current, DPR, center?.[1] ?? localKCol, center?.[0] ?? localKRow, dpZoom, dpPanX, dpPanY, detCols, detRows, isDraggingDP, roiColors);
       } else {
         drawRoiOverlayHiDPI(
           dpUiRef.current, DPR, roiMode,
-          localKCol, localKRow, roiRadius, roiRadiusInner, roiWidth, roiHeight,
+          center?.[1] ?? localKCol, center?.[0] ?? localKRow, outer, inner, roiWidth, roiHeight,
           dpZoom, dpPanX, dpPanY, detCols, detRows,
           isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner,
           roiColors
@@ -7862,6 +8665,8 @@ function Show4DSTEM() {
     }
   }, [roiVirtualDetectorActive, dpZoom, dpPanX, dpPanY, kPixelSize, kPixelUnit, kCalibrated, detRows, detCols, roiMode, roiRadius, roiRadiusInner, roiWidth, roiHeight, localKCol, localKRow, isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner,
       profileActive, profilePoints, profileWidth, themeColors, showDpColorbar, showScaleBar, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, canvasSize, roiColors]);
+  drawDpLiveRef.current = drawDpUi;
+  React.useEffect(() => drawDpUi(), [drawDpUi]);
   
   // VI scale bar + crosshair + ROI + profile lines (high-DPI)
   React.useEffect(() => {
@@ -8545,12 +9350,12 @@ function Show4DSTEM() {
         centerCol: activeRoiCenterCol,
         pointerRow: imgY,
         pointerCol: imgX,
-        radius: roiRadius,
-        radiusInner: roiRadiusInner,
+        radius: roiRadiusPendingRef.current ?? Number(model.get("roi_radius")),
+        radiusInner: roiRadiusInnerPendingRef.current ?? Number(model.get("roi_radius_inner") || 0),
         resizeInner: true,
       });
       if (geometry?.radiusInner === undefined) return false;
-      setRoiRadiusInner(geometry.radiusInner);
+      sendRoiRadius(geometry.radiusInner, "inner");
       requestCompareViLive();
       return true;
     }
@@ -8562,8 +9367,8 @@ function Show4DSTEM() {
         centerCol: activeRoiCenterCol,
         pointerRow: imgY,
         pointerCol: imgX,
-        radius: roiRadius,
-        radiusInner: roiRadiusInner,
+        radius: roiRadiusPendingRef.current ?? Number(model.get("roi_radius")),
+        radiusInner: roiRadiusInnerPendingRef.current ?? Number(model.get("roi_radius_inner") || 0),
         aspectRatio: resizeAspectRef.current,
         preserveAspect: shiftKey,
       });
@@ -8572,9 +9377,7 @@ function Show4DSTEM() {
         setRoiWidth(geometry.width!);
         setRoiHeight(geometry.height!);
       } else {
-        const rad = geometry.radius!;
-        setLocalRoiRadius(rad);
-        sendRoiRadius(rad);
+        sendRoiRadius(geometry.radius!);
       }
       requestCompareViLive();
       return true;
@@ -8583,45 +9386,26 @@ function Show4DSTEM() {
     return false;
   }, [
     activeRoiCenterCol, activeRoiCenterRow, isDraggingResize, isDraggingResizeInner,
-    requestCompareViLive, roiMode, roiRadius, roiRadiusInner, sendRoiRadius, setRoiHeight, setRoiRadiusInner, setRoiWidth
+    model, requestCompareViLive, roiMode, sendRoiRadius, setRoiHeight, setRoiWidth
   ]);
 
-  React.useEffect(() => {
-    if (!isDraggingResize && !isDraggingResizeInner) return;
-
-    const onMove = (event: MouseEvent | PointerEvent) => {
-      const coords = getDpImageCoordsFromClient(event.clientX, event.clientY);
-      if (!coords) return;
-      if (resizeDpRoiFromImagePoint(coords.imgX, coords.imgY, event.shiftKey)) {
-        event.preventDefault();
-      }
-    };
-    const onUp = () => {
-      finishDpRoiInteraction();
-      setIsDraggingResize(false);
-      setIsDraggingResizeInner(false);
-      setLocalRoiRadius(null);
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp); window.addEventListener("pointercancel", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp); window.removeEventListener("pointercancel", onUp);
-    };
-  }, [finishDpRoiInteraction, getDpImageCoordsFromClient, isDraggingResize, isDraggingResizeInner, resizeDpRoiFromImagePoint]);
-
-  const handleDpMouseDown = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleDpMouseDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const coords = getDpImageCoordsFromClient(e.clientX, e.clientY);
+    if (!coords || !dpPointerOwner.start(e)) return;
+    const { imgX, imgY } = coords;
     // Capture the pointer so a fast edge-drag resize keeps receiving move/up
     // events even when the cursor leaves the canvas (#751). Without capture the
     // window listener can miss events and the radius never updates.
     if ("pointerId" in e) {
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
     }
+    if (residentBatchInfo) {
+      const gesture = { phase: "start", epoch_ms: performance.timeOrigin + performance.now(),
+        pointer_id: "pointerId" in e ? e.pointerId : null, client: [e.clientX, e.clientY] };
+      e.currentTarget.dataset.residentGesture = JSON.stringify(gesture);
+      model.send({ type: "resident_detector_gesture", ...gesture });
+    }
     dpClickStartRef.current = { x: e.clientX, y: e.clientY };
-    const coords = getDpImageCoordsFromClient(e.clientX, e.clientY);
-    if (!coords) return;
-    const { imgX, imgY } = coords;
 
     // When profile mode is active, use profile interactions only
     if (profileActive) {
@@ -8661,7 +9445,7 @@ function Show4DSTEM() {
       return;
     }
 
-    dpRoiInteractiveRef.current = true;
+    beginDpRoiInteraction();
 
     // Check if clicking on resize handle (inner first, then outer)
     if (isNearResizeHandleInner(imgX, imgY)) {
@@ -8696,7 +9480,10 @@ function Show4DSTEM() {
     requestCompareViLive();
   };
 
-  const handleDpMouseMove = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleDpMouseMove = (e: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
+    const pointerMove = dpPointerOwner.move(e);
+    if (pointerMove === "ignore") return;
+    if (pointerMove === "release") { handleDpMouseUp(e); return; }
     const coords = getDpImageCoordsFromClient(e.clientX, e.clientY);
     if (!coords) return;
     const { imgX, imgY } = coords;
@@ -8704,12 +9491,13 @@ function Show4DSTEM() {
     // Fast path: skip cursor readout during any active drag — avoids setCursorInfo re-renders
     const anyDrag = isDraggingDP || isDraggingResize || isDraggingResizeInner
       || draggingDpProfileEndpoint !== null || isDraggingDpProfileLine;
+    if (anyDrag && pointerMove !== "drag") return;
 
     // Cursor readout: look up raw DP value at pixel position
     if (!anyDrag) {
       const pxCol = Math.floor(imgX);
       const pxRow = Math.floor(imgY);
-      if (pxCol >= 0 && pxCol < detCols && pxRow >= 0 && pxRow < detRows && frameBytes) {
+      if (pxCol >= 0 && pxCol < detCols && pxRow >= 0 && pxRow < detRows && frameBytes && !dpGpuPending) {
         const usesViRoiDp = viRoiMode && viRoiMode !== "off" && viRoiDpBytes && viRoiDpBytes.byteLength > 0;
         const sourceBytes = usesViRoiDp ? viRoiDpBytes : frameBytes;
         const raw = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
@@ -8792,23 +9580,28 @@ function Show4DSTEM() {
 
     const centerCol = imgX - dpDragOffsetRef.current.dCol;
     const centerRow = imgY - dpDragOffsetRef.current.dRow;
-    setLocalKCol(centerCol); setLocalKRow(centerRow);
+    if (!isResidentCompareDrag()) {
+      setLocalKCol(centerCol); setLocalKRow(centerRow);
+    }
     // rAF-coalesced — sends only the latest roi_center per frame.
-    // Keep the detector geometry subpixel while dragging. The public traits are
-    // floats and the scientific mask evaluates detector-pixel centers against
-    // that geometry. Rounding here made a binned 48x48 detector update only
-    // every roughly ten screen pixels, which looked like a pointer-up commit.
-    const { row: newRow, col: newCol } = clampDetectorCenter(
-      centerRow,
-      centerCol,
-      detRows,
-      detCols,
-    );
+    const boundedCol = Math.max(0, Math.min(detCols - 1, centerCol));
+    const boundedRow = Math.max(0, Math.min(detRows - 1, centerRow));
+    // Area detectors retain subpixel centers; point detectors select one pixel.
+    const newCol = roiMode === "point" ? Math.round(boundedCol) : boundedCol;
+    const newRow = roiMode === "point" ? Math.round(boundedRow) : boundedRow;
     queueRoiCenter(newRow, newCol);
     requestCompareViLive();
   };
 
-  const handleDpMouseUp = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleDpMouseUp = (e: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dpPointerOwner.release(e)) return;
+    if (residentBatchInfo) {
+      const gesture = { phase: e.type === "pointercancel" ? "cancel" : "end",
+        epoch_ms: performance.timeOrigin + performance.now(),
+        pointer_id: "pointerId" in e ? e.pointerId : null, client: [e.clientX, e.clientY] };
+      if (dpOverlayRef.current) dpOverlayRef.current.dataset.residentGesture = JSON.stringify(gesture);
+      model.send({ type: "resident_detector_gesture", ...gesture });
+    }
     finishDpRoiInteraction();
     if (draggingDpProfileEndpoint !== null || isDraggingDpProfileLine) {
       setDraggingDpProfileEndpoint(null);
@@ -8817,16 +9610,14 @@ function Show4DSTEM() {
       dpClickStartRef.current = null;
       setIsDraggingDP(false);
       setIsDraggingResize(false);
-      setLocalRoiRadius(null);  // revert ring to committed model radius on release
       setIsDraggingResizeInner(false);
-      setLocalRoiRadius(null);
       setHoveredDpProfileEndpoint(null);
       setIsHoveringDpProfileLine(false);
       return;
     }
 
     // Profile click capture
-    if (profileActive && dpClickStartRef.current) {
+    if (e.type === "pointerup" && profileActive && dpClickStartRef.current) {
       const dx = e.clientX - dpClickStartRef.current.x;
       const dy = e.clientY - dpClickStartRef.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < 3) {
@@ -8855,7 +9646,6 @@ function Show4DSTEM() {
     }
     dpClickStartRef.current = null;
     setIsDraggingDP(false); setIsDraggingResize(false); setIsDraggingResizeInner(false);
-    setLocalRoiRadius(null);
     setDraggingDpProfileEndpoint(null);
     setIsDraggingDpProfileLine(false);
     setHoveredDpProfileEndpoint(null);
@@ -8863,10 +9653,12 @@ function Show4DSTEM() {
     dpProfileDragStartRef.current = null;
   };
   const handleDpMouseLeave = () => {
+    // Capture can be lost when the canvas is replaced. The owner-filtered
+    // window handlers continue the gesture outside it until real up/cancel.
+    if (dpPointerOwner.active) return;
     dpClickStartRef.current = null;
     finishDpRoiInteraction();
     setIsDraggingDP(false); setIsDraggingResize(false); setIsDraggingResizeInner(false);
-    setLocalRoiRadius(null);
     setDraggingDpProfileEndpoint(null);
     setIsDraggingDpProfileLine(false);
     setHoveredDpProfileEndpoint(null);
@@ -8875,6 +9667,32 @@ function Show4DSTEM() {
     setIsHoveringResize(false); setIsHoveringResizeInner(false);
     setCursorInfo(prev => prev?.panel === "DP" ? null : prev);
   };
+  // Keep global delivery on the latest committed geometry/state, without
+  // detaching listeners during drag rerenders or processing canvas events twice.
+  const dpPointerHandlersRef = React.useRef({ move: handleDpMouseMove, up: handleDpMouseUp });
+  React.useLayoutEffect(() => {
+    dpPointerHandlersRef.current = { move: handleDpMouseMove, up: handleDpMouseUp };
+  });
+  React.useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      if (!dpPointerOwner.owns(event) || event.target === dpOverlayRef.current) return;
+      dpPointerHandlersRef.current.move(event);
+      event.preventDefault();
+    };
+    const onUp = (event: PointerEvent) => {
+      if (dpPointerOwner.owns(event)) dpPointerHandlersRef.current.up(event);
+    };
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      dpPointerOwner.reset();
+    };
+  }, [dpPointerOwner]);
+
   const handleDpDoubleClick = () => {
     dpViewRef.current.zoom = 1;
     dpViewRef.current.panX = 0;
@@ -8978,8 +9796,9 @@ function Show4DSTEM() {
       const pxRow = Math.floor(imgX);
       const pxCol = Math.floor(imgY);
       if (pxRow >= 0 && pxRow < shapeRows && pxCol >= 0 && pxCol < shapeCols && rawVirtualImageRef.current) {
-        const raw = rawVirtualImageRef.current;
-        setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * shapeCols + pxCol], panel: "VI" });
+        const exact = residentSelectedRawRef.current;
+        const raw = exact ?? rawVirtualImageRef.current;
+        setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * shapeCols + pxCol], panel: "VI", exact:exact !== null });
       } else {
         setCursorInfo(prev => prev?.panel === "VI" ? null : prev);
       }
@@ -9471,7 +10290,7 @@ function Show4DSTEM() {
     };
   }, [isResizingCanvas, resizeCanvasStart, panelWidthPx, setPanelWidthPx]);
 
-  const handleCompareGridResizeStart = (e: React.PointerEvent<HTMLElement>, panelScale = 1) => {
+  const handleCompareGridResizeStart = React.useCallback((e: React.PointerEvent<HTMLElement>, panelScale = 1) => {
     e.stopPropagation();
     e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
@@ -9506,7 +10325,20 @@ function Show4DSTEM() {
     window.addEventListener("pointermove", handlePointerMove, { passive: false });
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerUp);
-  };
+  }, [compareGridWidth, setCompareGridWidthPx]);
+
+  const selectCompareFrame = React.useCallback((idx: number) => {
+    setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
+  }, [nFrames, setFrameIdx]);
+  const recordCompareGpuPaint = React.useCallback((panelCount: number) => {
+    publishLiveCompareViStats("paint", { paintedPanels: panelCount });
+  }, [publishLiveCompareViStats]);
+  const reportCompareGpuRenderError = React.useCallback((error: unknown) => {
+    setOfflineBackendError(error instanceof Error ? error.message : String(error));
+  }, []);
+  const setCompareGpuRenderer = React.useCallback((renderNow: CompareGpuRenderer | null) => {
+    compareGpuRenderNowRef.current = renderNow;
+  }, []);
 
   React.useEffect(() => {
     return () => {
@@ -9807,9 +10639,10 @@ function Show4DSTEM() {
       || currentViSource === viGpuImageRef.current.source
     ),
   );
-  const getActiveViCanvas = React.useCallback((): HTMLCanvasElement | null => {
-    return virtualCanvasRef.current;
-  }, []);
+  const getActiveViCanvas = React.useCallback(async (): Promise<HTMLCanvasElement | null> => {
+    return viGpuVisible && virtualGpuCaptureRef.current
+      ? virtualGpuCaptureRef.current() : virtualCanvasRef.current;
+  }, [viGpuVisible]);
   const panelLoadingOverlaySx = React.useMemo(() => ({
     position: "absolute",
     inset: 0,
@@ -9845,7 +10678,7 @@ function Show4DSTEM() {
       </Typography>
     </Box>
   ), [panelLoadingOverlaySx, panelLoadingTextSx]);
-  const dpPanelReady = Boolean(displayedDpBytes && displayedDpBytes.byteLength >= detRows * detCols * 4);
+  const dpPanelReady = dpGpuReady || Boolean(displayedDpBytes && displayedDpBytes.byteLength >= detRows * detCols * 4);
   const viPanelReady = Boolean(
     viGpuVisible
     || (displayedVirtualImageBytes && displayedVirtualImageBytes.byteLength >= shapeRows * shapeCols * 4),
@@ -9856,7 +10689,7 @@ function Show4DSTEM() {
   const offlineStatusText = offlineBackendError || offlineBackendStatus;
   const offlineStatusIsError = Boolean(offlineBackendError);
   const offlineStatusIsReady = !offlineStatusIsError && /\bready\b/i.test(offlineStatusText);
-  const showOfflineStatus = offline && Boolean(offlineStatusText) && !offlineStatusIsReady;
+  const showOfflineStatus = offline && Boolean(offlineStatusText) && (!offlineStatusIsReady || residentSeriesLoading || source112Source);
   const showLocalH5GrantBanner = offline && h5SourceAvailable && requireLocalH5Files && !h5LocalFilesGranted;
 
   return (
@@ -9877,10 +10710,10 @@ function Show4DSTEM() {
         ref={h5LocalInputRef}
         type="file"
         multiple
-        accept=".h5,.hdf5"
+        accept={qemSource ? ".qem" : ransSourceAvailable ? undefined : ".h5,.hdf5"}
         onChange={onH5LocalInput}
         style={{ display: "none" }}
-        {...({ webkitdirectory: "", directory: "" } as object)}
+        {...(qemSource ? {} : { webkitdirectory: "", directory: "" })}
       />
       {/* HEADER */}
       {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
@@ -10011,7 +10844,7 @@ function Show4DSTEM() {
           {/* DP Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
             <Typography variant="caption" sx={{ ...typo.label }}>
-              DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
+              <span ref={dpPositionLabelRef}>DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})</span>
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
             </Typography>
             {controlsVisible && <Stack
@@ -10036,20 +10869,23 @@ function Show4DSTEM() {
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={async () => {
                 if (!dpCanvasRef.current) return;
                 try {
-                  const blob = await new Promise<Blob | null>(resolve => dpCanvasRef.current!.toBlob(resolve, "image/png"));
+                  const canvas = dpGpuReady && !usesViRoiDp && dpGpuDisplayRef.current
+                    ? await dpGpuDisplayRef.current.capture() : dpCanvasRef.current;
+                  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
                   if (!blob) return;
-                  await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-                } catch {
-                  dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_dp.png"); }, "image/png");
+                  try { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); }
+                  catch { downloadBlob(blob, "show4dstem_dp.png"); }
+                } catch (error) {
+                  setOfflineBackendError(`Could not copy the DP image: ${String(error)}`);
                 }
               }}>Copy</Button>
-              {offline && h5SourceAvailable && <Button
+              {offline && (h5SourceAvailable || ransSourceAvailable) && <Button
                 size="small"
                 sx={{ ...compactButton, color: h5LocalFilesGranted ? themeColors.accent : themeColors.textMuted }}
                 onClick={grantH5LocalFiles}
-                title={h5LocalSourceStatus || "Grant local HDF5 master/data files for browser WebGPU load"}
+                title={h5LocalSourceStatus || (ransSourceAvailable ? "Open the local lossless data folder" : "Grant local HDF5 master/data files for browser WebGPU load")}
               >
-                Local H5
+                {qemSource ? "Open QEM files" : ransSourceAvailable ? "Open data folder" : "Local H5"}
               </Button>}
               {exportEnabled && <Button
                 size="small"
@@ -10285,11 +11121,15 @@ function Show4DSTEM() {
 
           {/* DP Canvas */}
           <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
-            <canvas data-quantem-scientific-output="show4dstem-diffraction-pattern" ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
+            <canvas data-quantem-scientific-output={dpGpuReady && !usesViRoiDp ? undefined : "show4dstem-diffraction-pattern"} data-resident-detector={residentBatchInfo ? JSON.stringify({center:[activeRoiCenterRow,activeRoiCenterCol],inner:roiRadiusInner,outer:roiRadius,zoom:dpZoom,pan:[dpPanY,dpPanX]}) : undefined} ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", opacity: dpGpuReady && !usesViRoiDp ? 0 : 1, imageRendering: "pixelated" }} />
+            <canvas ref={dpGpuCanvasRef} width={detCols} height={detRows}
+              data-quantem-scientific-output={dpGpuReady && !usesViRoiDp ? "show4dstem-diffraction-pattern" : undefined}
+              style={{position: "absolute", width: "100%", height: "100%", pointerEvents: "none",
+                opacity: dpGpuReady && !usesViRoiDp ? 1 : 0, imageRendering: "pixelated"}} />
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
               onPointerDown={handleDpMouseDown} onPointerMove={handleDpMouseMove}
-              onPointerUp={handleDpMouseUp} onPointerCancel={handleDpMouseUp} onMouseLeave={handleDpMouseLeave}
+              onPointerUp={handleDpMouseUp} onPointerCancel={handleDpMouseUp} onPointerLeave={handleDpMouseLeave}
               onWheel={createZoomHandler(setDpZoom, setDpPanX, setDpPanY, dpViewRef, dpOverlayRef)}
               onDoubleClick={handleDpDoubleClick}
               onTouchStart={handlePanelTouchStart("dp")}
@@ -10314,10 +11154,10 @@ function Show4DSTEM() {
             {(dpPanelLoading || offlineBackendError) && renderPanelLoadingOverlay(
               offlineBackendError ? "Show4DSTEM load failed" : "Loading DP",
             )}
-            {panelChromeVisible && cursorInfo && cursorInfo.panel === "DP" && (
+            {panelChromeVisible && !dpGpuPending && cursorInfo && cursorInfo.panel === "DP" && (
               <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                 <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                  ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
+                  ({cursorInfo.row}, {cursorInfo.col}) {cursorInfo.exact ? String(cursorInfo.value) : formatNumber(cursorInfo.value)}
                 </Typography>
               </Box>
             )}
@@ -10327,10 +11167,10 @@ function Show4DSTEM() {
           {/* DP Stats Bar */}
           {showStats && !dpPanelLoading && dpStats && dpStats.length === 4 && (
             <Box sx={{ ...statsBarSx, ...hideBetweenPanelsOnMobileSx }}>
-              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(dpStats[0])}</Box></Typography>
-              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(dpStats[1])}</Box></Typography>
-              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(dpStats[2])}</Box></Typography>
-              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(dpStats[3])}</Box></Typography>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[3])}</Box></Typography>
               {controlsVisible && <>
                 <Box sx={{ flex: 1, minWidth: 4, "@media (max-width: 700px)": { display: "none" } }} />
                 <Typography component="span" onClick={() => requestViPreset("bf")} sx={viSourceButtonSx("bf", activeViSource === "roi")}>BF</Typography>
@@ -10357,7 +11197,7 @@ function Show4DSTEM() {
 
           {/* Profile sparkline */}
           {profileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box", ...mobileImageBoxSx }}>
+            <Box sx={{ visibility: dpGpuPending ? "hidden" : "visible", mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box", ...mobileImageBoxSx }}>
               <canvas
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
@@ -10405,7 +11245,7 @@ function Show4DSTEM() {
                           <Slider
                             value={roiMode === "annular" ? [roiRadiusInner, roiRadius] : [roiRadius]}
                             onChange={(_, v) => {
-                              dpRoiInteractiveRef.current = true;
+                              beginDpRoiInteraction();
                               if (roiMode === "annular") {
                                 const [inner, outer] = v as number[];
                                 setRoiRadiusInner(Math.min(inner, outer - 1));
@@ -10453,7 +11293,7 @@ function Show4DSTEM() {
                   </Box>
                   {/* Right: Histogram spanning both rows */}
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                    <Histogram data={dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
+                    <Histogram data={dpGpuPending ? null : dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
                   </Box>
                 </Box>
               </Box>
@@ -10680,14 +11520,16 @@ function Show4DSTEM() {
                 }} size="small" sx={switchStyles.small} />
                 <Button size="small" sx={compactButton} disabled={viZoom === 1 && viPanX === 0 && viPanY === 0} onClick={() => { setViZoom(1); setViPanX(0); setViPanY(0); }}>Reset</Button>
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={async () => {
-                  const canvas = getActiveViCanvas();
-                  if (!canvas) return;
+                  let canvas: HTMLCanvasElement | null = null;
                   try {
-                    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
+                    canvas = await getActiveViCanvas();
+                    if (!canvas) return;
+                    const captured = canvas;
+                    const blob = await new Promise<Blob | null>(resolve => captured.toBlob(resolve, "image/png"));
                     if (!blob) return;
                     await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
                   } catch {
-                    canvas.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
+                    canvas?.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
                   }
                 }}>Copy</Button>
               </>}
@@ -10738,6 +11580,7 @@ function Show4DSTEM() {
             <CompareVirtualGrid
               scanRegion={{mode:viRoiMode, row:localViRoiCenterRow, col:localViRoiCenterCol,
                 radius:viRoiRadius || 5, width:viRoiWidth || 10, height:viRoiHeight || 10}}
+              batchInfo={activeViSource === "roi" ? residentBatchInfo : undefined}
               bytes={displayedCompareVirtualImageBytes}
               count={comparePanelCount || 0}
               indices={comparePanelIndices || []}
@@ -10746,6 +11589,7 @@ function Show4DSTEM() {
               gpuVersion={compareGpuVersion}
               gpuEngine={viGpuColormapRef.current}
               progressivePage={progressiveComparePage}
+              sourceLoading={residentSeriesLoading}
               labels={frameLabels || []}
               activeIdx={frameIdx}
               shapeRows={shapeRows}
@@ -10774,9 +11618,7 @@ function Show4DSTEM() {
               maxWidthPx={compareGridWidth}
               panelGapPx={comparePanelGapPx}
               onResizeStart={handleCompareGridResizeStart}
-              onSelect={(idx) => {
-                setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
-              }}
+              onSelect={selectCompareFrame}
               onToggleStar={toggleCompareStar}
               onHide={hideCompareFrame}
               onReorderFrame={moveCompareFrame}
@@ -10789,15 +11631,14 @@ function Show4DSTEM() {
                 else regionRequests.request(row, col);
               }}
               onFreshVisiblePaint={acknowledgeFreshComparePagePaint}
-              onGpuPaint={(panelCount) => publishLiveCompareViStats("paint", { paintedPanels: panelCount })}
-              onGpuRendererReady={(renderNow) => {
-                compareGpuRenderNowRef.current = renderNow;
-              }}
+              onGpuPaint={recordCompareGpuPaint}
+              onGpuRenderError={reportCompareGpuRenderError}
+              onGpuRendererReady={setCompareGpuRenderer}
             />
           ) : (
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
               <canvas
-                data-quantem-scientific-output="show4dstem-virtual-image"
+                data-quantem-scientific-output={viGpuVisible ? "show4dstem-virtual-image-cpu" : "show4dstem-virtual-image"}
                 ref={virtualCanvasRef}
                 width={shapeCols}
                 height={shapeRows}
@@ -10808,6 +11649,12 @@ function Show4DSTEM() {
                   imageRendering: "pixelated",
                   display: "block",
                 }}
+              />
+              <canvas
+                data-quantem-scientific-output={viGpuVisible ? "show4dstem-virtual-image" : "show4dstem-virtual-image-gpu"}
+                ref={attachVirtualGpuCanvas}
+                style={{ position: "absolute", width: "100%", height: "100%",
+                  imageRendering: "pixelated", pointerEvents: "none", opacity: viGpuVisible ? 1 : 0 }}
               />
               <canvas
                 ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
@@ -10838,7 +11685,7 @@ function Show4DSTEM() {
               {panelChromeVisible && cursorInfo && cursorInfo.panel === "VI" && (
                 <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                    ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
+                    ({cursorInfo.row}, {cursorInfo.col}) {cursorInfo.exact ? String(cursorInfo.value) : formatNumber(cursorInfo.value)}
                   </Typography>
                 </Box>
               )}
@@ -10848,11 +11695,11 @@ function Show4DSTEM() {
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
           {showStats && !viPanelLoading && viStats && viStats.length === 4 && (
-            <Box sx={statsBarSx}>
-              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(viStats[0])}</Box></Typography>
-              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(viStats[1])}</Box></Typography>
-              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(viStats[2])}</Box></Typography>
-              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(viStats[3])}</Box></Typography>
+            <Box ref={(node: HTMLElement | null) => { viSummaryRefs.current[0] = node; }} data-resident-summary="statistics" aria-busy={viSummaryPending} sx={statsBarSx}>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[3])}</Box></Typography>
               {controlsVisible && <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
                 <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto</Typography>
                 <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
@@ -10952,8 +11799,8 @@ function Show4DSTEM() {
                     </Box>
                   </Box>
                   {/* Right: Histogram spanning both rows */}
-                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                    <Histogram data={viHistogramData} bins={viHistogramBins} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
+                  <Box ref={(node: HTMLElement | null) => { viSummaryRefs.current[1] = node; }} data-resident-summary="histogram" aria-busy={viSummaryPending} sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
+                    <Histogram data={viSummaryPending ? null : viHistogramData} bins={viSummaryPending ? null : viHistogramBins} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
                   </Box>
                 </Box>
               </Box>

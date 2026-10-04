@@ -11,16 +11,12 @@ def test_pr_cleanup_guidance_is_safe_and_agent_readable() -> None:
     assert "pull_request_target:" in workflow
     assert "types: [opened, reopened, closed]" in workflow
     assert "pull-requests: write" in workflow
-    assert "issues: write" not in workflow
+    assert "issues: write" in workflow
     assert "actions/checkout" not in workflow
-    assert "quantem-pr-cleanup-guidance:v1" in workflow
+    assert "uses: bobleesj/github-bots/.github/workflows/_pr-cleanup-guidance.yml@v0" in workflow
     assert "Agent-readable" not in workflow
     assert "JSON.stringify" not in workflow
     assert "### Repository cleanup" not in workflow
-    assert "tasks.map((task) => `- ${task}`)" in workflow
-    assert "pr.merged" in workflow
-    assert 'action === "closed" && !pr.merged' in workflow
-    assert "issues.deleteComment" in workflow
     assert ci_workflow.count('".github/PULL_REQUEST_TEMPLATE.md"') == 2
     assert ci_workflow.count('".github/workflows/pr-cleanup-guidance.yml"') == 2
 

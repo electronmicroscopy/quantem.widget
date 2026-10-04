@@ -128,7 +128,7 @@ git diff --stat
 Use a short, single-line Conventional Commit-style message such as:
 
 ```text
-feat: add ShowFolder thumbnail cache
+feat: add calibrated image export
 fix: stabilize Show2D resize handle
 docs: clarify HTML export guidance
 ```

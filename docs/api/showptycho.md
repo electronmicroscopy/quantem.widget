@@ -71,7 +71,7 @@ ssb = SSB.open(
     scan_sampling_A=0.276,
     voltage_kV=300.0,
 )
-result = ssb.fit(trials=200, refinement="nelder-mead")
+result = ssb.find_aberrations(trials=200, refinement="nelder-mead")
 w = ShowPtycho(
     ssb,
     source_file="reference_master.h5",
@@ -87,6 +87,59 @@ The refit control is absent from standalone HTML/WebGPU exports and MPS-only
 sessions. Those modes can inspect an existing result interactively, but only a
 source-backed CUDA session has the raw detector data and SSB optimizer needed
 to make a new scientific fit.
+
+## Sample Tilt (Thick Crystals)
+
+Standard SSB treats the sample as one thin plane. In a thick, tilted crystal
+each depth sees a different defocus and sits shifted sideways by depth x tilt,
+so the lattice washes out along the tilt: often only one set of fringes survives.
+The **Sample tilt (thick SSB)** panel, above the aberration sliders, adds the
+sample to the model:
+
+- **tilt row / tilt col** (mrad, scan frame) and **thickness** (nm). Thickness
+  0 is standard SSB, exactly. Thickness is the depth spread the model averages
+  over, not a measured sample thickness.
+- **Fit tilt** fits defocus, astigmatism, tilt and thickness together and moves
+  every slider to the result. The fitted C10 is the defocus at mid-depth.
+- The status line gives the tilt in the scan frame and in the ptychography
+  object frame (the scan frame rotated by the scan-detector rotation). The
+  object-frame value seeds a quantem.thick reconstruction directly.
+
+Open with the fit already run: the widget shows the session's latest fit.
+
+```python
+from quantem.gpu import SSB
+from quantem.widget import ShowPtycho
+
+ssb = SSB.open(path, voltage_kV=300.0, semiangle_mrad=30.0, scan_sampling_A=0.495,
+               det_sampling=0.5554, rotation_angle_deg=-8.6)
+standard = ssb.find_aberrations()                 # defocus + astigmatism
+ShowPtycho(ssb)                      # standard SSB
+tilted = ssb.find_aberrations(tilt=True)          # + sample tilt and depth spread, jointly
+ShowPtycho(ssb)                      # opens on the fitted tilt
+pd.concat([standard.report(), tilted.report()])
+```
+
+Saved calibrations store the tilt (`tilt_mrad` scan frame, `tilt_object_mrad`,
+`depth_spread_nm`) and reopening one restores the panel.
+
+Where it runs: live notebooks with a CUDA or MPS SSB session (sliders and Fit
+tilt), and exported WebGPU folders (sliders; fitting needs Python). It does not
+yet combine with the higher-order aberration panel.
+
+Validation: on a simulated 15 nm BaTiO3 crystal tilted (3, -4) mrad the fit
+returns (3.0, -4.1) and ~0 for the untilted control; on a logic-device dataset
+the fitted tilt matches the one ptychography learns to 2.4 deg. Speed (logic
+crop, 128 x 128 scan): Fit tilt about 5 s on CUDA and 6 s on MPS; full
+512 x 512 field about 45 s on CUDA.
+
+## Units
+
+C10, C12 and every higher-order magnitude are nm. quantem.gpu's SSB engines
+compute in Angstrom and, before 2026-09-24, reported that Angstrom number under
+the nm label (a -10 nm defocus showed as -100 "nm"). Calibrations written since
+carry `"aberration_unit": "nm"`; older files are read /10 automatically. Slider
+ranges are C10 +-40 nm and C12 0-10 nm, the same physical span as before.
 
 ## Bright-Field Count
 

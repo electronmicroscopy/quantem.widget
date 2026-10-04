@@ -41,7 +41,6 @@ STORY_IDS_BY_VARIANT = {
     "show4dstem": ["S4D-01", "S4D-02", "S4D-03", "S4D-06", "S4D-09"],
     "show4dstem-compare": ["S4D-02", "S4D-03", "S4D-07", "S4D-16"],
     "showptycho-webgpu-folder": ["SP-01", "SP-02", "SP-05", "SP-09"],
-    "showfolder": ["SF-2", "SF-5", "SF-8"],
 }
 
 
@@ -1597,7 +1596,7 @@ def _check_page(
 
         boxes = _visible_canvas_boxes(page)
         result["canvas_count"] = len(boxes)
-        if widget != "showfolder" and not boxes:
+        if not boxes:
             result["errors"].append("no visible canvas")
 
         if boxes:
@@ -1685,7 +1684,7 @@ def _check_page(
         )
         result["scientific_outputs"] = scientific_outputs
         result["scientific_output_count"] = len(scientific_outputs)
-        if widget != "showfolder" and not scientific_outputs:
+        if not scientific_outputs:
             result["errors"].append("no marked scientific output")
         for output in scientific_outputs:
             if not output["passed"]:
@@ -1719,11 +1718,7 @@ def _check_page(
         result["errors"].extend(console_errors)
         result["errors"].extend(http_errors)
 
-        if widget == "showfolder":
-            has_folder_marker = page.evaluate("document.body.innerText.includes('0010')")
-            if not has_folder_marker:
-                result["errors"].append("showfolder marker 0010 not visible")
-        elif boxes and not result["canvas_nonblank"]:
+        if boxes and not result["canvas_nonblank"]:
             result["errors"].append("render check failed")
 
         result["passed"] = not result["errors"]

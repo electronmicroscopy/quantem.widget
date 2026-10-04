@@ -805,8 +805,8 @@ w.set_folder_page_size(None) # show one unpaged gallery
 Paging limits the panels, histograms, and FFT views rendered at one time. The
 current folder implementation still retains the complete full-resolution
 gallery in Python and transports its display previews to the browser; it is not
-yet a lazy, bounded-memory source-page cache. Use `ShowFolder` for lightweight
-thumbnail discovery when the full scientific arrays need not all be opened.
+yet a lazy, bounded-memory source-page cache. Open a smaller file selection
+when the complete gallery exceeds available memory.
 
 An empty watched folder remains mounted with a waiting view and becomes the
 real gallery in the same widget model when its first stable file arrives.
@@ -828,10 +828,7 @@ panel. An incompatible shape is reported without blocking a later compatible
 file. Close long-running widgets when the notebook no longer needs them.
 
 `Show2D.from_folder(...)` reads the scientific image data at its source
-resolution. It is different from `ShowFolder`, which intentionally uses small
-cached thumbnails for fast folder discovery and selection. Use `ShowFolder`
-to decide what to open; use `Show2D.from_folder(...)` when the displayed pixel
-data and live panel append behavior matter.
+resolution.
 
 Maintainer real-time signoff follows
 [S2D-18](../maintainer/storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place):

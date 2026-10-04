@@ -682,7 +682,7 @@ cancellation cases.
 - Expose a read-only ``preview_cache_info`` property with enabled state, path,
   byte limit/current bytes, entry count, hits, misses, invalidations, evictions,
   and errors. ``clear_preview_cache()`` deletes this widget's persistent preview
-  namespace and resets its accounting without clearing ShowFolder thumbnails or
+  namespace and resets its accounting without
   pretending to free raw CUDA memory. ``rebuild_preview_cache=True`` ignores
   old entries for the new run and repopulates them safely.
 - Measure browser paint, not only Python traits. Record click-to-cached-first

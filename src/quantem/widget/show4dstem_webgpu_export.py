@@ -94,8 +94,8 @@ def export_show4dstem_webgpu_bundle(
         raise ValueError(f"bundle out_dir must be an existing data folder: {root}")
     masters = sorted(root.rglob("*_master.h5"))
     masters.extend(sorted(root.rglob("*_master_wrapper.h5")))
-    if not masters:
-        raise ValueError(f"no *_master.h5 files in {root}; the bundle serves the data folder itself")
+    if not masters and not (root / "rans" / "manifest.json").is_file():
+        raise ValueError(f"no *_master.h5 files or rans/manifest.json in {root}; the bundle serves the data folder itself")
     viewer = root / ".viewer"
     viewer.mkdir(exist_ok=True)
     html = viewer / "Show4DSTEM.html"
@@ -579,3 +579,227 @@ def build_lazy_show4dstem_sidecar(
     }
     (lazy_dir / "meta.json").write_text(json.dumps(meta, separators=(",", ":")))
     return f"{label}_lazy/"
+
+
+# --- browser-resident lossless (rANS) series -------------------------------------------------
+
+def export_show4dstem_rans_viewer(
+    build_result: str | pathlib.Path | Sequence[str | pathlib.Path],
+    out_dir: str | pathlib.Path,
+    *,
+    tilts: Sequence[int] | None = None,
+    title: str = "Show4DSTEM",
+    frame_labels: Sequence[str] | None = None,
+    valid_pixels: np.ndarray | None = None,
+    debug: bool = False,
+) -> pathlib.Path:
+    """Write a WebGPU viewer whose source is an encoded rANS series decoded in the browser.
+
+    ``build_result`` is the JSON written by the detector-rANS encoder (one record per
+    acquisition with ``artifacts`` folder, ``scan_block``, ``model_frames``,
+    ``scale_bits``, ``models`` and ``shape``). The encoded payload files are linked
+    read-only into ``out_dir/rans`` and read by HTTP byte range, so nothing large is
+    copied. Decode tables (packed symbol entries, a 256-bucket slot lookup per column,
+    column metadata) are derived once here and written next to the links.
+
+    An integer QEM file, or an ordered sequence of those files, uses the
+    same exporter. Geometry and native dtype are admitted from the validated
+    container metadata without decoding counts. Each container is linked into
+    the export; the browser requires an explicit local file grant instead of
+    fetching a whole container through HTTP. All selected acquisitions must
+    share geometry and dtype. ``tilts`` selects indices from the supplied order.
+
+    Parameters
+    ----------
+    build_result
+        Legacy encoder JSON, one integer QEM file, or an ordered
+        sequence of QEM files.
+    out_dir
+        Destination bundle folder. Source containers are linked, never copied
+        or modified.
+    tilts
+        Optional indices selecting acquisitions from the supplied order.
+    frame_labels
+        One label per selected acquisition.
+    valid_pixels
+        Optional Boolean native detector mask, shared by the acquisitions.
+
+    Returns
+    -------
+    pathlib.Path
+        Standalone HTML viewer path inside the bundle.
+
+    Examples
+    --------
+    >>> export_show4dstem_rans_viewer(["tilt-0.qem", "tilt-1.qem"], "viewer")
+    PosixPath('.../.viewer/Show4DSTEM.html')
+    """
+
+    from quantem.widget import Show4DSTEM
+
+    if isinstance(build_result, (str, pathlib.Path)):
+        source_path = pathlib.Path(build_result).expanduser().resolve()
+        with source_path.open("rb") as stream:
+            canonical = stream.read(8) == b"QEMDATA1"
+        canonical_paths = [source_path] if canonical else None
+        build_result = source_path
+    else:
+        canonical_paths = [pathlib.Path(path).expanduser().resolve() for path in build_result]
+    if canonical_paths is not None:
+        return _export_qem_viewer(
+            canonical_paths, out_dir, tilts=tilts, title=title,
+            frame_labels=frame_labels, valid_pixels=valid_pixels, debug=debug,
+        )
+
+    records = json.loads(pathlib.Path(build_result).read_text())["tilts"]
+    chosen = list(tilts) if tilts is not None else list(range(len(records)))
+    root = pathlib.Path(out_dir).expanduser().resolve()
+    rans = root / "rans"
+    rans.mkdir(parents=True, exist_ok=True)
+    manifest: dict = {"schema": "quantem.show4dstem-rans-browser/v1", "tilts": []}
+    shape = None
+    for ordinal, tilt in enumerate(chosen):
+        record = records[tilt]
+        artifacts = pathlib.Path(record["artifacts"])
+        det_rows, det_cols = int(record["shape"][2]), int(record["shape"][3])
+        K = det_rows * det_cols
+        frames = int(record["scan_block"])
+        blocks = int(record["shape"][0]) * int(record["shape"][1]) // frames
+        shape = (int(record["shape"][0]), int(record["shape"][1]), det_rows, det_cols)
+        offsets = np.load(artifacts / "offsets.npy")
+        starts = np.load(artifacts / "block_starts.npy")
+        payload_name = f"t{ordinal}-payload.bin"
+        _link_read_only(artifacts / "payload.bin", rans / payload_name)
+        blocks_meta = []
+        for b in range(blocks):
+            np.ascontiguousarray(offsets[b], dtype=np.uint32).tofile(rans / f"t{ordinal}-offsets-{b:02d}.u32")
+            blocks_meta.append(dict(index=b, byte_start=int(starts[b]), byte_end=int(starts[b + 1]),
+                                    bytes=int(starts[b + 1] - starts[b]), model=(b * frames) // int(record["model_frames"])))
+        models = []
+        for mi, m in enumerate(record["models"]):
+            with np.load(artifacts / m["path"]) as z:
+                ctx, sym, cum, freq, lit = (z[k] for k in ("context_offsets", "symbols", "cumulative", "frequencies", "literal"))
+            entries = np.empty((sym.size, 2), dtype=np.uint32)
+            entries[:, 0] = sym.astype(np.uint32) | (cum.astype(np.uint32) << 16)
+            entries[:, 1] = freq.astype(np.uint32)
+            lut = np.zeros((K, 256), dtype=np.uint8)
+            for k in range(K):
+                lo, hi = int(ctx[k]), int(ctx[k + 1])
+                if hi > lo:
+                    lut[k] = np.clip(np.searchsorted(cum[lo:hi].astype(np.int64), np.arange(256) << 7, side="right") - 1, 0, hi - lo - 1)
+            entries.tofile(rans / f"t{ordinal}-entries-{mi}.u32")
+            lut.tofile(rans / f"t{ordinal}-lut-{mi}.u8")
+            ctx.astype(np.uint32).tofile(rans / f"t{ordinal}-ctx-{mi}.u32")
+            lit.astype(np.uint8).tofile(rans / f"t{ordinal}-literal-{mi}.u8")
+            models.append(dict(index=mi, symbols=int(sym.size)))
+        manifest["tilts"].append(dict(tilt=ordinal, source_tilt=int(tilt), K=K, frames=frames, blocks=blocks,
+                                      scale=int(record["scale_bits"]), model_frames=int(record["model_frames"]),
+                                      payload_url=payload_name, payload_sha256=record.get("payload_sha256"),
+                                      blocks_meta=blocks_meta, models=models))
+    if shape is None:
+        raise ValueError("no acquisitions selected")
+    if valid_pixels is not None:
+        bad = np.flatnonzero(~np.asarray(valid_pixels, dtype=bool).reshape(-1))
+        manifest["bad_pixels"] = [int(v) for v in bad]
+    manifest["scan_shape"] = [shape[0], shape[1]]
+    manifest["detector_shape"] = [shape[2], shape[3]]
+    (rans / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    widget = Show4DSTEM(
+        np.zeros((1, 1, 1, 1), dtype=np.uint8),
+        rans_url="../rans/",
+        rans_count=len(chosen),
+        scan_shape=(shape[0], shape[1]),
+        detector_shape=(shape[2], shape[3]),
+        frame_labels=list(frame_labels) if frame_labels else None,
+        backend="webgpu",
+        view_mode="multiple" if len(chosen) > 1 else "single",
+        compare_max_panels=max(3, len(chosen)),
+        compare_group_mode="all",
+        compare_dp_mode="selected",
+        precompute_virtual_images=False,
+        debug=debug,
+        verbose=False,
+    )
+    try:
+        export_show4dstem_webgpu_bundle(widget, root, title=title)
+    finally:
+        widget.close()
+    return root / ".viewer" / "Show4DSTEM.html"
+
+
+def _export_qem_viewer(
+    paths, out_dir, *, tilts, title, frame_labels, valid_pixels, debug,
+):
+    """Admit canonical containers and serialize a local-grant-only viewer."""
+    from quantem.gpu.io._qem_reference import read_envelope
+    from quantem.gpu.io.qem_validation import validate_qem
+    from quantem.widget import Show4DSTEM
+
+    chosen = list(tilts) if tilts is not None else list(range(len(paths)))
+    if not chosen or any(type(index) is not int or not 0 <= index < len(paths) for index in chosen):
+        raise ValueError("Select at least one valid acquisition index from the QEM files.")
+    if frame_labels is not None and len(frame_labels) != len(chosen):
+        raise ValueError("Provide one frame label per selected QEM acquisition.")
+    sources = []
+    shape = dtype = None
+    for ordinal, index in enumerate(chosen):
+        integrity = validate_qem(paths[index])
+        header, _ = read_envelope(paths[index])
+        if header["codec"] != "runtime-column-rans-spatial-v2" or header["dtype"] not in ("uint8", "uint16"):
+            raise ValueError("Browser QEM export needs exact uint8/uint16 QEM counts; use Python GPU for float32 or scaled data.")
+        current_shape, current_dtype = tuple(header["shape"]), header["dtype"]
+        if shape is None:
+            shape, dtype = current_shape, current_dtype
+        elif current_shape != shape or current_dtype != dtype:
+            raise ValueError("QEM acquisitions must share native scan/detector geometry and dtype.")
+        sources.append({
+            "url": f"t{ordinal}-counts.qem",
+            "source_index": index,
+            "shape": list(current_shape),
+            "dtype": current_dtype,
+            "file_bytes": integrity["file_bytes"],
+            "scientific_metadata": header["scientific_metadata"],
+        })
+    bad_pixels = []
+    if valid_pixels is not None:
+        valid = np.asarray(valid_pixels, dtype=bool)
+        if valid.shape != shape[2:]:
+            raise ValueError(f"valid_pixels must have native detector shape {shape[2:]}.")
+        bad_pixels = np.flatnonzero(~valid.reshape(-1)).astype(int).tolist()
+    root = pathlib.Path(out_dir).expanduser().resolve()
+    rans = root / "rans"
+    rans.mkdir(parents=True, exist_ok=True)
+    for index, record in zip(chosen, sources):
+        target = rans / record["url"]
+        if target.exists() and target.samefile(paths[index]):
+            record["link"] = "existing"
+        else:
+            record["link"] = _link_read_only(paths[index], target)
+    manifest = {
+        "schema": "quantem.show4dstem-qem-browser/v1",
+        "source_format": "qem-v1",
+        "local_grant_required": True,
+        "sources": sources,
+        "scan_shape": list(shape[:2]),
+        "detector_shape": list(shape[2:]),
+        "dtype": dtype,
+        "bad_pixels": bad_pixels,
+    }
+    (rans / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    widget = Show4DSTEM(
+        np.zeros((1, 1, 1, 1), dtype=np.uint8),
+        rans_url="../rans/", rans_count=len(chosen),
+        rans_format="qem-v1", rans_files=[record["url"] for record in sources],
+        rans_dtype=dtype, scan_shape=shape[:2], detector_shape=shape[2:],
+        offline_dtype=dtype, frame_labels=list(frame_labels) if frame_labels else None,
+        backend="webgpu", view_mode="multiple" if len(chosen) > 1 else "single",
+        compare_max_panels=max(3, len(chosen)), compare_group_mode="all",
+        compare_dp_mode="selected", precompute_virtual_images=False,
+        debug=debug, verbose=False,
+    )
+    widget._offline_bad_px = json.dumps(bad_pixels)
+    try:
+        export_show4dstem_webgpu_bundle(widget, root, title=title)
+    finally:
+        widget.close()
+    return root / ".viewer" / "Show4DSTEM.html"

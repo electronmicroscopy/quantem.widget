@@ -253,6 +253,9 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         Per-trace CSS colors.
     title, x_label, y_label, x_unit, y_unit : str, optional
         Plot metadata shown in the widget and exported figures.
+    x_integer : bool, default False
+        Put x-axis ticks on whole numbers only. Use for counted quantities such
+        as epochs or iterations, where a tick at 2.5 has no meaning.
     log_scale : bool, default False
         Use logarithmic y display. Non-positive values are skipped in the plot.
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
@@ -372,6 +375,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
     title = traitlets.Unicode("").tag(sync=True)
     x_label = traitlets.Unicode("").tag(sync=True)
+    x_integer = traitlets.Bool(False).tag(sync=True)
     y_label = traitlets.Unicode("").tag(sync=True)
     x_unit = traitlets.Unicode("").tag(sync=True)
     y_unit = traitlets.Unicode("").tag(sync=True)
@@ -594,6 +598,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         colors: Sequence[str] | None = None,
         title: str = "",
         x_label: str = "",
+        x_integer: bool = False,
         y_label: str = "",
         x_unit: str = "",
         y_unit: str = "",
@@ -694,6 +699,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         self.method_labels = []
         self.title = title or inferred_title
         self.x_label = x_label
+        self.x_integer = bool(x_integer)
         self.y_label = y_label
         self.x_unit = x_unit
         self.y_unit = y_unit
@@ -2439,6 +2445,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             "colors": list(self.colors),
             "method_labels": list(self.method_labels),
             "x_label": self.x_label,
+            "x_integer": self.x_integer,
             "y_label": self.y_label,
             "x_unit": self.x_unit,
             "y_unit": self.y_unit,

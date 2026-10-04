@@ -9,7 +9,7 @@ Usage::
 
     from quantem.widget import ShowPtycho
 
-    ssb.fit()
+    ssb.find_aberrations()
     del data
     ShowPtycho(ssb)   # opens the widget
 """
@@ -35,7 +35,11 @@ from quantem.gpu import SSB
 # ``save_dir`` to override; otherwise we drop the JSON next to wherever the
 # notebook is executing so the "next cell" can read it back.
 _DEFAULT_STARS_FILENAME = "showptycho_stars.json"
-_CALIBRATION_SCHEMA_VERSION = 1
+_CALIBRATION_SCHEMA_VERSION = 3
+# Aberration magnitudes in saved calibrations / stars are nm from schema 2 ("aberration_unit": "nm"). Earlier files hold the
+# SSB engine's Angstrom numbers under an nm label (quantem.gpu SSB reported Angstrom as nm until 2026-09-24) and are read /10.
+_ABERRATION_UNIT = "nm"
+_LEGACY_ANGSTROM_PER_NM = 10.0
 _DEFAULT_DRAG_BF_FRACTION = 1.0
 _MIN_SSB_CROP_SPAN = 32
 
@@ -86,6 +90,13 @@ class PtychoCalibration:
         radians. Higher-order magnitudes are stored in nm.
     flip_phase : bool
         Whether the displayed phase sign was flipped.
+    tilt_mrad : tuple[float, float] | None
+        Sample tilt (row, col) in mrad, scan frame, when the tilt panel was active; None for standard SSB.
+        ``aberrations["C10"]`` is then the mid-depth defocus.
+    tilt_object_mrad : tuple[float, float] | None
+        The same tilt in the ptychography object frame, ready to seed a quantem.thick reconstruction.
+    depth_spread_nm : float | None
+        Depth spread of the thick-sample model (a model parameter, not a measured thickness).
     """
 
     rotation_angle_deg: float
@@ -103,6 +114,9 @@ class PtychoCalibration:
     label: str | None = None
     notes: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    tilt_mrad: tuple[float, float] | None = None
+    tilt_object_mrad: tuple[float, float] | None = None
+    depth_spread_nm: float | None = None
     timestamp: str = field(
         default_factory=lambda: datetime.datetime.now().isoformat(timespec="seconds")
     )
@@ -125,16 +139,47 @@ def _finite_float_or_none(value: object) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _object_frame_tilt(tilt_row_mrad: float, tilt_col_mrad: float, rotation_deg: float) -> list[float]:
+    """SSB tilt (scan frame) -> ptychography object frame: M(rot) = [[cos, sin], [-sin, cos]] of the scan-detector rotation.
+
+    quantem.thick places scan positions in the object frame by the same rotation, with no sign change (swap the two
+    components only if that reconstruction transposed the scan axes). Verified on a logic-device dataset (rot -8.6 deg): SSB
+    (-10.3, +4.7) -> (-10.9, +3.1) mrad vs ptychography's learned (-11.6, +2.8), 2.4 deg apart.
+    """
+    rot = math.radians(float(rotation_deg))
+    return [tilt_row_mrad * math.cos(rot) + tilt_col_mrad * math.sin(rot), -tilt_row_mrad * math.sin(rot) + tilt_col_mrad * math.cos(rot)]
+
+
+def _nm_magnitudes(values: dict[str, Any], legacy: bool, is_angle) -> dict[str, float]:
+    """Aberration dict in nm: legacy (pre-unit-marker) magnitudes were Angstrom; angles pass through."""
+    return {
+        str(k): float(v) if (not legacy or is_angle(str(k))) else float(v) / _LEGACY_ANGSTROM_PER_NM
+        for k, v in (values or {}).items()
+    }
+
+
+def _calibration_tilt(data: dict[str, Any]) -> dict[str, Any]:
+    """Tilt fields of a saved calibration; files written on 2026-09-24 kept them in a ``sample`` dict (thickness_nm)."""
+    legacy = data.get("sample") or {}
+    tilt = data.get("tilt_mrad") or ([legacy["tilt_row_mrad"], legacy["tilt_col_mrad"]] if legacy else None)
+    tilt_object = data.get("tilt_object_mrad") or legacy.get("tilt_object_mrad")
+    depth = data.get("depth_spread_nm", legacy.get("thickness_nm"))
+    return {
+        "tilt_mrad": None if tilt is None else (float(tilt[0]), float(tilt[1])),
+        "tilt_object_mrad": None if tilt_object is None else (float(tilt_object[0]), float(tilt_object[1])),
+        "depth_spread_nm": None if depth is None else float(depth),
+    }
+
+
 def _calibration_from_mapping(data: dict[str, Any]) -> PtychoCalibration:
+    legacy = data.get("aberration_unit") != _ABERRATION_UNIT
     return PtychoCalibration(
         rotation_angle_deg=float(data["rotation_angle_deg"]),
-        aberrations={
-            str(k): float(v) for k, v in (data.get("aberrations") or {}).items()
-        },
-        higher_order={
-            str(k): float(v) for k, v in (data.get("higher_order") or {}).items()
-        },
+        # angles: phi12, phi21, ... in the aberrations dict; <name>_angle in the higher-order panel dict
+        aberrations=_nm_magnitudes(data.get("aberrations"), legacy, lambda k: k.startswith("phi")),
+        higher_order=_nm_magnitudes(data.get("higher_order"), legacy, lambda k: k.endswith("_angle")),
         flip_phase=bool(data.get("flip_phase", False)),
+        **_calibration_tilt(data),
         voltage_kV=data.get("voltage_kV"),
         semiangle_mrad=data.get("semiangle_mrad"),
         scan_sampling_A=data.get("scan_sampling_A"),
@@ -181,6 +226,7 @@ def save_ptycho_calibration(
     payload = {
         "schema_version": _CALIBRATION_SCHEMA_VERSION,
         "version": "2.0",
+        "aberration_unit": _ABERRATION_UNIT,
         **asdict(calibration),
     }
     _atomic_write_json(path, payload)
@@ -303,10 +349,11 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
     _esm = pathlib.Path(__file__).with_name("static") / "showptycho.js"
 
     # -- Slider ranges (Python → JS, set once) --
-    c10_min = traitlets.Float(-400.0).tag(sync=True)
-    c10_max = traitlets.Float(400.0).tag(sync=True)
-    c12_min = traitlets.Float(-100.0).tag(sync=True)
-    c12_max = traitlets.Float(100.0).tag(sync=True)
+    # nm; the same physical span as the SSB fit's default search (C10 +-40 nm, C12 0-10 nm)
+    c10_min = traitlets.Float(-40.0).tag(sync=True)
+    c10_max = traitlets.Float(40.0).tag(sync=True)
+    c12_min = traitlets.Float(-10.0).tag(sync=True)
+    c12_max = traitlets.Float(10.0).tag(sync=True)
     phi12_min = traitlets.Float(-90.0).tag(sync=True)
     phi12_max = traitlets.Float(90.0).tag(sync=True)
     rotation_min = traitlets.Float(-180.0).tag(sync=True)
@@ -406,6 +453,16 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
     crop_refit_available = traitlets.Bool(False).tag(sync=True)
     crop_refit_status = traitlets.Unicode("").tag(sync=True)
     crop_refit_request_json = traitlets.Unicode("").tag(sync=True)
+
+    # Thick-sample SSB (sample tilt + thickness). ``sample_json`` carries the Sample panel sliders
+    # ({"tilt_row_mrad", "tilt_col_mrad", "thickness_nm"}); thickness 0 is standard SSB. ``sample_fit_request``
+    # (a counter) asks Python to fit aberrations, tilt and thickness together (``SSB.find_aberrations(tilt=True)``); the result
+    # arrives in ``sample_fit_json`` and the frontend moves the sliders to it. CUDA sessions only.
+    sample_json = traitlets.Unicode("{}").tag(sync=True)
+    sample_available = traitlets.Bool(False).tag(sync=True)
+    sample_fit_request = traitlets.Int(0).tag(sync=True)
+    sample_fit_status = traitlets.Unicode("").tag(sync=True)
+    sample_fit_json = traitlets.Unicode("").tag(sync=True)
 
     def __init__(
         self,
@@ -537,6 +594,9 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         self.observe(self._on_flip_change, names=["flip_phase"])
         self.observe(self._on_higher_order_change, names=["higher_order_json"])
         self.observe(self._on_crop_refit_request, names=["crop_refit_request_json"])
+        self.observe(self._on_sample_change, names=["sample_json"])
+        self.observe(self._on_sample_fit_request, names=["sample_fit_request"])
+        self.sample_available = bool(getattr(accel, "supports_tilt", False))
 
         # Publish total BF count so the UI can clamp user input to valid range
         self.total_bf = accel.num_bf
@@ -640,6 +700,73 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
             self._current_phi12_deg(),
             compute_loss=True,
         )
+
+    def _tilt(self) -> dict[str, Any] | None:
+        """The tilt panel as ``SSB.preview`` arguments (tilt_mrad, depth_spread_nm), or None for standard SSB (depth 0)."""
+        values = json.loads(self.sample_json or "{}")
+        depth_spread_nm = float(values.get("thickness_nm", 0.0))
+        if depth_spread_nm <= 0.0:
+            return None
+        return {
+            "tilt_mrad": (float(values.get("tilt_row_mrad", 0.0)), float(values.get("tilt_col_mrad", 0.0))),
+            "depth_spread_nm": depth_spread_nm,
+        }
+
+    def _on_sample_change(self, change):
+        """Re-reconstruct when the Sample panel (tilt, thickness) changes, at the current aberrations."""
+        if self._last_phase_np is None:
+            return
+        self._inflight_id += 1
+        self._do_reconstruct(
+            self._inflight_id,
+            self._current_c10(),
+            self._current_c12(),
+            self._current_phi12_deg(),
+            compute_loss=True,
+        )
+
+    def _on_sample_fit_request(self, change):
+        """Fit C10, C12, phi12, sample tilt and thickness together (``SSB.find_aberrations(tilt=True)``) and publish the result.
+
+        The frontend applies ``sample_fit_json`` to the aberration sliders and the Sample panel, which triggers the
+        reconstruction. C10 comes back as the defocus at mid-depth, not the standard-SSB optimum.
+        """
+        if not change["new"]:
+            return
+        if not self.sample_available:
+            self.sample_fit_status = "Tilt fit failed: needs a CUDA SSB session."
+            return
+        try:
+            self.sample_fit_status = "Fitting defocus, astigmatism, sample tilt and thickness..."
+            t0 = time.perf_counter()
+            result = self._accel.find_aberrations(tilt=True, verbose=False)
+            fit = {**result.aberrations, "tilt_row_mrad": result.tilt_mrad[0], "tilt_col_mrad": result.tilt_mrad[1],
+                   "depth_spread_nm": result.depth_spread_nm, "gain": result.tilt_fit_gain}
+            # SSB tilt is in the scan frame; quantem.thick's object frame is the scan rotated by the same scan-detector
+            # rotation (positions p_obj = M p_scan, no sign change; verified on a logic-device dataset: SSB -> object (-10.9, +3.1) mrad
+            # vs ptychography (-11.6, +2.8), 2.4 deg apart). The object-frame value seeds a reconstruction directly
+            # (swap its components only if that reconstruction transposed the scan axes).
+            tilt_r, tilt_c = float(fit["tilt_row_mrad"]), float(fit["tilt_col_mrad"])
+            payload = {
+                "C10": float(fit["C10"]),
+                "C12": float(fit["C12"]),
+                "phi12_deg": math.degrees(float(fit["phi12"])),
+                "tilt_row_mrad": tilt_r,
+                "tilt_col_mrad": tilt_c,
+                "tilt_object_mrad": _object_frame_tilt(tilt_r, tilt_c, self.rotation_deg),
+                "thickness_nm": float(fit["depth_spread_nm"]),
+                "gain": float(fit["gain"]),
+                "seconds": time.perf_counter() - t0,
+            }
+            self.sample_fit_json = json.dumps(payload)
+            self.sample_fit_status = (
+                f"Tilt fit: ({payload['tilt_row_mrad']:+.1f}, {payload['tilt_col_mrad']:+.1f}) mrad scan frame "
+                f"= ({payload['tilt_object_mrad'][0]:+.1f}, {payload['tilt_object_mrad'][1]:+.1f}) mrad ptychography frame, "
+                f"depth spread {payload['thickness_nm']:.1f} nm, fit x{payload['gain']:.2f} over standard SSB "
+                f"({payload['seconds']:.0f} s)."
+            )
+        except (RuntimeError, ValueError, NotImplementedError, MemoryError) as exc:
+            self.sample_fit_status = f"Tilt fit failed: {exc}"
 
     def _on_flip_change(self, change):
         """Re-send the current phase with the new sign; no GPU recompute needed.
@@ -788,6 +915,7 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
                 "starred": True,
                 "rotation_angle_deg": float(p.get("rotation_deg", math.degrees(self._rotation_rad))),
                 "aberrations": aberr,
+                "aberration_unit": _ABERRATION_UNIT,
                 "flip_phase": bool(p.get("flip_phase", False)),
                 "voltage_kV": voltage_kV,
                 "semiangle_mrad": semiangle_mrad,
@@ -871,15 +999,16 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         from quantem.gpu.io import load
 
         previous = self._ssb_ref
-        loaded = load(
+        with load(
             self._source_file,
-            scan_region=scan_region,
             backend=self._accel.backend,
             scan_shape=self._source_scan_shape,
             verbose=False,
-        )
-        rebuilt = SSB.from_array(
-            loaded.data,
+        ) as loaded:
+            row_start, row_stop, col_start, col_stop = scan_region
+            selected = loaded[row_start:row_stop, col_start:col_stop]
+        rebuilt = SSB(
+            selected,
             backend=previous.backend,
             voltage_kV=previous.voltage_kV,
             semiangle_mrad=previous.semiangle_mrad,
@@ -912,7 +1041,7 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
             bf_radius=previous.bf_radius,
             source_path=previous.source_path,
         )
-        rebuilt.fit(
+        rebuilt.find_aberrations(
             trials=n_trials,
             refinement="nelder-mead",
             verbose=False,
@@ -920,6 +1049,7 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
 
         self._ssb_ref = rebuilt
         self._accel = rebuilt
+        self.sample_available = bool(getattr(rebuilt, "supports_tilt", False))
         self._scan_shape = rebuilt.scan_shape
         self._scan_region = scan_region
         self.scan_rows, self.scan_cols = self._scan_shape
@@ -1028,11 +1158,17 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         if use_drag:
             self._enter_drag()
         try:
+            tilt = self._tilt() if self.sample_available else None
+            if tilt is not None and any_ho:
+                # the thick-sample kernel carries C10/C12/phi12 only; higher-order wins and the panel says so
+                self.sample_fit_status = "Sample tilt is ignored while higher-order aberrations are non-zero."
+                tilt = None
             phase_np, loss = self._accel.preview(
                 {"C10": c10, "C12": c12, "phi12": phi12_rad},
                 compute_loss=compute_loss,
                 higher_order_magnitudes=mags_m if any_ho else None,
                 higher_order_angles=angles_rad if any_ho else None,
+                **(tilt or {}),
             )
             if not compute_loss and loss_override is not None:
                 loss = float(loss_override)
@@ -1228,6 +1364,11 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         )
         if (self.notes or None) is not None:
             cal_kwargs["notes"] = self.notes
+        tilt = self._tilt() if self.sample_available else None
+        if tilt is not None:
+            cal_kwargs["tilt_mrad"] = tilt["tilt_mrad"]
+            cal_kwargs["tilt_object_mrad"] = tuple(_object_frame_tilt(*tilt["tilt_mrad"], math.degrees(self._rotation_rad)))
+            cal_kwargs["depth_spread_nm"] = tilt["depth_spread_nm"]
         cal = PtychoCalibration(**cal_kwargs)
         saved = save_ptycho_calibration(cal, self._calibration_path)
         self.calibration_path = str(saved.resolve())
@@ -1315,7 +1456,7 @@ def _apply_calibration(
     ssb: SSB,
     calibration: object,
     source_file: str | None,
-) -> tuple[bool, dict[str, float], float | None, str | None]:
+) -> tuple[bool, dict[str, float], float | None, str | None, dict[str, Any]]:
     cal = _coerce_calibration(calibration)
     primary = {
         "C10": float(cal.aberrations.get("C10", 0.0)),
@@ -1334,7 +1475,15 @@ def _apply_calibration(
         _higher_order_widget_payload(cal),
         None if cal.loss is None else float(cal.loss),
         source_file or cal.source_file,
+        _tilt_panel(cal.tilt_mrad, cal.depth_spread_nm),
     )
+
+
+def _tilt_panel(tilt_mrad, depth_spread_nm) -> dict[str, float]:
+    """Tilt panel state (the frontend's sample_json keys) for a tilt fit; empty for standard SSB."""
+    if tilt_mrad is None or not depth_spread_nm:
+        return {}
+    return {"tilt_row_mrad": float(tilt_mrad[0]), "tilt_col_mrad": float(tilt_mrad[1]), "thickness_nm": float(depth_spread_nm)}
 
 
 def _show_ptycho_from_ssb(
@@ -1351,11 +1500,12 @@ def _show_ptycho_from_ssb(
     fft_on: bool,
     calibration: object | None,
 ) -> _ShowPtychoWidget:
+    sample_from_cal: dict[str, Any] = {}
     flip_from_cal: bool | None = None
     ho_from_cal: dict[str, float] | None = None
     loss_from_cal: float | None = None
     if calibration is not None:
-        flip_from_cal, ho_from_cal, loss_from_cal, source_file = _apply_calibration(
+        flip_from_cal, ho_from_cal, loss_from_cal, source_file, sample_from_cal = _apply_calibration(
             ssb, calibration, source_file,
         )
 
@@ -1363,9 +1513,9 @@ def _show_ptycho_from_ssb(
     auto_c10 = float(aberrations.get("C10", 0.0))
 
     if c10_range is None:
-        c10_range = (min(-300.0, auto_c10), max(300.0, auto_c10))
+        c10_range = (min(-30.0, auto_c10), max(30.0, auto_c10))
     if c12_range is None:
-        c12_range = (-100.0, 100.0)
+        c12_range = (-10.0, 10.0)
     if phi12_range is None:
         phi12_range = (-90.0, 90.0)
 
@@ -1400,6 +1550,11 @@ def _show_ptycho_from_ssb(
         initial_flip_phase=bool(flip_from_cal) if flip_from_cal is not None else False,
         initial_higher_order=ho_from_cal,
     )
+    # the Sample panel opens on a saved calibration's tilt, else on the session's latest ssb.find_aberrations(tilt=True);
+    # the frontend reads sample_json once on mount
+    sample = sample_from_cal or _tilt_panel(getattr(ssb, "tilt_mrad", None), getattr(ssb, "depth_spread_nm", None))
+    if widget.sample_available and float(sample.get("thickness_nm", 0.0)) > 0.0:
+        widget.sample_json = json.dumps({key: float(sample[key]) for key in ("tilt_row_mrad", "tilt_col_mrad", "thickness_nm")})
 
     return widget
 
@@ -1454,7 +1609,7 @@ def ShowPtycho(
         SSB from the selected detector data with 200 optimization trials.
     calibration : path or object, optional
         Previously saved calibration used to seed aberrations, rotation, phase
-        flip, and higher-order controls.
+        flip, higher-order controls and, when saved, the sample tilt panel.
     Returns
     -------
     anywidget.AnyWidget
@@ -1488,7 +1643,7 @@ def ShowPtycho(
                 "and scan_sampling_A. Pass a prepared quantem.gpu.SSB object to reuse an "
                 "existing GPU-resident reconstruction."
             )
-        ssb = SSB.from_array(
+        ssb = SSB(
             data_or_ssb,
             backend=backend,
             voltage_kV=float(voltage_kV),

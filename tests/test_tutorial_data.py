@@ -183,76 +183,6 @@ def test_show1d_ducky_downloads_scoped_widget_tutorial_folder(tmp_path, monkeypa
     ]
 
 
-def test_showfolder_gold_uses_widget_tutorial_folder(tmp_path, monkeypatch):
-    root = tmp_path / "hf-cache"
-    folder = root / "widget-tutorials" / "showfolder" / "gold-haadf-session" / "small"
-    folder.mkdir(parents=True)
-    (folder / "0010 - HAADF 15Mx Nano.emd").write_bytes(b"placeholder")
-    calls = []
-
-    def fake_snapshot_download(**kwargs):
-        calls.append(kwargs)
-        return root
-
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
-
-    result = datasets.showfolder_gold(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
-
-    assert result == folder
-    assert calls == [
-        {
-            "repo_id": "bobleesj/quantem-data",
-            "repo_type": "dataset",
-            "allow_patterns": ["widget-tutorials/showfolder/gold-haadf-session/small/*"],
-            "force_download": False,
-            "cache_dir": "/tmp/qw-cache",
-        }
-    ]
-
-
-def test_create_tutorial_showfolder_folder_writes_velox_like_session(tmp_path):
-    from quantem.widget.showfolder_core import build_showfolder, has_eds, scan_rotation_deg
-
-    folder = tutorials.create_tutorial_showfolder_folder(tmp_path / "showfolder-demo")
-    files = sorted(folder.glob("*.emd"))
-
-    assert len(files) == 4
-    assert sum(has_eds(path) for path in files) == 1
-    assert scan_rotation_deg(folder / "0011 - HAADF 15Mx Nano 90deg.emd") == 90.0
-
-    result = build_showfolder(folder, thumb=32)
-    assert len(result.image_items) == 3
-    assert len(result.eds_items) == 1
-    assert result.eds_widgets == []
-    assert len(result.fov_groups) == 1
-
-
-def test_load_tutorial_showfolder_folder_falls_back_offline(monkeypatch, tmp_path):
-    def fail_download(*args, **kwargs):
-        raise OSError("offline")
-
-    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
-    monkeypatch.setattr(tutorials, "create_tutorial_showfolder_folder", lambda path=None: tmp_path)
-
-    folder = tutorials.load_tutorial_showfolder_folder(verbose=False)
-
-    assert folder == tmp_path
-
-
-def test_load_tutorial_showfolder_folder_can_require_real_download(monkeypatch):
-    def fail_download(*args, **kwargs):
-        raise OSError("offline")
-
-    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
-
-    try:
-        tutorials.load_tutorial_showfolder_folder(verbose=False, allow_fallback=False)
-    except OSError as exc:
-        assert "offline" in str(exc)
-    else:
-        raise AssertionError("expected real-data tutorial loader to raise when download fails")
-
-
 def test_showdiffraction_fe3o4_uses_widget_tutorial_source(tmp_path, monkeypatch):
     root = tmp_path / "hf-cache"
     data_dir = root / "widget-tutorials" / "showdiffraction" / "fe3o4-saed" / "small"
@@ -313,3 +243,30 @@ def test_showdiffraction_fe3o4_raises_without_usable_source(tmp_path, monkeypatc
             assert "offline" in str(exc)
         else:
             raise AssertionError("expected diffraction tutorial loader to raise")
+
+
+def test_gold_session_uses_widget_tutorial_folder(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    folder = root / "widget-tutorials" / "showfolder" / "gold-haadf-session" / "small"
+    folder.mkdir(parents=True)
+    (folder / "0010 - HAADF 15Mx Nano.emd").write_bytes(b"placeholder")
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    result = datasets.gold_session(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
+
+    assert result == folder
+    assert calls == [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["widget-tutorials/showfolder/gold-haadf-session/small/*"],
+            "force_download": False,
+            "cache_dir": "/tmp/qw-cache",
+        }
+    ]

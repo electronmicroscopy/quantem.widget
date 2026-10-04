@@ -349,22 +349,22 @@ def _artifact_rows(root: Path) -> list[dict[str, Any]]:
             notes="Run with --browser for exported HTML interaction/FPS proof",
         ))
 
-    live_html = root / "showfolder-live" / "index.html"
-    live_report = _read_json(root / "showfolder-live" / "report.json")
+    live_html = root / "folder-watch" / "index.html"
+    live_report = _read_json(root / "folder-watch" / "report.json")
     if live_html.exists():
         steps = (live_report or {}).get("steps", [])
         passed = bool((live_report or {}).get("passed"))
         rows.append(_gate(
-            "ShowFolder live-folder smoke",
+            "Direct viewer folder-watch smoke",
             "pass" if passed else "fail",
-            evidence=_link("showfolder-live/index.html", "Live-folder report"),
+            evidence=_link("folder-watch/index.html", "Live-folder report"),
             notes="Folder watcher and selected widget handoff",
             metrics={"Scenarios": str(len(steps))},
             errors=_flatten_errors(live_report),
         ))
     else:
         rows.append(_gate(
-            "ShowFolder live-folder smoke",
+            "Direct viewer folder-watch smoke",
             "missing",
             notes="Expected from local signoff; proves live Show2D/Show3D/Show4DSTEM handoff",
         ))
@@ -478,7 +478,7 @@ def _artifact_rows(root: Path) -> list[dict[str, Any]]:
 
     gif_reports = [
         path for path in _find_optional_reports(root, "report.json")
-        if path.parent.name not in {"html-smoke", "performance", "showfolder-live"}
+        if path.parent.name not in {"html-smoke", "performance", "folder-watch"}
         and isinstance(_read_json(path), dict)
         and "planned_exports" in (_read_json(path) or {})
         and "playback" in (_read_json(path) or {})

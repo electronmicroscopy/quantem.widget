@@ -551,6 +551,17 @@ function niceTicks(lo: number, hi: number, target = 5): number[] {
   return ticks.length ? ticks : [lo, hi];
 }
 
+// Counted quantities (epochs, iterations) only have whole-number ticks.
+function integerTicks(lo: number, hi: number, target = 6): number[] {
+  const first = Math.ceil(Math.min(lo, hi));
+  const last = Math.floor(Math.max(lo, hi));
+  if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return [Math.round(lo)];
+  const step = Math.max(1, Math.ceil((last - first) / Math.max(1, target)));
+  const ticks: number[] = [];
+  for (let value = first; value <= last; value += step) ticks.push(value);
+  return ticks;
+}
+
 function log10(value: number): number {
   return Math.log(value) / Math.LN10;
 }
@@ -2684,6 +2695,7 @@ function Show1DWidget() {
   const [colors] = useModelState<string[]>("colors");
   const [methodLabels] = useModelState<string[]>("method_labels");
   const [xLabel] = useModelState<string>("x_label");
+  const [xInteger] = useModelState<boolean>("x_integer");
   const [yLabel] = useModelState<string>("y_label");
   const [xUnit] = useModelState<string>("x_unit");
   const [yUnit] = useModelState<string>("y_unit");
@@ -4179,7 +4191,9 @@ function Show1DWidget() {
     ctx.rect(geom.left, geom.top, geom.plotW, geom.plotH);
     ctx.clip();
 
-    const xTicks = niceTicks(geom.xMin, geom.xMax, methodLabels?.length ? Math.min(methodLabels.length, 6) : 6);
+    const xTicks = xInteger
+      ? integerTicks(geom.xMin, geom.xMax, 6)
+      : niceTicks(geom.xMin, geom.xMax, methodLabels?.length ? Math.min(methodLabels.length, 6) : 6);
     const yTickValues = logScale
       ? niceTicks(log10(geom.yMin), log10(geom.yMax), 5).map((value) => Math.pow(10, value))
       : niceTicks(geom.yMin, geom.yMax, 5);
@@ -4367,6 +4381,7 @@ function Show1DWidget() {
     colors,
     methodLabels,
     xLabel,
+    xInteger,
     yLabel,
     xUnit,
     yUnit,

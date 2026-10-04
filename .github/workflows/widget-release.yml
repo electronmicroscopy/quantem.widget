@@ -47,6 +47,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: bobleesj/quantem.gpu
+          ref: gpu-v0.0.1rc11
           path: quantem-gpu-src
 
       - name: Resolve widget version from tag
@@ -129,6 +130,7 @@ jobs:
           wheel = wheels[0]
           required = {
               "quantem/widget/static/chooselattice.js",
+              "quantem/widget/static/planptycho.js",
               "quantem/widget/static/show1d.js",
               "quantem/widget/static/plot2d.js",
               "quantem/widget/static/show2d.js",

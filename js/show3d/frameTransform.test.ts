@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   browserFilterCacheKey,
   normalizedAverageWindow,
+  temporalAverageFrameIndices,
   requiresClientFrameTransform,
   shouldApplyClientDifference,
   supportsClientAverage,
@@ -53,5 +54,21 @@ describe("Show3D frame transform ownership", () => {
     };
     expect(browserFilterCacheKey({ ...base, panels: 1 }))
       .not.toBe(browserFilterCacheKey({ ...base, panels: 3 }));
+  });
+});
+
+
+describe("shared Show3D moving-average window", () => {
+  it("slides through three adjacent slices and keeps full width at edges", () => {
+    expect(temporalAverageFrameIndices(0,16,3)).toEqual([0,1,2]);
+    expect(temporalAverageFrameIndices(1,16,3)).toEqual([0,1,2]);
+    expect(temporalAverageFrameIndices(2,16,3)).toEqual([1,2,3]);
+    expect(temporalAverageFrameIndices(15,16,3)).toEqual([13,14,15]);
+  });
+  it("handles one slice, even windows, and wider requests without wrapping", () => {
+    expect(temporalAverageFrameIndices(4,16,1)).toEqual([4]);
+    expect(temporalAverageFrameIndices(4,16,4)).toEqual([2,3,4,5]);
+    expect(temporalAverageFrameIndices(0,1,15)).toEqual([0]);
+    expect(temporalAverageFrameIndices(8,3,15)).toEqual([0,1,2]);
   });
 });

@@ -6,9 +6,20 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+## rc39 - 2026-10-03
+
 - Show4DSTEM compares native diffraction patterns side by side in live
   Multiple view, with shared scan-region reductions and live detector dragging.
   Playback controls are reserved for Single view.
+
+- Remove the ShowFolder session browser and `quantem showfolder` command. Open acquisitions directly with Show4DSTEM; image and acquisition `--watch` commands now use the viewers’ own `from_folder` methods.
+
+- Show4DSTEM static render uses the Show2D overlay font and no forced gap between panels; depends on quantem.gpu 0.0.1rc11 (GPU-owned `Dataset4dstemGPU`, `io.load(files)` returns a list).
+- Add `PlanPtycho`: give a crystal (CIF, `ase.Atoms` or Materials Project id) and the microscope settings, and see
+  the beam through the specimen, the reconstruction's model window, the probe and the Bragg disks, with graded checks
+  (window, scan margin, overlap, detector reach, column lean from tilt, focus inside the specimen). Microscope
+  presets (Arina at 91, 115, 185 mm; EMPAD), a custom camera for a collaborator's reported values, and recommended
+  settings for 20-200 nm.
 
 - Add `Plot2D` for scalar maps with calibrated Cartesian axes, colormap
   selection, viewport controls, and editable Matplotlib figure export.

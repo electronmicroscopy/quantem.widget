@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from quantem.gpu.io.load import LoadResult
+from quantem.gpu.io.models import Dataset4dstemGPU
 
 from quantem.widget import Show4DSTEM
 from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
@@ -61,6 +61,12 @@ def test_public_show4dstem_import_uses_factory() -> None:
     assert Show4DSTEM is factory.Show4DSTEM
 
 
+def test_mps_folder_watch_explains_fixed_native_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr("quantem.gpu.device.resolve", lambda backend: backend)
+    with pytest.raises(NotImplementedError, match="watch=False"):
+        Show4DSTEM.from_folder(tmp_path, backend="mps", watch=True)
+
+
 def test_frontend_ready_resends_initial_scientific_views() -> None:
     """A late notebook mount receives both image panels without tutorial glue."""
     widget = Show4DSTEMBase(
@@ -86,6 +92,8 @@ def test_frontend_ready_resends_initial_scientific_views() -> None:
         "vi_preset_map_frames",
         "vi_preset_maps_bytes",
         "frame_bytes",
+        "compare_diffraction_bytes",
+        "compare_diffraction_indices",
         "compare_virtual_image_bytes",
     ]
     widget.close()
@@ -132,7 +140,7 @@ def test_master_file_contract_rejects_missing_required_field(monkeypatch) -> Non
 
 
 def test_show4dstem_routes_chunked_payload_to_mps_builder(monkeypatch) -> None:
-    payload = SimpleNamespace(chunks=[object()], metadata={"scan_shape": (2, 2)})
+    payload = SimpleNamespace(chunks=[object()], shape=(2, 2, 8, 8), dtype="uint16", metadata={"scan_shape": (2, 2)})
     calls = []
 
     def _fake_mps_builder(data, **kwargs):
@@ -149,8 +157,8 @@ def test_show4dstem_routes_chunked_payload_to_mps_builder(monkeypatch) -> None:
 
 
 def test_show4dstem_routes_loadresult_chunked_payload_to_mps_builder(monkeypatch) -> None:
-    payload = SimpleNamespace(chunks=[object()], metadata={"scan_shape": (2, 2)})
-    load_result = LoadResult(payload, {"file_names": ["a"]})
+    payload = SimpleNamespace(chunks=[object()], shape=(2, 2, 8, 8), dtype="uint16", metadata={"scan_shape": (2, 2)})
+    load_result = Dataset4dstemGPU(payload, {"file_names": ["a"]})
     calls = []
 
     def _fake_mps_builder(data, **kwargs):
@@ -171,7 +179,7 @@ def test_show4dstem_opens_mps_5d_loadresult_as_dataset_comparison(monkeypatch) -
         shape=(2, 4, 4, 8, 8),
         metadata={"scan_shape": (4, 4)},
     )
-    load_result = LoadResult(payload, {"file_names": ["-2 deg", "+2 deg"]})
+    load_result = Dataset4dstemGPU(payload, {"file_names": ["-2 deg", "+2 deg"]})
 
     def _fake_mps_builder(data, **kwargs):
         return {"data": data, "kwargs": kwargs}
@@ -206,6 +214,25 @@ def test_show4dstem_routes_mps_gpu_frame_proxy_to_mps_builder(monkeypatch) -> No
     assert factory.is_mps_show4dstem_payload(payload)
 
 
+def test_mps_viewer_without_interaction_sidecar_shows_exact_images() -> None:
+    """Encoded residents have no binned sidecar: never show the startup preview."""
+    torch = pytest.importorskip("torch")
+    from quantem.widget.show4dstem_mps import Show4DSTEMMPS
+
+    values = _preset_region_data()
+    data = torch.from_numpy(values)
+    data.det_bin = 1
+    viewer = Show4DSTEMMPS(
+        data, scan_shape=(4, 5), fast_interaction=True, fast_interaction_async=True,
+        verbose=False,
+    )
+    mask = np.asarray(viewer._detector_mask_np()) > 0
+    image = np.frombuffer(viewer.virtual_image_bytes, np.float32).reshape(4, 5)
+
+    assert not viewer.fast_interaction
+    np.testing.assert_array_equal(image, values[..., mask].sum(axis=-1).astype(np.float32))
+
+
 def test_show4dstem_keeps_cuda_gpu_frame_proxy_on_base_viewer(monkeypatch) -> None:
     payload = SimpleNamespace(_is_gpu_frames=True, device="cuda:0", ndim=4)
 
@@ -236,8 +263,8 @@ def test_show4dstem_base_route_does_not_import_mps_implementation(monkeypatch) -
 
 
 def test_show4dstem_opens_5d_loadresult_as_dataset_comparison(monkeypatch) -> None:
-    payload = SimpleNamespace(ndim=5)
-    load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
+    payload = SimpleNamespace(ndim=5, shape=(2, 2, 2, 8, 8), dtype="uint16")
+    load_result = Dataset4dstemGPU(payload, {"file_names": ("first.h5", "second.h5")})
 
     def _fake_base(data, **kwargs):
         return {"kind": "base", "data": data, "kwargs": kwargs}
@@ -255,8 +282,8 @@ def test_show4dstem_opens_5d_loadresult_as_dataset_comparison(monkeypatch) -> No
 
 
 def test_show4dstem_preserves_explicit_5d_view_options(monkeypatch) -> None:
-    payload = SimpleNamespace(ndim=5)
-    load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
+    payload = SimpleNamespace(ndim=5, shape=(2, 2, 2, 8, 8), dtype="uint16")
+    load_result = Dataset4dstemGPU(payload, {"file_names": ("first.h5", "second.h5")})
 
     def _fake_base(data, **kwargs):
         return {"data": data, "kwargs": kwargs}
@@ -277,7 +304,7 @@ def test_simple_5d_loadresult_keeps_selected_and_average_dp_working() -> None:
     data = np.zeros((2, 2, 2, 6, 6), dtype=np.uint16)
     data[0, :, :, 1:3, 1:3] = 8
     data[1, :, :, 3:5, 3:5] = 24
-    loaded = LoadResult(data, {"file_names": ("tilt -2 deg", "tilt +2 deg")})
+    loaded = Dataset4dstemGPU(data, {"file_names": ("tilt -2 deg", "tilt +2 deg")})
 
     widget = factory.Show4DSTEM(
         loaded,
@@ -938,3 +965,36 @@ def test_show4dstem_compare_grid_validates_api() -> None:
             assert message in str(exc)
         else:  # pragma: no cover - assertion helper
             raise AssertionError(f"Show4DSTEM accepted invalid kwargs {kwargs!r}")
+
+
+def test_loaded_metadata_preserves_scan_and_detector_calibration(monkeypatch):
+    captured = {}
+
+    def build(payload, **kwargs):
+        captured.update(kwargs)
+        return payload
+
+    monkeypatch.setattr(factory, "_Show4DSTEMBase", build)
+    values = np.ones((2, 3, 4, 4), dtype=np.float32)
+    data = Dataset4dstemGPU(values, {
+        "scan_sampling_A": [0.4, 0.6],
+        "detector_sampling": [0.02, 0.03],
+        "detector_sampling_unit": "1/angstrom",
+    })
+    assert factory.Show4DSTEM(data) is values
+    assert captured["sampling"] == (0.4, 0.6, 0.02, 0.03)
+    assert captured["units"] == ["angstrom", "angstrom", "1/angstrom", "1/angstrom"]
+
+    # A calibrated scan does not imply an angularly calibrated detector.
+    data.metadata.pop("detector_sampling_unit")
+    captured.clear()
+    factory.Show4DSTEM(data)
+    assert captured["sampling"] == (0.4, 0.6, 1.0, 1.0)
+    assert captured["units"] == ["angstrom", "angstrom", "pixels", "pixels"]
+
+    captured.clear()
+    factory.Show4DSTEM(
+        data, sampling=(1, 1, 0.2, 0.2), units=["nm", "nm", "mrad", "mrad"],
+    )
+    assert captured["sampling"] == (1, 1, 0.2, 0.2)
+    assert captured["units"] == ["nm", "nm", "mrad", "mrad"]

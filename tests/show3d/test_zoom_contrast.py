@@ -55,7 +55,7 @@ def test_frame_scrub_is_raf_coalesced_and_commits_once_on_release() -> None:
     root = pathlib.Path(__file__).resolve().parents[2]
     frontend = (root / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
     colormaps = (
-        root / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
+        root / "js" / ".generated" / "engine" / "display" / "backends" / "webgpu" / "colormaps.ts"
     ).read_text(encoding="utf-8")
 
     assert "averageResidentSlotsInto" in colormaps
@@ -102,7 +102,7 @@ def test_playback_uses_live_per_panel_colormap_contract() -> None:
     root = pathlib.Path(__file__).resolve().parents[2]
     frontend = (root / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
     colormaps = (
-        root / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
+        root / "js" / ".generated" / "engine" / "display" / "backends" / "webgpu" / "colormaps.ts"
     ).read_text(encoding="utf-8")
 
     assert "const panelCmapsLiveRef = React.useRef" in frontend

@@ -1,7 +1,6 @@
 import json
 import math
 import sys
-from collections import namedtuple
 
 import numpy as np
 import pytest
@@ -11,7 +10,7 @@ from quantem.widget import ShowDiffraction
 from quantem.widget import Phase
 from quantem.widget.showdiffraction import build_measurement_records, measurement_metadata
 
-LoadResult = namedtuple("LoadResult", ("data", "metadata"))
+from quantem.gpu.io.models import Dataset4dstemGPU
 
 
 def _disk_dp(size=64, center=(32, 30), radius=6):
@@ -55,8 +54,8 @@ def test_showdiffraction_construction_and_ingest():
     # torch tensor input
     w = ShowDiffraction(torch.rand(4, 16, 16), verbose=False)
     assert w.n_frames == 4
-    # LoadResult input applies metadata
-    result = LoadResult(
+    # Dataset input applies metadata
+    result = Dataset4dstemGPU(
         data=np.random.rand(4, 16, 16).astype(np.float32),
         metadata={"pixel_size": 2.0},
     )
@@ -70,8 +69,8 @@ def test_showdiffraction_construction_and_ingest():
     assert w.n_frames == 8
     assert w.det_rows == 64
     assert len(w.spots) == 0
-    # set_image with a LoadResult applies metadata
-    result = LoadResult(
+    # set_image with a Dataset applies metadata
+    result = Dataset4dstemGPU(
         data=np.random.rand(8, 32, 32).astype(np.float32),
         metadata={"pixel_size": 3.0},
     )

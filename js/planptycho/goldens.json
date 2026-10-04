@@ -1,0 +1,1890 @@
+{
+ "cases": {
+  "srtio3_110nm_arina": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 17,
+    "thickness_nm": 110,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.563,
+    "scan_step_A": 0.495,
+    "scan_size_px": 48,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 34.969108184865036,
+    "pixel_A": 0.19004950100470128,
+    "theta_max_mrad": 51.79599999999999,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 11.00062938826188,
+    "exit_A": 56.60062938826188,
+    "widest_A": 56.60062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 23.759999999999998,
+    "overlap": 0.9550025746228498,
+    "reach": 1.726533333333333,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 1100.0,
+    "focus_A": 170.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "caution",
+    "margin": "caution",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "57 Å beam in a 35 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "The beam wraps around the virtual window. Simulated SrTiO3 still reconstructed with it (130 nm: 68 Å beam in a 35 Å window, picture 0.80). A longer camera length widens the window but lowers the detector reach; a 2x virtual window in the reconstruction removes the wrap without changing the acquisition.",
+     "status": "caution"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "24 Å scan, beam radius 28 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "The outer ~28 Å of the scan is lit from one side only deep in the sample (110 nm SrTiO3, 24 Å scan: centre 0.79, edge 0.60). Scan 113 Å or more, or report only the interior.",
+     "status": "caution"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "96 % (step 0.495 Å, beam 11.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "52 mrad = 1.7 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "17.0 nm above, 93.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.190 Å (184 px over 35.0 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 11.0 Å, focus 0.8 Å, exit 56.6 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "srtio3_110nm_tilted_4mrad": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 17,
+    "thickness_nm": 110,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.563,
+    "scan_step_A": 0.495,
+    "scan_size_px": 48,
+    "tilt_mrad": [
+     3.2,
+     -2.4
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 34.969108184865036,
+    "pixel_A": 0.19004950100470128,
+    "theta_max_mrad": 51.79599999999999,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 11.00062938826188,
+    "exit_A": 56.60062938826188,
+    "widest_A": 56.60062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 23.759999999999998,
+    "overlap": 0.9550025746228498,
+    "reach": 1.726533333333333,
+    "tilt_mrad": 4.0,
+    "lean_A": 4.4000234668168545,
+    "thickness_A": 1100.0,
+    "focus_A": 170.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "caution",
+    "margin": "caution",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "caution",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "57 Å beam in a 35 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "The beam wraps around the virtual window. Simulated SrTiO3 still reconstructed with it (130 nm: 68 Å beam in a 35 Å window, picture 0.80). A longer camera length widens the window but lowers the detector reach; a 2x virtual window in the reconstruction removes the wrap without changing the acquisition.",
+     "status": "caution"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "24 Å scan, beam radius 28 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "The outer ~28 Å of the scan is lit from one side only deep in the sample (110 nm SrTiO3, 24 Å scan: centre 0.79, edge 0.60). Scan 113 Å or more, or report only the interior.",
+     "status": "caution"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "96 % (step 0.495 Å, beam 11.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "52 mrad = 1.7 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "4.4 Å at 4.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "The columns lean across more than an object pixel: measure the tilt and hold it in the propagator. 110 nm SrTiO3 at 4 mrad reached 0.74 with the measured tilt held, 0.81 when the probe was also frozen for the first 10 iterations.",
+     "status": "caution"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "17.0 nm above, 93.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.190 Å (184 px over 35.0 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 11.0 Å, focus 0.8 Å, exit 56.6 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "thin_focused_on_surface": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 0,
+    "thickness_nm": 5,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.563,
+    "scan_step_A": 0.6,
+    "scan_size_px": 256,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 34.969108184865036,
+    "pixel_A": 0.19004950100470128,
+    "theta_max_mrad": 51.79599999999999,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 0.8006293882618798,
+    "exit_A": 3.80062938826188,
+    "widest_A": 3.80062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 153.6,
+    "overlap": 0.25058958764608263,
+    "reach": 1.726533333333333,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 50.0,
+    "focus_A": 0.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "fail",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "4 Å beam in a 35 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "154 Å scan, beam radius 2 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "25 % (step 0.600 Å, beam 0.8 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "Neighbouring probe positions barely share illuminated area; a smaller step or a focus deeper below the entrance increases the overlap.",
+     "status": "fail"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "52 mrad = 1.7 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "0.0 nm above, 5.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.190 Å (184 px over 35.0 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 0.8 Å, focus 0.8 Å, exit 3.8 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "wide_scan_finer_detector": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 17,
+    "thickness_nm": 30,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.25,
+    "scan_step_A": 0.495,
+    "scan_size_px": 256,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 78.75043163231604,
+    "pixel_A": 0.42799147626258716,
+    "theta_max_mrad": 23.0,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 11.00062938826188,
+    "exit_A": 8.60062938826188,
+    "widest_A": 11.00062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 126.72,
+    "overlap": 0.9550025746228498,
+    "reach": 0.7666666666666667,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 300.0,
+    "focus_A": 170.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "pass",
+    "reach": "fail",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "11 Å beam in a 79 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "127 Å scan, beam radius 6 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "96 % (step 0.495 Å, beam 11.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "23 mrad = 0.8 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "The detector cuts into the bright-field disk.",
+     "status": "fail"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "17.0 nm above, 13.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.428 Å (184 px over 78.8 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 11.0 Å, focus 0.8 Å, exit 8.6 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "edge_of_disk_small_step": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 0,
+    "thickness_nm": 5,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.35,
+    "scan_step_A": 0.4,
+    "scan_size_px": 256,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 56.25030830879717,
+    "pixel_A": 0.30570819733041943,
+    "theta_max_mrad": 32.199999999999996,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 0.8006293882618798,
+    "exit_A": 3.80062938826188,
+    "widest_A": 3.80062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 102.4,
+    "overlap": 0.5003930584307217,
+    "reach": 1.0733333333333333,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 50.0,
+    "focus_A": 0.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "caution",
+    "reach": "caution",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "4 Å beam in a 56 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "102 Å scan, beam radius 2 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "50 % (step 0.400 Å, beam 0.8 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "Neighbouring probe positions barely share illuminated area; a smaller step or a focus deeper below the entrance increases the overlap.",
+     "status": "caution"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "32 mrad = 1.1 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "Little dark field is recorded; scattering to high angles carries the fine detail.",
+     "status": "caution"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "0.0 nm above, 5.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.306 Å (184 px over 56.3 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 0.8 Å, focus 0.8 Å, exit 3.8 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "detector_cuts_disk": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 17,
+    "thickness_nm": 110,
+    "detector_px": 96,
+    "detector_mrad_per_px": 0.55,
+    "scan_step_A": 0.495,
+    "scan_size_px": 48,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 35.795650741961836,
+    "pixel_A": 0.3728713618954358,
+    "theta_max_mrad": 26.400000000000002,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 11.00062938826188,
+    "exit_A": 56.60062938826188,
+    "widest_A": 56.60062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 23.759999999999998,
+    "overlap": 0.9550025746228498,
+    "reach": 0.8800000000000001,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 1100.0,
+    "focus_A": 170.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "caution",
+    "margin": "caution",
+    "overlap": "pass",
+    "reach": "fail",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "57 Å beam in a 36 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "The beam wraps around the virtual window. Simulated SrTiO3 still reconstructed with it (130 nm: 68 Å beam in a 35 Å window, picture 0.80). A longer camera length widens the window but lowers the detector reach; a 2x virtual window in the reconstruction removes the wrap without changing the acquisition.",
+     "status": "caution"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "24 Å scan, beam radius 28 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "The outer ~28 Å of the scan is lit from one side only deep in the sample (110 nm SrTiO3, 24 Å scan: centre 0.79, edge 0.60). Scan 113 Å or more, or report only the interior.",
+     "status": "caution"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "96 % (step 0.495 Å, beam 11.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "26 mrad = 0.9 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "The detector cuts into the bright-field disk.",
+     "status": "fail"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "17.0 nm above, 93.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.373 Å (96 px over 35.8 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 11.0 Å, focus 0.8 Å, exit 56.6 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "holz_in_the_corners": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 17,
+    "thickness_nm": 110,
+    "detector_px": 192,
+    "detector_mrad_per_px": 0.9,
+    "scan_step_A": 0.495,
+    "scan_size_px": 48,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 21.875119897865567,
+    "pixel_A": 0.1139329161347165,
+    "theta_max_mrad": 86.4,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 11.00062938826188,
+    "exit_A": 56.60062938826188,
+    "widest_A": 56.60062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 23.759999999999998,
+    "overlap": 0.9550025746228498,
+    "reach": 2.8800000000000003,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 1100.0,
+    "focus_A": 170.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "caution",
+    "margin": "caution",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "57 Å beam in a 22 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "The beam wraps around the virtual window. Simulated SrTiO3 still reconstructed with it (130 nm: 68 Å beam in a 35 Å window, picture 0.80). A longer camera length widens the window but lowers the detector reach; a 2x virtual window in the reconstruction removes the wrap without changing the acquisition.",
+     "status": "caution"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "24 Å scan, beam radius 28 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "The outer ~28 Å of the scan is lit from one side only deep in the sample (110 nm SrTiO3, 24 Å scan: centre 0.79, edge 0.60). Scan 113 Å or more, or report only the interior.",
+     "status": "caution"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "96 % (step 0.495 Å, beam 11.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "86 mrad = 2.9 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "17.0 nm above, 93.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.114 Å (192 px over 21.9 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 11.0 Å, focus 0.8 Å, exit 56.6 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, in the corners of the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "collaborator_custom_camera": {
+   "settings": {
+    "voltage_kV": 200,
+    "semiangle_mrad": 24.5,
+    "focus_depth_nm": 15,
+    "thickness_nm": 40,
+    "detector_px": 128,
+    "detector_mrad_per_px": 0.9,
+    "scan_step_A": 0.4,
+    "scan_size_px": 256,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.02507949548945313,
+    "window_A": 27.866106099392365,
+    "pixel_A": 0.21770395390150285,
+    "theta_max_mrad": 57.6,
+    "airy_A": 1.2488565100870537,
+    "entrance_A": 8.598856510087055,
+    "exit_A": 13.498856510087053,
+    "widest_A": 13.498856510087053,
+    "depth_of_field_A": 83.56350017310497,
+    "scan_A": 102.4,
+    "overlap": 0.9534821869011569,
+    "reach": 2.3510204081632655,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 400.0,
+    "focus_A": 150.0,
+    "holz_mrad": 113.33495502469549
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "13 Å beam in a 28 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "102 Å scan, beam radius 7 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "95 % (step 0.400 Å, beam 8.6 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "58 mrad = 2.4 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "15.0 nm above, 25.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.218 Å (128 px over 27.9 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "8.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 8.6 Å, focus 1.2 Å, exit 13.5 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "113 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "cryo_200nm_small_semiangle": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 4.0,
+    "focus_depth_nm": 100,
+    "thickness_nm": 200,
+    "detector_px": 192,
+    "detector_mrad_per_px": 0.0994,
+    "scan_step_A": 2.0,
+    "scan_size_px": 256,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": null
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 198.06446587604637,
+    "pixel_A": 1.031585759771075,
+    "theta_max_mrad": 9.5424,
+    "airy_A": 6.004720411964098,
+    "entrance_A": 14.004720411964097,
+    "exit_A": 14.004720411964097,
+    "widest_A": 14.004720411964097,
+    "depth_of_field_A": 2460.9509885098764,
+    "scan_A": 512.0,
+    "overlap": 0.8571910083766171,
+    "reach": 2.3856,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 2000.0,
+    "focus_A": 1000.0,
+    "holz_mrad": null
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "pass"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "14 Å beam in a 198 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "512 Å scan, beam radius 7 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "86 % (step 2.000 Å, beam 14.0 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "10 mrad = 2.4 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "100.0 nm above, 100.0 nm below the focus",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "1.032 Å (192 px over 198.1 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "246.1 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 14.0 Å, focus 6.0 Å, exit 14.0 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    }
+   ]
+  },
+  "focus_below_exit": {
+   "settings": {
+    "voltage_kV": 300,
+    "semiangle_mrad": 30,
+    "focus_depth_nm": 40,
+    "thickness_nm": 30,
+    "detector_px": 184,
+    "detector_mrad_per_px": 0.563,
+    "scan_step_A": 0.495,
+    "scan_size_px": 48,
+    "tilt_mrad": [
+     0.0,
+     0.0
+    ],
+    "holz_repeat_A": 3.905
+   },
+   "geometry": {
+    "wavelength_A": 0.01968760790807901,
+    "window_A": 34.969108184865036,
+    "pixel_A": 0.19004950100470128,
+    "theta_max_mrad": 51.79599999999999,
+    "airy_A": 0.8006293882618798,
+    "entrance_A": 24.80062938826188,
+    "exit_A": 6.80062938826188,
+    "widest_A": 24.80062938826188,
+    "depth_of_field_A": 43.75023979573113,
+    "scan_A": 23.759999999999998,
+    "overlap": 0.9800408291156399,
+    "reach": 1.726533333333333,
+    "tilt_mrad": 0.0,
+    "lean_A": 0.0,
+    "thickness_A": 300.0,
+    "focus_A": 400.0,
+    "holz_mrad": 100.41554610290271
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "caution",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "caution"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "25 Å beam in a 35 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "24 Å scan, beam radius 12 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "The outer ~12 Å of the scan is lit from one side only deep in the sample (110 nm SrTiO3, 24 Å scan: centre 0.79, edge 0.60). Scan 50 Å or more, or report only the interior.",
+     "status": "caution"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "98 % (step 0.495 Å, beam 24.8 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "52 mrad = 1.7 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.0 Å at 0.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "specimen entirely above the focus (10.0 nm below the exit)",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "The whole thickness is on one side of the focus, so the beam is widest at one surface. Thick-sample runs focused inside the specimen (110 nm SrTiO3: 17 nm below the entrance).",
+     "status": "caution"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.190 Å (184 px over 35.0 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "4.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 24.8 Å, focus 0.8 Å, exit 6.8 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    },
+    {
+     "id": "holz",
+     "label": "First HOLZ ring",
+     "status": "info",
+     "value": "100 mrad, beyond the detector",
+     "rule": "√(2 × wavelength / lattice period along the beam)",
+     "note": ""
+    }
+   ]
+  },
+  "low_voltage_focus_above": {
+   "settings": {
+    "voltage_kV": 80,
+    "semiangle_mrad": 25,
+    "focus_depth_nm": -5,
+    "thickness_nm": 8,
+    "detector_px": 128,
+    "detector_mrad_per_px": 0.8,
+    "scan_step_A": 0.8,
+    "scan_size_px": 64,
+    "tilt_mrad": [
+     0.0,
+     1.0
+    ],
+    "holz_repeat_A": null
+   },
+   "geometry": {
+    "wavelength_A": 0.04175742747933049,
+    "window_A": 52.19678434916311,
+    "pixel_A": 0.4077873777278368,
+    "theta_max_mrad": 51.2,
+    "airy_A": 2.037762460991328,
+    "entrance_A": 4.537762460991328,
+    "exit_A": 8.537762460991328,
+    "widest_A": 8.537762460991328,
+    "depth_of_field_A": 133.62376793385755,
+    "scan_A": 51.2,
+    "overlap": 0.8237016576171264,
+    "reach": 2.048,
+    "tilt_mrad": 1.0,
+    "lean_A": 0.08000002666667734,
+    "thickness_A": 80.0,
+    "focus_A": -50.0,
+    "holz_mrad": null
+   },
+   "statuses": {
+    "window": "pass",
+    "margin": "pass",
+    "overlap": "pass",
+    "reach": "pass",
+    "lean": "pass",
+    "split": "caution"
+   },
+   "rows": [
+    {
+     "id": "window",
+     "label": "Beam fits the virtual window",
+     "value": "9 Å beam in a 52 Å window",
+     "rule": "widest beam (entrance or exit) ≤ wavelength / detector pixel angle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "margin",
+     "label": "Scan margin for the spread beam",
+     "value": "51 Å scan, beam radius 4 Å",
+     "rule": "scan side ≥ 4 × widest beam radius",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "overlap",
+     "label": "Probe overlap at the entrance",
+     "value": "82 % (step 0.800 Å, beam 4.5 Å)",
+     "rule": "1 − step / entrance beam diameter ≥ 60 %",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "reach",
+     "label": "Detector reach",
+     "value": "51 mrad = 2.0 × semiangle",
+     "rule": "detector edge ≥ 1.5 × semiangle",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "lean",
+     "label": "Column lean across the thickness",
+     "value": "0.1 Å at 1.0 mrad tilt",
+     "rule": "thickness × tan(tilt) ≤ object pixel",
+     "note": "",
+     "status": "pass"
+    },
+    {
+     "id": "split",
+     "label": "Focus splits the specimen",
+     "value": "specimen entirely below the focus (5.0 nm above the entrance)",
+     "rule": "0 ≤ focus depth ≤ thickness",
+     "note": "The whole thickness is on one side of the focus, so the beam is widest at one surface. Thick-sample runs focused inside the specimen (110 nm SrTiO3: 17 nm below the entrance).",
+     "status": "caution"
+    },
+    {
+     "id": "pixel",
+     "label": "Object pixel",
+     "status": "info",
+     "value": "0.408 Å (128 px over 52.2 Å)",
+     "rule": "window / detector pixels",
+     "note": ""
+    },
+    {
+     "id": "depth",
+     "label": "Depth of field",
+     "status": "info",
+     "value": "13.4 nm",
+     "rule": "2 × wavelength / semiangle²: the depth the probe resolves",
+     "note": ""
+    },
+    {
+     "id": "beam",
+     "label": "Beam diameter",
+     "status": "info",
+     "value": "entrance 4.5 Å, focus 2.0 Å, exit 8.5 Å",
+     "rule": "2 × semiangle × |depth − focus| + 1.22 × wavelength / semiangle",
+     "note": ""
+    },
+    {
+     "id": "phase",
+     "label": "Column phase per nm",
+     "status": "info",
+     "value": "1.29 rad (strongest column)",
+     "rule": "interaction constant × projected potential of the strongest column per nm of thickness",
+     "note": ""
+    }
+   ]
+  }
+ },
+ "column_phase_rad_per_A": 0.1291,
+ "recommended": [
+  {
+   "thickness_nm": 20,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 20.0,
+    "focus_depth_nm": 10.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 20,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 20.0,
+    "focus_depth_nm": 10.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 20,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 20.0,
+    "focus_depth_nm": 10.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 30,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 30.0,
+    "focus_depth_nm": 15.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 30,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 30.0,
+    "focus_depth_nm": 15.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 30,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 30.0,
+    "focus_depth_nm": 15.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 40,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 40.0,
+    "focus_depth_nm": 20.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 40,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 40.0,
+    "focus_depth_nm": 20.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 40,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 40.0,
+    "focus_depth_nm": 20.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 50,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 50.0,
+    "focus_depth_nm": 25.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 50,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 50.0,
+    "focus_depth_nm": 25.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 50,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 50.0,
+    "focus_depth_nm": 25.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 60,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 60.0,
+    "focus_depth_nm": 30.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 60,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 60.0,
+    "focus_depth_nm": 30.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 60,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 60.0,
+    "focus_depth_nm": 30.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 70,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 70.0,
+    "focus_depth_nm": 35.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 70,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 70.0,
+    "focus_depth_nm": 35.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 70,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 70.0,
+    "focus_depth_nm": 35.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 100,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 100.0,
+    "focus_depth_nm": 50.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 100,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 100.0,
+    "focus_depth_nm": 50.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 100,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 100.0,
+    "focus_depth_nm": 50.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 150,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 150.0,
+    "focus_depth_nm": 75.0,
+    "scan_size_px": 192
+   }
+  },
+  {
+   "thickness_nm": 150,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 150.0,
+    "focus_depth_nm": 75.0,
+    "scan_size_px": 144
+   }
+  },
+  {
+   "thickness_nm": 150,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 150.0,
+    "focus_depth_nm": 75.0,
+    "scan_size_px": 144
+   }
+  },
+  {
+   "thickness_nm": 200,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 200.0,
+    "focus_depth_nm": 100.0,
+    "scan_size_px": 256
+   }
+  },
+  {
+   "thickness_nm": 200,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 200.0,
+    "focus_depth_nm": 100.0,
+    "scan_size_px": 176
+   }
+  },
+  {
+   "thickness_nm": 200,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 200.0,
+    "focus_depth_nm": 100.0,
+    "scan_size_px": 176
+   }
+  },
+  {
+   "thickness_nm": 110,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 110.0,
+    "focus_depth_nm": 55.0,
+    "scan_size_px": 144
+   }
+  },
+  {
+   "thickness_nm": 110,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 110.0,
+    "focus_depth_nm": 55.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 110,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 110.0,
+    "focus_depth_nm": 55.0,
+    "scan_size_px": 128
+   }
+  },
+  {
+   "thickness_nm": 250,
+   "semiangle_mrad": 30,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 250.0,
+    "focus_depth_nm": 125.0,
+    "scan_size_px": 304
+   }
+  },
+  {
+   "thickness_nm": 250,
+   "semiangle_mrad": 21.4,
+   "voltage_kV": 300,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 250.0,
+    "focus_depth_nm": 125.0,
+    "scan_size_px": 224
+   }
+  },
+  {
+   "thickness_nm": 250,
+   "semiangle_mrad": 20,
+   "voltage_kV": 80,
+   "scan_step_A": 0.5,
+   "expected": {
+    "thickness_nm": 250.0,
+    "focus_depth_nm": 125.0,
+    "scan_size_px": 224
+   }
+  }
+ ],
+ "detector_sampling": [
+  {
+   "detector": "Arina",
+   "camera_length_mm": 91,
+   "expected": 0.554
+  },
+  {
+   "detector": "Arina",
+   "camera_length_mm": 115,
+   "expected": 0.461
+  },
+  {
+   "detector": "Arina",
+   "camera_length_mm": 150,
+   "expected": 0.3360933333333334
+  },
+  {
+   "detector": "Arina",
+   "camera_length_mm": 185,
+   "expected": 0.269
+  },
+  {
+   "detector": "EMPAD",
+   "camera_length_mm": 91,
+   "expected": 0.8310000000000001
+  },
+  {
+   "detector": "EMPAD",
+   "camera_length_mm": 115,
+   "expected": 0.6915
+  },
+  {
+   "detector": "EMPAD",
+   "camera_length_mm": 150,
+   "expected": 0.50414
+  },
+  {
+   "detector": "EMPAD",
+   "camera_length_mm": 185,
+   "expected": 0.4035
+  }
+ ],
+ "presets": {
+  "detectors": {
+   "Arina": {
+    "pixels": 192,
+    "pixel_pitch_um": 100.0,
+    "note": "measured Arina calibration"
+   },
+   "EMPAD": {
+    "pixels": 128,
+    "pixel_pitch_um": 150.0,
+    "note": "scaled from the Arina calibration by pixel pitch (150 / 100 um), not measured"
+   }
+  },
+  "arina_mrad_per_px": {
+   "91": 0.554,
+   "115": 0.461,
+   "185": 0.269
+  },
+  "arina_mrad_mm": 50.414
+ }
+}

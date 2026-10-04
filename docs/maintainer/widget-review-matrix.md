@@ -51,7 +51,6 @@ or request browser signoff.
 | Show3DSlices | slice sliders, crosshair, 3D view controls, panel size, histogram, FFT/log/smooth/export |
 | Show4DSTEM | diffraction pan/zoom, scan-position update, BF/ABF/ADF detectors, detector drag, virtual image update, WebGPU path, export/reopen |
 | ShowEDS | band center/edge drag, map/spectrum sync, ROI drag/resize, periodic table, element lines, WebGPU/sparse/folder backends, export/reopen |
-| ShowFolder | real folder selection, thumbnails/cache, file/folder navigation, multiselect, selection save/load, compact state |
 | ShowDiffraction | center pick/refine, spot/ring add/move/remove, d-spacing calibration, masks, profile/azimuthal panels, phase tools, export/reopen |
 
 ## Agent Assignments

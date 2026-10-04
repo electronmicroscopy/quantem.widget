@@ -575,7 +575,7 @@ def test_public_show4dstem_from_folder_paints_real_external_arrival(
         tmp_path,
         scan_size=4,
         det_bin=1,
-        dtype="u8",
+        dtype=None,
         page_budget=1,
         page_size=4,
         view_mode="multiple",

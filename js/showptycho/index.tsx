@@ -38,7 +38,7 @@ import { nextPow2, shiftedMagnitude, applyHannWindow2D, reciprocalCoordinatesFro
 import { findFFTPeakWebGPU } from "../geometry";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI } from "../figure";
 import { computeHistogramFromBytes } from "../stats";
-import { WebGPUSSBBackend, deleteSSBFolderFile, readSSBFolderBytes, readSSBFolderJson, setSSBLocalDirectory, setSSBLocalFiles, ssbFolderWritable, ssbNeedsLocalSource, writeSSBFolderFile, type WebGPULoadProgress } from "../.generated/engine/ssb/compute/webgpu/backend";
+import { WebGPUSSBBackend, deleteSSBFolderFile, readSSBFolderBytes, readSSBFolderJson, setSSBLocalDirectory, setSSBLocalFiles, ssbFolderWritable, ssbNeedsLocalSource, writeSSBFolderFile, type WebGPULoadProgress } from "../.generated/engine/ssb/backends/webgpu/backend";
 
 /* ================================================================
    Design tokens (matching Live / Show2D)
@@ -1248,6 +1248,129 @@ function formatHOValue(v_nm: number, max_nm: number, display_scale: number): str
   return v.toFixed(4);
 }
 
+/* Sample panel — thick-sample SSB.  A crystal of thickness t tilted by theta changes how strongly
+   each bright-field pixel carries each spatial frequency; the kernel averages every pixel's
+   correction over the depth with the columns leaning by the tilt.  Thickness 0 = standard SSB.
+   "Fit tilt" fits C10, C12, phi12, tilt and thickness together in Python (CUDA session). */
+/* Aberration units: ShowPtycho's sliders are nm; the SSB engines (Python backends and this browser WebGPU engine) evaluate
+   chi = (pi / lambda[A]) alpha^2 (C10 + ...), i.e. take Angstrom.  Python converts at quantem.gpu's SSB boundary; the browser
+   engine is called directly, so C10 / C12 and every higher-order magnitude go through this helper (angles unchanged). */
+const ENGINE_PER_NM = 10;
+function reconstructNm(
+  engine: { reconstruct: (c10: number, c12: number, phi12Rad: number, options: any) => Promise<any> },
+  c10Nm: number, c12Nm: number, phi12Rad: number,
+  options: { higherOrder?: Record<string, number>; sample?: SampleValues | null } & Record<string, unknown>,
+) {
+  const higherOrder: Record<string, number> = {};
+  for (const [key, value] of Object.entries(options.higherOrder ?? {})) {
+    higherOrder[key] = key.endsWith("_angle") ? value : value * ENGINE_PER_NM;
+  }
+  // Thick-sample SSB: thickness nm -> Angstrom like C10; tilt stays mrad. Thickness 0 sends no sample (standard SSB path).
+  const { sample: sampleNm, ...rest } = options;
+  const sample = sampleNm && sampleNm.thickness_nm > 0
+    ? { tiltRowMrad: sampleNm.tilt_row_mrad, tiltColMrad: sampleNm.tilt_col_mrad, thickness: sampleNm.thickness_nm * ENGINE_PER_NM }
+    : undefined;
+  return engine.reconstruct(c10Nm * ENGINE_PER_NM, c12Nm * ENGINE_PER_NM, phi12Rad, { ...rest, higherOrder, ...(sample ? { sample } : {}) });
+}
+
+type SampleValues = { tilt_row_mrad: number; tilt_col_mrad: number; thickness_nm: number };
+const SAMPLE_ZERO: SampleValues = { tilt_row_mrad: 0, tilt_col_mrad: 0, thickness_nm: 0 };
+
+function SamplePanel({
+  tc, open, onToggle, values, setValues, onCommit, onFit, fitBusy, fitStatus, fitAvailable = true,
+}: {
+  tc: ThemeColors;
+  open: boolean;
+  onToggle: () => void;
+  values: SampleValues;
+  setValues: React.Dispatch<React.SetStateAction<SampleValues>>;
+  onCommit?: () => void;
+  onFit: () => void;
+  fitBusy: boolean;
+  fitStatus: string;
+  fitAvailable?: boolean;
+}) {
+  const active = values.thickness_nm > 0;
+  const rows: { key: keyof SampleValues; label: string; unit: string; min: number; max: number; step: number; tip: string }[] = [
+    { key: "tilt_row_mrad", label: "tilt row", unit: "mrad", min: -25, max: 25, step: 0.1,
+      tip: "Sample tilt along the scan rows.  Only acts when thickness > 0." },
+    { key: "tilt_col_mrad", label: "tilt col", unit: "mrad", min: -25, max: 25, step: 0.1,
+      tip: "Sample tilt along the scan columns.  Only acts when thickness > 0." },
+    { key: "thickness_nm", label: "thickness", unit: "nm", min: 0, max: 60, step: 0.5,
+      tip: "Depth over which the correction is averaged.  0 = standard SSB.  A model depth spread, not a measured sample thickness." },
+  ];
+  return (
+    <Box sx={{
+      display: "inline-flex", flexDirection: "column", width: "fit-content", maxWidth: "100%",
+      border: `1px solid ${tc.border}`, bgcolor: tc.controlBg,
+    }}>
+      <Box
+        sx={{
+          display: "inline-flex", alignItems: "center", gap: `${SPACING.MD}px`, px: 1, py: 0.5,
+          cursor: "pointer", userSelect: "none", borderBottom: open ? `1px solid ${tc.border}` : "none",
+        }}
+        onClick={onToggle}
+      >
+        <Typography sx={{ ...typography.label, color: tc.accent, fontFamily: "monospace" }}>
+          {open ? "▾" : "▸"} Sample tilt (thick SSB)
+        </Typography>
+        {active && (
+          <Box sx={{ fontSize: 10, px: 0.8, py: 0.1, borderRadius: 0, bgcolor: STATUS_GOOD, color: "#fff", fontFamily: "monospace" }}>
+            ({values.tilt_row_mrad.toFixed(1)}, {values.tilt_col_mrad.toFixed(1)}) mrad · {values.thickness_nm.toFixed(1)} nm
+          </Box>
+        )}
+        <Tooltip title="Back to standard SSB (tilt 0, thickness 0)." placement="top" arrow>
+          <span>
+            <IconButton
+              size="small" aria-label="Reset sample tilt and thickness" disabled={!active && values.tilt_row_mrad === 0 && values.tilt_col_mrad === 0}
+              onClick={(e) => { e.stopPropagation(); onCommit?.(); setValues(SAMPLE_ZERO); }}
+              sx={compactBareIconButton(tc)}
+            >
+              <RestartAltIcon sx={{ fontSize: 14 }} />
+            </IconButton>
+          </span>
+        </Tooltip>
+      </Box>
+      {open && (
+        <Box sx={{ px: 1, py: 0.5, minWidth: 420 }}>
+          {rows.map(row => (
+            <Box key={row.key} sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px`, py: 0.25 }}>
+              <Tooltip title={row.tip} placement="right" arrow>
+                <Typography sx={{ ...typography.value, color: active ? tc.accent : tc.textMuted, minWidth: 64 }}>{row.label}</Typography>
+              </Tooltip>
+              <Box sx={{ flex: 1, maxWidth: 200, minWidth: 120 }}>
+                <Slider
+                  value={values[row.key]} min={row.min} max={row.max} step={row.step}
+                  onChange={(_, v) => setValues(prev => ({ ...prev, [row.key]: v as number }))}
+                  onChangeCommitted={() => onCommit?.()}
+                  size="small" sx={{ py: 0.5 }}
+                />
+              </Box>
+              <Typography sx={{ ...typography.value, color: active ? tc.accent : tc.textMuted, minWidth: 72, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                {values[row.key].toFixed(1)} {row.unit}
+              </Typography>
+            </Box>
+          ))}
+          {fitAvailable ? (
+            <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.MD}px`, mt: 0.5 }}>
+              <Button size="small" variant="outlined" onClick={onFit} disabled={fitBusy} sx={{ ...compactButton(tc), color: STATUS_GOOD, borderColor: tc.border }}>
+                {fitBusy ? "Fitting…" : "Fit tilt"}
+              </Button>
+              <Typography sx={{ ...typography.labelSmall, color: /failed|ignored/.test(fitStatus) ? STATUS_BAD : tc.textMuted, maxWidth: 520 }}>
+                {fitStatus || "Fits defocus, astigmatism, tilt and thickness together (about a minute).  C10 becomes the mid-depth defocus."}
+              </Typography>
+            </Box>
+          ) : (
+            <Typography sx={{ ...typography.labelSmall, color: tc.textMuted, mt: 0.5, maxWidth: 520 }}>
+              Sliders run in the browser.  Fitting tilt needs the Python session (ShowPtycho in a notebook).
+            </Typography>
+          )}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 function HigherOrderPanel({
   tc, open, onToggle, activeCount, values, setValues,
 }: {
@@ -1504,6 +1627,11 @@ function Explore() {
   const [cropRefitAvailable] = useModelState<boolean>("crop_refit_available");
   const [cropRefitStatus] = useModelState<string>("crop_refit_status");
   const [, setCropRefitRequestJson] = useModelState<string>("crop_refit_request_json");
+  const [sampleJsonModel, setSampleJson] = useModelState<string>("sample_json");
+  const [sampleAvailable] = useModelState<boolean>("sample_available");
+  const [sampleFitRequest, setSampleFitRequest] = useModelState<number>("sample_fit_request");
+  const [sampleFitStatus] = useModelState<string>("sample_fit_status");
+  const [sampleFitJson] = useModelState<string>("sample_fit_json");
 
   /* --- Local state --- */
   const [c10, setC10] = React.useState(0);
@@ -1512,8 +1640,8 @@ function Explore() {
   type AberKey = "c10" | "c12" | "phi12" | "rot";
   type MainRanges = Record<AberKey, [number, number]>;
   const [uiRanges, setUiRanges] = React.useState<MainRanges>({
-    c10: [-300, 300],
-    c12: [-100, 100],
+    c10: [-30, 30],
+    c12: [-10, 10],
     phi12: [-180, 180],
     rot: [-180, 180],
   });
@@ -1952,6 +2080,40 @@ function Explore() {
     }
   }, [autoC10, autoC12, autoPhi12]);
 
+  /* --- Sample panel (thick SSB): push slider values to Python; apply a finished tilt fit to the
+         aberration sliders and the panel (the sample_json push then re-renders). --- */
+  // Seed once from Python (a restored calibration sets sample_json before the widget mounts); afterwards the panel owns it.
+  const [sample, setSample] = React.useState<SampleValues>(() => {
+    try {
+      const v = JSON.parse(sampleJsonModel || "{}");
+      return v && Number(v.thickness_nm) > 0
+        ? { tilt_row_mrad: Number(v.tilt_row_mrad) || 0, tilt_col_mrad: Number(v.tilt_col_mrad) || 0, thickness_nm: Number(v.thickness_nm) }
+        : SAMPLE_ZERO;
+    } catch { return SAMPLE_ZERO; }
+  });
+  const sampleRef = React.useRef<SampleValues>(SAMPLE_ZERO);
+  sampleRef.current = sample;
+  const [sampleOpen, setSampleOpen] = React.useState(false);
+  const [sampleFitBusy, setSampleFitBusy] = React.useState(false);
+  const sampleDebounceRef = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    if (sampleDebounceRef.current != null) window.clearTimeout(sampleDebounceRef.current);
+    sampleDebounceRef.current = window.setTimeout(() => setSampleJson(JSON.stringify(sample)), 20);
+    return () => {
+      if (sampleDebounceRef.current != null) {
+        window.clearTimeout(sampleDebounceRef.current);
+        sampleDebounceRef.current = null;
+      }
+    };
+  }, [sample, setSampleJson]);
+  React.useEffect(() => {
+    if (/^Tilt fit(:| failed)/.test(sampleFitStatus || "")) setSampleFitBusy(false);
+  }, [sampleFitStatus]);
+  const requestSampleFit = React.useCallback(() => {
+    setSampleFitBusy(true);
+    setSampleFitRequest((sampleFitRequest || 0) + 1);
+  }, [sampleFitRequest, setSampleFitRequest]);
+
   /* --- Push higher-order state to Python as JSON whenever it changes.
          In exported WebGPU folders there is no Python kernel, so a second
          debounced effect below sends the same current slider state through the
@@ -2060,6 +2222,34 @@ function Explore() {
       }
     };
   }, [higherOrder]);
+  /* Sample sliders in exported WebGPU folders: drag previews like the aberration sliders, release (or reset) runs the
+     full-BF path so the loss readout matches the thick-sample phase instead of the last thin commit. */
+  const sampleCommitPendingRef = React.useRef(false);
+  const sampleFrontendDebounceRef = React.useRef<number | null>(null);
+  const firstSampleEffectRef = React.useRef(true);
+  React.useEffect(() => {
+    if (firstSampleEffectRef.current) { firstSampleEffectRef.current = false; return; }
+    if (sampleFrontendDebounceRef.current != null) window.clearTimeout(sampleFrontendDebounceRef.current);
+    sampleFrontendDebounceRef.current = window.setTimeout(() => {
+      const engine = webgpuSsbRef.current;
+      const commit = sampleCommitPendingRef.current;
+      sampleCommitPendingRef.current = false;
+      const run = (commit && webgpuStandalone ? frontendFullRef.current : null) ?? frontendPreviewRef.current;
+      if (!engine || !run || !initRef.current) return;
+      const current = sliderVals.current;
+      run(current.c10, current.c12, current.phi12, rotationDegRef.current);
+    }, 20);
+    return () => {
+      if (sampleFrontendDebounceRef.current != null) {
+        window.clearTimeout(sampleFrontendDebounceRef.current);
+        sampleFrontendDebounceRef.current = null;
+      }
+    };
+  }, [sample, webgpuStandalone]);
+  const commitSample = React.useCallback(() => {
+    sampleCommitPendingRef.current = true;
+    setSample(prev => ({ ...prev }));
+  }, []);
 
   /* --- Play control: sweep one parameter over its range ---
      Like Show3D playback: pick which aberration to sweep, set FPS, hit play.
@@ -2551,12 +2741,13 @@ function Explore() {
     const bfCount = selectedDragBfCount();
     const total = Math.max(1, effectiveTotalBf || bfCount);
     const isFull = bfCount >= total;
-    engine.reconstruct(c10Val, c12Val, phi12Val * Math.PI / 180, {
+    reconstructNm(engine, c10Val, c12Val, phi12Val * Math.PI / 180, {
       preview: !isFull,
       bfCount,
       computeLoss: false,
       rotationDeg: rotationVal,
       higherOrder: higherOrderRef.current,
+      sample: sampleRef.current,
     }).then(result => {
       const phase = result.phase;
       if (flipPhaseRef.current) {
@@ -2629,12 +2820,13 @@ function Explore() {
     const bfCount = selectedDragBfCount();
     const total = Math.max(1, effectiveTotalBf || bfCount);
     const isFull = bfCount >= total;
-    engine.reconstruct(c10Val, c12Val, phi12Val * Math.PI / 180, {
+    reconstructNm(engine, c10Val, c12Val, phi12Val * Math.PI / 180, {
       preview: !isFull,
       bfCount,
       computeLoss: isFull,
       rotationDeg: rotationVal,
       higherOrder: higherOrderRef.current,
+      sample: sampleRef.current,
     }).then(result => {
       const phase = result.phase;
       if (flipPhaseRef.current) {
@@ -2775,6 +2967,20 @@ function Explore() {
   }, [phaseBytes, phaseWidth, phaseHeight, renderAll]);
 
   /* --- Buttons --- */
+  /* --- Apply a finished tilt fit: aberration sliders + Sample panel.  The fit's C10 is the
+         mid-depth defocus, so it only makes sense together with the fitted tilt/thickness. --- */
+  const appliedSampleFitRef = React.useRef("");
+  React.useEffect(() => {
+    if (!sampleFitJson || sampleFitJson === appliedSampleFitRef.current) return;
+    appliedSampleFitRef.current = sampleFitJson;
+    let fit: { C10: number; C12: number; phi12_deg: number; tilt_row_mrad: number; tilt_col_mrad: number; thickness_nm: number };
+    try { fit = JSON.parse(sampleFitJson); } catch { return; }
+    setSample({ tilt_row_mrad: fit.tilt_row_mrad, tilt_col_mrad: fit.tilt_col_mrad, thickness_nm: fit.thickness_nm });
+    setSampleOpen(true);
+    setC10(fit.C10); setC12(fit.C12); setPhi12(fit.phi12_deg);
+    sendCommit(fit.C10, fit.C12, fit.phi12_deg);
+  }, [sampleFitJson, sendCommit]);
+
   const doReset = () => {
     // auto values arrive asynchronously from Python; skip until init landed
     if (!initRef.current) return;
@@ -3068,7 +3274,8 @@ function Explore() {
     if (!engine) throw new Error("MP4 export needs the WebGPU ShowPtycho engine.");
     const bfCount = selectedDragBfCount();
     const total = Math.max(1, effectiveTotalBf || bfCount);
-    const result = await engine.reconstruct(
+    const result = await reconstructNm(
+      engine,
       frame.c10,
       frame.c12,
       frame.phi12 * Math.PI / 180,
@@ -3078,6 +3285,7 @@ function Explore() {
       computeLoss: false,
       rotationDeg: frame.rotation,
       higherOrder: frame.higherOrder,
+      sample: sampleRef.current,
       },
     );
     const phase = result.phase;
@@ -3812,7 +4020,7 @@ function Explore() {
               )}
               <Box sx={{ flex: 1 }} />
               <Typography sx={{ ...typography.value, color: tc.textMuted, opacity: 0.7 }}>
-                auto {autoC10?.toFixed(0)} / {autoC12?.toFixed(0)} / {autoPhi12?.toFixed(0)}° = {autoLoss?.toFixed(8)}
+                auto {autoC10?.toFixed(1)} / {autoC12?.toFixed(1)} / {autoPhi12?.toFixed(0)}° = {autoLoss?.toFixed(8)}
               </Typography>
             </Box>
 
@@ -3983,6 +4191,21 @@ function Explore() {
           </Box>
         </Box>
 
+        {/* Sample tilt first: for thick, tilted crystals it decides what the lattice looks like before any aberration does. */}
+        {(sampleAvailable || webgpuStandalone) && (
+          <SamplePanel
+            tc={tc}
+            open={sampleOpen}
+            onToggle={() => setSampleOpen(v => !v)}
+            values={sample}
+            setValues={setSample}
+            onCommit={commitSample}
+            onFit={requestSampleFit}
+            fitBusy={sampleFitBusy}
+            fitStatus={sampleFitStatus || ""}
+            fitAvailable={!webgpuStandalone}
+          />
+        )}
         {/* Sliders.  When a slider's parameter is the ACTIVE sweep target, it
             renders as a 3-thumb slider: outer thumbs = PLAY sweep bounds, middle
             thumb = current value.  Everything else stays single-thumb.  CSS below
@@ -4008,16 +4231,16 @@ function Explore() {
               Slider instances with independent thumbs. */}
           {([
             {
-              key: "c10" as AberKey, label: "C10", unit: "nm", value: c10, displayPrec: 0,
+              key: "c10" as AberKey, label: "C10", unit: "nm", value: c10, displayPrec: 1,
               tipFull: "C10 — defocus.  Positive = overfocus, negative = underfocus.  The dominant aberration.",
-              min: c10UiMin, max: c10UiMax, step: 1,
+              min: c10UiMin, max: c10UiMax, step: 0.1,
               setValue: (v: number) => { setC10(v); sendDrag(v, sliderVals.current.c12, sliderVals.current.phi12); },
               commitValue: (v: number) => { if (shouldCommitOnReleaseRef.current) sendCommit(v, sliderVals.current.c12, sliderVals.current.phi12); },
             },
             {
-              key: "c12" as AberKey, label: "C12", unit: "nm", value: c12, displayPrec: 0,
+              key: "c12" as AberKey, label: "C12", unit: "nm", value: c12, displayPrec: 1,
               tipFull: "C12 — 2-fold astigmatism magnitude.  Paired with φ₁₂.",
-              min: c12UiMin, max: c12UiMax, step: 1,
+              min: c12UiMin, max: c12UiMax, step: 0.1,
               setValue: (v: number) => { setC12(v); sendDrag(sliderVals.current.c10, v, sliderVals.current.phi12); },
               commitValue: (v: number) => { if (shouldCommitOnReleaseRef.current) sendCommit(sliderVals.current.c10, v, sliderVals.current.phi12); },
             },

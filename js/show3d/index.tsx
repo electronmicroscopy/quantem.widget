@@ -12,6 +12,8 @@
  */
 
 import * as React from "react";
+import { sliderStyles } from "../controlStyles";
+import { PlayPauseButton } from "../PlayPauseButton";
 import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -199,6 +201,7 @@ const controlRow = {
   boxSizing: "border-box",
 } as const;
 const compactButton = {
+  borderRadius: 0,
   fontSize: 10,
   fontFamily: "inherit",
   textTransform: "none" as const,
@@ -214,14 +217,7 @@ const switchStyles = {
     "& .MuiSwitch-switchBase": { padding: "4px" },
   },
 };
-const sliderStyles = {
-  small: {
-    py: 0,
-    "& .MuiSlider-thumb": { width: 10, height: 10 },
-    "& .MuiSlider-rail": { height: 2 },
-    "& .MuiSlider-track": { height: 2 },
-  },
-};
+
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
 const CONTRAST_PRESETS = [
   { value: "custom", label: "Custom", low: 0, high: 100 },
@@ -1750,6 +1746,7 @@ import { computeFftQualityMetrics, formatFftQualityLabel, summarizeFftQualityMet
 import {
   browserFilterCacheKey,
   normalizedAverageWindow,
+  temporalAverageFrameIndices as sharedAverageFrameIndices,
   requiresClientFrameTransform,
   shouldApplyClientDifference,
   supportsClientAverage,
@@ -2637,18 +2634,19 @@ function Show3D() {
   // Theme-aware select style (matching Show4DSTEM)
   const themedSelect = {
     ...controlPanel.select,
+    borderRadius: 0,
     fontFamily: "inherit",
     flexShrink: 0,  // never compress a dropdown below its width -> no truncated label
     bgcolor: themeColors.controlBg,
     color: themeColors.text,
     "& .MuiSelect-select": { py: 0.5, fontFamily: "inherit", textOverflow: "clip", overflow: "visible" },
-    "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
+    "& .MuiOutlinedInput-notchedOutline": { borderRadius: 0, borderColor: themeColors.border },
     "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.accent },
   };
 
   const themedMenuProps = {
     ...upwardMenuProps,
-    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: UI_FONT, "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
+    PaperProps: { sx: { borderRadius: 0, bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: UI_FONT, "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
   };
   const themedFastMenuProps = {
     ...themedMenuProps,
@@ -6963,18 +6961,8 @@ function Show3D() {
     const win = normalizedAverageWindow(playRef.current.avgWindow);
     if (win <= 1) return rawFrameForIndex(idx, currentIdx, currentFrame);
     const n = Math.max(1, nSlices || 1);
-    const center = Math.max(0, Math.min(n - 1, Math.round(idx)));
-    const half = Math.floor(win / 2);
-    let start = center - half;
-    let end = start + win - 1;
-    if (start < 0) {
-      end = Math.min(n - 1, end - start);
-      start = 0;
-    }
-    if (end >= n) {
-      start = Math.max(0, start - (end - n + 1));
-      end = n - 1;
-    }
+    const indices = sharedAverageFrameIndices(idx, n, win);
+    const start = indices[0], end = indices[indices.length - 1];
     if (offline && offlineFloatStack && offlineFloatStack.byteLength >= n * frameSize * 4) {
       const out = new Float32Array(frameSize);
       let count = 0;
@@ -7622,23 +7610,8 @@ function Show3D() {
     return true;
   };
 
-  const temporalAverageFrameIndices = (idx: number, windowSize: number): number[] => {
-    const n = Math.max(1, nSlices || 1);
-    const win = Math.max(1, Math.min(n, normalizedAverageWindow(windowSize)));
-    const center = Math.max(0, Math.min(n - 1, Math.round(idx)));
-    const half = Math.floor(win / 2);
-    let start = center - half;
-    let end = start + win - 1;
-    if (start < 0) {
-      end = Math.min(n - 1, end - start);
-      start = 0;
-    }
-    if (end >= n) {
-      start = Math.max(0, start - (end - n + 1));
-      end = n - 1;
-    }
-    return Array.from({ length: end - start + 1 }, (_, offset) => start + offset);
-  };
+  const temporalAverageFrameIndices = (idx: number, windowSize: number): number[] =>
+    sharedAverageFrameIndices(idx, nSlices, windowSize);
 
   const renderGpuTemporalAverageSliceDirect = (
     idx: number,
@@ -7695,7 +7668,11 @@ function Show3D() {
     const adapterDebug = show3dPerfDebug();
     if (adapterDebug) adapterDebug.webgpuAdapter = adapterInfo || "unknown";
     if (!engine || !gpuCmapReadyRef.current || /swiftshader|software/i.test(adapterInfo)) {
-      setGpuResidency({ stage: "fallback", ready: 0, error: "WebGPU unavailable" });
+      // say why, so the reader knows what to change: an insecure page hides navigator.gpu entirely
+      const reason = typeof window !== "undefined" && !window.isSecureContext
+        ? "not a secure context: open this page over https, localhost, or as a local file"
+        : /swiftshader|software/i.test(adapterInfo) ? `software renderer (${adapterInfo})` : "no WebGPU adapter";
+      setGpuResidency({ stage: "fallback", ready: 0, error: reason });
       const dbg = show3dPerfDebug();
       if (dbg) {
         dbg.embeddedGpuResident = false;
@@ -7871,6 +7848,10 @@ function Show3D() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [benchmarkRequest, nSlices, canvasW, canvasH, width, height]);
 
+  // Slider gestures temporarily own the displayed frame without changing Play.
+  const sliderScrubbingRef = React.useRef(false);
+  const sliderGestureCleanupRef = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => sliderGestureCleanupRef.current?.(), []);
   const playbackHistogramCounterRef = React.useRef(0);
   const refreshHistogramRef = React.useRef<((idxArg?: number) => void | Promise<void>) | null>(null);
 
@@ -7913,6 +7894,11 @@ function Show3D() {
     if (startDbg) resetFramePacingDebug(startDbg, playbackIntervalMs(startFps));
 
     tick = (_now: number) => {
+      if (sliderScrubbingRef.current) {
+        lastFrameTime = 0;
+        scheduleTick();
+        return;
+      }
       const tickNow = performance.now();
       const c = playRef.current;
       const effectiveFps = clampPlaybackFps(benchmarkPlaybackFpsRef.current ?? c.fps);
@@ -14083,7 +14069,10 @@ function Show3D() {
     const inputAt = performance.now();
     const scrubDebug = show3dPerfDebug();
     if (scrubDebug) scrubDebug.lastScrubInputAt = inputAt;
-    if (playing) setPlaying(false);
+    // A seek changes position, not playback intent. Pointer gestures hold the
+    // frame loop until release; keyboard seeks keep the loop running.
+    playbackIdxRef.current = next;
+    scheduleIdleCommit = scheduleIdleCommit && !playing;
     if (renderGpuTemporalAverageSliceDirect(next, false)) {
       playbackIdxRef.current = next;
       updatePlaybackLiveControls(next);
@@ -14134,6 +14123,7 @@ function Show3D() {
   };
   const commitSlice = (idx: number) => {
     const next = clampSlice(idx);
+    playbackIdxRef.current = next;
     if (sliceCommitTimerRef.current !== null) {
       window.clearTimeout(sliceCommitTimerRef.current);
       sliceCommitTimerRef.current = null;
@@ -14148,19 +14138,32 @@ function Show3D() {
       debug.lastScrubCommitFrame = next;
     }
   };
-  const handleLoopSliderMouseDown = (e: React.MouseEvent<HTMLSpanElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.closest(".MuiSlider-thumb")) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
-    const next = clampSlice(pct * Math.max(0, nSlices - 1));
-    e.preventDefault();
-    e.stopPropagation();
-    scrubToSlice(next);
-    commitSlice(next);
-  };
   const handleLoopSliderPointerDownCapture = (e: React.PointerEvent<HTMLSpanElement>) => {
     if (e.button !== 0) return;
+    sliderGestureCleanupRef.current?.();
+    sliderScrubbingRef.current = true;
+    if (sliceCommitTimerRef.current !== null) {
+      window.clearTimeout(sliceCommitTimerRef.current);
+      sliceCommitTimerRef.current = null;
+    }
+    const controller = new AbortController();
+    let finish = (_event: Event) => {};
+    let cancelPaint = () => {};
+    const cleanup = () => {
+      cancelPaint();
+      controller.abort();
+      sliderScrubbingRef.current = false;
+      sliderGestureCleanupRef.current = null;
+    };
+    sliderGestureCleanupRef.current = cleanup;
+    const endGesture = (event: Event) => {
+      if (event instanceof PointerEvent && event.pointerId !== e.pointerId) return;
+      try { finish(event); } finally { cleanup(); }
+    };
+    const options = { capture: true, signal: controller.signal };
+    window.addEventListener("pointerup", endGesture, options);
+    window.addEventListener("pointercancel", endGesture, options);
+    window.addEventListener("blur", endGesture, options);
     const target = e.target as HTMLElement;
     const thumb = target.closest(".MuiSlider-thumb") as HTMLElement | null;
     // Loop sliders have start/current/end thumbs. Leave start/end to MUI so
@@ -14206,19 +14209,21 @@ function Show3D() {
     e.nativeEvent.stopImmediatePropagation();
     paintCurrent();
     const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
       ev.preventDefault();
       const debug = show3dPerfDebug();
       if (debug) debug.scrubPointerEvents = ((debug.scrubPointerEvents as number | undefined) ?? 0) + 1;
       scheduleCurrent(ev.clientX);
     };
-    const onUp = (ev: PointerEvent) => {
-      ev.preventDefault();
-      window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerup", onUp, true);
-      commitCurrent(ev.clientX);
+    cancelPaint = () => { if (scrubRaf) window.cancelAnimationFrame(scrubRaf); };
+    finish = (event: Event) => {
+      // Cancellation or leaving the window commits the last real position;
+      // neither can leave a dangling listener holding playback indefinitely.
+      const clientX = event.type === "pointerup" && event instanceof PointerEvent
+        ? event.clientX : pendingClientX;
+      commitCurrent(clientX);
     };
-    window.addEventListener("pointermove", onMove, true);
-    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointermove", onMove, options);
   };
   const overlayCanvasVisible = effectiveRoiActive || profileActive || (panelOverlays || []).some((items) => items && items.length > 0);
   const lensCanvasVisible = showLens && lensPos !== null;
@@ -14263,7 +14268,7 @@ function Show3D() {
     : gpuResidency.stage === "ready"
       ? `${resolvedDisplayBin}× mean-binned ${displayPayloadLabel} display · WebGPU resident · ${gpuResidency.ready}/${Math.max(1, nSlices)} frames`
       : gpuResidency.stage === "fallback"
-        ? `WebGPU unavailable · using CPU/canvas${gpuResidency.error ? ` (${gpuResidency.error})` : ""}`
+        ? `WebGPU unavailable · using CPU/canvas${gpuResidency.error ? `: ${gpuResidency.error}` : ""}`
         : "Loading one display-resolution stack into the browser";
   const gpuDetailText = `Original: ${Math.max(1, nSlices)} frames × ${Math.max(1, nPanels)} panels × ${Math.max(1, sourceHeight || height)}×${Math.max(1, nativeSourcePanelWidth || panelWidthPx || width)} · float32 · ${formatSavedBytes(sourceBytes || 0)}. ${resolvedDisplayBin === 1 ? "Native display requested" : `${resolvedDisplayBin}×${resolvedDisplayBin} mean bin`} → ${Math.max(1, height)}×${Math.max(1, panelWidthPx || Math.round(width / Math.max(1, nPanels)))} per panel · ${formatSavedBytes(displayStackBytes)}.`;
   const gpuStatusTitle = "One display-resolution stack is embedded in the widget and uploaded once to WebGPU when available; native source arrays are not duplicated in the browser.";
@@ -16283,9 +16288,8 @@ function Show3D() {
                       <IconButton size="small" onClick={() => playFromCurrentFrame(-1)} sx={{ color: reverse && playing ? themeColors.accent : themeColors.textMuted, p: 0.25 }} aria-label="Play in reverse" title="Play reverse">
                         <FastRewindIcon sx={{ fontSize: 18 }} />
                       </IconButton>
-                      <IconButton size="small" onClick={() => { if (playing) pausePlayback(); else playFromCurrentFrame(); }} sx={{ color: themeColors.accent, p: 0.25 }} aria-label={playing ? "Pause playback" : "Play"} title={playing ? "Pause (Space)" : "Play (Space)"}>
-                        {playing ? <PauseIcon sx={{ fontSize: 18 }} /> : <PlayArrowIcon sx={{ fontSize: 18 }} />}
-                      </IconButton>
+                      <PlayPauseButton playing={playing} color={themeColors.accent}
+                        onToggle={() => { if (playing) pausePlayback(); else playFromCurrentFrame(); }} />
                       <IconButton size="small" onClick={() => playFromCurrentFrame(1)} sx={{ color: !reverse && playing ? themeColors.accent : themeColors.textMuted, p: 0.25 }} aria-label="Play forward" title="Play forward">
                         <FastForwardIcon sx={{ fontSize: 18 }} />
                       </IconButton>
@@ -16294,7 +16298,7 @@ function Show3D() {
                       </IconButton>
                     </Stack>
                     {loop ? (
-                      <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; if (vals[0] !== loopStart) setLoopStart(vals[0]); scrubToSlice(vals[1]); if (vals[2] !== effectiveLoopEnd) setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; if (vals[0] !== loopStart) setLoopStart(vals[0]); commitSlice(vals[1]); if (vals[2] !== effectiveLoopEnd) setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                      <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; if (vals[0] !== loopStart) setLoopStart(vals[0]); scrubToSlice(vals[1]); if (vals[2] !== effectiveLoopEnd) setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; if (vals[0] !== loopStart) setLoopStart(vals[0]); commitSlice(vals[1]); if (vals[2] !== effectiveLoopEnd) setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     ) : (
                       <Slider ref={playbackSliderRef} value={activeIdx} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}

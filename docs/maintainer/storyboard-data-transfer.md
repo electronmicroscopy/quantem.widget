@@ -6,7 +6,7 @@ viewer widget right now. The supported interface is the set of Python
 utilities under `quantem.widget.io` (the old `quantem data-transfer` CLI
 subcommand was removed).
 
-Keep this workflow separate from ShowFolder, Show2D, Show3D, and Show4DSTEM.
+Keep this workflow separate from Show2D, Show3D, and Show4DSTEM.
 Those widgets inspect scientific data after it is already placed. Data transfer
 only plans, verifies, copies, resumes, and records where files live.
 
@@ -87,11 +87,10 @@ changing existing target assignments.
 
 ## DT-5: Open Viewers After Transfer
 
-**User story**: After files are copied, the user wants to browse them with
-ShowFolder or load ready target masters with Show4DSTEM without remembering the
+**User story**: After files are copied, the user wants to load ready target masters with Show4DSTEM without remembering the
 exact target paths.
 
-**Primary tools**: `target_masters`, `ShowFolder(target_folder)`,
+**Primary tools**: `target_masters`,
 and `Show4DSTEM(load(...))`.
 
 **Acceptance checks**:

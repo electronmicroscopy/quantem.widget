@@ -3,8 +3,6 @@
 Deeper workflows for when the basic tutorials are not enough - each one built
 around a real question from the microscope room:
 
-- **ShowFolder session browser** - triage a finished session: thumbnail it,
-  star the good fields of view, open them directly.
 - **HTML and file export** - hand a collaborator one interactive HTML file, a
   figure, or a full report package.
 - **Saving GIF and MP4 movies** - write raw arrays or widget-rendered views to

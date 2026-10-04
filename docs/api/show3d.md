@@ -453,9 +453,7 @@ rewrites do not alter existing frames silently. An incompatible shape is
 reported without blocking a later compatible frame. Pass `watch=False` when a
 fixed folder must remain fixed.
 
-`Show3D.from_folder(...)` reads full-resolution source frames. `ShowFolder`
-uses cached thumbnails to browse and select a session quickly; those thumbnails
-are not the data used by the folder-backed Show3D stack.
+`Show3D.from_folder(...)` reads full-resolution source frames.
 
 Maintainer real-time signoff follows
 [S3D-17](../maintainer/storyboard-show3d.md#s3d-17-watch-a-live-emd-frame-series-in-place):

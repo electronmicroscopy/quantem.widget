@@ -7,12 +7,12 @@ calibration details.
 
 ```python
 from quantem.widget.datasets import (
+    gold_session,
     show1d_ducky,
     show2d_gold,
     show3d_gold,
     show4dstem_gold,
     showdiffraction_fe3o4,
-    showfolder_gold,
 )
 ```
 
@@ -72,7 +72,6 @@ widget-tutorials/shared/gold-haadf/full/data.npy
 widget-tutorials/show4dstem/gold-128-bin8/full/data.npy
 widget-tutorials/show4dstem/gold-512-bin4/full/data.npy
 widget-tutorials/show4dstem/gold-512-bin8/full/data.npy
-widget-tutorials/showfolder/gold-haadf-session/small/*.emd
 ```
 
 `showdiffraction_fe3o4()` expects

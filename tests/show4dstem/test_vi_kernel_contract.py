@@ -11,9 +11,12 @@ from quantem.widget import Show4DSTEM
 
 def _webgpu_source(name: str) -> str:
     repo = Path(__file__).resolve().parents[2]
-    return (repo / "js" / ".generated" / "engine" / name).read_text(
-        encoding="utf-8"
+    root = repo / "js" / ".generated" / "engine"
+    canonical = name.replace("/compute/webgpu/", "/backends/webgpu/").replace(
+        "display/webgpu/", "display/backends/webgpu/"
     )
+    source = root / canonical if (root / canonical).is_file() else root / name
+    return source.read_text(encoding="utf-8")
 
 
 def test_show4dstem_cuda_keeps_cupy_compute_source_for_rawkernel() -> None:
@@ -108,15 +111,9 @@ def test_show4dstem_webgpu_engine_has_selected_index_vi_kernel() -> None:
     assert "readFloatBuffer(buf: GPUBuffer" in source
     assert "const DPC_MEAN_WGSL" in dpc_source
     assert "const DPC_COMPONENT_WGSL" in dpc_source
-    assert "adoptBuffer(idx: number, buffer: GPUBuffer" in (
-        repo / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
-    ).read_text(encoding="utf-8")
-    assert "renderSlotDirectWithGpuRangeToCanvas" in (
-        repo / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
-    ).read_text(encoding="utf-8")
-    assert "renderPanelSlotsToImageBitmapAsync" in (
-        repo / "js" / ".generated" / "engine" / "display" / "webgpu" / "colormaps.ts"
-    ).read_text(encoding="utf-8")
+    assert "adoptBuffer(idx: number, buffer: GPUBuffer" in _webgpu_source("display/webgpu/colormaps.ts")
+    assert "renderSlotDirectWithGpuRangeToCanvas" in _webgpu_source("display/webgpu/colormaps.ts")
+    assert "renderPanelSlotsToImageBitmapAsync" in _webgpu_source("display/webgpu/colormaps.ts")
     assert "function buildDetectorMask" not in frontend
     assert "function buildScanMask" not in frontend
     assert "buildFullDetectorMask" in frontend
@@ -133,10 +130,9 @@ def test_show4dstem_webgpu_engine_has_selected_index_vi_kernel() -> None:
     assert "saveChangesIfLiveComm" in frontend
     assert "requestViPreset" in frontend
     assert '"launch_warm_cache"' in frontend
-    assert "renderPanelSlotsToImageBitmapAsync" in frontend
-    assert "renderSlotDirectWithGpuRangeToImageBitmapAsync" in frontend
-    assert "virtualGpuCanvasRef" not in frontend
-    assert "renderPanelSlotsDirectToCanvas" not in frontend
+    assert "virtualGpuCanvasRef" in frontend
+    assert "renderPanelSlotsDirectToCanvas" in frontend
+    assert "captureGpuCanvas" in frontend
     assert "renderSlotDirectWithGpuRangeToCanvas" in frontend
     assert "compareGpuRangesRef" in frontend
     assert "computeRangeBatch(batchSlots)" in frontend
@@ -233,7 +229,8 @@ def test_show4dstem_webgpu_h5_master_loader_batches_external_decodes() -> None:
     assert "uploadViaMapped" in bslz4
     assert "stageUploadCopies" in bslz4
     assert "decodeVariant" in local_h5
-    assert 'title={h5LocalSourceStatus || "Grant local HDF5 master/data files for browser WebGPU load"}' in frontend
+    assert '"Grant local HDF5 master/data files for browser WebGPU load"' in frontend
+    assert '"Open the local lossless data folder"' in frontend
     assert "export async function loadShow4DSTEMLocalH5Master" in local_h5
     assert 'acquisitionMode: "local-file"' in local_h5
     assert "const READ_WORKER_SOURCE" in local_h5
@@ -387,46 +384,21 @@ def test_show4dstem_multiple_detector_drag_uses_live_gpu_compare_slots() -> None
         "requestViFinalizeRef.current",
         1,
     )[0]
-    visible_route = frontend.split(
-        "const recomputeVisibleVirtualImages = async () => {",
-        1,
-    )[1].split(
-        '(window as unknown as { __sh4d: unknown })',
-        1,
+    assert "await recomputeVisibleVirtualImages();" in live_drag
+    assert "await recomputeCompareVI();" in live_drag
+    assert 'if (ransSet && compareVisibleIndices().length' in live_drag
+    visible_route = frontend.split("const recomputeVisibleVirtualImages = async () => {", 1)[1].split(
+        '(window as unknown as { __sh4d: unknown })', 1
     )[0]
     assert 'mode === "multiple" || mode === "compare"' in visible_route
-    assert visible_route.index("await recomputeCompareVI();") < visible_route.index(
-        "await recomputeVI();"
-    )
-    assert "void recomputeVisibleVirtualImages().finally" in live_drag
-    assert "recomputeVI" not in live_drag
-    assert "recomputeCompareVI" not in live_drag
-    finalize = frontend.split("requestViFinalizeRef.current = () => {", 1)[1].split(
-        "};",
-        1,
-    )[0]
-    assert "void recomputeVisibleVirtualImages();" in finalize
-    detector_drag = frontend.split(
-        "const handleDpMouseMove =",
-        1,
-    )[1].split(
-        "const handleDpMouseUp =",
-        1,
-    )[0]
-    assert "Keep the detector geometry subpixel while dragging." in detector_drag
-    assert "Math.round(Math.max(0, Math.min(detCols - 1, centerCol)))" not in (
-        detector_drag
-    )
-    detector_resize = frontend.split(
-        "const resizeDpRoiFromImagePoint =",
-        1,
-    )[1].split(
-        "React.useEffect(() => {",
-        1,
-    )[0]
-    assert "Math.round(newRadius)" not in detector_resize
+    assert visible_route.index("await recomputeCompareVI();") < visible_route.index("await recomputeVI();")
+    assert 'const residentSource = kind !== "diffraction" && Boolean(batchModel.get("_rans_url"))' in frontend
+    assert "if (!residentSource) {" in frontend
+    assert "if (!ransSet && (!interactiveDrag || !rangesReady))" in frontend
+    assert "compareGpuInFlight >= 2" in live_drag
     assert 'type DpcGpuSource = "DPC_row" | "DPC_col" | "iDPC";' in frontend
-    assert "gpuLoaded: Boolean(gpuSlots?.has(frame) && gpuRanges?.has(frame) && gpuEngine)" in frontend
+    assert "gpuSlots?.has(frame) && gpuEngine && (residentSource || gpuRanges?.has(frame))" in frontend
+    assert "integerCounts && batchEnabled && !batchFailed" in frontend
     assert 'scaleMode === "log"' in frontend
     assert "entry.panel !== undefined || entry.gpuLoaded" in frontend
     assert "const loaded = panel !== undefined || gpuLoaded;" in frontend

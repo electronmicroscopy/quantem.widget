@@ -237,7 +237,7 @@ owned by the live Python process. That is correct behavior. A small residual
 allocation can remain after cleanup because CUDA keeps a runtime context and
 small caches alive until the kernel exits.
 
-NVIDIA GPU cleanup check, using a real `Au_TiO2_030_master.h5` 4D-STEM scan
+NVIDIA GPU cleanup check, using a real 4D-STEM scan
 loaded as `det_bin=4, dtype="u8"`:
 
 ```text

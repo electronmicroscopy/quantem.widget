@@ -134,7 +134,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/check_docs_widget_provenance.py",
         "scripts/cleanup_browser_artifacts.py",
         "scripts/widget_html_smoke.py",
-        "scripts/widget_showfolder_live_smoke.py",
+        "scripts/widget_folder_watch_smoke.py",
         "scripts/widget_show3d_animation_smoke.py",
         "scripts/widget_browser_smoke.py",
         "scripts/widget_phone_handoff.py",
@@ -149,8 +149,8 @@ def test_automation_documentation_names_entrypoints() -> None:
         "--artifact-dir",
         "index.html",
         "browser-plan.json",
-        "showfolder-live/index.html",
-        "ShowFolder live-folder smoke",
+        "folder-watch/index.html",
+        "Direct viewer folder-watch smoke",
         "Show3D GIF presentation smoke",
         "--dry-run",
         "--panel-gap",
@@ -335,8 +335,8 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "signoff"
     html_smoke = artifact_dir / "html-smoke"
     html_smoke.mkdir(parents=True)
-    showfolder_live = artifact_dir / "showfolder-live"
-    showfolder_live.mkdir()
+    folder_watch = artifact_dir / "folder-watch"
+    folder_watch.mkdir()
     performance = artifact_dir / "performance"
     performance.mkdir()
     external = artifact_dir / "external-html-profile"
@@ -377,8 +377,8 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
         }),
         encoding="utf-8",
     )
-    (showfolder_live / "index.html").write_text("<html>live</html>", encoding="utf-8")
-    (showfolder_live / "report.json").write_text(
+    (folder_watch / "index.html").write_text("<html>live</html>", encoding="utf-8")
+    (folder_watch / "report.json").write_text(
         json.dumps({"passed": True, "steps": [{"name": "live", "passed": True}]}),
         encoding="utf-8",
     )
@@ -447,7 +447,7 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     assert "quantem.widget everything dashboard: PASS" in dashboard
     assert "HTML export smoke" in dashboard
     assert "Browser HTML smoke" in dashboard
-    assert "ShowFolder live-folder smoke" in dashboard
+    assert "Direct viewer folder-watch smoke" in dashboard
     assert "Real-data Show2D/Show3D performance smoke" in dashboard
     assert "Real-data Show2D/Show3D browser smoke" in dashboard
     assert "External exported HTML profile(s)" in dashboard
@@ -458,7 +458,7 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     assert "Min FPS: 58.4" in dashboard
     assert "Slowest backend step: load_show3d_real_derived_stack 1.25 s" in dashboard
     assert "Show2D page max" in dashboard
-    assert "showfolder-live/index.html" in dashboard
+    assert "folder-watch/index.html" in dashboard
     assert "html-smoke/browser-smoke.html" in dashboard
     assert "performance/index.html" in dashboard
     assert "performance/browser-smoke.html" in dashboard
@@ -598,7 +598,7 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     plan = json.loads((artifact_dir / "browser-plan.json").read_text(encoding="utf-8"))
     index = (artifact_dir / "index.html").read_text(encoding="utf-8")
 
-    assert len(report["exports"]) == 19
+    assert len(report["exports"]) == 18
     assert sum(1 for item in report["exports"] if item["widget"] == "show2d") >= 5
     assert sum(1 for item in report["exports"] if item["widget"] == "show3d") >= 6
     assert {item["widget"] for item in report["exports"]} == {
@@ -610,13 +610,11 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
         "showptycho",
         "showeds",
         "showdiffraction",
-        "showfolder",
     }
     assert "show2d-gallery-6-fft.html" in index
     assert "show3d-four-panel-downsample.html" in index
     assert "show4dstem-compare.html" in index
     assert "showptycho-webgpu-folder/index.html" in index
-    assert "showfolder.html" in index
     assert "synthetic MoS2-like HAADF lattice" in index
     assert "ShowPtycho" in index
     assert {page["widget"] for page in plan["pages"]} == {
@@ -628,7 +626,6 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
         "showptycho",
         "showeds",
         "showdiffraction",
-        "showfolder",
     }
     assert any(
         page["url_path"] == "showptycho-webgpu-folder/index.html"
@@ -636,12 +633,12 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     )
 
 
-def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
-    artifact_dir = tmp_path / "showfolder-live"
+def test_widget_folder_watch_smoke_writes_report(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "folder-watch"
 
     result = _run(
         sys.executable,
-        "scripts/widget_showfolder_live_smoke.py",
+        "scripts/widget_folder_watch_smoke.py",
         "--artifact-dir",
         str(artifact_dir),
     )
@@ -654,22 +651,8 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
     index = (artifact_dir / "index.html").read_text(encoding="utf-8")
 
     assert report["passed"] is True
-    assert len(report["steps"]) == 5
-    image_step = report["steps"][0]
-    master_step = report["steps"][1]
-    assert image_step["watch_changed"] is True
-    assert image_step["show2d_panels"] == 3
-    assert image_step["show3d_slices"] == 3
-    assert len(image_step["thumbnail_previews"]) == 3
-    for preview in image_step["thumbnail_previews"]:
-        assert (artifact_dir / preview["webp"]).exists()
-    assert master_step["watch_changed"] is True
-    assert master_step["after_frames"] == 2
-    assert master_step["frame_labels"] == ["scan_000", "scan_001"]
-    assert [row["status"] for row in master_step["master_qc"]] == ["ready", "ready"]
-    assert master_step["uses_monkeypatch"] is True
-
-    direct_steps = report["steps"][2:]
+    assert len(report["steps"]) == 3
+    direct_steps = report["steps"]
     assert [step["kind"] for step in direct_steps] == [
         "direct_public_from_folder",
         "direct_public_from_folder",
@@ -727,7 +710,7 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
         assert green["compare_panel_indices"] == [0, 1]
         assert direct_show4d["static_watch_contract"]["watching_embedded"] is False
 
-    assert len(report["exports"]) == (6 if show4d_skipped else 7)
+    assert len(report["exports"]) == (2 if show4d_skipped else 3)
     assert len(plan["pages"]) == len(report["exports"])
     expected_static_variants = {
         "show2d-folder-watch-static",
@@ -742,13 +725,8 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
     } == expected_static_variants
     for row in report["exports"]:
         assert Path(row["path"]).exists()
-    assert "ShowFolder live-folder smoke: PASS" in index
-    assert "<img" in index
-    assert "4D-STEM Master QC" in index
+    assert "Direct viewer folder-watch smoke: PASS" in index
     assert "Direct Viewer Lifecycle Timeline" in index
-    assert (artifact_dir / "showfolder-live-show2d.html").exists()
-    assert (artifact_dir / "showfolder-live-show3d.html").exists()
-    assert (artifact_dir / "showfolder-live-show4dstem.html").exists()
     assert (artifact_dir / "show2d-from-folder-stopped.html").exists()
     assert (artifact_dir / "show3d-from-folder-stopped.html").exists()
     assert (artifact_dir / "show4dstem-from-folder-stopped.html").exists() is (
@@ -801,7 +779,6 @@ def test_widget_show3d_animation_smoke_writes_gif_report(tmp_path: Path) -> None
     assert "Show3D GIF presentation smoke" in index
     assert "Raw, Smoothed, Change" in index
     assert "PowerPoint" in index
-    assert "<img" in index
 
 
 def test_widget_show3d_animation_smoke_supports_zero_panel_gap(tmp_path: Path) -> None:

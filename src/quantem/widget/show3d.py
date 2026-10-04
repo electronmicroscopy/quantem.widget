@@ -6206,7 +6206,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             setattr(self, trait, b"")
         gc.collect()
         # Flush cupy pool: _data may have been a torch view into cupy memory.
-        if "cupy" in sys.modules:
+        if device.startswith("cuda") and "cupy" in sys.modules:
             import cupy
             cupy.get_default_memory_pool().free_all_blocks()
             cupy.fft.config.get_plan_cache().clear()

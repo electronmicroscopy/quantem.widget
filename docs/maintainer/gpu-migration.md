@@ -144,7 +144,7 @@ ipykernel, macOS Chrome-launch, and test-fixture dependencies before signoff.
 The fresh standalone matrix generated 19 exports and passed `38/38` across
 desktop and 390x844 touch layouts in headed Phil Chrome. This includes Show1D,
 five Show2D layouts, six Show3D layouts, Show3DSlices, Show4DSTEM single and
-compare, a ShowPtycho WebGPU folder, ShowEDS, ShowDiffraction, and ShowFolder.
+compare, a ShowPtycho WebGPU folder, ShowEDS and ShowDiffraction.
 Every page acquired `apple / metal-3`; all 38 adapter records reported
 `is_fallback_adapter=false` and `software=false`.
 

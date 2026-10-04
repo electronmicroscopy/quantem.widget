@@ -22,7 +22,6 @@ from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget.show4dstem import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showeds import ShowEDS
-from quantem.widget.showfolder import ShowFolder
 from quantem.widget.showptycho import _ShowPtychoWidget
 
 
@@ -95,8 +94,8 @@ class _SmokePtychoAccel:
         return np.asarray(phase, dtype=np.float32)
 
     def browser_state(self):
-        from quantem.gpu.ssb.compute.protocol import SSBExportState
-        from quantem.gpu.ssb.bf_selector import BrightfieldDisk
+        from quantem.gpu.ssb.backends.contract import SSBExportState
+        from quantem.gpu.ssb.brightfield import BrightfieldDisk
 
         selection = BrightfieldDisk(
             rows=self.bf_inds_row,
@@ -369,10 +368,6 @@ def _mos2_lattice_stack(rng: np.random.Generator, frames: int, rows: int, cols: 
 
 def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object], str]]:
     rng = np.random.default_rng(0)
-    showfolder_dir = folder_root / "showfolder-session"
-    showfolder_dir.mkdir(parents=True, exist_ok=True)
-    _image_emd(showfolder_dir / "0010 - HAADF 15Mx Nano.emd")
-    _image_emd(showfolder_dir / "0011 - HAADF 15Mx Nano.emd")
 
     show2d_single = _mos2_lattice_stack(rng, 1, 160, 192)[0]
     show2d_gallery3 = _mos2_lattice_stack(rng, 3, 160, 192)
@@ -598,13 +593,6 @@ def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object],
             ShowDiffraction(rng.random((48, 48), dtype=np.float32), title="Smoke ShowDiffraction", verbose=False),
             {"encoding": "full"},
             "Smoke ShowDiffraction",
-        ),
-        (
-            "showfolder",
-            "showfolder",
-            ShowFolder(showfolder_dir, thumb=8, group_by="none", cache_dir=folder_root / "cache"),
-            {},
-            "0010",
         ),
     ]
     return cases

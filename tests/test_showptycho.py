@@ -101,9 +101,15 @@ class _FakeAccel:
     def phase_to_numpy(phase):
         return np.asarray(phase, dtype=np.float32)
 
+    def preview_upsampled(self, aberrations, *, compute_loss, **kwargs):
+        return self.preview(
+            aberrations, compute_loss=compute_loss,
+            higher_order_magnitudes=None, higher_order_angles=None,
+        )
+
     def browser_state(self):
-        from quantem.gpu.ssb.compute.protocol import SSBExportState
-        from quantem.gpu.ssb.bf_selector import BrightfieldDisk
+        from quantem.gpu.ssb.backends.contract import SSBExportState
+        from quantem.gpu.ssb.brightfield import BrightfieldDisk
 
         selection = BrightfieldDisk(
             rows=self.bf_inds_row,
@@ -365,8 +371,8 @@ def test_showptycho_from_ssb_uses_widget_contract(monkeypatch):
     assert widget.initial_fft_on is True
     assert widget.total_bf == 8
     assert widget.drag_bf == 8
-    assert widget.c10_min == -300.0
-    assert widget.c10_max == 300.0
+    assert widget.c10_min == -30.0
+    assert widget.c10_max == 30.0
     result = json.loads(widget.result_json)
     assert result["loss"] == 0.125
     assert not hasattr(ssb, "_showptycho_widget")
@@ -392,7 +398,7 @@ def test_showptycho_python_uses_only_public_session_state() -> None:
     for private_name in (
         "_rotation_angle_rad",
         "_best_loss",
-        "_optuna_trials",
+        "_trial_records",
         "_showptycho_widget",
         "_get_accelerator",
     ):
@@ -437,7 +443,7 @@ def test_showptycho_default_c10_range_includes_outlier_auto(monkeypatch):
     ssb.aberrations["C10"] = 383.3
     widget = ShowPtycho(ssb)
 
-    assert widget.c10_min == -300.0
+    assert widget.c10_min == -30.0
     assert widget.c10_max == 383.3
 
 
@@ -524,6 +530,74 @@ def test_showptycho_calibration_seed_restores_higher_order(monkeypatch, tmp_path
     assert math.isclose(higher["C32_angle"], 45.0)
 
 
+def test_legacy_calibration_magnitudes_read_as_angstrom(tmp_path):
+    """C3a: a calibration written before the SSB unit fix (no aberration_unit) holds Angstrom under an nm label: read /10.
+
+    quantem.gpu's SSB engine evaluates chi with lambda in Angstrom and until 2026-09-24 reported that Angstrom number as nm
+    (abTEM C10 = -100 A came back as -100.26 "nm"). Angles are unit-free and must pass through unchanged.
+    """
+    from quantem.widget.showptycho import load_ptycho_calibration
+
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "rotation_angle_deg": 30.0,
+        "aberrations": {"C10": -100.0, "C12": 50.0, "phi12": 0.5, "C32": 400.0, "phi32": 0.25},
+        "higher_order": {"C32_mag": 400.0, "C32_angle": 14.0},
+    }))
+    calibration = load_ptycho_calibration(path)
+    assert calibration.aberrations == {"C10": -10.0, "C12": 5.0, "phi12": 0.5, "C32": 40.0, "phi32": 0.25}
+    assert calibration.higher_order == {"C32_mag": 40.0, "C32_angle": 14.0}
+
+
+def test_calibration_tilt_round_trip(tmp_path):
+    """C3c: the tilt panel is saved with the calibration and read back; files without it load as standard SSB, and
+    calibrations saved with the 2026-09-24 ``sample`` dict read as the same tilt."""
+    from quantem.widget import PtychoCalibration
+    from quantem.widget.showptycho import load_ptycho_calibration, save_ptycho_calibration
+
+    cal = PtychoCalibration(rotation_angle_deg=-8.6, aberrations={"C10": -2.6, "C12": 4.2, "phi12": -1.1},
+                            tilt_mrad=(-10.3, 4.7), tilt_object_mrad=(-10.89, 3.11), depth_spread_nm=22.0)
+    loaded = load_ptycho_calibration(save_ptycho_calibration(cal, tmp_path / "cal.json"))
+    assert (loaded.tilt_mrad, loaded.tilt_object_mrad, loaded.depth_spread_nm) == ((-10.3, 4.7), (-10.89, 3.11), 22.0)
+    standard = tmp_path / "standard.json"
+    standard.write_text(json.dumps({"rotation_angle_deg": 0.0, "aberrations": {"C10": 1.0, "C12": 0.0, "phi12": 0.0}}))
+    assert load_ptycho_calibration(standard).tilt_mrad is None
+    dict_form = tmp_path / "sample_dict.json"
+    dict_form.write_text(json.dumps({"rotation_angle_deg": -8.6, "aberration_unit": "nm", "aberrations": {"C10": 1.0},
+                                     "sample": {"tilt_row_mrad": -10.3, "tilt_col_mrad": 4.7, "tilt_object_mrad": [-10.89, 3.11],
+                                                "thickness_nm": 22.0}}))
+    assert load_ptycho_calibration(dict_form).tilt_mrad == (-10.3, 4.7)
+
+
+def test_object_frame_tilt_matches_quantem_thick_convention():
+    """SSB tilt (scan frame) -> ptychography object frame by the scan-detector rotation, verified on a logic-device dataset."""
+    from quantem.widget.showptycho import _object_frame_tilt
+
+    row, col = _object_frame_tilt(-10.3, 4.7, -8.6)
+    assert abs(row - -10.887) < 1e-3 and abs(col - 3.107) < 1e-3
+
+
+def test_tilt_fit_on_the_session_opens_in_the_sample_panel(monkeypatch):
+    """C3d: after ssb.find_aberrations(tilt=True) the widget opens on that tilt (sample_json), with no widget-side fit call."""
+    from quantem.widget import ShowPtycho
+
+    monkeypatch.setitem(sys.modules, "cupy", _FakeCuPy())
+    class _TiltedSSB(_FakeSSB):
+        supports_tilt = True
+        previewed_samples = []
+
+        def preview(self, aberrations, *, tilt_mrad=None, depth_spread_nm=None, **kwargs):
+            self.previewed_samples.append((tilt_mrad, depth_spread_nm))
+            return super().preview(aberrations, **kwargs)
+
+    ssb = _TiltedSSB()
+    ssb.tilt_mrad, ssb.depth_spread_nm = (-0.1, -5.07), 10.7
+    widget = ShowPtycho(ssb)
+    assert json.loads(widget.sample_json) == {"tilt_row_mrad": -0.1, "tilt_col_mrad": -5.07, "thickness_nm": 10.7}
+    assert ssb.previewed_samples[-1] == ((-0.1, -5.07), 10.7)
+
+
 def test_showptycho_calibration_seed_reuses_saved_loss(monkeypatch, tmp_path):
     """C3b: saved calibration loss, expect no duplicate full-loss pass at open."""
     from quantem.widget import PtychoCalibration, ShowPtycho
@@ -549,8 +623,9 @@ def test_showptycho_calibration_seed_reuses_saved_loss(monkeypatch, tmp_path):
 
     result = json.loads(widget.result_json)
     assert result["loss"] == 0.03125
+    # the calibration is nm; quantem.gpu's SSB boundary hands the engine Angstrom (x10)
     assert ssb._accel.reconstruct_calls == [
-        ("phase", 12.0, 5.0, math.radians(10.0)),
+        ("phase", 120.0, 50.0, math.radians(10.0)),
     ]
 
 
@@ -614,8 +689,9 @@ def test_showptycho_calibration_without_loss_still_skips_loss_pass(
 
     result = json.loads(widget.result_json)
     assert result["loss"] is None
+    # the calibration is nm; quantem.gpu's SSB boundary hands the engine Angstrom (x10)
     assert ssb._accel.reconstruct_calls == [
-        ("phase", 12.0, 5.0, math.radians(10.0)),
+        ("phase", 120.0, 50.0, math.radians(10.0)),
     ]
 
 
@@ -660,9 +736,9 @@ def test_showptycho_mps_accel_does_not_require_cupy(monkeypatch):
 
 def test_showptycho_mps_accel_uses_phase_only_reconstruct(monkeypatch):
     """MPS ShowPtycho should hit the fused phase/loss path, not object-wave work."""
-    import quantem.gpu.ssb.compute.mps.engine as mps
-    import quantem.gpu.ssb.compute.mps.backend as mps_engine
-    from quantem.gpu.ssb.compute.mps.backend import MpsSSBBackend
+    import quantem.gpu.ssb.backends.mps.engine as mps
+    import quantem.gpu.ssb.backends.mps.backend as mps_engine
+    from quantem.gpu.ssb.backends.mps.backend import MpsSSBBackend
 
     class FakePrepared:
         num_bf = 2
@@ -713,7 +789,7 @@ def test_showptycho_mps_accel_uses_phase_only_reconstruct(monkeypatch):
 
     monkeypatch.setattr(mps_engine, "_reconstruct_prepared", fake_reconstruct)
     monkeypatch.setattr(
-        "quantem.gpu.ssb.compute.mps.backend.mean_dp",
+        "quantem.gpu.ssb.backends.mps.backend.detector_mean",
         lambda _frames: np.ones((4, 4), dtype=np.float32),
     )
 
@@ -734,7 +810,7 @@ def test_showptycho_mps_accel_uses_phase_only_reconstruct(monkeypatch):
     assert [call["compute_loss"] for call in calls] == [True, False]
     assert [call["compute_object"] for call in calls] == [False, False]
     state = accel.browser_state()
-    from quantem.gpu.ssb.compute import SSBProtocol
+    from quantem.gpu.ssb.backends.contract import SSBProtocol
 
     assert isinstance(accel, SSBProtocol)
     assert state.kx_bf.shape == (2,)
@@ -854,8 +930,8 @@ def test_showptycho_export_reuses_matching_exact_bf_companion(
     monkeypatch,
 ):
     """C4: matching MPS BF source, expect a link without HDF5 re-extraction."""
-    from quantem.gpu.ssb.bf_selector import BrightfieldDisk
-    from quantem.gpu.ssb.compute.mps.engine import MpsBfColumnFrames
+    from quantem.gpu.ssb.brightfield import BrightfieldDisk
+    from quantem.gpu.ssb.backends.mps.engine import MpsBfColumnFrames
 
     from quantem.widget.showptycho_webgpu_export import _reuse_bf_column_source
 
@@ -983,7 +1059,7 @@ def test_showptycho_save_copy_is_project_agnostic() -> None:
     """C1: Save copy, expect the public project workflow, not a private notebook."""
     ui_source = pathlib.Path("js/showptycho/index.tsx").read_text(encoding="utf-8")
     webgpu_source = pathlib.Path(
-        "js/.generated/engine/ssb/compute/webgpu/backend.ts"
+        "js/.generated/engine/ssb/backends/webgpu/backend.ts"
     ).read_text(encoding="utf-8")
 
     assert "Save calibration.json in this ShowPtycho project" in ui_source
@@ -1123,11 +1199,11 @@ def test_showptycho_webgpu_folder_uses_mps_metadata_without_gqk_sync(
 
 def test_showptycho_webgpu_kernel_source_has_128_256_512_1024_specializations():
     """C6: frontend SSB code keeps explicit 128/256/512/1024 WGSL support."""
-    source = _webgpu_source("ssb/compute/webgpu/backend.ts")
-    source += _webgpu_source("ssb/compute/webgpu/protocol.ts")
+    source = _webgpu_source("ssb/backends/webgpu/backend.ts")
+    source += _webgpu_source("ssb/backends/webgpu/protocol.ts")
     ui_source = pathlib.Path("js/showptycho/index.tsx").read_text()
 
-    registry = _webgpu_source("ssb/compute/webgpu/kernels/index.ts")
+    registry = _webgpu_source("ssb/backends/webgpu/kernels/index.ts")
     assert "SUPPORTED_SSB_SIZES = [128, 256, 512, 1024]" in registry
     assert "const workgroupSize = Math.min(n, 256)" in source
     assert "@compute @workgroup_size(${workgroupSize})" in source
@@ -1252,7 +1328,7 @@ def test_showptycho_phase_contrast_coalesces_gpu_updates_without_thumb_swaps():
 
 def test_showptycho_webgpu_reuses_resident_bf_columns_after_prepare():
     """C7: prepared browser BF columns, expect sliders/FFT not to refetch them."""
-    source = _webgpu_source("ssb/compute/webgpu/backend.ts")
+    source = _webgpu_source("ssb/backends/webgpu/backend.ts")
     ui_source = pathlib.Path("js/showptycho/index.tsx").read_text()
 
     setup = source[
@@ -1310,7 +1386,7 @@ def test_showptycho_webgpu_reuses_resident_bf_columns_after_prepare():
 
 def test_showptycho_webgpu_folder_uses_full_logical_bf_total():
     """C7b: standalone BF slider, expect the complete coordinate prefix."""
-    source = _webgpu_source("ssb/compute/webgpu/backend.ts")
+    source = _webgpu_source("ssb/backends/webgpu/backend.ts")
     ui_source = pathlib.Path("js/showptycho/index.tsx").read_text()
 
     active_selector = source[

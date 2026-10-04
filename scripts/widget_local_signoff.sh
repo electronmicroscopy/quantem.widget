@@ -156,7 +156,6 @@ if [[ "$mode" == "quick" ]]; then
   echo "== focused pytest =="
   PYTHONPATH="$signoff_pythonpath" pytest -q \
     tests/test_html_export_protocol.py \
-    tests/test_showfolder.py \
     tests/test_automation_scripts.py
 else
   echo "== full pytest =="
@@ -166,8 +165,8 @@ fi
 echo "== HTML export smoke matrix =="
 PYTHONPATH="$signoff_pythonpath" python scripts/widget_html_smoke.py --artifact-dir "$artifact_dir/html-smoke"
 
-echo "== ShowFolder live-folder smoke =="
-PYTHONPATH="$signoff_pythonpath" python scripts/widget_showfolder_live_smoke.py --artifact-dir "$artifact_dir/showfolder-live"
+echo "== Direct viewer folder-watch smoke =="
+PYTHONPATH="$signoff_pythonpath" python scripts/widget_folder_watch_smoke.py --artifact-dir "$artifact_dir/folder-watch"
 
 if [[ "$browser" -eq 1 ]]; then
   echo "== browser-drive HTML smoke =="
@@ -176,6 +175,12 @@ if [[ "$browser" -eq 1 ]]; then
     browser_args+=(--mobile)
   fi
   PYTHONPATH="$signoff_pythonpath" python scripts/widget_browser_smoke.py "${browser_args[@]}"
+
+  echo "== Show3D playback and slider regression =="
+  QUANTEM_TEST_PLAYBACK=1 \
+    PYTHONPATH="$signoff_pythonpath" python -m pytest -q \
+    tests/show3d/test_playback_browser.py \
+    --basetemp="$artifact_dir/playback-regression"
 
   echo "== post-browser artifact cleanup =="
   python scripts/cleanup_browser_artifacts.py

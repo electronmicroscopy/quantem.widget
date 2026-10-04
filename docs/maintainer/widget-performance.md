@@ -4,6 +4,32 @@ These notes capture interaction bugs that were easy to misread while building
 the widgets. Keep this page short and practical: it should explain what went
 wrong, how to recognize the pattern, and what to do instead.
 
+## Playback regression gate
+
+Play and scrub must be tested together: dragging the current-frame handle or
+either loop endpoint preserves playback intent. Seeking while paused stays
+paused. Keyboard seeks preserve the same behavior. A paused frame counter is
+not enough evidence; the displayed scientific pixels must keep advancing too.
+
+`scripts/widget_local_signoff.sh --quick --browser` runs
+`tests/show3d/test_playback_browser.py` against a generated moving-pattern HTML
+export. The tests use real pointer/keyboard input and interior image pixels;
+they do not assert implementation strings, exact frame timing, or FPS. WebGPU
+is required; CPU fallback is a failure of this gate. Ordinary Python unit-test
+runs skip this browser gate.
+
+To run just this check in the active conda environment after `npm run build`:
+
+```bash
+python -m playwright install chromium
+QUANTEM_TEST_PLAYBACK=1 PYTHONPATH=src python -m pytest -q tests/show3d/test_playback_browser.py
+```
+
+This opens headed Chromium, including from the signoff script. Use
+`QUANTEM_HEADLESS=1` only where headless Chromium exposes WebGPU, or set
+`QUANTEM_SHOW3D_PLAYBACK_HTML=/path/to/export.html` to test an existing looping
+multi-frame export. Keep screenshots, private exports and data outside Git.
+
 ## Current summary
 
 2026-07-05 Show4DSTEM loader work:
@@ -158,7 +184,6 @@ evidence.
 | Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, cache-backed folder reopen, lazy folder sessions, and export reopen. | `scripts/widget_show4dstem_heavy_signoff.py` covers direct backend/export interaction only. S4D-19 additionally requires a recorded fresh-process folder-paging/cache runner and browser report; do not infer that signoff from the heavy script. Lightweight CI checks only the protocol. |
 | ShowEDS | Explore spectral maps, ROIs, energy bands, element lines, and sparse/folder-backed EDS cubes. | Band dragging, map/spectrum sync, ROI changes, periodic table selection, sparse lookup/cache, and export reopen. | Browser story plus EDS-specific real-data smoke when backend or map/spectrum logic changes. |
 | ShowDiffraction | Inspect diffraction-like 2D patterns when a full 4D-STEM session is not needed. | Zoom/pan, histogram/contrast, peak/FFT-style overlays when present, and export reopen. | Lightweight export/browser smoke; use Show4DSTEM heavy signoff for full detector workflows. |
-| ShowFolder | Browse a session folder before loading heavy data, cache thumbnails, and open selected data in the right viewer. | Folder scan, thumbnail cache, live `watch_once()`, selected Show2D/Show3D refresh, lazy Show4DSTEM handoff, and compact saved state. | `scripts/widget_showfolder_live_smoke.py`; keep generated thumbnail/report artifacts outside git unless intentionally committed. |
 
 ## Folder-watching performance contract
 
@@ -232,7 +257,7 @@ on-demand CPU/canvas renderer is the functional fallback.
 
 | Viewer | Required append behavior | Work that must not repeat |
 |---|---|---|
-| Show2D | Add each new full-resolution image as one panel; automatically render folder pages of at most `page_size` panels (default 20) | Reread existing source files; rebuild the widget; replace full-resolution data with ShowFolder thumbnails; render every folder panel at once after paging activates |
+| Show2D | Add each new full-resolution image as one panel; automatically render folder pages of at most `page_size` panels (default 20) | Reread existing source files; rebuild the widget; replace full-resolution data with thumbnails; render every folder panel at once after paging activates |
 | Show3D | Add each new full-resolution image as a frame in one unpaged stack | Reread existing source files; rebuild the widget; infer Show2D-style pages from frame count |
 | Show4DSTEM | Add each ready master as a cold lazy dataset | Load every new master into VRAM immediately; clear unrelated reduced-page caches |
 
@@ -1018,7 +1043,7 @@ Update from the 0016 Velox stream test:
 
 Date: 2026-07-02
 
-Symptom: the real DGGG 0039 EDS widget loaded and displayed the map/spectrum,
+Symptom: a real collaborator EDS widget loaded and displayed the map/spectrum,
 but changing the energy band or ROI felt slow on the full 1024 x 1024 x 4096
 file. The standalone export could still render, so it was easy to mistake this
 for a drawing problem instead of an interaction-backend problem.

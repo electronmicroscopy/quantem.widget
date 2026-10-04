@@ -56,3 +56,12 @@ export function browserFilterCacheKey({
 }): string {
   return `${Math.round(frameIndex)}:${frameSeq}:${mode}:${sigma}:${bin}:${normalizedAverageWindow(avgWindow)}:${diffMode}:${Math.max(1, Math.round(panels))}`;
 }
+
+/** Show3D's centered, full-width window; edges slide inward without wrapping. */
+export function temporalAverageFrameIndices(idx: number, count: number, windowSize: number): number[] {
+  const n = Math.max(1, Math.round(count || 1));
+  const win = Math.min(n, normalizedAverageWindow(windowSize));
+  const center = Math.max(0, Math.min(n - 1, Math.round(idx)));
+  const start = Math.max(0, Math.min(n - win, center - Math.floor(win / 2)));
+  return Array.from({length: win}, (_, offset) => start + offset);
+}

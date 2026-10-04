@@ -358,7 +358,7 @@ def _verify_book_interactions(
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                         page.wait_for_function(
-                            "document.querySelectorAll('canvas, [data-quantem-scientific-output], .showfolder-root').length > 0",
+                            "document.querySelectorAll('canvas, [data-quantem-scientific-output]').length > 0",
                             timeout=timeout_ms,
                         )
                         page.wait_for_timeout(1200)

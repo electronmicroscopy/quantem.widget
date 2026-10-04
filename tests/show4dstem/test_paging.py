@@ -1,6 +1,6 @@
 """Show4DSTEM dataset-slider paging (out-of-core multi-dataset VRAM control).
 
-A ShowFolder of many 4D masters loads into one Show4DSTEM behind a dataset
+A folder of many 4D masters loads into one Show4DSTEM behind a dataset
 slider. Keeping every master resident fills VRAM; ``page_budget`` controls how
 many stay on the GPU and switching the slider pages the target in while evicting
 least-recently-used datasets to RAM. This guards both fixed-count paging and
@@ -20,7 +20,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from quantem.widget import Show4DSTEM  # noqa: E402
-from quantem.gpu.io.load import LoadResult  # noqa: E402
+from quantem.gpu.io.models import Dataset4dstemGPU  # noqa: E402
 from quantem.widget.data.dataset5dstem import Dataset5dstem  # noqa: E402
 
 cuda_required = pytest.mark.skipif(
@@ -998,104 +998,6 @@ def test_show4dstem_compare_grid_oom_reports_gracefully_without_raw_trace():
         widget.close()
 
 
-# --- ShowFolder -> Show4DSTEM handoff -----------------------------------------
-
-
-def _stub_browser(folder):
-    from quantem.widget.showfolder_core import ShowFolderBrowser
-
-    class _Stub(ShowFolderBrowser):
-        def __init__(self, f):
-            self.folder = f
-
-    return _Stub(folder)
-
-
-def test_showfolder_open_show4dstem_preserves_loader_device_when_gpus_none(
-    monkeypatch, tmp_path
-):
-    """open_show4dstem(gpus=None) must not force CUDA on CPU/MPS loaders."""
-    import quantem.gpu.io as wio
-    import quantem.widget as qw
-
-    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(2)]
-
-    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
-        return list(fake_masters)
-
-    def fake_ready(path):
-        return True
-
-    class _Result:
-        def __init__(self, path):
-            # distinct value per master so frames are not aliased
-            v = int(path.split("scan_")[1][:2])
-            self.data = torch.full((4, 4, 6, 6), v, dtype=torch.uint8)
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "discover", fake_discover)
-    monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
-    monkeypatch.setattr(wio, "inspect", _ready_master_report)
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    sf = _stub_browser(tmp_path)
-    w = sf.open_show4dstem(gpus=None, page_budget=1, det_bin=4, dtype="u8")
-    assert w is not None
-    ds = w._data
-    assert w.n_frames == 2
-    assert list(w.frame_labels) == [f"scan_{i:02d}" for i in range(2)]
-    assert [frame.device.type for frame in ds.frames] == ["cpu", "cpu"]
-    w.frame_idx = 1
-    _ = w._frame_data
-    assert [frame.device.type for frame in ds.frames] == ["cpu", "cpu"]
-
-
-def test_showfolder_open_show4dstem_is_lazy_after_initial_frame(monkeypatch, tmp_path):
-    """Opening a master folder must not load every dataset hot."""
-    import quantem.gpu.io as wio
-    import quantem.widget as qw
-
-    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
-    calls = []
-
-    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
-        return list(fake_masters)
-
-    def fake_ready(path):
-        return True
-
-    class _Result:
-        def __init__(self, path):
-            v = int(path.split("scan_")[1][:2])
-            self.data = torch.full((4, 4, 6, 6), v, dtype=torch.uint8)
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
-        calls.append(path)
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "discover", fake_discover)
-    monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    sf = _stub_browser(tmp_path)
-    w = sf.open_show4dstem(gpus=None, page_budget="auto", det_bin=4, dtype="u8")
-
-    assert w is not None
-    assert w.n_frames == 4
-    assert calls == [fake_masters[0]]
-    loaded = [idx for idx, frame in enumerate(w._data._frames) if frame is not None]
-    assert loaded == [0]
-
-    w.frame_idx = 3
-    _ = w._frame_data
-
-    assert calls == [fake_masters[0], fake_masters[3]]
-    loaded = [idx for idx, frame in enumerate(w._data._frames) if frame is not None]
-    assert loaded == [0, 3]
-
-
 def test_show4dstem_from_folder_builds_lazy_widget_and_poll_appends(
     monkeypatch, tmp_path
 ):
@@ -1123,7 +1025,7 @@ def test_show4dstem_from_folder_builds_lazy_widget_and_poll_appends(
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
         calls.append(path)
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
 
     monkeypatch.setattr(wio, "discover", fake_discover)
     monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
@@ -1184,7 +1086,7 @@ def test_show4dstem_from_folder_watches_by_default_and_appends_cold(
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
         calls.append(str(path))
         value = int(str(path).split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
 
     monkeypatch.setattr(wio, "load", fake_load)
     widget = Show4DSTEM.from_folder(
@@ -1274,7 +1176,7 @@ def test_show4dstem_watched_master_contract_retries_and_registers_batch_paths(
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
         calls.append(str(path))
         value = int(str(path).split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
 
     monkeypatch.setattr(wio, "load", fake_load)
     widget = Show4DSTEM.from_folder(
@@ -1351,7 +1253,7 @@ def test_show4dstem_watcher_warms_only_new_pages_without_blocking_cached_page(
             if not release_new_load.wait(timeout=3):
                 raise RuntimeError("test did not release watched master load")
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
 
     monkeypatch.setattr(wio, "load", fake_load)
     widget = Show4DSTEM.from_folder(
@@ -1416,7 +1318,7 @@ def test_show4dstem_watcher_warms_only_new_pages_without_blocking_cached_page(
         widget.close()
 
 
-def test_show4dstem_from_folder_auto_dtype_uses_stable_u16(monkeypatch, tmp_path):
+def test_show4dstem_from_folder_auto_dtype_preserves_native_counts(monkeypatch, tmp_path):
     import quantem.widget as qw
     import quantem.gpu.io as wio
 
@@ -1440,7 +1342,7 @@ def test_show4dstem_from_folder_auto_dtype_uses_stable_u16(monkeypatch, tmp_path
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
         dtypes.append(dtype)
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
 
     monkeypatch.setattr(wio, "discover", fake_discover)
     monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
@@ -1459,10 +1361,10 @@ def test_show4dstem_from_folder_auto_dtype_uses_stable_u16(monkeypatch, tmp_path
     )
 
     try:
-        assert dtypes == ["u16"]
+        assert dtypes == [None]
         widget.frame_idx = 1
         assert int(widget._frame_data[0, 0, 0, 0]) == 2
-        assert dtypes == ["u16", "u16"]
+        assert dtypes == [None, None]
     finally:
         widget.stop_folder_watch()
         widget.close()
@@ -1492,7 +1394,7 @@ def test_show4dstem_from_folder_skips_unreadable_masters(monkeypatch, tmp_path):
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
         calls.append(path)
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
 
     monkeypatch.setattr(wio, "discover", fake_discover)
     monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
@@ -1536,7 +1438,7 @@ def test_show4dstem_from_folder_is_quiet_by_default(monkeypatch, tmp_path, capsy
     monkeypatch.setattr(
         wio,
         "load",
-        lambda *args, **kwargs: LoadResult(
+        lambda *args, **kwargs: Dataset4dstemGPU(
             torch.ones((3, 3, 6, 6), dtype=torch.uint16),
             {},
         ),
@@ -1571,7 +1473,7 @@ def test_show4dstem_from_folder_accepts_simple_grid_names(monkeypatch, tmp_path)
     monkeypatch.setattr(
         wio,
         "load",
-        lambda *args, **kwargs: LoadResult(
+        lambda *args, **kwargs: Dataset4dstemGPU(
             torch.ones((3, 3, 6, 6), dtype=torch.uint16),
             {},
         ),
@@ -1642,7 +1544,7 @@ def test_show4dstem_from_folder_uses_largest_compatible_metadata_group(
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
         calls.append(path)
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
+        return Dataset4dstemGPU(torch.full((3, 3, 6, 6), value, dtype=torch.uint16), {})
 
     monkeypatch.setattr(wio, "discover", fake_discover)
     def fake_inspect(path, **kwargs):
@@ -1888,7 +1790,7 @@ def test_show4dstem_from_folder_preloads_complete_series_when_it_fits(
             for item in paths
         ]
         data = torch.stack(frames) if isinstance(path, list) else frames[0]
-        return LoadResult(data, {})
+        return Dataset4dstemGPU(data, {})
 
     monkeypatch.setattr(wio, "load", fake_load)
 
@@ -1931,7 +1833,7 @@ def test_show4dstem_from_folder_does_not_preload_series_over_budget(
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
         calls.append(path)
         value = int(path.split("scan_")[1][:2]) + 1
-        return LoadResult(
+        return Dataset4dstemGPU(
             torch.full(frame_shape, value, dtype=torch.uint8, device="cuda:0"),
             {},
         )
@@ -1984,7 +1886,7 @@ def test_show4dstem_from_folder_one_gpu_auto_pages_with_independent_loads(
             dtype=torch.uint8,
             device="cuda:0",
         )
-        return LoadResult(data, {})
+        return Dataset4dstemGPU(data, {})
 
     monkeypatch.setattr(wio, "load", fake_load)
 
@@ -2032,304 +1934,37 @@ def test_show4dstem_from_folder_one_gpu_auto_pages_with_independent_loads(
         widget.close()
 
 
-@cuda_required
-def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(
-    monkeypatch, tmp_path
-):
-    """open_show4dstem(gpus=[...]) pages lazy masters into one Show4DSTEM."""
-    import quantem.gpu.io as wio
-    import quantem.widget as qw
-
-    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
-    calls = []
-
-    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
-        return list(fake_masters)
-
-    def fake_ready(path):
-        return True
-
-    class _Result:
-        def __init__(self, path):
-            v = int(path.split("scan_")[1][:2])
-            self.data = torch.full(
-                (16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0"
-            )
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
-        calls.append(path)
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "discover", fake_discover)
-    monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    sf = _stub_browser(tmp_path)
-    w = sf.open_show4dstem(gpus=[0], page_budget=1, det_bin=4, dtype="u8")
-    assert w is not None
-    ds = w._data
-    assert w.n_frames == 4
-    assert list(w.frame_labels) == [f"scan_{i:02d}" for i in range(4)]
-    assert calls == [fake_masters[0]]
-    assert ds.vram_resident() == [0]
-    w.frame_idx = 3
-    _ = w._frame_data
-    assert calls == [fake_masters[0], fake_masters[3]]
-    assert ds.vram_resident() == [3]
-    assert ds._frames[0] is None
-    w.frame_idx = 0
-    _ = w._frame_data
-    assert calls == [fake_masters[0], fake_masters[3], fake_masters[0]]
-    assert ds.vram_resident() == [0]
-
-
-@cuda_required
-def test_showfolder_open_show4dstem_auto_uses_gpu_sized_cache(monkeypatch, tmp_path):
-    """Auto paging keeps hot datasets until the byte budget, then LRU-evicts."""
-    import quantem.widget as qw
-    import quantem.gpu.io as wio
-
-    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(5)]
-
-    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
-        return list(fake_masters)
-
-    def fake_ready(path):
-        return True
-
-    class _Result:
-        def __init__(self, path):
-            v = int(path.split("scan_")[1][:2])
-            self.data = torch.full(
-                (16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0"
-            )
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "discover", fake_discover)
-    monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    frame_bytes = 16 * 16 * 24 * 24
-    sf = _stub_browser(tmp_path)
-    w = sf.open_show4dstem(
-        gpus=[0],
-        page_budget="auto",
-        page_max_vram_bytes=frame_bytes * 2 + 1,
-        det_bin=4,
-        dtype="u8",
-    )
-
-    assert w is not None
-    ds = w._data
-    assert w.n_frames == 5
-    assert 0 in ds.vram_resident()
-    assert len(ds.vram_resident()) <= 2
-    w.frame_idx = 4
-    frame = w._frame_data
-    assert frame.device.type == "cuda"
-    del frame
-    assert 4 in ds.vram_resident()
-    assert len(ds.vram_resident()) <= 2
-
-
-@cuda_required
-def test_showfolder_open_show4dstem_preloads_complete_series_when_it_fits(
-    monkeypatch, tmp_path
-):
-    import quantem.widget as qw
-    import quantem.gpu.io as wio
-
-    fake_masters = [str(tmp_path / f"scan_{idx:02d}_master.h5") for idx in range(4)]
-    calls = []
-    frame_shape = (16, 16, 24, 24)
-    frame_bytes = int(np.prod(frame_shape))
-
-    monkeypatch.setattr(wio, "discover", lambda *args, **kwargs: list(fake_masters))
-    monkeypatch.setattr(wio, "inspect", _inspection_from(lambda path: True))
-
-    class _Result:
-        def __init__(self, path):
-            value = int(path.split("scan_")[1][:2])
-            self.data = torch.full(
-                frame_shape,
-                value,
-                dtype=torch.uint8,
-                device="cuda:0",
-            )
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
-        calls.append(path)
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    browser = _stub_browser(tmp_path)
-    widget = browser.open_show4dstem(
-        gpus=[0],
-        page_budget="auto",
-        page_max_vram_bytes=frame_bytes * len(fake_masters),
-        det_bin=4,
-        dtype="u8",
-        preload_all_if_fits=True,
+def test_compare_accepts_one_owned_resident_batch():
+    """A batched backend delivers every panel without per-image dispatch."""
+    data = torch.arange(3 * 3 * 3 * 4 * 4, dtype=torch.float32).reshape(3, 3, 3, 4, 4)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_group_mode="all",
+        compare_max_panels=3,
+        precompute_virtual_images=False,
+        verbose=False,
     )
     try:
-        widget.wait_for_dataset_preload(timeout=10)
-        assert widget._data.vram_resident() == list(range(len(fake_masters)))
-        assert widget._raw_preload_status == "resident"
-        assert calls == fake_masters
+        widget._clear_compare_virtual_page_cache()
+        mask = widget._current_detector_mask().numpy().astype(bool)
+        expected = data.numpy()[..., mask].sum(axis=-1) / max(1, mask.sum())
+        batch = np.ascontiguousarray(expected, dtype=np.float32)
+        calls = []
+
+        def compute_batch(indices, requested_mask):
+            calls.append(tuple(indices))
+            np.testing.assert_array_equal(requested_mask.numpy().astype(bool), mask)
+            return batch
+
+        widget._compare_virtual_images_for_display_indices = compute_batch
+        widget._refresh_compare_virtual_images_sync()
+        assert calls == [(0, 1, 2)]
+        assert widget.compare_panel_indices == [0, 1, 2]
+        assert widget.compare_panel_count == 3
+        payload = widget.compare_virtual_image_bytes
+        np.testing.assert_array_equal(np.frombuffer(payload, np.float32).reshape(3, 3, 3), expected)
+        batch.fill(0)
+        np.testing.assert_array_equal(np.frombuffer(payload, np.float32).reshape(3, 3, 3), expected)
     finally:
         widget.close()
-
-
-def test_showfolder_open_show4dstem_no_masters_returns_none(monkeypatch, tmp_path):
-    import quantem.gpu.io as wio
-
-    monkeypatch.setattr(wio, "discover", lambda *a, **k: [])
-    sf = _stub_browser(tmp_path)
-    assert sf.open_show4dstem() is None
-
-
-def test_showfolder_open_show4dstem_with_selection_panel_builds_once(
-    monkeypatch, tmp_path
-):
-    """A live selection panel must not build the heavy Show4DSTEM twice."""
-    sf = _stub_browser(tmp_path)
-    sf._selection_viewer_output = object()
-    calls = []
-
-    def fake_apply():
-        calls.append("apply")
-        sf._selected_show4dstem_widget = "widget"
-        return "widget"
-
-    def fake_refresh():
-        return fake_apply()
-
-    monkeypatch.setattr(sf, "_apply_selected_show4dstem", fake_apply)
-    monkeypatch.setattr(sf, "_refresh_selected_viewers", fake_refresh)
-
-    assert sf.open_show4dstem(gpus=[0], page_budget=1) == "widget"
-    assert calls == ["apply"]
-
-
-def test_showfolder_inherits_live_show4dstem_config_and_releases_old_widget(
-    monkeypatch,
-    tmp_path,
-):
-    """A watched folder rebuild keeps 4D paging options without leaking the old widget."""
-
-    class _FakeShow4DSTEM:
-        freed = False
-
-        def free(self):
-            self.freed = True
-
-    previous = _stub_browser(tmp_path)
-    old_widget = _FakeShow4DSTEM()
-    previous._active_selected_modes = {"show4dstem"}
-    previous._show4dstem_config = {
-        "gpus": [0],
-        "page_budget": "auto",
-        "det_bin": 8,
-        "dtype": "u8",
-        "scan_size": 128,
-    }
-    previous._selected_show4dstem_widget = old_widget
-
-    current = _stub_browser(tmp_path)
-    refresh_calls = []
-    monkeypatch.setattr(
-        current,
-        "_refresh_selected_viewers",
-        lambda: refresh_calls.append("refresh"),
-    )
-
-    current.inherit_selected_viewers_from(previous)
-
-    assert current._active_selected_modes == {"show4dstem"}
-    assert current._show4dstem_config == previous._show4dstem_config
-    assert getattr(current, "_selected_show4dstem_widget", None) is None
-    assert getattr(previous, "_selected_show4dstem_widget", None) is None
-    assert old_widget.freed is True
-    assert refresh_calls == ["refresh"]
-
-
-@cuda_required
-def test_showfolder_open_show4dstem_drops_staging_frames_on_second_gpu(
-    monkeypatch, tmp_path
-):
-    """Explicit multi-GPU staging must not pin offloaded frames outside Dataset5dstem."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("needs two CUDA devices")
-    import gc
-
-    import quantem.widget as qw
-    import quantem.gpu.io as wio
-
-    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
-
-    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
-        return list(fake_masters)
-
-    def fake_ready(path):
-        return True
-
-    class _Result:
-        def __init__(self, path):
-            v = int(path.split("scan_")[1][:2])
-            self.data = torch.full(
-                (16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0"
-            )
-
-    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
-        return _Result(path)
-
-    monkeypatch.setattr(wio, "discover", fake_discover)
-    monkeypatch.setattr(wio, "inspect", _inspection_from(fake_ready))
-    monkeypatch.setattr(wio, "load", fake_load)
-
-    sf = _stub_browser(tmp_path)
-    w = sf.open_show4dstem(gpus=[0, 1], page_budget=1, det_bin=4, dtype="u8")
-    gc.collect()
-    with torch.cuda.device(1):
-        torch.cuda.empty_cache()
-
-    assert w._data.vram_resident() == [0]
-    leaked = []
-    for obj in gc.get_objects():
-        try:
-            if (
-                isinstance(obj, torch.Tensor)
-                and obj.device.type == "cuda"
-                and obj.device.index == 1
-                and tuple(obj.shape) == (16, 16, 24, 24)
-            ):
-                leaked.append(obj)
-        except Exception:
-            pass
-    assert leaked == []
-
-    w.frame_idx = 1
-    frame = w._frame_data
-    torch.cuda.synchronize(frame.device.index)
-    del frame
-    w.free()
-    gc.collect()
-    for device in (0, 1):
-        with torch.cuda.device(device):
-            torch.cuda.empty_cache()
-    leaked_after_free = []
-    for obj in gc.get_objects():
-        try:
-            if (
-                isinstance(obj, torch.Tensor)
-                and obj.device.type == "cuda"
-                and obj.device.index == 1
-                and tuple(obj.shape) == (16, 16, 24, 24)
-            ):
-                leaked_after_free.append(obj)
-        except Exception:
-            pass
-    assert leaked_after_free == []
