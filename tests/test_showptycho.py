@@ -293,6 +293,7 @@ class _FakeSSB(SSB):
     def __init__(self, accel=None):
         self.aberrations = {"C10": 1.0, "C12": 2.0, "phi12": 0.1}
         self.rotation_angle_deg = math.degrees(0.2)
+        self.com_reversed = False
         self.best_loss = float("inf")
         self.trial_history = []
         self.scan_sampling_A = (0.5, 0.5)
@@ -351,6 +352,22 @@ def test_showptycho_crop_request_uses_global_source_coordinates(monkeypatch, tmp
     )
 
     assert received == {"region": (192, 320, 384, 512), "n_trials": 200}
+
+
+def test_showptycho_preserves_selected_rotation_branch(monkeypatch):
+    """Opening the explorer retains the branch selected from the SSB phase."""
+    from quantem.widget import ShowPtycho
+
+    monkeypatch.setitem(sys.modules, "cupy", _FakeCuPy())
+    ssb = _FakeSSB()
+    ssb.set_rotation(345.0)
+    widget = ShowPtycho(ssb)
+
+    assert math.isclose(widget.rotation_deg, 345.0)
+    assert math.isclose(widget.auto_rotation_deg, 345.0)
+    assert math.isclose(ssb.physical_rotation_deg, 345.0)
+    assert widget.rotation_min <= widget.rotation_deg <= widget.rotation_max
+    assert widget.flip_phase is False
 
 
 def test_showptycho_from_ssb_uses_widget_contract(monkeypatch):

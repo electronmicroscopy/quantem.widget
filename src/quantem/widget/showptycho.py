@@ -552,7 +552,7 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         # microscope conventions that sometimes report negative values.
         start_deg = math.degrees(rotation_rad)
         if rotation_range is None:
-            rotation_range = (-180.0, 180.0)
+            rotation_range = (min(-180.0, start_deg), max(180.0, start_deg))
         self.rotation_min, self.rotation_max = rotation_range
         # Set current rotation without firing the observer (guard against premature reconstruct
         # before _inflight_id and accel state are initialized).
@@ -1056,7 +1056,7 @@ class _ShowPtychoWidget(anywidget.AnyWidget):
         self.scan_region_json = json.dumps(scan_region)
         self.total_bf = self._accel.num_bf
         self.drag_bf = self.total_bf
-        self._rotation_rad = math.radians(rebuilt.rotation_angle_deg)
+        self._rotation_rad = math.radians(rebuilt.physical_rotation_deg)
         self.rotation_deg = math.degrees(self._rotation_rad)
         self.auto_rotation_deg = self.rotation_deg
         self.auto_c10 = float(rebuilt.aberrations["C10"])
@@ -1520,7 +1520,7 @@ def _show_ptycho_from_ssb(
         phi12_range = (-90.0, 90.0)
 
     accel = ssb
-    rotation_rad = math.radians(float(ssb.rotation_angle_deg))
+    rotation_rad = math.radians(float(ssb.physical_rotation_deg))
     accel.set_rotation(math.degrees(rotation_rad))
     auto_loss_val = (
         float(loss_from_cal)
