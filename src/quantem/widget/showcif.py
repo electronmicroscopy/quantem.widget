@@ -60,7 +60,8 @@ class ShowCIF(anywidget.AnyWidget):
     num_slices : int, default 16
         Equal-width preview slabs along the selected beam, from 1 to 64.
     potential : bool, default False
-        Enable WebGPU independent-atom potential preview (requires abTEM).
+        Enable WebGPU independent-atom potential preview (requires quantem
+        with ``quantem.diffraction.Crystal`` and ``bloch``, quantem PR #297).
         At most 8,192 atoms can contribute to this preview; the atom viewer
         supports up to 250,000. Reduce repeats if the preview is unavailable.
     potential_sigma_A : float, default 0.08

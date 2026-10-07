@@ -14,7 +14,10 @@ plan.apply_preset("Arina · 300 kV · 25 mrad · 115 mm")
 plan.window_A, plan.object_pixel_A
 ```
 
-Needs `ase`, `abtem` and, for Materials Project ids, `spglib` (`pip install "quantem.widget[crystal]"`).
+Needs quantem with `quantem.diffraction.Crystal` and `bloch` (quantem PR #297, first release after 0.1.9) for the
+Lobato scattering factors (Lobato & Van Dyck, Acta Cryst. A 70, 636 (2014), <https://doi.org/10.1107/S205327331401643X>)
+of the projected potential, plus `ase`, `pandas` for `report()` and, for Materials Project ids, `spglib`
+(`pip install "quantem.widget[crystal]"`).
 
 ## Settings from a collaborator
 

@@ -6,6 +6,23 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add `DiffractionSim`: rotate a unit cell and see its nanobeam, CBED, or
+  Kikuchi pattern update live, with kinematical or Bloch wave intensities
+  computed in the browser, state save/load, and HTML export. Needs quantem
+  with `quantem.diffraction.Crystal` and `bloch` (quantem PR #297, first
+  release after 0.1.9). `npm run build:web` writes
+  `dist/web/diffraction-sim.js`, a framework-free build for web pages, whose
+  structure data comes from `scripts/diffraction_sim_presets.py`.
+- Drop abTEM (and the dask stack it pulled in). The ShowCIF potential preview
+  and `PlanPtycho` now take their Lobato scattering factors from quantem
+  (`quantem.diffraction.crystal`, quantem PR #297, first release after 0.1.9);
+  the `crystal` extra is now ASE, spglib and pandas. `PlanPtycho` keeps every
+  atom: abTEM lost one of 48 in the Si [112] cell and dropped atoms at
+  -1e-17 Å from the projected potential (SrTiO3 [111] was 20 % low). The
+  potential is now the exact Fourier sum of the cell on the same grid; column
+  peaks are about 1 % below abTEM's, whose bilinear atom spreading and sinc
+  correction do not cancel.
+
 ## rc39 - 2026-10-03
 
 - Show4DSTEM compares native diffraction patterns side by side in live

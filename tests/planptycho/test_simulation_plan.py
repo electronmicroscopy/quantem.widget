@@ -8,7 +8,10 @@ from quantem.widget import PlanPtycho
 
 @pytest.fixture
 def planner():
-    pytest.importorskip("abtem")
+    from quantem.widget._lobato import QUANTEM_REQUIREMENT, scattering_factors_available
+
+    if not scattering_factors_available():
+        pytest.skip(f"needs {QUANTEM_REQUIREMENT}")
     atoms = Atoms(
         "SrTiO3",
         scaled_positions=[

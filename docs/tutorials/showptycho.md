@@ -122,8 +122,10 @@ no depth, so it cannot express this.
 
 **The experiment.** Simulate a crystal whose tilt you know: BaTiO3 [001],
 15 nm thick, leaning by (3, -4) mrad, then reconstruct it both ways. The
-simulation uses [abTEM](https://abtem.readthedocs.io) on the GPU and takes
-about a minute; no data file is needed.
+simulation uses [abTEM](https://abtem.readthedocs.io), a separate multislice
+package that quantem.widget does not install or depend on: install it yourself
+(`pip install abtem`) to run this cell. It runs on the GPU and takes about a
+minute; no data file is needed.
 
 ```python
 import abtem

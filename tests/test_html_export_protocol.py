@@ -7,6 +7,8 @@ import pathlib
 import numpy as np
 import pytest
 
+from quantem.widget._diffraction_sim_crystal import require_crystal_tools
+from quantem.widget.diffraction_sim import DiffractionSim
 from quantem.widget.export import HTML_EXPORT_TRAITS, supports_html_export
 from quantem.widget.show1d import Show1D
 from quantem.widget.show2d import Show2D
@@ -17,7 +19,22 @@ from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showeds import ShowEDS
 
 
-EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction)
+EXPORT_WIDGET_CLASSES = (
+    Show1D,
+    Show2D,
+    Show3D,
+    Show3DSlices,
+    Show4DSTEM,
+    ShowEDS,
+    ShowDiffraction,
+    DiffractionSim,
+)
+
+try:
+    require_crystal_tools()
+    _DIFFRACTION_SIM_MISSING = ""
+except ImportError as exc:
+    _DIFFRACTION_SIM_MISSING = str(exc)
 
 
 def _show1d() -> Show1D:
@@ -80,6 +97,10 @@ def _showdiffraction() -> ShowDiffraction:
     return ShowDiffraction(data, title="Protocol ShowDiffraction", verbose=False)
 
 
+def _diffractionsim() -> DiffractionSim:
+    return DiffractionSim("Al (fcc)", zone_axis=[0, 0, 1], title="Protocol DiffractionSim")
+
+
 EXPORT_WIDGET_CASES = (
     pytest.param(_show1d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show1D", id="show1d"),
     pytest.param(_show2d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show2D", id="show2d"),
@@ -88,6 +109,14 @@ EXPORT_WIDGET_CASES = (
     pytest.param(_show4dstem, {"encoding": "uint8", "downsample": 1}, {"mode": "single", "encoding": "uint8", "downsample": 1}, "Protocol Show4DSTEM", id="show4dstem"),
     pytest.param(_showeds, {"mode": "single", "encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowEDS", id="showeds"),
     pytest.param(_showdiffraction, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowDiffraction", id="showdiffraction"),
+    pytest.param(
+        _diffractionsim,
+        {"mode": "single", "encoding": "full"},
+        {"mode": "single", "encoding": "full"},
+        "Protocol DiffractionSim",
+        id="diffractionsim",
+        marks=pytest.mark.skipif(bool(_DIFFRACTION_SIM_MISSING), reason=_DIFFRACTION_SIM_MISSING),
+    ),
 )
 
 

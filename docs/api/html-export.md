@@ -128,6 +128,7 @@ browse-quality or count-preserving.
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show4DSTEM | yes | `single`; interactive exports may write a local launcher/folder when a companion payload must be served | `uint8`, `full`/`uint16` | detector: `1`, `2`, `4`, `8`; scan: `1`, `2`, `4`, `8` | yes, for companion-data interactive exports and HDF5 bundles | `export_kind="report"` writes static PNG virtual-image pages with no raw 4D; `export_kind="interactive"` writes browser WebGPU raw-4D payload. The CLI WebGPU folder keeps source HDF5 beside `index.html` and `Show4DSTEM.command`. `scan_bin` and `det_bin` are explicit mean-binning choices. |
 | ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
+| DiffractionSim | yes | `single` | `full` | none | no | no image data; embeds the crystal reflection list, settings, and the Kikuchi reference when computed. `presets=` embeds more structures for the crystal menu |
 
 The public Python calls are:
 
@@ -140,6 +141,7 @@ The public Python calls are:
 | Show4DSTEM | `export_html(path=None, title=None, mode="single", encoding=None, downsample=None, dtype="uint8", det_bin=1, scan_bin=1, real_space_bin=None, export_kind="interactive", dataset_scope="unhidden")`; for compact screening use `export_kind="report"` |
 | ShowPtycho | `export_webgpu_folder(out_dir)` for browser-side SSB review from compressed HDF5 source files; transient BF-indexed reducers are built in WebGPU |
 | ShowEDS | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
+| DiffractionSim | `export_html(path=None, title=None, presets=None, mode="single", encoding="full", downsample=None)` |
 
 Existing compatibility aliases remain supported:
 

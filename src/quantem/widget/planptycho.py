@@ -1,7 +1,7 @@
 """planptycho: check multislice ptychography settings against a known crystal before the experiment.
 
 A crystal (CIF path, ase ``Atoms`` or Materials Project id) is turned so a zone axis runs along the beam and its
-projected potential is computed once (abTEM, Lobato parametrisation, static lattice). Everything that depends only on
+projected potential is computed once (Lobato & Van Dyck 2014 scattering factors from quantem, static lattice). Everything that depends only on
 the microscope and scan settings is geometry: beam width through the thickness, the model window the detector sampling
 gives, probe overlap, detector reach, column lean from a sample tilt, where the focus sits. The
 browser recomputes it on every slider move; :func:`plan_geometry`, :func:`check_statuses`, :func:`check_rows` and
@@ -269,23 +269,42 @@ def load_crystal(structure) -> Any:
     return read(path)
 
 
-def oriented_cell(atoms, zone_axis: Sequence[int]):
+def oriented_cell(atoms, zone_axis: Sequence[int], max_repetitions: int = 10):
     """The crystal turned so the zone axis [uvw] runs along the beam (z) and its shortest in-plane lattice vector along x,
-    as the smallest orthogonal cell that repeats along z. With that in-plane alignment the orthogonal cell is exact; abTEM
-    is told not to strain the lattice to fit one (without the alignment, [111] and [112] came out sheared by 2-4 %)."""
-    from abtem import orthogonalize_cell
+    as the smallest orthogonal cell that repeats along z: the shortest lattice vectors along x, y and z within
+    ``max_repetitions`` of each cell vector. With that in-plane alignment the orthogonal cell is exact; a crystal with no
+    exact orthogonal cell is refused rather than strained to fit one (without the alignment, [111] and [112] would come
+    out sheared by 2-4 %)."""
+    from ase.build import make_supercell
     turned = atoms.copy(); turned.rotate(np.asarray(zone_axis, float) @ turned.cell.array, "z", rotate_cell=True)
     cell = turned.cell.array; in_plane = None
     for n in itertools.product(range(-3, 4), repeat=3):
         vector = np.asarray(n, float) @ cell
         if any(n) and abs(vector[2]) < 1e-6 * np.linalg.norm(vector) and (in_plane is None or np.linalg.norm(vector) < np.linalg.norm(in_plane) - 1e-9):
             in_plane = vector
+    if in_plane is None:
+        raise ValueError(f"No lattice vector perpendicular to {list(zone_axis)} within 3 repetitions; choose a lower-index zone axis.")
     turned.rotate(-math.degrees(math.atan2(in_plane[1], in_plane[0])), "z", rotate_cell=True)
-    # abTEM's allow_transform=False does not raise (its check is commented out), so read the transform and refuse any strain
-    oriented, transform = orthogonalize_cell(turned, max_repetitions=10, return_transform_matrix=True)
-    if not np.allclose(transform, np.eye(3), atol=1e-3):
-        raise ValueError(f"No orthogonal cell of this crystal along {list(zone_axis)} within 10 repetitions without straining the "
-                         f"lattice; choose a lower-index zone axis.")
+    # shortest lattice vector along +x, +y and +z; "along" allows 1e-6 relative off-axis error from the rotations only
+    span = np.arange(-max_repetitions, max_repetitions + 1)
+    combinations = np.stack(np.meshgrid(span, span, span, indexing="ij"), -1).reshape(-1, 3)
+    vectors = combinations @ turned.cell.array; lengths = np.linalg.norm(vectors, axis=1)
+    rows = []
+    for axis in range(3):
+        off_axis = np.linalg.norm(np.delete(vectors, axis, axis=1), axis=1)
+        along = np.flatnonzero((vectors[:, axis] > 1e-6) & (off_axis <= 1e-6 * lengths))
+        if along.size == 0:
+            raise ValueError(f"No orthogonal cell of this crystal along {list(zone_axis)} within {max_repetitions} repetitions without "
+                             f"straining the lattice; choose a lower-index zone axis.")
+        rows.append(combinations[along[np.argmin(lengths[along])]])
+    oriented = make_supercell(turned, np.array(rows))
+    box = np.diag(oriented.cell.array)
+    if not np.allclose(oriented.cell.array, np.diag(box), atol=1e-6 * box.max()):   # unreachable by construction; guards the search
+        raise ValueError(f"No orthogonal cell of this crystal along {list(zone_axis)} within {max_repetitions} repetitions without "
+                         f"straining the lattice; choose a lower-index zone axis.")
+    oriented.set_cell(np.diag(box), scale_atoms=False)
+    scaled = oriented.get_scaled_positions(wrap=False) % 1.0; scaled[scaled > 1 - 1e-9] = 0.0   # in [0, 1): no -0.0 or 1 - eps
+    oriented.set_scaled_positions(scaled)
     return oriented
 
 
@@ -303,17 +322,34 @@ def holz_repeat_A(cell) -> float:
 
 
 def projected_potential(cell, sampling_A: float = _CELL_SAMPLING_A) -> np.ndarray:
-    """Projected potential of one repeat of the oriented cell (V A; abTEM, Lobato parametrisation, static lattice). It does
-    not depend on the voltage; multiply by the interaction constant for the phase. Axis 0 runs along cell vector a."""
-    from abtem import Potential
-    potential = Potential(cell, sampling=sampling_A, parametrization="lobato", projection="infinite")
-    return np.asarray(potential.build().project().array, dtype=np.float32)
+    """Projected potential of one repeat of the oriented cell (V A; Lobato & Van Dyck 2014 scattering factors, infinite
+    atomic projections, static lattice). It does not depend on the voltage; multiply by the interaction constant for the
+    phase. Axis 0 runs along cell vector a. The grid has ``ceil(length / sampling_A)`` points along a and b, so the actual
+    sampling is at most ``sampling_A``; the potential is the exact Fourier sum of the periodic cell over that grid's
+    frequencies (Fourier coefficient (C / area) sum_j f_e,j(|k|) exp(-2 pi i k.r_j), C = h^2 / (2 pi m0 e))."""
+    from ._lobato import projected_scattering_factor
+    lengths = np.diag(cell.cell.array)[:2]
+    shape = tuple(int(math.ceil(length / sampling_A)) for length in lengths)
+    kx, ky = (np.fft.fftfreq(n, length / n) for n, length in zip(shape, lengths))
+    k = np.hypot(kx[:, None], ky[None, :])
+    positions = cell.positions[:, :2]; numbers = cell.numbers
+    species = np.unique(numbers)
+    factors = projected_scattering_factor(species, k, feature="PlanPtycho")
+    spectrum = np.zeros(shape, complex)
+    for factor, number in zip(factors, species):
+        x, y = positions[numbers == number].T
+        spectrum += factor * (np.exp(-2j * np.pi * np.outer(kx, x)) @ np.exp(-2j * np.pi * np.outer(y, ky)))
+    return np.asarray(np.fft.ifft2(spectrum).real * (shape[0] * shape[1] / (lengths[0] * lengths[1])), dtype=np.float32)
 
 
 def interaction_constant(voltage_kV: float) -> float:
-    """Phase per unit projected potential (rad / V A) of a fast electron (abTEM ``energy2sigma``)."""
-    from abtem.core.energy import energy2sigma
-    return float(energy2sigma(voltage_kV * 1e3))
+    """Phase per unit projected potential (rad / V A) of a fast electron: 2 pi m e lambda / h^2 with the relativistic mass
+    and wavelength (CODATA constants)."""
+    from scipy import constants
+    energy = voltage_kV * 1e3 * constants.e; rest = constants.m_e * constants.c**2
+    wavelength = constants.h * constants.c / math.sqrt(energy * (energy + 2 * rest))
+    mass = constants.m_e * (1 + energy / rest)
+    return 2 * math.pi * mass * constants.e * wavelength / constants.h**2 * 1e-10
 
 
 def bragg_reflections(phase: np.ndarray, cell_size_A: Sequence[float], max_g_inv_A: float = _MAX_G_INV_A) -> list[list[float]]:
@@ -397,7 +433,8 @@ class PlanPtycho(anywidget.AnyWidget):
 
     Notes
     -----
-    Needs ``ase`` and ``abtem`` (``pip install "quantem.widget[crystal]"``). :meth:`report` returns the checks as a
+    Needs quantem with ``quantem.diffraction.Crystal`` and ``bloch`` (electronmicroscopy/quantem PR #297, first release
+    after 0.1.9) for the Lobato scattering factors, and ``ase`` (``pip install "quantem.widget[crystal]"``). :meth:`report` returns the checks as a
     DataFrame. The widget has no ``save_state`` or HTML export: the crystal is rebuilt from ``structure``.
     """
 
@@ -472,6 +509,8 @@ class PlanPtycho(anywidget.AnyWidget):
             raise ValueError(f"tilt_mrad must be (row, col) in mrad, got {tilt_mrad!r}.")
         sampling = detector_mrad_per_px if detector == "custom" else detector_sampling_mrad(detector, camera_length_mm)   # raises for an unknown detector
         start = recommended_settings(thickness_nm, voltage_kV=voltage_kV, semiangle_mrad=semiangle_mrad, scan_step_A=scan_step_A)
+        from ._lobato import require_scattering_factors
+        require_scattering_factors("PlanPtycho")
         self._atoms = load_crystal(structure)
         self._custom_title = bool(title)
         native_px = detector_px if detector == "custom" else DETECTORS[detector]["pixels"]
@@ -687,7 +726,7 @@ class PlanPtycho(anywidget.AnyWidget):
         Omitted arguments use the live ``simulation_repeats``,
         ``simulation_pixels_per_cell`` and ``simulation_guard_A`` traits,
         initially (24, 24), 96 and 5 Å. Explicit method arguments do not change
-        those settings. This method plans geometry; it does not run abTEM.
+        those settings. This method plans geometry; it does not run a simulation.
 
         Examples
         --------

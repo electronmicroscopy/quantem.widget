@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS).
+"""Regression shield for the ``save_state`` contract (Plot2D / Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS / DiffractionSim).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -16,16 +16,35 @@ future edit can't silently reintroduce either the bloat or the blank render.
 """
 import base64
 import io
+import json
 import pathlib
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
+from quantem.widget import DiffractionSim, Plot2D, Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
+from quantem.widget._diffraction_sim_crystal import require_crystal_tools
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
+# Widgets whose saved-notebook preview is PNG rather than JPEG.
+PNG_PREVIEW_WIDGETS = (Plot2D, DiffractionSim)
+
+try:
+    require_crystal_tools()
+    _DIFFRACTION_SIM_MISSING = ""
+except ImportError as exc:
+    _DIFFRACTION_SIM_MISSING = str(exc)
+
+
+def _frontend_png_b64() -> str:
+    """A PNG like the one the DiffractionSim frontend captures of its panels."""
+    rng = np.random.default_rng(0)
+    rgb = (rng.random((96, 192, 3)) * 255).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(rgb, mode="RGB").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
@@ -70,6 +89,15 @@ def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
 def _make(widget, *, save_state):
     """Construct a small instance of each widget plus the trait key that carries
     its live-render pixels (the one that must survive the targeted send path)."""
+    if widget is DiffractionSim:
+        # The pattern is simulated in the browser, so the preview PNG comes
+        # from the frontend; set it here as the frontend would after a redraw.
+        # kossel_json (the Kikuchi reference) is the heavy key.
+        w = DiffractionSim("Al (fcc)", save_state=save_state)
+        w.kossel_json = json.dumps({"shape": [8, 8], "data": "A" * 344})
+        if not save_state:
+            w._static_fallback_jpeg = _frontend_png_b64()
+        return w, "kossel_json"
     if widget is Plot2D:
         data = np.arange(24, dtype=float).reshape(4, 6)
         return Plot2D(data, x=np.arange(6), y=np.arange(4),
@@ -92,7 +120,19 @@ def _make(widget, *, save_state):
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Plot2D, Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS]
+WIDGETS = [
+    Plot2D,
+    Show1D,
+    Show2D,
+    Show3D,
+    Show4DSTEM,
+    ShowEDS,
+    pytest.param(
+        DiffractionSim,
+        marks=pytest.mark.skipif(bool(_DIFFRACTION_SIM_MISSING), reason=_DIFFRACTION_SIM_MISSING),
+        id="DiffractionSim",
+    ),
+]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -131,7 +171,7 @@ def test_static_fallback_present(widget):
     bundle = w._repr_mimebundle_()
     data = bundle[0] if isinstance(bundle, tuple) else bundle
     image_keys = [key for key in IMAGE_MIME_KEYS if key in (data or {})]
-    assert image_keys == ["image/png" if widget is Plot2D else "image/jpeg"], (
+    assert image_keys == ["image/png" if widget in PNG_PREVIEW_WIDGETS else "image/jpeg"], (
         f"{widget.__name__}: missing expected static fallback for a cold reopen")
 
 
@@ -1756,7 +1796,7 @@ def test_sibling_static_fallback_contract(widget, monkeypatch):
     assert png_calls, f"{widget.__name__}: deferred fill never rendered the PNG"
     assert "post_execute" not in hooks, "one-shot hook did not unregister"
     fill_data, fill_meta = updated[-1]
-    preview_mime = "image/png" if widget is Plot2D else "image/jpeg"
+    preview_mime = "image/png" if widget in PNG_PREVIEW_WIDGETS else "image/jpeg"
     assert isinstance(fill_data[preview_mime], bytes)
     assert len(fill_data[preview_mime]) > 1000
     assert "quantem-static-fallback" in fill_data["text/html"]
@@ -1834,3 +1874,15 @@ def test_show1d_save_state_true_keeps_buffers():
     full = w.get_state()
     assert "snapshot_bytes" in full
     assert "export_payload" in full
+
+
+@pytest.mark.skipif(bool(_DIFFRACTION_SIM_MISSING), reason=_DIFFRACTION_SIM_MISSING)
+def test_diffractionsim_frontend_capture_refreshes_saved_sibling():
+    """The DiffractionSim preview arrives from the frontend after the cell has
+    run, so each new capture must refill the saved-notebook sibling."""
+    w = DiffractionSim("Al (fcc)")
+    calls = []
+    w._static_fallback_fill = lambda: calls.append(w._static_png_b64())
+    png = _frontend_png_b64()
+    w._static_fallback_jpeg = png
+    assert calls == [png]

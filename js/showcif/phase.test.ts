@@ -1,8 +1,8 @@
 import { expect, it } from "vitest";
 import { interactionConstant } from "./phase";
 
-it("matches independent abTEM energy2sigma values across the electron energy range", () => {
-  // abTEM uses older ASE constants; allow 1 ppm for CODATA-version differences.
+it("matches independent reference interaction constants across the electron energy range", () => {
+  // Reference values from abTEM 1.0.10 energy2sigma (older ASE constants); allow 1 ppm for CODATA-version differences.
   const reference = [
     [1, 0.008112322940737268],
     [10, 0.00259902808855018],

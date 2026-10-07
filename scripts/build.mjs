@@ -7,6 +7,9 @@ import { rmSync, copyFileSync, mkdirSync, existsSync } from "fs";
 import { syncGpuWebgpuSources } from "./sync-gpu-webgpu.mjs";
 
 const watch = process.argv.includes("--watch");
+// --web-only (`npm run build:web`): build only the web-page bundles below and
+// leave static/ alone. A plain build never builds them.
+const webOnly = process.argv.includes("--web-only");
 if (process.env.QUANTEM_WIDGET_SKIP_GPU_WEBGPU_SYNC !== "1") {
   syncGpuWebgpuSources();
 }
@@ -24,10 +27,23 @@ const widgets = [
   { name: "chooselattice" },
   { name: "planptycho" },
   { name: "showcif" },
+  { name: "diffractionsim" },
 ];
 
-rmSync("src/quantem/widget/static", { recursive: true, force: true });
-mkdirSync("src/quantem/widget/static", { recursive: true });
+// Framework-free bundles for web pages (MyST `anywidget` directive), built
+// only by `npm run build:web`: one self-contained ESM file each, with
+// `export default { render }`. They are written to dist/web/, outside the
+// Python package, and copied to the website by hand.
+const webBundles = [
+  { name: "diffraction-sim", entry: "js/diffractionsim-web/index.ts" },
+];
+const webOutDir = "dist/web";
+
+if (!webOnly) {
+  rmSync("src/quantem/widget/static", { recursive: true, force: true });
+  mkdirSync("src/quantem/widget/static", { recursive: true });
+}
+if (webOnly) mkdirSync(webOutDir, { recursive: true });
 
 const baseOpts = {
   bundle: true,
@@ -41,7 +57,7 @@ const baseOpts = {
   legalComments: "none",
 };
 
-for (const w of widgets) {
+for (const w of webOnly ? [] : widgets) {
   const opts = {
     ...baseOpts,
     entryPoints: [`js/${w.name}/index.tsx`],
@@ -63,6 +79,23 @@ for (const w of widgets) {
       copyFileSync(cssSrc, `src/quantem/widget/static/${w.name}.css`);
       break;
     }
+  }
+}
+
+for (const w of webOnly ? webBundles : []) {
+  const opts = {
+    ...baseOpts,
+    entryPoints: [w.entry],
+    outfile: `${webOutDir}/${w.name}.js`,
+  };
+  if (watch) {
+    const ctx = await context(opts);
+    await ctx.watch();
+    console.log(`watching ${w.name}...`);
+  } else {
+    const start = Date.now();
+    await build(opts);
+    console.log(`built ${webOutDir}/${w.name}.js (${Date.now() - start}ms)`);
   }
 }
 
