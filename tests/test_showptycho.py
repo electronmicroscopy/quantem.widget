@@ -551,7 +551,7 @@ def test_legacy_calibration_magnitudes_read_as_angstrom(tmp_path):
     """C3a: a calibration written before the SSB unit fix (no aberration_unit) holds Angstrom under an nm label: read /10.
 
     quantem.gpu's SSB engine evaluates chi with lambda in Angstrom and until 2026-09-24 reported that Angstrom number as nm
-    (abTEM C10 = -100 A came back as -100.26 "nm"). Angles are unit-free and must pass through unchanged.
+    (a simulated C10 = -100 A came back as -100.26 "nm"). Angles are unit-free and must pass through unchanged.
     """
     from quantem.widget.showptycho import load_ptycho_calibration
 

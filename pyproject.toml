@@ -40,8 +40,10 @@ dependencies = [
 # Not published on PyPI yet so cannot be a hard depedency
 # pip install quantem.widget[hub] once available
 hub = ["quantem.data>=0.0.1rc1"]
-# PlanPtycho builds crystals from CIF / Materials Project (spglib: primitive -> conventional cell) and projects them with abTEM (brings ase)
-crystal = ["abtem>=1.0", "spglib>=2"]
+# ShowCIF and PlanPtycho read CIF / Materials Project crystals with ASE (spglib: primitive -> conventional cell).
+# Their projected potentials use quantem's Lobato scattering factors (quantem.diffraction.crystal, electronmicroscopy/quantem
+# PR #297, first release after 0.1.9). PlanPtycho.report returns a pandas DataFrame.
+crystal = ["ase>=3.23", "spglib>=2.5", "pandas"]
 test = [
     "ipykernel>=6",
     "pytest>=8",

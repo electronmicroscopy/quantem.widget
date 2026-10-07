@@ -31,7 +31,10 @@ def test_invalid_support_factor(factor):
 
 
 def test_widget_switch_keeps_cell_and_acquisition():
-    pytest.importorskip("abtem")
+    from quantem.widget._lobato import QUANTEM_REQUIREMENT, scattering_factors_available
+
+    if not scattering_factors_available():
+        pytest.skip(f"needs {QUANTEM_REQUIREMENT}")
     from ase import Atoms
     from quantem.widget import PlanPtycho
 

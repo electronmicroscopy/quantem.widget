@@ -14,7 +14,8 @@ def projected_atom_table(symbol: str, sigma: float = 0.08) -> np.ndarray:
     Parameters
     ----------
     symbol : str
-        Neutral element symbol, using abTEM's Lobato parameters and units.
+        Neutral element symbol. The Lobato & Van Dyck (2014) scattering
+        factors come from ``quantem.diffraction.crystal`` (quantem PR #297).
     sigma : float, default 0.08
         Explicit transverse Gaussian regularization width in Å. This is a
         preview filter, not a fitted displacement or a frozen-phonon model.
@@ -34,25 +35,30 @@ def projected_atom_table(symbol: str, sigma: float = 0.08) -> np.ndarray:
     """
     if not np.isfinite(sigma) or not 0.04 <= sigma <= 0.5:
         raise ValueError("potential_sigma_A must be between 0.04 and 0.5 Å.")
+    from ase.data import atomic_numbers
+    from scipy.integrate import simpson
+    from scipy.special import j0
+
+    from ._lobato import projected_scattering_factor, require_scattering_factors
+
     try:
-        from abtem.parametrizations import LobatoParametrization
-        from scipy.integrate import simpson
-        from scipy.special import j0
+        require_scattering_factors("The ShowCIF potential preview")
     except ImportError as exc:
         raise ImportError(
-            "Potential previews require abTEM and SciPy. Install them in this "
-            "environment, or use ShowCIF(..., potential=False) for atoms only."
+            f"{exc} Use ShowCIF(..., potential=False) for atoms only."
         ) from exc
+    if symbol not in atomic_numbers:
+        raise ValueError(f"Unknown element symbol {symbol!r}.")
 
     # k_max gives exp(-32) Gaussian attenuation. dk resolves the full 8 Å table.
     k = np.linspace(0, 4 / (np.pi * sigma), 2049)
     radius = np.arange(1601, dtype=np.float64) * 0.005
-    spectrum = LobatoParametrization().projected_scattering_factor(symbol)(k * k)
+    spectrum = projected_scattering_factor([atomic_numbers[symbol]], k)[0]
     spectrum = spectrum * np.exp(-2 * np.pi**2 * sigma**2 * k**2) * (2 * np.pi * k)
     table = simpson(j0(2 * np.pi * radius[:, None] * k) * spectrum, x=k, axis=1)
     if not np.all(np.isfinite(table)) or np.min(table) < -1e-3:
         raise ValueError(
-            f"Invalid projected potential for {symbol}; check the abTEM parameters."
+            f"Invalid projected potential for {symbol}; check the Lobato parameters."
         )
     result = np.maximum(table, 0).astype(np.float32)
     result.flags.writeable = False

@@ -7,8 +7,9 @@ import pathlib
 import numpy as np
 import pytest
 
+from quantem.widget._lobato import PROJECTED_POTENTIAL_PER_SCATTERING_FACTOR, QUANTEM_REQUIREMENT, projected_scattering_factor, scattering_factors_available
 from quantem.widget.planptycho import (
-    check_rows, check_statuses, detector_sampling_mrad, plan_geometry, recommended_settings, wavelength_A,
+    check_rows, check_statuses, detector_sampling_mrad, interaction_constant, plan_geometry, recommended_settings, wavelength_A,
 )
 
 GOLDENS = json.loads((pathlib.Path(__file__).resolve().parents[2] / "js" / "planptycho" / "goldens.json").read_text())
@@ -19,8 +20,14 @@ def srtio3():
     return Atoms("SrTiO3", scaled_positions=[(0, 0, 0), (0.5, 0.5, 0.5), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)], cell=[3.905] * 3, pbc=True)
 
 
+def needs_crystal_tools():
+    pytest.importorskip("ase")
+    if not scattering_factors_available():
+        pytest.skip(f"needs {QUANTEM_REQUIREMENT}")
+
+
 def plan(**kwargs):
-    pytest.importorskip("abtem")
+    needs_crystal_tools()
     from quantem.widget import PlanPtycho
     return PlanPtycho(srtio3(), **kwargs)
 
@@ -70,20 +77,76 @@ def test_recommended_focus_splits_the_specimen_and_every_check_passes_to_100_nm(
 # --- crystal
 
 def test_oriented_cells_are_exact_and_small():
-    """Rotating an in-plane lattice vector onto x first makes the orthogonal cell exact: no strain, 30 atoms for [111]."""
-    pytest.importorskip("abtem")
+    """Rotating an in-plane lattice vector onto x first makes the orthogonal cell exact: no strain, 30 atoms for [111].
+    Sizes and atom counts are those abTEM 1.0.10 ``orthogonalize_cell`` gave, except Si [112], where it lost one of 48."""
+    needs_crystal_tools()
+    from ase.build import bulk
     from quantem.widget.planptycho import oriented_cell
-    expected = {(0, 0, 1): ([3.905, 3.905, 3.905], 5), (0, 1, 1): ([3.905, 5.523, 5.523], 10), (1, 1, 1): ([5.523, 9.565, 6.764], 30), (1, 1, 2): ([5.523, 6.764, 9.565], 30)}
-    for zone, (size, atoms) in expected.items():
-        cell = oriented_cell(srtio3(), zone)
-        assert np.diag(cell.cell.array) == pytest.approx(size, abs=1e-3) and len(cell) == atoms, zone
-    with pytest.raises(ValueError, match="without straining"):
-        oriented_cell(srtio3(), (3, 5, 7))
+    titanium = bulk("Ti", "hcp", a=2.9505, c=4.6855)
+    expected = {("SrTiO3", (0, 0, 1)): ([3.905, 3.905, 3.905], 5), ("SrTiO3", (0, 1, 1)): ([3.905, 5.523, 5.523], 10),
+                ("SrTiO3", (1, 1, 1)): ([5.523, 9.565, 6.764], 30), ("SrTiO3", (1, 1, 2)): ([5.523, 6.764, 9.565], 30),
+                ("SrTiO3", (1, 2, 3)): ([6.764, 25.307, 14.611], 210), ("Si", (1, 1, 2)): ([7.679, 9.405, 13.301], 48),
+                ("Ti", (0, 0, 1)): ([2.950, 5.110, 4.686], 4), ("Ti", (2, 1, 0)): ([2.951, 4.686, 5.110], 4)}
+    crystals = {"SrTiO3": srtio3(), "Si": bulk("Si", cubic=True), "Ti": titanium}
+    for (name, zone), (size, atoms) in expected.items():
+        cell = oriented_cell(crystals[name], zone)
+        assert np.allclose(cell.cell.array, np.diag(size), atol=1e-3) and len(cell) == atoms, (name, zone)
+        scaled = cell.get_scaled_positions(wrap=False)
+        assert ((scaled >= 0) & (scaled < 1)).all(), (name, zone)
+    # positions as abTEM placed them (fractional, sorted by element then position)
+    cell = oriented_cell(srtio3(), (0, 1, 1)); scaled = np.round(cell.get_scaled_positions(), 6) % 1
+    order = np.lexsort((scaled[:, 2], scaled[:, 1], scaled[:, 0], cell.numbers))
+    assert [cell.get_chemical_symbols()[i] for i in order] == ["O"] * 6 + ["Ti"] * 2 + ["Sr"] * 2
+    np.testing.assert_allclose(scaled[order], [(0, 0, 0.5), (0, 0.5, 0), (0.5, 0.25, 0.25), (0.5, 0.25, 0.75), (0.5, 0.75, 0.25),
+                                               (0.5, 0.75, 0.75), (0.5, 0, 0.5), (0.5, 0.5, 0), (0, 0, 0), (0, 0.5, 0.5)], atol=1e-6)
+    # refused by abTEM too: no orthogonal cell within 10 repetitions without strain
+    for crystal, zone in ((srtio3(), (3, 5, 7)), (titanium, (0, 1, 1)), (titanium, (1, 1, 1))):
+        with pytest.raises(ValueError, match="without straining"):
+            oriented_cell(crystal, zone)
+
+
+def test_interaction_constant_matches_abtem():
+    """abTEM 1.0.10 ``energy2sigma`` (also pinned in js/showcif/phase.test.ts); abTEM's older ASE constants differ by < 1 ppm."""
+    for voltage, sigma in ((60, 0.0011356905381324882), (80, 0.0010087066046262614), (200, 0.0007288401085927866), (300, 0.0006526161464700888)):
+        assert interaction_constant(voltage) == pytest.approx(sigma, rel=1e-6)
+
+
+def test_projected_potential_grid_mean_and_real_space_reference():
+    """abTEM's grid (ceil(length / sampling) points) and mean; the mean is C sum_j f_e,j(0) / area exactly; blurred by a
+    Gaussian, the Fourier sum equals the sum of the real-space radial tables ShowCIF uses (independent Hankel transform)."""
+    needs_crystal_tools()
+    from ase.build import bulk
+    from quantem.widget._showcif_potential import projected_atom_table
+    from quantem.widget.planptycho import oriented_cell, projected_potential
+    abtem_reference = {("SrTiO3", (0, 0, 1)): ((79, 79), 87.83967), ("Au", (0, 1, 1)): ((82, 116), 172.06822),
+                       ("Si", (0, 1, 1)): ((109, 154), 107.21446)}
+    crystals = {"SrTiO3": srtio3(), "Au": bulk("Au", cubic=True), "Si": bulk("Si", cubic=True)}
+    for (name, zone), (shape, mean) in abtem_reference.items():
+        cell = oriented_cell(crystals[name], zone); potential = projected_potential(cell)
+        lengths = np.diag(cell.cell.array)[:2]; area = lengths[0] * lengths[1]
+        assert potential.shape == shape and potential.dtype == np.float32, name
+        assert potential.mean() == pytest.approx(mean, rel=1e-5), name
+        assert potential.mean() == pytest.approx(projected_scattering_factor(cell.numbers, [0.0])[:, 0].sum() / area, rel=1e-5), name
+    assert PROJECTED_POTENTIAL_PER_SCATTERING_FACTOR == pytest.approx(47.8776, rel=1e-5)
+    # Real-space reference for SrTiO3 [001], both blurred by sigma = 0.08 A
+    sigma = 0.08
+    cell = oriented_cell(srtio3(), (0, 0, 1)); potential = projected_potential(cell).astype(float); length = cell.cell[0, 0]
+    k = np.fft.fftfreq(potential.shape[0], length / potential.shape[0])
+    blurred = np.fft.ifft2(np.fft.fft2(potential) * np.exp(-2 * np.pi**2 * sigma**2 * (k[:, None] ** 2 + k[None] ** 2))).real
+    x = np.arange(potential.shape[0]) * length / potential.shape[0]
+    reference = np.zeros_like(blurred)
+    for symbol, (px, py, _) in zip(cell.get_chemical_symbols(), cell.positions):
+        table = projected_atom_table(symbol, sigma)
+        for i in range(-3, 4):
+            for j in range(-3, 4):
+                r = np.hypot(x[:, None] - px - i * length, x[None] - py - j * length)
+                reference += np.interp(r, np.arange(1601) * 0.005, table, right=0.0)
+    assert np.sqrt(np.mean((blurred - reference) ** 2) / np.mean(reference**2)) < 3e-4
 
 
 def test_holz_period_counts_centring():
     """fcc Au [011]: the orthogonal repeat is 5.77 A but the first non-empty reciprocal layer is the second (period 2.88 A)."""
-    pytest.importorskip("abtem")
+    needs_crystal_tools()
     from ase.build import bulk
     from quantem.widget.planptycho import holz_repeat_A, oriented_cell
     assert holz_repeat_A(oriented_cell(bulk("Au", cubic=True), (0, 1, 1))) == pytest.approx(4.078 / math.sqrt(2), abs=0.01)
@@ -92,10 +155,12 @@ def test_holz_period_counts_centring():
 
 
 def test_srtio3_bragg_orders_and_column_phase():
-    pytest.importorskip("abtem")
+    needs_crystal_tools()
     from quantem.widget.planptycho import bragg_reflections, column_phase_rad_per_A, interaction_constant, oriented_cell, projected_potential
     cell = oriented_cell(srtio3(), (0, 0, 1)); phase = interaction_constant(300) * projected_potential(cell)
-    assert phase.max() == pytest.approx(1.729, abs=0.01)                       # strongest (Sr) column per 3.905 A repeat, 0.05 A grid
+    # strongest (Sr) column per 3.905 A repeat, 0.05 A grid. abTEM 1.0.10 gave 1.729: it spreads atoms bilinearly over
+    # four pixels and divides by a sinc that does not undo that spreading, so its peaks differ from the exact sum by ~1 %
+    assert phase.max() == pytest.approx(1.709, abs=0.01)
     reflections = bragg_reflections(phase, (3.905, 3.905))
     order = lambda h, k: [r[2] for r in reflections if math.hypot(r[0], r[1]) == pytest.approx(math.hypot(h, k) / 3.905, rel=1e-9)]
     # [001]: Sr and TiO columns on one checkerboard, O on the other. {200} all in phase (strongest), {110} O against the rest,
@@ -110,11 +175,12 @@ def test_defaults_come_from_the_arina_preset_and_focus_splits_the_specimen():
     p = plan(thickness_nm=60)
     assert (p.detector, p.camera_length_mm, p.detector_px, p.detector_mrad_per_px, p.voltage_kV, p.semiangle_mrad) == ("Arina", 91.0, 192, pytest.approx(0.554), 300.0, 30.0)
     assert p.focus_depth_nm == 30.0
+    pytest.importorskip("pandas")                                     # report() returns a DataFrame
     assert set(p.report()["status"]) <= {"pass", "info"}
 
 
 def test_zone_change_keeps_a_custom_title_and_builds_once(monkeypatch):
-    pytest.importorskip("abtem")
+    needs_crystal_tools()
     import quantem.widget.planptycho as module
     calls = []
     real = module.oriented_cell
@@ -143,7 +209,7 @@ def test_camera_and_length_recalibrate_from_python():
 
 
 def test_voltage_rescales_without_rebuilding(monkeypatch):
-    pytest.importorskip("abtem")
+    needs_crystal_tools()
     import quantem.widget.planptycho as module
     p = module.PlanPtycho(srtio3())
     potential = p._potential.copy()

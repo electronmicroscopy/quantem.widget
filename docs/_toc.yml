@@ -80,6 +80,7 @@ parts:
           - file: api/showdiffraction
           - file: api/choose-lattice
           - file: api/showcif
+          - file: api/diffractionsim
           - file: api/planptycho
           - file: api/html-export
           - file: api/io

@@ -50,6 +50,7 @@ for backend setup, Colab instructions, and verification.
 | `ShowDiffraction` | Measure diffraction spots, rings, spacing, and angles | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/showdiffraction.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/showdiffraction.html) |
 | `ChooseLattice` | Select an origin and lattice vectors | [API](https://electronmicroscopy.github.io/quantem.widget/api/choose-lattice.html) |
 | `PlanPtycho` | Check multislice ptychography settings against a known crystal before the experiment | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/planptycho.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/planptycho.html) |
+| `DiffractionSim` | Rotate a crystal and see its nanobeam, CBED, or Kikuchi pattern, computed in the browser | [API](https://electronmicroscopy.github.io/quantem.widget/api/diffractionsim.html) |
 | `ShowEDS` | Explore linked EDS/EELS maps and spectra | — |
 
 ## Documentation

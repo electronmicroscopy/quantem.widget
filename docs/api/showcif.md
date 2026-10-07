@@ -10,7 +10,9 @@ viewer = ShowCIF("crystal.cif", repeats=(4, 4, 8), zone_axis=(0, 0, 1))
 viewer
 ```
 
-Install `quantem.widget[crystal]` for ASE and the optional abTEM potential tables.
+Install `quantem.widget[crystal]` for ASE. The optional potential preview also
+needs quantem with `quantem.diffraction.Crystal` and `bloch` (quantem PR #297,
+first release after 0.1.9) for its Lobato scattering factors.
 Rendering requires WebGPU in a secure browser context (HTTPS or localhost).
 
 ## Reference
@@ -85,8 +87,10 @@ supports up to 8,192 atoms. Larger structures remain available in the atom
 viewer; reduce repeats to enable their potential preview. No atoms are silently
 removed to meet the limit.
 
-Maps use neutral abTEM Lobato **infinite atomic projections**, assigned to depth
-slabs by atomic-site position. They are not finite-z potential integrals, bonded
+Maps use **infinite atomic projections** of neutral-atom Lobato scattering
+factors (Lobato & Van Dyck, Acta Cryst. A 70, 636 (2014),
+<https://doi.org/10.1107/S205327331401643X>), assigned to depth slabs by
+atomic-site position. They are not finite-z potential integrals, bonded
 charge density, or a multislice propagation. A finite inspection patch is used;
 there are no periodic images beyond the explicit repeats.
 

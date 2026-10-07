@@ -1,4 +1,4 @@
-/** WebGPU accumulation of abTEM radial atomic projections, in V Å. */
+/** WebGPU accumulation of Lobato radial atomic projections (tables from Python), in V Å. */
 import { GPUColormapEngine, COLORMAPS } from "../colormaps";
 import { type V3 } from "./geometry";
 export type PotentialGeometry = {
