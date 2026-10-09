@@ -5,10 +5,11 @@ Linked top and arbitrary-angle side cuts through a 3D volume. See the
 
 ## Viewer UI
 
-`Show3DSlices` supports the shared `ui_mode`, `show_title`, `show_controls`,
-`controls_collapsed`, `show_stats`, `show_crosshair`, and `show_scale_bar`
-names. The saved-state scale-bar trait remains `scale_bar_visible` for
-compatibility. See [Viewer UI controls](viewer-ui).
+`Show3DSlices` takes the shared `show_title` and `show_scale_bar` names at
+construction; `show_controls`, `controls_collapsed` and `show_crosshair` are
+synced traits set after construction, as the browser controls do. The
+saved-state scale-bar trait is `scale_bar_visible`. See
+[Viewer UI controls](viewer-ui).
 
 ## Reference
 
@@ -28,18 +29,19 @@ compatibility. See [Viewer UI controls](viewer-ui).
 | Oblique line drag | `oblique_profile_line`, `oblique_angle`, `slice_x`, `slice_y` | Drag either endpoint to rotate/resize the side cut, or drag the line body to translate the whole cut freely in row/col while staying inside the top slice |
 | Oblique angle | `oblique_angle` | Rotates the oblique cut plane |
 | Colormap dropdown | `cmap` | Recolors all panels |
-| Contrast min / max | `vmin`, `vmax` | Display clamp changes |
-| Auto-contrast toggle | `auto_contrast` | Re-fits the percentile range |
+| Contrast min / max | `vmin`, `vmax` | The display window, used exactly as given; while either is set, Auto is off and its switch is disabled |
+| Auto-contrast toggle | `auto_contrast` | Re-fits the 2/98 percentile range of the volume; only when `vmin` and `vmax` are both None |
 | Log-scale toggle | `log_scale` | Log intensity mapping |
+| Smooth toggle | `smooth` | Off by default: each voxel of a slice is drawn as a sharp block (nearest neighbour). On: bilinear interpolation where the canvas enlarges a slice. Display only |
 | Slice alignment | `slice_alignment`, `row_shift_px_per_slice`, `col_shift_px_per_slice` | Open **Advanced** and enable **Slice alignment**. The first enable estimates one global row/col shift per slice automatically; later raw/aligned toggles reuse the cached estimate and aligned display volume. The sliders refine the cached result without modifying the raw volume. |
 | FFT toggle | `show_fft`, `fft_window` | Panels show power spectra |
 | Z-stretch | `z_stretch` | Depth axis scaled for anisotropic voxels |
 | Scale bar toggle | `scale_bar_visible` | Calibrated bar shows/hides |
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer (exact / quantized) |
 
-Automatic slice alignment high-pass filters adjacent reconstructed slices with
-a Gaussian sigma capped at 12 pixels, then refines each translation on a 20x
-local matrix-DFT grid. The 12-pixel scale is an empirical preprocessing setting,
+Automatic slice alignment (`quantem.widget.show3dslices.alignment`) high-pass
+filters adjacent reconstructed slices with a Gaussian sigma capped at 12
+pixels, then refines each translation on a 20x local matrix-DFT grid. The 12-pixel scale is an empirical preprocessing setting,
 not a physical microscope parameter. The subpixel method follows
 [Guizar-Sicairos, Thurman, and Fienup (2008), DOI 10.1364/OL.33.000156](https://doi.org/10.1364/OL.33.000156).
 The resulting row/col trajectory is reduced to one global linear shift per
@@ -72,15 +74,5 @@ w = Show3DSlices(
 )
 ```
 
-Explicit page dictionaries are also accepted:
-
-```python
-w = Show3DSlices([
-    {"title": "before", "volume": before},
-    {"title": "after", "volume": after},
-])
-```
-
-`set_page()`, `next_page()`, and `previous_page()` provide the same workflow
-from Python. Existing 4D calls without `page_labels` keep their legacy
-multi-panel meaning, so saved notebooks do not silently change interpretation.
+Set `page_idx` to switch pages from Python. A 4D array without `page_labels`
+is a multi-panel volume, as before.

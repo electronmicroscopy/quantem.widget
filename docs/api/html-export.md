@@ -4,9 +4,10 @@
 
 1. **Widget-level HTML**: `widget.export_html(...)` writes one standalone widget
    viewer. Use this when a single Show1D / Show2D / Show3D / Show3DSlices /
-   Show4DSTEM / ShowEDS view is the artifact.
-2. **Notebook-level HTML**: `quantem html notebook.ipynb --no-execute` exports a
-   whole notebook with its saved widget state. Use this for reports and
+   Show4DSTEM view is the artifact.
+2. **Notebook-level HTML**: `jupyter nbconvert --to html notebook.ipynb`
+   exports a whole notebook with its saved widget state (add `--execute` to
+   rerun it first). Use this for reports and
    tutorials that combine text, figures, and multiple widgets.
 3. **GitHub preview notebook**: `quantem github notebook.ipynb --no-execute`
    keeps a notebook readable on GitHub by replacing live widgets with compressed
@@ -30,48 +31,31 @@ to find.
 
 ## Python contract
 
-Every export-capable widget should expose:
-
-```python
-from pathlib import Path
-
-path: Path = widget.export_html(
-    path=None,          # str | pathlib.Path | None
-    title=None,         # optional browser page title when supported
-    mode="single",      # "single" or "folder"
-    encoding="full",    # "full", "uint8", or widget-specific
-    downsample=None,    # None, 2, 4, or widget-specific
-)
-```
-
-The method returns the written `pathlib.Path`, creates parent directories, and
-updates `widget.export_status` with the filename, size, and selected export mode.
-The exported page must hydrate with the ipywidgets HTML manager and run without a
-live Python kernel. Browser-side changes in the HTML are local; they do not write
+Every export-capable widget exposes `export_html(path=None, *, title=None, ...)`.
+It returns the written `pathlib.Path`, creates parent directories, and updates
+`widget.export_status` with the filename, size, and selected encoding. The
+exported page hydrates with the ipywidgets HTML manager and runs without a live
+Python kernel. Browser-side changes in the HTML are local; they do not write
 back to the `.ipynb` or `.html` file.
 
-For type hints or feature detection, use the structural protocol:
+| Widget | Python API |
+|---|---|
+| Show1D | `export_html(path=None, *, title=None, mode="single", encoding="full", downsample=None)` |
+| Show2D | `export_html(path=None, *, title=None, mode="single", encoding="full", downsample=None, quantized=None, max_mb=...)` |
+| Show3D | `export_html(path=None, *, title=None, mode="single", encoding="full", downsample=None, quantized=None, max_mb=...)` |
+| Show3DSlices | `export_html(path=None, *, title=None, encoding="full")` |
+| Show4DSTEM | `export_html(path=None, *, title=None, dtype="uint8", det_bin=1, scan_bin=1, export_kind="interactive", dataset_scope="unhidden")` |
+| ShowDiffraction | `export_html(path=None, *, title=None)` |
+| ShowPtycho | `export(path)` writes a folder: the widget page over exact bright-field counts; the browser builds transient BF-indexed reducers in WebGPU |
 
-```python
-from quantem.widget import SupportsHtmlExport, supports_html_export
-
-def maybe_export(widget: object) -> None:
-    if supports_html_export(widget):
-        widget.export_html("viewer.html")
-```
-
-```{eval-rst}
-.. autoclass:: quantem.widget.export.SupportsHtmlExport
-   :members:
-
-.. autoclass:: quantem.widget.export.SupportsFrontendHtmlExport
-   :members:
-```
+`encoding="uint8"` (or `quantized=True`) stores display-scaled data; `downsample`
+reduces the shape before export. Each reduction is explicit: nothing is binned
+or quantized unless the call asks for it.
 
 ## HTML export button
 
-Widgets that expose an in-widget **Export** button should use the same synced
-traits:
+Widgets that expose an in-widget **Export** button share these synced traits
+(`HtmlExportMixin` in `quantem/widget/export.py`):
 
 | Trait | Direction | Purpose |
 |---|---|---|
@@ -82,112 +66,31 @@ traits:
 | `export_payload_id` | Python -> JS | Echoes the request id so JS downloads the right payload once |
 | `export_filename` | Python -> JS | Suggested download filename |
 
-The standard request shape is:
-
-```json
-{
-  "mode": "single",
-  "encoding": "full",
-  "downsample": null,
-  "id": "unique-request-id",
-  "filename": "viewer.html",
-  "download": true
-}
-```
-
-For older widgets, legacy request modes such as `exact`, `quantized`, or
-`uint8-bin2` may still be accepted. New code should use `mode`, `encoding`, and
-`downsample`. `download=true` means Python should build HTML bytes into
-`export_payload`; otherwise Python may write directly to disk by calling
-`export_html(...)`.
-
-## Standard options
-
-Use the same three option names across widgets:
-
-| Option | Meaning | Preferred values |
-|---|---|---|
-| `mode` | where the data lives | `single`, `folder` |
-| `encoding` | how the data is stored | `full`, `uint8`, widget-specific |
-| `downsample` | whether dimensions are reduced before export | `None`, `2`, `4`, widget-specific |
-
-`mode` is packaging. It should not imply lower precision or a smaller shape.
-`encoding` is storage representation. It replaces vague API names like
-`quantized`. `downsample` is shape reduction. Each widget must document whether
-the reducer is mean, sum, min/max, or another operation, and the export UI must
-label the choice clearly enough that users know whether the file is
-browse-quality or count-preserving.
+The Show2D and Show3D menus send `{"mode": "exact" | "quantized", "id": ..., "filename": ..., "download": true}`;
+`download=true` means Python builds HTML bytes into `export_payload`, otherwise
+it writes the file by calling `export_html(...)`.
 
 ## Widget capability table
 
-| Widget | HTML export | Mode | Encoding | Downsample | Folder export | Reducer / notes |
-|---|---|---|---|---|---|---|
-| Show1D | yes | `single` | `full` | `1`, `2`, `4`, `8` | no | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
-| Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
-| Show3D | yes | `single` | `full`, `uint8` | `1`, `2`, `4`, `8` | no | `uint8` stores display-scaled volume data; use explicit downsampling for smaller portable reports. Legacy sidecar folders remain readable but cannot be newly created. |
-| Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
-| Show4DSTEM | yes | `single`; interactive exports may write a local launcher/folder when a companion payload must be served | `uint8`, `full`/`uint16` | detector: `1`, `2`, `4`, `8`; scan: `1`, `2`, `4`, `8` | yes, for companion-data interactive exports and HDF5 bundles | `export_kind="report"` writes static PNG virtual-image pages with no raw 4D; `export_kind="interactive"` writes browser WebGPU raw-4D payload. The CLI WebGPU folder keeps source HDF5 beside `index.html` and `Show4DSTEM.command`. `scan_bin` and `det_bin` are explicit mean-binning choices. |
-| ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
+| Widget | Encoding | Downsample | Reducer / notes |
+|---|---|---|---|
+| Show1D | `full` | `1`, `2`, `4`, `8` | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
+| Show2D | `full`, `uint8` | `1`, `2`, `4`, `8` (uint8 only) | `uint8` stores display-scaled image data; downsample is a mean bin |
+| Show3D | `full`, `uint8` | `1`, `2`, `4`, `8` (uint8 only) | `uint8` stores display-scaled volume data; downsample is a mean bin |
+| Show3DSlices | `full`, `uint8` | none | `uint8` packs against the global range |
+| Show4DSTEM | `dtype="uint8"`, `"uint16"` | `det_bin`, `scan_bin`: `1`, `2`, `4`, `8` | mean bin; `uint8` clips counts above 255 and says how many; `export_kind="report"` writes static PNG virtual-image pages with no raw 4D; interactive exports write a local launcher beside the page |
 
-The public Python calls are:
+## Single-file exports
 
-| Widget | Python API |
-|---|---|
-| Show1D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show2D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show4DSTEM | `export_html(path=None, title=None, mode="single", encoding=None, downsample=None, dtype="uint8", det_bin=1, scan_bin=1, real_space_bin=None, export_kind="interactive", dataset_scope="unhidden")`; for compact screening use `export_kind="report"` |
-| ShowPtycho | `export_webgpu_folder(out_dir)` for browser-side SSB review from compressed HDF5 source files; transient BF-indexed reducers are built in WebGPU |
-| ShowEDS | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-
-Existing compatibility aliases remain supported:
-
-| Old option | Preferred option |
-|---|---|
-| `quantized=True` | `encoding="uint8"` |
-| `dtype="uint8"` | `encoding="uint8"` |
-| `dtype="uint16"` | `encoding="full"` |
-| `det_bin=2` | `downsample=2` |
-| `binning=4` | `downsample=4` |
-
-For Show4DSTEM, prefer the newer explicit names instead of the generic
-compatibility aliases: `dtype="uint8"` or `"uint16"`, `det_bin=...`,
-`scan_bin=...`, and `export_kind="report"` or `"interactive"`.
-
-## Single and folder exports
-
-Use `mode="single"` when you want one HTML file. This is the default because it
-is easiest to email, upload, and move around.
-
-Use `mode="folder"` when the HTML file should read exact data from a nearby
-data folder or URL. The HTML contains the viewer and startup state; the large
-dataset stays outside the HTML file.
-
-For Show4DSTEM WebGPU CLI exports, this folder shape is the normal
-full-detector no-notebook path: `index.html`, `Show4DSTEM.command`, `.viewer/`,
-and anonymous `tilt_NN_master.h5` / `tilt_NN_data_*.h5` links. Double-click
+`export_html` writes one HTML file: easiest to email, upload, and move around.
+When the exact data is too large for one file, Show2D and Show3D refuse above
+`max_mb` and name the smaller options (`encoding="uint8"`, `downsample=2` or
+`4`); pass `max_mb=None` to force the size. Show4DSTEM interactive exports and
+the CLI WebGPU route keep their data beside the page and serve it with
+`Show4DSTEM.command`: `index.html`, `Show4DSTEM.command`, `.viewer/`, and
+anonymous `dataset_NN_master.h5` / `dataset_NN_data_*.h5` links. Double-click
 `index.html` and grant the folder in Chromium, or run the command file to serve
-the same folder locally. Do not replace that path with a precomputed lazy
-`profile.bin`/`com.bin` bundle in public docs.
-
-Use `mode="folder"` when:
-
-- the exact dataset is too large to put inside one HTML file,
-- the audience is internal and can keep a folder next to the HTML,
-- preserving full data matters more than having one portable file.
-
-Use `mode="single"` when:
-
-- you are sending one file by email or Slack,
-- the file will be posted as a simple web download,
-- the reader may move the HTML without its data folder.
-
-Use `downsample=2` or `downsample=4` when you still want `mode="single"` but
-the exact dataset is too large. Downsampling makes a smaller one-file HTML
-export by combining nearby pixels, voxels, detector pixels, or energy channels.
-For lab sharing, `mode="folder"` is useful because it keeps exact data without
-making the HTML enormous.
+the same folder locally.
 
 Reducer choice is part of the scientific contract. Compact `uint8` 4D-STEM
 exports should avoid immediate clipping, so detector downsample may use a
@@ -210,7 +113,11 @@ exported page.
 
 Use `export_kind="interactive"` when the reader must keep changing detector ROIs
 offline in the browser. It embeds or serves a binned raw-4D payload and runs the
-virtual-detector math in WebGPU. This can be much larger than a report.
+virtual-detector math in WebGPU. This can be much larger than a report. The
+payload is the viewer's 4D array. A live viewer over `quantem.gpu.io.load`
+acquisitions, including `Show4DSTEM.from_folder(...)`, reads that array in small
+scan windows, so the export copies every acquisition to host memory at the
+chosen dtype and binning while the GPU keeps only the encoded storage.
 
 For raw HDF5 masters, prefer the CLI WebGPU folder route when the user wants
 native detector sampling without a notebook:
@@ -267,11 +174,11 @@ HTML export and GitHub preview solve different problems:
 | Command | Output | Interactive | Use it for |
 |---|---|---:|---|
 | normal `.ipynb` saved from Jupyter | notebook with widget state | yes, in Jupyter | continuing work |
-| `quantem html notebook.ipynb --no-execute` | standalone HTML page | yes, in a browser | sharing an interactive report |
+| `jupyter nbconvert --to html notebook.ipynb` | standalone HTML page | yes, in a browser | sharing an interactive report |
 | `quantem github notebook.ipynb --no-execute` | optional notebook copy with compressed widget pictures | no | GitHub notebook preview |
 
 GitHub does not run widget JavaScript. Use the hosted documentation, Colab,
-Jupyter, or `quantem html` for real interaction. The `quantem github` command is
+Jupyter, or the nbconvert HTML for real interaction. The `quantem github` command is
 only for a separate non-interactive notebook copy for GitHub's native renderer;
 never run it in place on the canonical tutorial notebooks.
 
@@ -280,16 +187,12 @@ never run it in place on the canonical tutorial notebooks.
 For a new widget, copy the pattern from the closest existing widget:
 
 - Public `export_html(...) -> pathlib.Path`.
-- Private `_default_html_export_path(...)` with a readable slug, shape, and mode.
-- Private `_write_html_export(...)` using `ipywidgets.embed.embed_minimal_html`
-  with `dependency_state(..., drop_defaults=False)`.
-- Optional `_html_export_bytes(...)` for the browser download path.
-- Optional `_clone_for_html_export(...)` when the standalone artifact needs a
-  packed/export-only widget state.
-- Standard HTML export button traits listed above.
-- Export status strings that include both file size and mode.
+- `HtmlExportMixin` for the toolbar handshake; override
+  `_html_export_options(...)`, `_default_html_export_path(...)` and
+  `_export_mode_label(...)` for the widget's options.
+- `_clone_for_html_export(...)` when the standalone artifact needs a
+  packed/export-only widget state; `write_widget_html` writes the page.
+- Export status strings that include both file size and encoding.
 
-Do not force all widgets through one base class. The shared part is the public
-shape; the data packing must remain widget-specific so full, uint8,
-downsampled, and folder exports can be honest about precision, size, and
-performance.
+The data packing stays widget-specific so full, uint8 and downsampled exports
+are honest about precision, size, and performance.

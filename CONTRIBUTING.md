@@ -80,8 +80,8 @@ npm test
 You do not need to memorize a separate command for every widget. The
 [pull-request template](.github/PULL_REQUEST_TEMPLATE.md) routes each type of
 change to the relevant checks, and the
-[performance and UI testing guide](docs/maintainer/performance-ui-testing.md)
-documents specialized and release-level gates.
+[release guide](docs/maintainer/widget-release.md) documents the release-level
+gates.
 
 ## Use the pull-request template
 

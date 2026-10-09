@@ -45,9 +45,19 @@ first, killing the visible hamburger. Two defenses, keep both:
 
 CI is never the first build. Before pushing docs changes:
 
-1. `scripts/docs_preview.sh` (full build + no-store server on port 8767);
-   for CSS-only tweaks, `--no-build` and copy the asset into
-   `docs/_build/html/_static/`.
+1. Build and serve the site locally:
+
+   ```bash
+   python scripts/stage_docs_anywidget_runtime.py
+   jupyter-book build docs --all
+   python scripts/check_docs_widget_provenance.py docs/_build/html
+   python docs/serve.py --port 8767
+   ```
+
+   For CSS-only tweaks, skip the build and copy the asset into
+   `docs/_build/html/_static/`. A built tutorial page over ~25 MB means a
+   widget is syncing a bulk buffer into baked state; find the heavy trait in
+   the page's `widget-state+json` block.
 2. Drive the built pages at phone (375/420), laptop (~1500), and large
    desktop (~1900) widths — with the left sidebar **both expanded and
    collapsed**, and the phone drawer opened and closed.

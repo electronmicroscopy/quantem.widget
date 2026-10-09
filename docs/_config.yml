@@ -1,7 +1,7 @@
 # Jupyter Book 1.x config for the quantem.widget docs site.
 # Tutorial notebooks are EXECUTED at build time ("force"): tutorial data
 # downloads from Hugging Face and myst-nb bakes the resulting widget state into
-# the HTML, so the published widgets stay interactive offline. Committed
+# the HTML, so the published widgets stay interactive without a Python kernel. Committed
 # notebooks carry no baked state (repo stays small). "force" (not "cache") is
 # deliberate: jupyter-cache does not preserve metadata.widgets, which would
 # silently blank every widget. Building locally needs the package installed
@@ -19,7 +19,7 @@ execute:
 
 # Embedded anywidget views need the ipywidgets HTML manager in the static page.
 # myst-nb writes the widget state baked into each notebook; this pulls the JS
-# runtime that rehydrates it so the published widgets stay interactive offline.
+# runtime that rehydrates it so the published widgets stay interactive without a Python kernel.
 sphinx:
   extra_extensions:
     - sphinx.ext.autodoc
@@ -39,9 +39,7 @@ sphinx:
     # mock the heavy + native deps. The pure-python deps (anywidget, traitlets,
     # numpy, quantem core) are installed in the docs build step.
 
-    # quantem.data is optional (not on PyPI)
-    # mock it so autodoc can still import quantem.widget.io.hub to
-    # document list_datasets and download
+    # quantem.data is optional (not on PyPI); only the hub extra uses it
     autodoc_mock_imports:
       - anywidget
       - quantem.data

@@ -56,7 +56,7 @@ Six pieces, all in the widget class:
 | widget | `_UNSAVED_HEAVY_KEYS` | static PNG source |
 |---|---|---|
 | Show2D | `frame_bytes`, `export_payload` | the N panels in `_data` |
-| Show3D | `frame_bytes`, `_buffer_bytes`, `_offline_stack`, `_offline_float_stack`, `export_payload` | evenly-spaced slices of the z-stack |
+| Show3D | `_offline_stack`, `_offline_float_stack`, `export_payload` | evenly-spaced slices of the z-stack |
 | Show4DSTEM | `_offline_stack`, `export_payload`, `_gif_data` | the virtual (BF/ADF) image |
 
 ## Executing notebooks small (the other half)
@@ -87,8 +87,7 @@ save. Verify **both halves**:
    `heavy_key in get_state(heavy_key)` (targeted survives) while
    `heavy_key not in get_state(None)` (full snapshot trimmed). This is the exact
    mechanism that delivers pixels to the frontend; if the targeted lookup keeps the key,
-   live render works. (Show3D's `frame_bytes` is empty at construction because it streams
-   on scrub - the key must still be *present*, just empty.)
+   live render works.
 2. **Visual oracle (browser-free):** execute on real data, extract the cell's
    `image/png`, and *look at it*. Confirm the panels are the real render, not blank.
 3. **Live browser drive (when the environment allows headed Chrome):** open the notebook

@@ -12,10 +12,10 @@ The human creates the Write token and attests permission. The agent runs
 After that Hugging Face PR is merged, open a GitHub PR here only if a
 notebook should load the fixture by name:
 
-- helper in `src/quantem/widget/data/tutorials.py`
+- helper in `src/quantem/widget/datasets.py`
 - list it on [Tutorial Datasets](../api/datasets.md)
 - use it in the tutorial
 - link the Hugging Face PR
 
 A new widget is discuss-first. See [Pull requests](../maintainer/pull-requests.md).
-Do not commit `.npy` or `.emd` here. Do not call `quantem.widget.io.upload`.
+Do not commit `.npy` or `.emd` here.

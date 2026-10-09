@@ -19,15 +19,27 @@ Each widget should be self-contained, meaning that its Python module and `js/<bu
 |---|---|
 | Widget state, layout, and interactions | `src/quantem/widget/<widget>.py` and `js/<bundle>/` |
 | Frontend helpers for several widgets | shared modules at the top of [`js/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js) |
-| WebGPU browser computation - FFT, reductions, histograms | [`quantem.gpu`](https://github.com/bobleesj/quantem.gpu) |
+| Display math - colormaps, ranges, histograms, display FFT, display geometry | [`js/display/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js/display) |
+| WebGPU science kernels - detector reductions, HDF5/bslz4 browser IO, SSB | [`quantem.gpu`](https://github.com/bobleesj/quantem.gpu) |
 
-The rule of thumb is that browser-GPU work that is not specific to one widget belongs in `quantem.gpu`, so that every widget reuses the same kernels. [`scripts/sync-gpu-webgpu.mjs`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/sync-gpu-webgpu.mjs) generates them into `js/.generated/engine/` before each frontend build:
+Display math is widget source. Each operation has a JavaScript path that runs
+without WebGPU and a WebGPU path that must give the same pixels; the widget
+shows which one is active (`WebGPU` or `CPU` in the title row).
+
+Science kernels belong to `quantem.gpu`.
+[`scripts/sync-gpu-webgpu.mjs`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/sync-gpu-webgpu.mjs)
+copies its `detector/`, `dpc/`, `formats/`, `io/` and `ssb/` sources into
+`js/.generated/engine/` for the two bundles that use them, `show4dstem` and
+`showptycho`. Building those bundles needs the quantem.gpu source (set
+`QUANTEM_GPU_SRC=/path/to/quantem.gpu/src`, or install quantem.gpu in the Python
+named by `PYTHON`); without it the build stops and names `QUANTEM_GPU_SRC`.
+Every other bundle builds from widget source alone:
 
 ```bash
-npm run sync:webgpu
+npm run build -- show2d show3d
 ```
 
-Always edit the file in `quantem.gpu`, never the generated copy.
+Always edit science kernels in `quantem.gpu`, never the generated copy.
 
 ## Before you start
 
@@ -46,7 +58,7 @@ This should be consistent across the Python API, frontend, tests, and documentat
 
 | Base | Use when | Example |
 |---|---|---|
-| Subclass an existing viewer (`Show2D`, `Show3D`, …) | The new widget is mostly an existing viewer with an additional interaction or analysis tool | [`Mask2D`](../api/mask2d): [`mask2d.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/mask2d.py), [`js/mask2d/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/mask2d/index.tsx) |
+| Subclass an existing viewer (`Show2D`, `Show3D`, …) | The new widget is mostly an existing viewer with an additional interaction or analysis tool | [`Show3DSlices`](../api/show3dslices): [`show3dslices.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/show3dslices/widget.py), [`js/show3dslices/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/show3dslices/index.tsx) |
 | Standalone `anywidget.AnyWidget` | The widget has its own layout or only needs a small part of the existing viewer infrastructure | [`ChooseLattice`](../api/choose-lattice): [`choose_lattice.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/choose_lattice.py), [`js/chooselattice/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/chooselattice/index.tsx) |
 
 `Ruler2D` is better as a standalone widget. It only needs an image and two endpoints, so carrying the complete `Show2D` state would add unnecessary complexity. When unsure, start by finding the existing widget whose behavior is closest to what you are building.
@@ -103,8 +115,8 @@ Use the existing frontend infrastructure:
 |---|---|
 | [`js/theme.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/theme.ts) | widget themes and host environment |
 | [`js/format.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/format.ts) | trait decoding and formatting |
-| [`js/colormaps.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/colormaps.ts) | colormaps and image rendering |
-| [`js/stats.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/stats.ts) | display ranges and image statistics |
+| [`js/display/colormaps.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/display/colormaps.ts) | colormaps and image rendering |
+| [`js/display/stats.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/display/stats.ts) | display ranges and image statistics |
 | [`js/figure.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/figure.ts) | scale bars and figure formatting |
 | [`js/staticFallback.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/staticFallback.ts) | saved-notebook fallback behavior |
 
@@ -150,7 +162,7 @@ tests/ruler2d/test_ruler2d.py
 
 Test the behavior a user relies on.
 
-For `Ruler2D`, the important cases are that valid 2D input works, invalid input is rejected, and known endpoints with known calibration produce the correct distance. [`tests/mask2d/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/tests/mask2d) is a small example to read.
+For `Ruler2D`, the important cases are that valid 2D input works, invalid input is rejected, and known endpoints with known calibration produce the correct distance. [`tests/plot2d/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/tests/plot2d) is a small example to read.
 
 Frontend numerical helpers can be tested with Vitest.
 
@@ -212,10 +224,12 @@ npm run typecheck
 npm test
 ```
 
-Before opening a pull request, run [`scripts/widget_local_signoff.sh`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/widget_local_signoff.sh):
+Before opening a pull request, run the test suite and the size guards:
 
 ```bash
-scripts/widget_local_signoff.sh --quick
+PYTHONPATH=src pytest -q
+python scripts/check_large_files.py
+python scripts/check_notebook_sizes.py
 ```
 
-The widget should now have a Python API, frontend bundle, tests, documentation, release registration, and browser signoff consistent with the rest of `quantem.widget`.
+The widget should now have a Python API, frontend bundle, tests, documentation and release registration consistent with the rest of `quantem.widget`.

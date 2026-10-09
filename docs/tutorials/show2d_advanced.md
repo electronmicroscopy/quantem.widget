@@ -86,7 +86,7 @@ residual_002 = (raw_002 - den_002).astype("float32")
 | Many conditions, one page at a time | `Show2D(page_stack, page_labels=...)` | Keeps dense sweeps readable without one huge grid |
 | Reproducible visual callouts | `panel_annotations`, `panel_overlays`, `inset_plots` | Saved state and exported HTML reproduce the same figure intent |
 | Live editable figure callouts | `panel_overlays` + More -> Overlay Edit | Reproducible circles/rectangles can be selected, moved, resized, deleted, or reset in live/exported HTML |
-| Measurement geometry with Python readback | ROI tools | ROIs are the path for statistics, FFT crops, and `get_roi_geometries()` readback |
+| Measurement geometry with Python readback | ROI tools | ROIs are the path for statistics and FFT crops; `widget.roi_list` holds their geometry |
 
 ## Start with a report-ready gallery
 

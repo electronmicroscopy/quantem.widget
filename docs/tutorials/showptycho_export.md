@@ -26,28 +26,30 @@ This writes a folder:
 
 - `index.html` — the viewer
 - `ShowPtycho.command` — double-click launcher for Chrome on macOS
-- `source/` — the exact BF-column browser source plus linked HDF5 evidence
+- `source/`: the exact bright-field detector counts: `bf_columns.qem`
+  (lossless ANS, written by a CUDA session) or the `bf_columns.u8` /
+  `bf_columns.u16` companion an MPS `SSB.open` session already holds
 - `snapshots/` — calibration, manifest, viewer snapshots, and review metadata
 
-The export persists no expanded float32 images and no complex64 BF reducers.
-By default, the browser range-reads `source/bf_columns.u8` or
-`source/bf_columns.u16` and does not decode the compressed HDF5 stack on open.
+The export persists no expanded float32 images, no complex64 BF reducers and no
+copy of the raw HDF5 acquisition. The browser range-reads the counts under
+`source/` and never decodes the compressed HDF5 stack.
 Saved aberration states live in `snapshots/snapshots.json`; reopening the
-folder through a folder grant or `quantem showptycho out/` reads them back into
+folder through a folder grant or a local HTTP server reads them back into
 the snapshot strip automatically.
 
 ### Export at native detector size
 
 The WebGPU browser export **cannot bin the detector**. If the `ssb` was built
-with `det_bin=2` (a 96x96 calibration) but the embedded HDF5 is native 192x192,
-the browser decodes 192x192, mismatches the calibration, and shows
+from a detector-binned array (a 96x96 calibration) while the stored counts are
+native 192x192, the browser mismatches the calibration and shows
 
 ```
 detector shape mismatch; HDF5 has 192x192, calibration has 96x96
 ```
 
-with blank panels. Always build and export at native detector size
-(`det_bin=1`, the default).
+with blank panels. Always build and export at native detector size, as
+`SSB.open` and `quantem.gpu.io.load` do.
 
 ## Run it
 
@@ -73,15 +75,15 @@ to another Mac and the same double-click works, nothing to install.
 
 One grant per session. This works fully offline.
 
-### C. CLI (serves and opens, no grant click)
+### C. Any static server (no grant click)
 
 ```bash
-quantem showptycho out/
+cd out/ && python -m http.server 8900
 ```
 
-The command serves the folder over range-capable HTTP and opens it, so the viewer
-loads without the manual folder-grant. Use this when double-click + grant is
-inconvenient (for example over a remote connection).
+Any Range-capable static server works: open `http://localhost:8900/` and the
+viewer loads without the manual folder grant. Use this when double-click + grant
+is inconvenient (for example over a remote connection, with the port tunnelled).
 
 ## What you can do in the viewer
 
@@ -89,7 +91,7 @@ inconvenient (for example over a remote connection).
   `G(k)` reducers and re-runs SSB live; the phase and FFT update in tens of
   milliseconds on a real GPU.
 - Toggle the **FFT** panel to watch Bragg spots sharpen as aberrations improve.
-- Change colormap, contrast, and the amplitude/complex view.
+- Change colormap and contrast.
 - **Save** writes the current aberrations and preview JPEG into `snapshots/`
   without prompting for a separate download in the normal local folder workflow.
 
@@ -104,32 +106,16 @@ launch the browser with GPU blocklisting ignored.
 
 ## Checklist
 
-1. The `ssb` was fitted with `fit(trials=200, refinement="nelder-mead")` before export.
-2. Native detector (`det_bin=1`) — the browser cannot bin.
+1. The `ssb` was fitted with `find_aberrations(trials=200, refinement="nelder-mead")` before export.
+2. Native detector size: the browser cannot bin.
 3. Export writes a clean root: `index.html`, `ShowPtycho.command`, `source/`,
    and `snapshots/`.
-4. Open by double-click + **Open data folder**, or `quantem showptycho out/`.
+4. Open by double-click + **Open data folder**, or serve `out/` over HTTP.
 5. On open, the stats bar shows a non-null `loss` and the phase renders.
 
 ## Privacy
 
-Exports embed source HDF5 file basenames in the metadata under `snapshots/` and
-in the viewer state. The direct `w.export(...)` example above is therefore for
-local or otherwise trusted use.
-
-For a community-facing folder, build it through the canonical CLI and request
-redaction explicitly:
-
-```bash
-quantem showptycho scan_master.h5 \
-  --out shared-review \
-  --anonymize \
-  --trials 200 \
-  --refinement nelder-mead
-```
-
-`--anonymize` replaces the local acquisition name and source paths in saved
-calibration and optimization provenance while retaining the scientific fit and
-software-version record. Inspect the resulting folder before publishing it;
-the detector evidence itself is still experimental data and must be yours to
+The folder records the source file as `redacted_local_source`; no acquisition
+name or local path is written under `snapshots/` or into the viewer state. The
+detector evidence itself is still experimental data and must be yours to
 share.

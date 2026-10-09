@@ -16,6 +16,15 @@ from quantem.widget.datasets import (
 )
 ```
 
+Images and stacks come back as quantem core `Dataset2d` and `Dataset3d`
+(`show2d_gold`, `show3d_gold`, `showdiffraction_fe3o4`), and the 4D-STEM scan
+as every 4D-STEM file reads (`read_4dstem`): a `quantem.gpu.io.Dataset4dstemGPU`
+when quantem.gpu is installed and a GPU is present, else a quantem core
+`Dataset4dstem` (`show4dstem_gold`). On an Intel Mac or Windows on ARM, which
+cannot install quantem core, the widget's stand-in carries the same `array`,
+`name`, `sampling`, `units`, `metadata`, `shape`, `ndim` and `dtype`.
+`show1d_ducky` and `gold_session` return folders.
+
 All size selectors use the same language:
 
 | Size | Intended use |
@@ -39,15 +48,6 @@ widget = Show1D.from_monitor_file(
     y_label="final loss",
     log_scale=False,
 )
-widget
-```
-
-Use the one-line example API when you only need the viewer:
-
-```python
-from quantem.widget import Show1D
-
-widget = Show1D.from_example("ducky", size="small")
 widget
 ```
 

@@ -39,31 +39,49 @@ ShowPtycho(ssb)
 
 ### Do NOT skip step 2
 
-```python
-# WRONG — this NEVER fits. It uses whatever aberrations you pass verbatim,
-# so the phase and FFT are junk unless your numbers were already perfect.
-ShowPtycho(data, semiangle_mrad=30.0, scan_sampling_A=0.264,
-           voltage_kV=300.0,
-           aberrations={"C10": 78.0, "C12": 17.0, "phi12": 0.5})
-```
-
-`ShowPtycho(data, aberrations=...)` is a convenience constructor that trusts the
-aberrations you hand it. It does not fit them. If you want the solver to find
-the aberrations, build an `SSB`, call `fit(trials=200,
-refinement="nelder-mead")`, and pass that same prepared `ssb` object to
-`ShowPtycho(ssb)`. The returned `SSBResult` is also available as `result` for
-non-interactive analysis through `result.phase`, `result.amplitude`, and
-`result.object_wave`.
+For aberration tuning `ShowPtycho` takes a prepared `SSB` session; raw data and
+hand-typed aberrations are not accepted. An unfitted session shows whatever
+starting aberrations it was built with, so the phase and FFT are junk unless
+those numbers were already perfect. Build an `SSB`, call
+`find_aberrations(trials=200, refinement="nelder-mead")`, and pass that same
+`ssb` object to `ShowPtycho(ssb)`. The returned `SSBResult` is also available
+as `result` for non-interactive analysis through `result.phase`,
+`result.amplitude`, and `result.object_wave`.
 
 You can confirm the solve ran: the stats bar shows a non-null `loss`, and the
 `Optuna trials + Nelder-Mead` panel at the bottom is populated.
 
+## View a reconstruction on any computer
+
+To look at a reconstruction you already have, from SSB or any other method,
+pass the array. It needs no GPU and no quantem.gpu: a real array is the phase,
+a complex array is the object wave, shown as its phase and amplitude. NumPy
+arrays and torch tensors on any device work.
+
+```python
+import numpy as np
+from quantem.widget import ShowPtycho
+
+rows, cols = np.mgrid[0:256, 0:256]
+phase = 0.3 * np.cos(2 * np.pi * rows / 15.6) * np.cos(2 * np.pi * cols / 15.6)   # 3.9 A lattice
+amplitude = 1.0 - 0.05 * np.cos(2 * np.pi * rows / 15.6) ** 2
+object_wave = amplitude * np.exp(1j * phase)
+
+ShowPtycho(object_wave, sampling=0.25, units="Å", fft_on=True)
+```
+
+The phase, amplitude (Amp), FFT, histograms and the scale bar show the array's
+own numbers; a float64 or complex128 array is drawn in float32 and the widget
+prints the largest change that causes. The aberration sliders, Save, pins and
+sweeps need an SSB session, and the widget says so in one line.
+
 ## No detector binning
 
-Build the reconstruction at the **native detector size** (`det_bin=1`, the
-default). Native (e.g. 192x192) is what resolves light columns such as oxygen in
-a perovskite; binning throws that away. Binning also breaks the HTML export (the
-browser cannot bin), so keep the whole workflow un-binned.
+Build the reconstruction at the **native detector size**. `SSB.open` and
+`quantem.gpu.io.load` keep every detector pixel; do not bin an array before
+passing it to `SSB(...)`. Native (e.g. 192x192) is what resolves light columns
+such as oxygen in a perovskite; binning throws that away. Binning also breaks
+the HTML export (the browser cannot bin), so keep the whole workflow un-binned.
 
 ## Region-specific refit (crop)
 
@@ -75,19 +93,20 @@ Two ways to crop:
 
 - **Interactively.** Construct the widget with the raw master path so the `Crop`
   action appears next to `Export`/`Reset`. Enable `Crop`, drag a rectangle on the
-  phase, then `Refit SSB` — the widget reloads only that scan region from the
+  phase, then `Refit SSB`: the widget decodes only that scan region from the
   HDF5 source, runs 200 optimization trials plus refinement, and replaces the
   phase/FFT and calibration.
 
-- **In code.** Load only the region, then fit as usual:
+- **In code.** Read only the region from the encoded acquisition, then fit as
+  usual:
 
   ```python
   from quantem.gpu.io import load
 
-  data = load("scan_master.h5", dtype=None,
-              scan_region=(128, 384, 128, 384)).data   # 256x256 center crop
+  with load("scan_master.h5") as acquisition:
+      crop_t = acquisition.read(scan_region=(128, 384, 128, 384))   # 256x256 center crop
   ssb = SSB(
-      data,
+      crop_t,
       semiangle_mrad=30.0,
       scan_sampling_A=0.264,
       voltage_kV=300.0,
@@ -154,7 +173,7 @@ def tilted_crystal(tilt_mrad=(3.0, -4.0), thickness_A=152.0):
 
 data, det_mrad = tilted_crystal()
 ssb = SSB(data, backend="auto", voltage_kV=300.0, semiangle_mrad=30.0,
-                     scan_sampling_A=0.25, det_sampling=det_mrad, rotation_angle_deg=0.0)
+          scan_sampling_A=0.25, det_sampling=det_mrad, rotation_angle_deg=0.0)
 ```
 
 First the thin-sheet model. Look at the FFT: are the lattice spots equally
@@ -165,7 +184,7 @@ standard = ssb.find_aberrations(verbose=False)
 ShowPtycho(ssb, fft_on=True)
 ```
 
-Now let the sample lean. `fit(tilt=True)` fits the same aberrations together
+Now let the sample lean. `find_aberrations(tilt=True)` fits the same aberrations together
 with a tilt and a depth spread. Compare: which spots sharpened, and did the
 defocus move?
 
@@ -211,14 +230,14 @@ and the model is standard SSB.
   update takes a few hundred ms on CUDA.
 
 See the [SSB API](https://bobleesj.github.io/quantem.gpu/api/ssb.html) for
-`fit(tilt=True)`, `preview(tilt_mrad=..., depth_spread_nm=...)` and the
+`find_aberrations(tilt=True)`, `preview(tilt_mrad=..., depth_spread_nm=...)` and the
 evidence behind the defaults.
 
 ## Checklist
 
 1. Leave `SSB.open(..., dtype=None)` at its default for native detector precision.
-2. Native detector, `det_bin=1` — do not bin.
-3. `ssb.find_aberrations(trials=200, refinement="nelder-mead")` — the fit is not optional.
+2. Native detector: do not bin.
+3. `ssb.find_aberrations(trials=200, refinement="nelder-mead")`: the fit is not optional.
 4. Pass the `ssb` object to `ShowPtycho`, not `data` + hand-typed aberrations.
 5. Confirm: stats bar `loss` is non-null and the trials panel is populated.
 6. Thick or possibly mistilted crystal: also run `ssb.find_aberrations(tilt=True)` and compare `report()` rows.

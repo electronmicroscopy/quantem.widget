@@ -5,8 +5,6 @@ around a real question from the microscope room:
 
 - **HTML and file export** - hand a collaborator one interactive HTML file, a
   figure, or a full report package.
-- **Saving GIF and MP4 movies** - write raw arrays or widget-rendered views to
-  GIF and MP4, with CUDA MP4 compression on NVIDIA workstations.
 - **Memory management** - know what a load will cost in RAM/VRAM, pick the
   GPU, and give the memory back.
 - **Live folder watching** - keep one widget open at the scope and let new
@@ -55,7 +53,6 @@ w = Show3D(
     title="800C 1.3Mx denoise review",
     display_bin=1,
     link_contrast=False,
-    debug=True,
 )
 w.export_html(
     "/data/reports/800C_1.3Mx_review.html",
@@ -179,7 +176,6 @@ Show3D(
     denoised_stack,
     residual_stack,
     panel_titles=["raw stack", "denoised stack", "residual stack"],
-    marker_style="around",
     panel_annotations=[
         {"panel": "raw stack", "text": "input", "position": "top-left"},
         {
@@ -486,16 +482,14 @@ w.export_html("regularization_review.html", encoding="uint8")
 ```
 
 The collapsed view still shows `Controls` and `Export` in the title chrome.
-In live Jupyter, Show3D's Export menu can write HTML and request GIF/MP4
+In live Jupyter, Show3D's Export menu can write HTML and request GIF
 animation exports through Python. In standalone HTML, the page can download
-itself as HTML, export GIF in the browser, and export MP4 when the browser
-provides WebCodecs H.264 support. If browser MP4 is unavailable, reopen the
-live Python widget for MP4 export.
+itself as HTML and export GIF in the browser.
 
 For PowerPoint, Slack, or publication review, export movies from the live
 widget or from exact HTML when possible. A standalone HTML file made with
-`encoding="uint8"` is still useful for compact review, but GIF/MP4 from that
-file uses the encoded display data and GIF then applies a 256-color palette.
+`encoding="uint8"` is still useful for compact review, but GIF from that
+file uses the encoded display data and then applies a 256-color palette.
 The export panel warns about this path and points users back to
 `encoding="full"` when fidelity matters.
 

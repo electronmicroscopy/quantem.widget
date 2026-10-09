@@ -1,5 +1,8 @@
 # ShowCIF
 
+Start with the [interactive ShowCIF notebook](../tutorials/showcif.ipynb) or the
+[demo route](../tutorials/demo.md).
+
 Inspect a CIF or ASE structure with linked WebGPU atom, column, and potential
 views. Start with the crystal and its orientation:
 
@@ -17,7 +20,7 @@ Rendering requires WebGPU in a secure browser context (HTTPS or localhost).
 
 ```{eval-rst}
 .. autoclass:: quantem.widget.ShowCIF
-   :members: atoms, export_html
+   :members:
 ```
 
 ## Structure and orientation
@@ -28,13 +31,12 @@ model. The maximum inspection size is 250,000 atoms.
 
 `zone_axis` is the direct-lattice direction `u*a + v*b + w*c`, including for
 oblique cells. It is not a reciprocal-plane normal. The 3D camera rotates
-independently of the projection direction. `atoms()` returns an independent
-copy of the original cell, before repeats, display filters, or specimen tilt.
+independently of the projection direction. The structure passed in is never
+modified by repeats, display filters or specimen tilt.
 
 ```python
 viewer.zone_axis = [1, 1, 0]
 viewer.specimen_tilt_mrad = [10, -5]  # (row, col)
-original = viewer.atoms()
 ```
 
 Specimen tilt ranges from −15 to +15 mrad per component. Positive row tilt leans
@@ -47,12 +49,10 @@ bounds, slice membership, and potential maps use this same geometry.
 ## Microscope field of view
 
 ```python
-viewer = ShowCIF(
-    "crystal.cif",
-    view_mode="microscope",
-    field_of_view_A=40,
-    magnification_calibration=(1_000_000, 100),
-)
+viewer = ShowCIF("crystal.cif")
+viewer.view_mode = "microscope"
+viewer.field_of_view_A = 40
+viewer.magnification_calibration = [1_000_000, 100]
 viewer
 ```
 
@@ -148,14 +148,3 @@ Playback loops at 5 fps by default and pauses during scrubbing, gallery preview,
 when hidden, or at invalid phase energy. GPU-resident averaging and filtering
 avoid image readback; geometry changes recompute the potential planes.
 
-## HTML export
-
-```python
-viewer.export_html("structure.html")
-```
-
-The export embeds atomic coordinates, potential tables, and synced settings
-(including repeats, tilt, FOV, energy, colormap, and orthogonal visibility).
-Transient camera, panel-visibility, playback, blur, and slice selections reset
-when reopened. The widget manager loads from a CDN: the export requires network
-access and WebGPU, and is not an offline simulation package.

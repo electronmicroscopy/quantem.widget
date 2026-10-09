@@ -1,8 +1,8 @@
 # Viewing exported HTML on mobile (the WebGPU secure-context rule)
 
 This is the single most important and most confusing fact about opening an
-exported interactive widget (`Show4DSTEM`, `Show3D`, `Show3DSlices`, `Show2D`,
-`ShowEDS`) on a phone or tablet.
+exported interactive widget (`Show4DSTEM`, `Show3D`, `Show3DSlices`, `Show2D`)
+on a phone or tablet.
 
 ## The rule
 
@@ -166,15 +166,7 @@ mirror it for any new interactive canvas. Verify with Chrome touch emulation
 (`Emulation.setTouchEmulationEnabled`, `Input.dispatchTouchEvent`), but remember
 emulation is not iOS WebKit: confirm the real device too.
 
-For repository signoff artifacts, use the maintained handoff helper:
-
-```bash
-python scripts/widget_phone_handoff.py /tmp/quantem-widget-signoff
-```
-
-It serves the report directory on `0.0.0.0`, prints local and Tailscale URLs,
-and creates `phone-probe.html`. Open `phone-probe.html` on the physical phone
-from the same origin as the widget, then drag, pinch, tap, rotate, and scroll.
-The server writes `phone-events.ndjson` with viewport, scroll, pointer, touch,
-click, and WebGPU availability events. This does not automate Safari; it gives
-the human phone tester and the agent a shared event log for the real device.
+To test on a physical phone, serve the export folder on all interfaces
+(`python -m http.server --bind 0.0.0.0 8000`) and open the page from the phone
+over the local network or a VPN; WebGPU needs a secure context, so use
+`https` or `localhost` forwarding when the page stays blank.

@@ -36,17 +36,17 @@ no console error, no NaN frame).
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | FFT zoom / pan | Browser-local per FFT panel; FFT `Link Zoom` and `Link Pan` controls | Wheel or pinch zoom updates an always-visible `N.N×` badge in that FFT panel; reset returns Show2D's `2.0×` FFT default |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
-| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Control visibility | `show_controls`, `controls_collapsed` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
 | Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, saved state, and exported HTML |
 | Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
 | Scale bar style | `scale_bar_panels`, `scale_bar_length`, `scale_bar_label`, `scale_bar_style` | Restrict scale bars to selected panels and control exact publication text, font, outline, label spacing, offset, and bar thickness |
-| Gallery gap and borders | `inter_panel_gap_px`, `inter_panel_gap_color`, `gallery_outer_border_px`, `gallery_outer_border_color`, `panel_inner_border_px`, `panel_inner_border_color` | Separately controls the layer between panels, the outside gallery frame, and each panel's own inner stroke for browser, SVG, and static previews |
+| Gallery gap and borders | `inter_panel_gap_px` (older name `gallery_gap_px`), `inter_panel_gap_color`, `gallery_outer_border_px`, `gallery_outer_border_color`, `panel_inner_border_px`, `panel_inner_border_color` | Separately controls the layer between panels, the outside gallery frame, and each panel's own inner stroke for browser, SVG, and static previews |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
-| Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
-| Smooth toggle | `smooth` | Bilinear vs nearest sampling |
+| Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col`; constructor `zoom=`, `center=(row, col)` (full-resolution pixels) | Zooms about the cursor |
+| Smooth toggle | `smooth` | Off by default: sharp data pixels (nearest neighbour); on: bilinear interpolation. The FFT panel has its own Smooth switch, also off by default |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Region overlay; stats panel reports the ROI; saved notebook previews include all ROI overlays and one comparable right-side zoom crop per visible ROI; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
 | Gallery select | `selected_idx` | Highlights the active panel |
 | Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`, `panel_playback_fps`; `set_panel_frame()` | Every grayscale 3D list item gets independent slider/play controls; changing one panel does not move another, and constructor-configured playback speed adds no toolbar clutter |
@@ -54,6 +54,7 @@ no console error, no NaN frame).
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 | Link Denoise switch (gallery) | `denoise_scope` | Linked ("all"): denoise edits apply to every panel; unlinked ("panel"): edits apply to the selected panel only |
+| Denoise at construction | `denoise=`, `denoise_sigma=`, `denoise_bin=` (scalar for every panel, or one per panel) | `Show2D(images, denoise="anscombe", denoise_sigma=8.0)` shows the filtered view from the first paint with the switch on; a per-panel list selects per-panel scope |
 | Denoise master | `denoise_enabled` | Off shows raw pixels and hides the banner without discarding method, sigma, bin, or per-panel settings |
 | Denoise Settings | `show_denoise` | Expands/collapses the Method, sigma, and bin editor without changing whether the effect is active |
 | Filter master | `frequency_filter_enabled` | Turns frequency filtering on/off without discarding cutoff or band settings |
@@ -406,19 +407,15 @@ Show2D(
 
 `inter_panel_gap_*` controls only the layer between panels.
 `gallery_outer_border_*` controls the frame around the whole grid.
-`panel_inner_border_*` controls the stroke drawn inside each image panel. The
-older `gallery_gap_px` / `gallery_gap_color` names remain as aliases for old
-notebooks; when used together they populate all three black-grid layers for
-the historical pixel-perfect SVG behavior.
+`panel_inner_border_*` controls the stroke drawn inside each image panel.
 
 ## Which denoise filter should I use?
 
 The Denoise controls are hidden behind their own toggle by default; everything
 here is display-only (the stored array, the stats row, and raw exports keep
 the original counts, and an active denoise always announces itself with a
-one-line banner). Three methods cover the space; binning is a separate knob,
-so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
-**Bin 2**.
+one-line banner). Three methods cover the space and binning is a separate
+knob: for a binned Poisson smooth pick **Poisson (Anscombe)** and set **Bin 2**.
 
 | Your data | Use | Why |
 |---|---|---|
@@ -428,8 +425,7 @@ so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
 | Anything quantitative (FFT, intensities, stats) | None | Measure on raw counts; the stats row is always computed from raw data |
 
 From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
-denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
-spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+denoise_sigma=8` (per-panel lists supported for A/B galleries).
 
 ## Reuse ROI coordinates in notebooks and agents
 
@@ -638,10 +634,6 @@ w.move_panel("raw", 0)
 w.reset_panel_order()
 ```
 
-```{seealso}
-The deeper behavioral spec (invariants, per-feature pass criteria, isolation
-checks) lives alongside the integration test at `widget/docs/show2d-test-spec.md`.
-```
 
 ## Live image updates
 
@@ -830,10 +822,9 @@ file. Close long-running widgets when the notebook no longer needs them.
 `Show2D.from_folder(...)` reads the scientific image data at its source
 resolution.
 
-Maintainer real-time signoff follows
-[S2D-18](../maintainer/storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place):
-add genuine EMD files after the widget is visibly mounted and verify the same
-browser canvas paints each full-resolution panel.
+To verify the live path, add genuine EMD files after the widget is visibly
+mounted and check that the same browser canvas paints each full-resolution
+panel.
 
 ## Paged galleries
 

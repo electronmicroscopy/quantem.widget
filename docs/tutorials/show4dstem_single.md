@@ -6,20 +6,24 @@ ADF images without reducing the detector grid.
 
 ## Jupyter notebook
 
-Load the master with the public GPU loader, then let Jupyter render the viewer
-as the last expression:
+Read the master, then let Jupyter render the viewer as the last expression:
 
 ```python
-from quantem.gpu.io import load
-from quantem.widget import Show4DSTEM
+from quantem.widget import Show4DSTEM, read_4dstem
 
-data = load("/data/session/scan_001_master.h5")
-viewer = Show4DSTEM(data)
+loaded = read_4dstem("/data/session/scan_001_master.h5")
+viewer = Show4DSTEM(loaded)
 viewer
 ```
 
-The default keeps native detector sampling and the source count dtype. The
-loader selects CUDA on an NVIDIA workstation or Metal/MPS on Apple Silicon.
+The default keeps native detector sampling and the source count dtype. With
+quantem.gpu installed, the reader selects CUDA on an NVIDIA workstation or
+Metal/MPS on Apple Silicon and keeps the acquisition encoded on the GPU as a
+`Dataset4dstemGPU`; without a GPU it reads the counts into a quantem core
+`Dataset4dstem` in host memory, and the same cell runs. On the GPU: a 512 x 512 x 192 x 192 uint16 scan,
+18 GiB as a dense array, occupies about 0.1 to 2 GiB. Virtual images are summed
+on the encoded storage, and each diffraction pattern is decoded as you move the
+scan position.
 
 After the widget appears:
 
