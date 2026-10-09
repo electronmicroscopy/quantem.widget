@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import goldens from "./.generated/engine/display/goldens/parity.json";
-import { reciprocalCoordinatesFromShiftedOffset } from "./fft";
-import { rotateStackInPlane } from "./geometry";
-import { dequantizeUint8 } from "./quantization";
+import goldens from "./display/goldens.json";
+import { reciprocalCoordinatesFromShiftedOffset } from "./display/fft";
+import { dequantizeUint8 } from "./display/quantization";
 
-describe("quantem.gpu shared numerical goldens", () => {
+describe("display numerical goldens", () => {
   for (const testCase of goldens.quantized) {
     it(`decodes uint8 ${testCase.name}`, () => {
       const actual = dequantizeUint8(Uint8Array.from(testCase.bytes), testCase.low, testCase.high);
@@ -18,16 +17,6 @@ describe("quantem.gpu shared numerical goldens", () => {
     expect(Array.from(dequantizeUint8(Uint8Array.of(0, 255), -2, Number.POSITIVE_INFINITY))).toEqual([-2, -2]);
     expect(Array.from(dequantizeUint8(Uint8Array.of(0, 255), 4, -4))).toEqual([4, 4]);
   });
-
-  for (const testCase of goldens.rotation) {
-    it(`rotates ${testCase.name}`, () => {
-      const [frames, rows, columns] = testCase.shape;
-      const actual = rotateStackInPlane(
-        Float32Array.from(testCase.input), frames, rows, columns, testCase.angle_degrees,
-      );
-      testCase.expected.forEach((expected, index) => expect(actual[index]).toBeCloseTo(expected, 5));
-    });
-  }
 
   for (const testCase of goldens.reciprocal) {
     it(`converts reciprocal coordinates ${testCase.name}`, () => {

@@ -64,7 +64,7 @@ describe("useHideStaticFallback", () => {
 
   it("hides the static output on docs pages (.cell scope, no model_id)", () => {
     // jupyter-book / myst-nb pages wrap outputs in .cell (no .jp-Cell), and
-    // the html-manager model exposes no model_id — only the structural scope
+    // the html-manager model exposes no model_id; only the structural scope
     // can find the sibling there.
     document.body.innerHTML = `
       <div class="cell">

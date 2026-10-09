@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cropMaskedRegion, rotateStackInPlane, sampleLineProfile, sampleLineProfileUint8 } from "./geometry";
+import { cropMaskedRegion, sampleLineProfile, sampleLineProfileUint8 } from "./display/geometry";
 
 const image = Float32Array.from({ length: 30 }, (_, index) => index);
 
@@ -80,6 +80,12 @@ describe("shared bilinear line profile reference", () => {
     }
   });
 
+  it("rounds a fractional width to whole lines, as the WebGPU kernel does", () => {
+    const ramp = Float32Array.from({ length: 36 }, (_, index) => Math.floor(index / 6) ** 2);
+    expect(Array.from(sampleLineProfile(ramp, 6, 6, 2, 0, 2, 5, 2.6))).toEqual(Array.from(sampleLineProfile(ramp, 6, 6, 2, 0, 2, 5, 3)));
+    expect(Array.from(sampleLineProfile(ramp, 6, 6, 2, 0, 2, 5, 1.4))).toEqual(Array.from(sampleLineProfile(ramp, 6, 6, 2, 0, 2, 5, 1)));
+  });
+
   it("preserves non-finite source evidence", () => {
     const values = new Float32Array(9).fill(1);
     values[0] = NaN;
@@ -87,7 +93,7 @@ describe("shared bilinear line profile reference", () => {
   });
 });
 
-describe("quantized profile and stack rotation references", () => {
+describe("quantized profile reference", () => {
   it("samples uint8+range without materializing a float image", () => {
     const encoded = Uint8Array.from({ length: 12 }, (_, index) => index * 20);
     const decoded = Float32Array.from(encoded, value => value * 2 / 255 - 1);
@@ -100,14 +106,5 @@ describe("quantized profile and stack rotation references", () => {
     const encoded = Uint8Array.of(0, 255, 0, 255);
     expect(Array.from(sampleLineProfileUint8(encoded, Number.NaN, 7, 2, 2, 0, 0, 1, 1))).toEqual([0, 7]);
     expect(Array.from(sampleLineProfileUint8(encoded, 4, -4, 2, 2, 0, 0, 1, 1))).toEqual([4, 4]);
-  });
-
-  it("keeps full turns as identity and rotates odd nonsquare data", () => {
-    const source = Float32Array.from({ length: 15 }, (_, index) => index - 7);
-    expect(rotateStackInPlane(source, 1, 3, 5, 360)).toBe(source);
-    const rotated = rotateStackInPlane(source, 1, 3, 5, 30);
-    expect(rotated).toHaveLength(15);
-    expect(rotated[7]).toBeCloseTo(0, 6);
-    expect(rotated[0]).toBeCloseTo(-6.2320509, 5);
   });
 });

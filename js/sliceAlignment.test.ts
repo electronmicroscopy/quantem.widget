@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { fft2d } from "./fft";
+import { fft2d } from "./display/fft";
 import { estimateSliceAlignment, median } from "./sliceAlignment";
 
 /**
- * Mirrors `_texture` / `_fractionally_shifted_stack` in
- * tests/test_show3dslices_slice_alignment.py: a fixed textured base image is
- * shifted by an exact sub-pixel amount per slice with an FFT phase ramp, so the
- * drift the estimator should recover is known analytically rather than measured.
+ * A fixed textured base image is shifted by an exact sub-pixel amount per slice
+ * with an FFT phase ramp, so the drift the estimator should recover is known
+ * analytically rather than measured.
  */
 function texture(size: number): Float32Array {
   const image = new Float32Array(size * size);

@@ -3,10 +3,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import plot2d from "./index";
 
 const gpu = vi.hoisted(() => ({
-  uploadData: vi.fn(), uploadLUT: vi.fn(), destroy: vi.fn(), create: vi.fn(),
+  uploadData: vi.fn(), destroy: vi.fn(), create: vi.fn(),
   renderSlotsToImageBitmapAsync: vi.fn(),
 }));
-vi.mock("../colormaps", () => ({
+vi.mock("../display/colormaps", () => ({
   COLORMAPS: { viridis: new Uint8Array(768), magma: new Uint8Array(768).fill(255) },
   createGPUColormapEngine: () => gpu.create(),
   renderToOffscreen: vi.fn(() => document.createElement("canvas")),
@@ -98,7 +98,7 @@ it("keeps visible pixels, hover and color limits together during rapid replaceme
   expect(context.drawImage.mock.lastCall?.[0]).toBe(latest);
   expect(context.fillText).toHaveBeenCalledWith("20", expect.anything(), expect.anything());
   expect(el.textContent).toContain("value 11.0000");
-  expect(gpu.uploadLUT.mock.lastCall?.[0]).toBe("magma");
+  expect(gpu.renderSlotsToImageBitmapAsync.mock.lastCall?.[3]).toBe("magma");
 });
 
 it("releases an in-flight bitmap and the engine when the view closes", async () => {
@@ -146,7 +146,7 @@ it("keeps zoom previews local and commits the final viewport on reset", async ()
 it("reports canvas fallback while retaining original readout values", async () => {
   gpu.renderSlotsToImageBitmapAsync.mockResolvedValueOnce(null);
   await mount(); hover();
-  expect(el.textContent).toContain("Canvas fallback");
+  expect(el.textContent).toContain("CPU display");
   expect(el.textContent).toContain("value 1.00000");
   expect(context.drawImage.mock.lastCall?.[0]).toBeInstanceOf(HTMLCanvasElement);
 });

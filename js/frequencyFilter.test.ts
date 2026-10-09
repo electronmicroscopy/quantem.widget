@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   applyFrequencyFilterCPU,
   applyFrequencyFilterBrowser,
-  formatFrequencyFilterBanner,
   frequencyMaskValue,
+  getFrequencyFilterBackend,
   normalizeFrequencyFilterMode,
-} from "./frequencyFilter";
+} from "./display/frequencyFilter";
 
 describe("frequency filter", () => {
   it("normalizes scientist-facing mode spellings", () => {
@@ -35,14 +35,11 @@ describe("frequency filter", () => {
     expect(Math.max(...Array.from(result).map(Math.abs))).toBeLessThan(0.1);
   });
 
-  it("rejects an active production filter when hardware WebGPU is unavailable", async () => {
-    await expect(applyFrequencyFilterBrowser(
-      new Float32Array(15).fill(2), 5, 3, { mode: "highpass", cutoff: 0.15 },
-    )).rejects.toThrow(/requires a hardware WebGPU adapter/);
-  });
-
-  it("uses an honest view-only banner", () => {
-    expect(formatFrequencyFilterBanner({ mode: "bandpass", center: 0.3, width: 0.1 }))
-      .toContain("view only; raw counts unchanged");
+  it("runs the scalar reference when the browser has no WebGPU", async () => {
+    const image = Float32Array.from({ length: 15 }, (_, index) => 2 + (index % 4));
+    const options = { mode: "highpass", cutoff: 0.15 };
+    const browser = await applyFrequencyFilterBrowser(image, 5, 3, options);
+    expect(Array.from(browser)).toEqual(Array.from(applyFrequencyFilterCPU(image, 5, 3, options)));
+    expect(getFrequencyFilterBackend()).toBe("CPU");
   });
 });

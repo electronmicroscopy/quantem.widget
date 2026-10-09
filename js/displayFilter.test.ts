@@ -12,7 +12,7 @@
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyDisplayFilterBrowser, applyDisplayFilterCPU, resolvePanelDenoiseKnobs } from "./displayFilter";
+import { applyDisplayFilterBrowser, applyDisplayFilterCPU, resolvePanelDenoiseKnobs } from "./display/filter";
 
 describe("per-panel denoise knobs", () => {
   it("returns the selected panel's independent mode, sigma, and bin", () => {
@@ -35,10 +35,10 @@ describe("per-panel denoise knobs", () => {
 });
 
 describe("display filter production backend", () => {
-  it("rejects active filtering when hardware WebGPU is unavailable", async () => {
-    await expect(applyDisplayFilterBrowser(
-      new Float32Array(15), 5, 3, "gaussian", 1.5, 1,
-    )).rejects.toThrow(/requires hardware WebGPU|requires a hardware WebGPU adapter/);
+  it("runs the scalar reference when the browser has no WebGPU", async () => {
+    const image = Float32Array.from({ length: 15 }, (_, index) => (index * 7) % 5);
+    const browser = await applyDisplayFilterBrowser(image, 5, 3, "gaussian", 1.5, 1);
+    expect(Array.from(browser)).toEqual(Array.from(applyDisplayFilterCPU(image, 5, 3, "gaussian", 1.5, 1)));
   });
 });
 
@@ -76,14 +76,14 @@ odd_image = rng.poisson(0.3, (67, 65)).astype(np.float32)  # (n_rows, n_cols)
 cases = [
     ("gaussian", 4.0, 1),
     ("gaussian", 2.5, 1),
-    ("bin2", 4.0, 1),
+    ("gaussian", 4.0, 2),
+    ("gaussian", 4.0, 4),
     ("anscombe", 4.0, 1),
     ("anscombe", 8.0, 2),
-    ("bin2_anscombe", 8.0, 1),
-    ("bin4_anscombe", 8.0, 1),
+    ("anscombe", 8.0, 4),
     ("none", 4.0, 4),
 ]
-odd_cases = [("gaussian", 3.0, 1), ("bin2", 4.0, 1), ("bin2_anscombe", 6.0, 1)]
+odd_cases = [("gaussian", 3.0, 1), ("gaussian", 4.0, 2), ("anscombe", 6.0, 2)]
 
 
 def run(img, mode, sigma, spatial_bin):

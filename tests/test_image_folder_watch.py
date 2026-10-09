@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import gc
 import time
 from pathlib import Path
@@ -24,219 +22,6 @@ def _wait_until(predicate, timeout: float = 2.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("condition was not reached before the watcher timeout")
-
-
-def test_show2d_folder_poll_remaps_panel_state_by_path(tmp_path: Path) -> None:
-    _save(tmp_path / "frame_2.npy", 2)
-    _save(tmp_path / "frame_10.npy", 10)
-    widget = Show2D.from_folder(tmp_path, watch=False, show_fft=True)
-    try:
-        assert widget.labels == ["frame_2", "frame_10"]
-        assert widget._data.shape == (2, 6, 8)
-
-        widget.selected_idx = 1
-        widget.star_panel(0)
-        widget.hide_panel(0)
-        widget.set_panel_order([1, 0])
-        widget.rotate(1, 180)
-        widget.roi_active = True
-        widget.roi_list = [{"shape": "circle", "row": 2, "col": 3, "radius": 1}]
-        widget.roi_selected_idx = 0
-        widget.profile_line = [{"row": 1, "col": 1}, {"row": 4, "col": 6}]
-        widget.view_box = [0, 5, 0, 7]
-        widget.zoom_row = 2.5
-        widget.zoom_col = 3.5
-
-        _save(tmp_path / "frame_1.npy", 1)
-        _save(tmp_path / "frame_10.npy", 99)
-        assert widget.poll_folder() == []
-        changed = widget.poll_folder()
-
-        assert changed == [0]
-        assert widget.labels == ["frame_1", "frame_2", "frame_10"]
-        np.testing.assert_array_equal(widget._data[:, 0, 0], [1, 2, 10])
-        assert widget.selected_idx == 2
-        assert widget.starred == [0, 1, 0]
-        assert widget.hidden_panels == [1]
-        assert widget.panel_order == [2, 1, 0]
-        assert widget.image_rotations == [0, 0, 2]
-        assert widget.roi_active is True
-        assert widget.roi_list[0]["radius"] == 1
-        assert widget.roi_selected_idx == 0
-        assert widget.profile_line == [{"row": 1, "col": 1}, {"row": 4, "col": 6}]
-        assert widget.view_box == [0, 5, 0, 7]
-        assert widget.zoom_row == 2.5
-        assert widget.zoom_col == 3.5
-        assert widget.show_fft is True
-    finally:
-        widget.close()
-
-
-def test_show2d_folder_defaults_to_twenty_item_panels_per_page(
-    tmp_path: Path,
-) -> None:
-    for index in range(45):
-        _save(tmp_path / f"frame_{index:03d}.npy", index)
-
-    widget = Show2D.from_folder(tmp_path, watch=False)
-    try:
-        # C1: a large folder opens as sequential item pages, expect 20/20/5
-        # real panels with no padded scientific data.
-        assert widget.page_kind == "items"
-        assert widget.n_images == 45
-        assert widget.n_pages == 3
-        assert widget.panels_per_page == 20
-        assert widget.page_labels == [
-            "Images 1\u201320",
-            "Images 21\u201340",
-            "Images 41\u201345",
-        ]
-        assert widget.visible_panels == list(range(20))
-        widget.page_idx = 2
-        assert widget.visible_panels == [40, 41, 42, 43, 44]
-
-        # C2: hiding one file on the partial page, expect absolute per-file
-        # state rather than hiding the same slot on unrelated pages.
-        widget.hide_panel(40)
-        assert widget.visible_panels == [41, 42, 43, 44]
-        with pytest.raises(ValueError, match="every panel on folder page 3"):
-            widget.hide_panel(41, 42, 43, 44)
-        with pytest.raises(ValueError, match="every panel on folder page 1"):
-            widget.set_hidden_panels(list(range(20)))
-        widget.page_idx = 0
-        assert widget.visible_panels == list(range(20))
-        assert widget.hidden_page_slots == []
-    finally:
-        widget.close()
-
-
-def test_show2d_folder_default_threshold_crosses_twenty_to_twenty_one(
-    tmp_path: Path,
-) -> None:
-    for index in range(20):
-        _save(tmp_path / f"frame_{index:03d}.npy", index)
-    widget = Show2D.from_folder(tmp_path, watch=False)
-    try:
-        widget_id = id(widget)
-        # C1: exactly the default limit remains an ordinary unpaged gallery.
-        assert (widget.n_images, widget.n_pages, widget.panels_per_page) == (
-            20,
-            1,
-            0,
-        )
-
-        _save(tmp_path / "frame_020.npy", 20)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [20]
-
-        # C2: the 21st stable file activates a partial second page in place.
-        assert id(widget) == widget_id
-        assert (widget.n_images, widget.n_pages, widget.panels_per_page) == (
-            21,
-            2,
-            20,
-        )
-        assert widget.page_labels == ["Images 1\u201320", "Images 21\u201321"]
-        assert widget.page_idx == 0
-        widget.page_idx = 1
-        assert widget.visible_panels == [20]
-    finally:
-        widget.close()
-
-
-def test_show2d_folder_page_size_override_disable_and_validation(
-    tmp_path: Path,
-) -> None:
-    for index in range(5):
-        _save(tmp_path / f"frame_{index:03d}.npy", index)
-
-    paged = Show2D.from_folder(tmp_path, watch=False, page_size=2)
-    unpaged = Show2D.from_folder(tmp_path, watch=False, page_size=None)
-    try:
-        # C1: an explicit positive page size controls the visible grouping.
-        assert paged.folder_page_size == 2
-        assert (paged.n_pages, paged.panels_per_page) == (3, 2)
-        paged.page_idx = 2
-        assert paged.visible_panels == [4]
-        assert paged.set_folder_page_size(4) is paged
-        assert paged.folder_page_size == 4
-        assert (paged.n_pages, paged.panels_per_page) == (2, 4)
-
-        # C2: None deliberately disables automatic folder paging.
-        assert unpaged.folder_page_size is None
-        assert (unpaged.n_pages, unpaged.panels_per_page) == (1, 0)
-        assert unpaged.visible_panels == [0, 1, 2, 3, 4]
-    finally:
-        paged.close()
-        unpaged.close()
-
-    # C3: invalid sizes fail with a corrective next step.
-    with pytest.raises(ValueError, match="use None to disable folder paging"):
-        Show2D.from_folder(tmp_path, watch=False, page_size=0)
-    with pytest.raises(TypeError, match="positive integer or None"):
-        Show2D.from_folder(tmp_path, watch=False, page_size=True)
-
-
-def test_show2d_folder_live_append_crosses_page_boundary_in_place(
-    tmp_path: Path,
-) -> None:
-    _save(tmp_path / "frame_2.npy", 2)
-    _save(tmp_path / "frame_10.npy", 10)
-    widget = Show2D.from_folder(tmp_path, watch=False, page_size=2)
-    try:
-        widget_id = id(widget)
-        widget.selected_idx = 1
-        widget.star_panel(0)
-        widget.hide_panel(0)
-        widget.set_panel_order([1, 0])
-
-        _save(tmp_path / "frame_1.npy", 1)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [0]
-
-        # C1: crossing 2 -> 3 files activates paging on the same widget while
-        # path-keyed selection, star, hide, and order state survive insertion.
-        assert id(widget) == widget_id
-        assert widget.n_pages == 2
-        assert widget.panels_per_page == 2
-        assert widget.page_labels == ["Images 1\u20132", "Images 3\u20133"]
-        assert widget.selected_idx == 2
-        assert widget.starred == [0, 1, 0]
-        assert widget.hidden_panels == [1]
-        assert widget.hidden_page_slots == []
-        assert widget.panel_order == [2, 1, 0]
-        assert widget.page_idx == 0
-        assert widget.visible_panels == [2]
-
-        # C2: the second page contains the remaining real file; hiding slot 2
-        # on page 1 does not bleed into it.
-        widget.page_idx = 1
-        assert widget.visible_panels == [0]
-    finally:
-        widget.close()
-
-
-def test_show2d_folder_live_append_preserves_the_reviewed_page(
-    tmp_path: Path,
-) -> None:
-    for index in range(3):
-        _save(tmp_path / f"frame_{index}.npy", index)
-    widget = Show2D.from_folder(tmp_path, watch=False, page_size=2)
-    try:
-        widget.selected_idx = 0
-        widget.page_idx = 1
-
-        _save(tmp_path / "frame_3.npy", 3)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [3]
-
-        # C1: selection and the reviewed page are independent, expect a live
-        # append not to jump back to the page containing the selected panel.
-        assert widget.selected_idx == 0
-        assert widget.page_idx == 1
-        assert widget.visible_panels == [2, 3]
-    finally:
-        widget.close()
 
 
 @pytest.mark.parametrize(
@@ -410,7 +195,7 @@ def test_folder_worker_baseexception_replaces_stale_green(
     monkeypatch.setattr(source, "poll", abort_poll)
     try:
         # C1: an unexpected BaseException terminates the owned worker, expect
-        # its thread fields to clear and a corrective red state—not stale green.
+        # its thread fields to clear and a corrective red state, not stale green.
         widget.watch_folder(interval=0.01)
         thread = source._watch_thread
         assert thread is not None
@@ -438,10 +223,12 @@ def test_folder_empty_launch_arrival_restart_and_close_lifecycle(
     tmp_path: Path,
     viewer,
     count_attr: str,
+    request,
 ) -> None:
     # C1: a watched acquisition starts empty, expect a mounted zero-record
     # model and a visible-status trait instead of a fake scientific frame.
     widget = viewer.from_folder(tmp_path, watch=True, watch_interval=0.02)
+    request.addfinalizer(widget.close)
     source = widget._folder_source
     first_thread = source._watch_thread
     model_id = widget.model_id
@@ -458,7 +245,7 @@ def test_folder_empty_launch_arrival_restart_and_close_lifecycle(
     first.write_bytes(b"incomplete npy")
     _wait_until(
         lambda: (
-            first.resolve() in widget.folder_errors
+            first.resolve() in widget._folder_source.errors
             and widget.folder_watch_state == "waiting"
         )
     )
@@ -466,10 +253,12 @@ def test_folder_empty_launch_arrival_restart_and_close_lifecycle(
     assert widget.folder_watch_state == "waiting"
     assert "pending file" in widget.folder_watch_detail
     _save(first, 1, shape=(17, 23))
-    _wait_until(lambda: int(getattr(widget, count_attr)) == 1)
+    _wait_until(lambda: (
+        int(getattr(widget, count_attr)) == 1
+        and not widget.folder_waiting
+        and widget.folder_watch_state == "watching"
+    ))
     assert widget.model_id == model_id
-    assert widget.folder_waiting is False
-    assert widget.folder_watch_state == "watching"
     assert widget.labels == ["frame_1"]
     assert widget._data.shape == (1, 17, 23)
 
@@ -566,7 +355,7 @@ def test_folder_failed_and_mismatched_files_remain_retryable(
         partial = tmp_path / "frame_2.npy"
         partial.write_bytes(b"not a complete npy file")
         assert widget.poll_folder() == []
-        assert partial.resolve() in widget.folder_errors
+        assert partial.resolve() in widget._folder_source.errors
         assert [path.name for path in widget.folder_paths] == ["frame_1.npy"]
 
         _save(partial, 2)
@@ -580,8 +369,8 @@ def test_folder_failed_and_mismatched_files_remain_retryable(
         _save(tmp_path / "frame_4.npy", 4)
         assert widget.poll_folder() == []
         assert widget.poll_folder() == [2]
-        assert mismatch.resolve() in widget.folder_errors
-        assert "expected (6, 8), got (3, 4)" in widget.folder_errors[mismatch.resolve()]
+        assert mismatch.resolve() in widget._folder_source.errors
+        assert "expected (6, 8), got (3, 4)" in widget._folder_source.errors[mismatch.resolve()]
         assert [path.name for path in widget.folder_paths] == [
             "frame_1.npy",
             "frame_2.npy",
@@ -652,7 +441,7 @@ def test_folder_initial_mismatch_does_not_block_later_valid_file(
     try:
         assert widget.labels == ["frame_1", "frame_3"]
         np.testing.assert_array_equal(widget._data[:, 0, 0], [1, 3])
-        assert mismatch.resolve() in widget.folder_errors
+        assert mismatch.resolve() in widget._folder_source.errors
 
         # C2: correcting the skipped file later, expect insertion at its natural
         # index without rebuilding the widget object.
@@ -719,6 +508,31 @@ def test_watched_folder_empty_opt_in_anchors_shape_and_prunes_errors(
     assert source.poll(widget) == []
     assert source.errors == {}
     assert widget._folder_watch_error == ""
+
+
+def test_watched_folder_empty_start_accepts_rgb_files(tmp_path: Path) -> None:
+    source = WatchedImageFolder(tmp_path, mode="panels")
+    source.read_initial(allow_empty=True)
+
+    class RecordingWidget:
+        pixel_size = 0.0
+        pixel_unit = "pixels"
+        scale_bar_visible = True
+
+        def _apply_folder_image_records(self, old, new, changed) -> None:
+            self.changed = changed
+
+    widget = RecordingWidget()
+    source.attach(widget, explicit_calibration=False)
+
+    # C1: an RGB file arrives in a folder watched from empty, expect it to
+    # anchor the spatial (rows, cols) shape and appear after its confirming
+    # poll instead of failing the shape check against its own channel axis.
+    np.save(tmp_path / "frame_1.npy", np.ones((6, 8, 3), dtype=np.uint8))
+    assert source.poll(widget) == []
+    assert source.poll(widget) == [0]
+    assert source.expected_shape == (6, 8)
+    assert source.errors == {}
 
 
 def test_watched_folder_natural_order_has_exact_path_tie_breaker(
@@ -853,7 +667,7 @@ def test_show2d_empty_first_recomputes_auto_display_bin(
     # C1: the bootstrap 1x1 waiting state cannot choose a useful auto preview;
     # expect the first real frame to recompute the wire-budget factor.
     monkeypatch.setattr(Show2D, "_WIRE_BUDGET_BYTES_PER_PANEL", 100)
-    widget = Show2D.from_folder(tmp_path, watch=True, watch_interval=60)
+    widget = Show2D.from_folder(tmp_path, watch=True, watch_interval=60, display_bin="auto")
     try:
         assert widget.n_images == 0
         assert widget._display_bin_factor == 1
@@ -890,12 +704,7 @@ def test_folder_calibration_is_preserved_until_files_disagree(
 
     widget = viewer.from_folder(tmp_path, watch=False)
     try:
-        if viewer is Show3D:
-            assert widget.display_bin == 4
-            assert widget.pixel_size == pytest.approx(0.8)
-            assert widget.pixel_size / widget.display_bin == pytest.approx(0.2)
-        else:
-            assert widget.pixel_size == pytest.approx(0.2)
+        assert widget.pixel_size == pytest.approx(0.2)
         assert widget.pixel_unit == "nm"
         assert widget.scale_bar_visible is True
 

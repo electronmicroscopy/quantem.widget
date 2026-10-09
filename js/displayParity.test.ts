@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import canonicalPoints from "./.generated/engine/swift/Sources/MetalDisplayKernels/Resources/colormaps.json";
+import canonicalPoints from "../src/quantem/widget/colormaps.json";
 import {
   COLORMAP_NAMES,
   COLORMAP_POINTS,
   COLORMAPS,
   applyColormap,
-} from "./colormaps";
+} from "./display/colormaps";
 import {
   applyHannWindow2D,
   computeMagnitude,
@@ -15,16 +15,16 @@ import {
   findFFTPeak,
   reciprocalCoordinatesFromShiftedOffset,
   shiftedMagnitude,
-} from "./fft";
+} from "./display/fft";
 import {
   applyLogScale,
   computeStats,
   computeHistogramFromBytes,
   percentileClip,
   signedLog1p,
-} from "./stats";
+} from "./display/stats";
 
-describe("canonical quantem.gpu display parity", () => {
+describe("display math parity", () => {
   it("uses the exact colormap control points shared with Metal and Python", () => {
     expect(COLORMAP_POINTS).toEqual(canonicalPoints);
     expect(COLORMAP_NAMES).toEqual(Object.keys(canonicalPoints));

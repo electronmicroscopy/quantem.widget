@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { autoEnhanceFFT } from "./fft";
+import { autoEnhanceFFT } from "./display/fft";
 
 describe("FFT automatic display range", () => {
   it("resolves the useful percentile when a DC outlier spans many orders of magnitude", () => {

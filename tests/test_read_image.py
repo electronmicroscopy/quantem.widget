@@ -5,24 +5,31 @@ read_image, and checked for exact array equality + Dataset2d return + the
 right first-frame reduction and calibration. This guards the multi-format
 routing so loading stays `ds = io.read_image(path)` for tif/png/npy/emd.
 """
+
+
 import json
 
+
 import numpy as np
+
+
 import pytest
 
-from quantem.core.datastructures import Dataset2d, Dataset3d
-from quantem.widget import Show2D, Show3D, read_gif
+
+
+
+
+
+from quantem.widget.adapters.core import is_dataset
 from quantem.widget.io.image import read_image, read_image_stack, read_images
 
-
-# --- per-format round trips ------------------------------------------------
 
 def test_npy_exact(tmp_path):
     arr = np.arange(512 * 512, dtype=np.float32).reshape(512, 512)
     path = tmp_path / "img.npy"
     np.save(path, arr)
     ds = read_image(path)
-    assert isinstance(ds, Dataset2d)
+    assert is_dataset(ds, ndim=2)
     assert ds.name == "img"
     np.testing.assert_array_equal(ds.array, arr)
 
@@ -41,7 +48,7 @@ def test_pillow_formats_exact(tmp_path, ext, dtype, maxval):
     path = tmp_path / f"img.{ext}"
     Image.fromarray(arr).save(path)
     ds = read_image(path)
-    assert isinstance(ds, Dataset2d)
+    assert is_dataset(ds, ndim=2)
     np.testing.assert_array_equal(ds.array, arr)
 
 
@@ -54,7 +61,7 @@ def test_three_dim_reduced_to_first_frame(tmp_path):
     assert ds.array.shape == (16, 16)
 
 
-def test_read_gif_returns_stack_and_widgets_open_it(tmp_path):
+def test_read_image_gif_reads_the_first_frame(tmp_path):
     from PIL import Image
 
     frames = [
@@ -71,42 +78,11 @@ def test_read_gif_returns_stack_and_widgets_open_it(tmp_path):
         optimize=False,
     )
 
-    ds = read_gif(path)
-    assert ds.name == "denoise_preview"
-    assert ds.array.shape == (4, 7, 9)
-    assert ds.array.dtype == np.float32
-    np.testing.assert_array_equal(ds.array[:, 0, 0], [10, 80, 160, 240])
-
     first = read_image(path)
+    assert first.name == "denoise_preview" and first.array.dtype == np.float32
     np.testing.assert_array_equal(first.array, frames[0])
 
-    movie = Show3D.from_gif(
-        path,
-        fps=12,
-        frame_labels=True,
-        show_controls=False,
-        show_scale_bar=False,
-    )
-    assert movie.title == "denoise_preview"
-    assert movie.n_slices == 4
-    assert movie.source_height == 7
-    assert movie.source_panel_width == 9
-    assert movie.height == 1
-    assert movie.width == 2
-    assert movie._data.shape == (4, 7, 9)
-    assert movie.fps == 12
-    assert movie.labels == ["Frame 1", "Frame 2", "Frame 3", "Frame 4"]
 
-    grid = Show2D.from_gif(path, ncols=2, labels=True, verbose=False)
-    assert grid.title == "denoise_preview"
-    assert grid.n_images == 4
-    assert grid.ncols == 2
-    assert grid.height == 7
-    assert grid.width == 9
-    assert grid.labels == ["Frame 1", "Frame 2", "Frame 3", "Frame 4"]
-
-
-# --- EMD: Velox layout + non-Velox fallback --------------------------------
 
 def test_velox_emd_sampling_and_first_frame(tmp_path):
     import h5py
@@ -137,8 +113,6 @@ def test_non_velox_emd_picks_largest_dataset(tmp_path):
     assert ds.array.shape == (48, 48)
 
 
-# --- folder reader (mixed formats + sizes) ---------------------------------
-
 def test_read_images_folder_mixed(tmp_path):
     from PIL import Image
     a = np.arange(32 * 32, dtype=np.float32).reshape(32, 32)
@@ -147,7 +121,7 @@ def test_read_images_folder_mixed(tmp_path):
     (tmp_path / "notes.md").write_text("ignore me")     # non-image, skipped
     out = read_images(tmp_path)
     assert [d.name for d in out] == ["a", "b"]           # sorted by filename
-    assert all(isinstance(d, Dataset2d) for d in out)
+    assert all(is_dataset(d, ndim=2) for d in out)
     assert out[0].array.shape == (16, 24)               # different sizes OK
     np.testing.assert_array_equal(out[1].array, a)
 
@@ -170,8 +144,6 @@ def test_read_images_empty_dir_raises(tmp_path):
         read_images(tmp_path)
 
 
-# --- folder stack reader ----------------------------------------------------
-
 def test_read_image_stack_natural_sort_and_pattern(tmp_path):
     from PIL import Image
 
@@ -182,7 +154,7 @@ def test_read_image_stack_natural_sort_and_pattern(tmp_path):
 
     ds = read_image_stack(tmp_path, pattern="frame_*.png", workers=2, progress=False)
 
-    assert isinstance(ds, Dataset3d)
+    assert is_dataset(ds, ndim=3)
     assert ds.name == tmp_path.name
     assert ds.array.shape == (3, 6, 8)
     assert ds.array.dtype == np.float32
@@ -206,8 +178,6 @@ def test_read_image_stack_empty_dir_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="No image frames"):
         read_image_stack(tmp_path, progress=False)
 
-
-# --- error path ------------------------------------------------------------
 
 def test_unsupported_extension_raises(tmp_path):
     path = tmp_path / "data.xyz"

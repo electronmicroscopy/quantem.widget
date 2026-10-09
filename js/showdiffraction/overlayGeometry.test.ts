@@ -5,6 +5,7 @@ import {
   dataRowToScreenY,
   frameStats,
   screenToData,
+  staggerLabelRows,
   staleFrameNote,
   viewTransform,
 } from "./overlayGeometry";
@@ -85,5 +86,27 @@ describe("staleFrameNote", () => {
     expect(staleFrameNote(true, 4, 0, 0)).toBeNull();
     expect(staleFrameNote(false, 4, 2, 0)).toBeNull();
     expect(staleFrameNote(true, 1, 0, 0)).toBeNull();
+  });
+});
+
+describe("staggerLabelRows", () => {
+  it("puts the labels of neighbouring rings on separate rows, like axis tick labels", () => {
+    // magnetite rings 1 and 2 (84.3 and 98.7 px) sit 19 screen px apart on the profile;
+    // their "2.96Å" and "2.53Å" labels are 25 px wide, so on one row they print as "2.962.53Å"
+    const spans = [{ start: 164, width: 25 }, { start: 183, width: 25 }, { start: 210, width: 25 }, { start: 300, width: 25 }];
+    const rows = staggerLabelRows(spans, 4);
+    expect(rows).toEqual([0, 1, 0, 0]);
+    for (let a = 0; a < spans.length; a++) {
+      for (let b = a + 1; b < spans.length; b++) {
+        if (rows[a] !== rows[b]) continue;
+        const [left, right] = spans[a].start < spans[b].start ? [spans[a], spans[b]] : [spans[b], spans[a]];
+        expect(left.start + left.width).toBeLessThanOrEqual(right.start);
+      }
+    }
+  });
+
+  it("leaves out a label that fits no row instead of drawing it over another", () => {
+    const spans = [{ start: 100, width: 30 }, { start: 105, width: 30 }, { start: 110, width: 30 }];
+    expect(staggerLabelRows(spans, 2)).toEqual([0, 1, null]);
   });
 });

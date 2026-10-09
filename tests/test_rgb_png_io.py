@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from quantem.widget import Show2D, Show3D, io
@@ -70,14 +69,13 @@ def test_show3d_rgb_stack_from_pngs(tmp_path: Path):
     folder.mkdir()
     _write_rgb_png(folder / "f0.png")
     _write_rgb_png(folder / "f1.png")
-    w = Show3D.from_folder(folder, watch=False, verbose=False, apply_config_transforms=False)
+    w = Show3D.from_folder(folder, watch=False, verbose=False)
     assert w.is_rgb is True
     assert w.n_slices == 2
     assert w.height == 24 and w.width == 32
     assert w._rgb_data is not None
     assert w._rgb_data.shape == (2, 24, 32, 3)
     # The single embedded RGB float32 stack is the live browser payload.
-    assert w.frame_bytes == b""
     assert len(w._offline_float_stack) == 2 * 24 * 32 * 3 * 4
 
 

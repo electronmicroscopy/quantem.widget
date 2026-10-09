@@ -26,7 +26,7 @@ def test_calibrated_map_export_and_saved_state(tmp_path):
         max_width=420,
         save_state=True,
     )
-    assert plot.plot_width_px == 420
+    assert plot.layout.width == "420px"
     assert plot.layout.max_width == "min(100%, 420px)"
     original = truth.copy()
     np.testing.assert_allclose(plot.grid["bounds"], [0, 10, 0, 180], atol=1e-14)

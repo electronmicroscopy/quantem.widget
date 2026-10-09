@@ -4,21 +4,6 @@ from pathlib import Path
 import numpy as np
 
 from quantem.widget import datasets
-from quantem.widget.data import tutorials
-
-
-def test_load_tutorial_show2d_uses_calibrated_preview(tmp_path, monkeypatch):
-    data_dir = tmp_path / "gold_haadf_npy"
-    data_dir.mkdir()
-    np.save(data_dir / "data.npy", np.arange(16, dtype=np.float32).reshape(4, 4))
-    (data_dir / "meta.json").write_text(json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]}))
-    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
-
-    dataset = tutorials.load_tutorial_show2d(stride=2, verbose=False)
-
-    np.testing.assert_array_equal(dataset.array, np.array([[0, 2], [8, 10]], dtype=np.float32))
-    assert tuple(dataset.sampling) == (0.4, 0.4)
-    assert tuple(dataset.units) == ("nm", "nm")
 
 
 def test_show2d_gold_size_maps_to_preview_stride(tmp_path, monkeypatch):
@@ -35,7 +20,7 @@ def test_show2d_gold_size_maps_to_preview_stride(tmp_path, monkeypatch):
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     dataset = datasets.show2d_gold(size="medium", verbose=False)
 
@@ -66,7 +51,7 @@ def test_show3d_gold_reuses_shared_haadf_source(tmp_path, monkeypatch):
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     dataset = datasets.show3d_gold(size="small", verbose=False)
 
@@ -75,55 +60,13 @@ def test_show3d_gold_reuses_shared_haadf_source(tmp_path, monkeypatch):
 
 
 def test_tutorial_size_names_are_strict():
-    assert tutorials._normalise_tutorial_size("Small") == "small"
+    assert datasets._normalise_tutorial_size("Small") == "small"
     try:
-        tutorials._normalise_tutorial_size("mini")
+        datasets._normalise_tutorial_size("mini")
     except ValueError as exc:
         assert "small, medium, large, full" in str(exc)
     else:
         raise AssertionError("expected invalid tutorial size to raise")
-
-
-def test_load_tutorial_show3d_uses_real_image_crops(tmp_path, monkeypatch):
-    data_dir = tmp_path / "gold_haadf_npy"
-    data_dir.mkdir()
-    image = np.arange(30 * 30, dtype=np.float32).reshape(30, 30)
-    np.save(data_dir / "data.npy", image)
-    (data_dir / "meta.json").write_text(json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]}))
-    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
-
-    dataset = tutorials.load_tutorial_show3d(n_frames=3, stride=1, crop_size=16, verbose=False)
-
-    assert dataset.array.shape == (3, 16, 16)
-    np.testing.assert_array_equal(dataset.array[0], image[0:16, 14:30])
-    np.testing.assert_array_equal(dataset.array[-1], image[14:30, 0:16])
-    assert tuple(dataset.sampling) == (1.0, 0.2, 0.2)
-    assert tuple(dataset.units) == ("frame", "nm", "nm")
-
-
-def test_load_tutorial_show4dstem_preserves_uint16_counts(tmp_path, monkeypatch):
-    data_dir = tmp_path / "gold_128_npy_bin8"
-    data_dir.mkdir()
-    stack = np.arange(4 * 4 * 2 * 2, dtype=np.uint16).reshape(4, 4, 2, 2)
-    stack[2, 2, 1, 1] = 4096
-    np.save(data_dir / "data.npy", stack)
-    (data_dir / "meta.json").write_text(
-        json.dumps(
-            {
-                "name": "gold_128_npy_bin8",
-                "sampling": [2.0, 2.0, 3.68, 3.68],
-                "units": ["A", "A", "mrad", "mrad"],
-                "processing": "test",
-            }
-        )
-    )
-    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
-
-    dataset = tutorials.load_tutorial_show4dstem(scan_stride=2, verbose=False)
-
-    assert dataset.array.dtype == np.uint16
-    np.testing.assert_array_equal(dataset.array, stack[::2, ::2])
-    assert tuple(dataset.sampling) == (4.0, 4.0, 3.68, 3.68)
 
 
 def test_show4dstem_gold_uses_widget_tutorial_source(tmp_path, monkeypatch):
@@ -147,11 +90,11 @@ def test_show4dstem_gold_uses_widget_tutorial_source(tmp_path, monkeypatch):
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     dataset = datasets.show4dstem_gold(size="small", verbose=False)
 
-    assert dataset.array.shape == (2, 2, 2, 2)
+    assert dataset.shape == (2, 2, 2, 2)  # a Dataset4dstemGPU on a GPU, a core Dataset4dstem elsewhere
     assert tuple(dataset.sampling) == (8.0, 8.0, 3.68, 3.68)
     assert calls[0]["allow_patterns"] == ["widget-tutorials/show4dstem/gold-128-bin8/full/*"]
 
@@ -167,7 +110,7 @@ def test_show1d_ducky_downloads_scoped_widget_tutorial_folder(tmp_path, monkeypa
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     result = datasets.show1d_ducky(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
 
@@ -195,7 +138,7 @@ def test_showdiffraction_fe3o4_uses_widget_tutorial_source(tmp_path, monkeypatch
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     pattern = datasets.showdiffraction_fe3o4(verbose=False)
 
@@ -211,38 +154,18 @@ def test_showdiffraction_fe3o4_uses_widget_tutorial_source(tmp_path, monkeypatch
     ]
 
 
-def test_showdiffraction_fe3o4_falls_back_to_packaged_file(tmp_path, monkeypatch):
-    # a failed download, and a snapshot without data.npy, both use the packaged copy
-    packaged = tmp_path / "fe3o4_saed_512.npy"
-    np.save(packaged, np.ones((6, 6), dtype=np.float32))
-    monkeypatch.setattr(tutorials, "_FE3O4_PACKAGED_PATH", packaged)
-
-    def fail_download(*args, **kwargs):
-        raise OSError("offline")
-
-    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
-    assert tutorials.showdiffraction_fe3o4(verbose=False).shape == (6, 6)
-
-    root = tmp_path / "hf-cache"
-    (root / "widget-tutorials" / "showdiffraction" / "fe3o4-saed" / "small").mkdir(parents=True)
-    monkeypatch.setattr(tutorials, "snapshot_download", lambda **kwargs: root, raising=False)
-    assert tutorials.showdiffraction_fe3o4(verbose=False).shape == (6, 6)
-
-
 def test_showdiffraction_fe3o4_raises_without_usable_source(tmp_path, monkeypatch):
     def fail_download(*args, **kwargs):
         raise OSError("offline")
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
-    monkeypatch.setattr(tutorials, "_FE3O4_PACKAGED_PATH", tmp_path / "missing.npy")
+    monkeypatch.setattr(datasets, "snapshot_download", fail_download, raising=False)
 
-    for kwargs in ({"allow_fallback": False}, {}):
-        try:
-            tutorials.showdiffraction_fe3o4(verbose=False, **kwargs)
-        except OSError as exc:
-            assert "offline" in str(exc)
-        else:
-            raise AssertionError("expected diffraction tutorial loader to raise")
+    try:
+        datasets.showdiffraction_fe3o4(verbose=False)
+    except OSError as exc:
+        assert "offline" in str(exc)
+    else:
+        raise AssertionError("expected diffraction tutorial loader to raise")
 
 
 def test_gold_session_uses_widget_tutorial_folder(tmp_path, monkeypatch):
@@ -256,7 +179,7 @@ def test_gold_session_uses_widget_tutorial_folder(tmp_path, monkeypatch):
         calls.append(kwargs)
         return root
 
-    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
 
     result = datasets.gold_session(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
 

@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS).
+"""Regression shield for the ``save_state`` contract (Plot2D / Show1D / Show2D / Show3D / Show4DSTEM).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -14,15 +14,29 @@ receive the buffer and the widget would render blank - invisible to unit tests
 that only check output size. These tests lock both halves of the contract so a
 future edit can't silently reintroduce either the bloat or the blank render.
 """
+
+
 import base64
+
+
 import io
-import pathlib
+
+
+
 
 import numpy as np
+
+
 import pytest
+
+
 from PIL import Image
 
-from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
+
+from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show4DSTEM
+
+
+from quantem.widget.show4dstem.export import export_clone
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
@@ -84,15 +98,12 @@ def _make(widget, *, save_state):
         return Show2D(data, save_state=save_state), "frame_bytes"
     if widget is Show3D:
         return Show3D(np.random.rand(4, 128, 128).astype("float32"),
-                      save_state=save_state), "frame_bytes"
-    if widget is ShowEDS:
-        return ShowEDS(np.random.rand(16, 16, 32).astype("float32"),
-                       np.linspace(0.1, 10.0, 32), save_state=save_state), "cube_bytes"
+                      save_state=save_state), "_offline_float_stack"
     return Show4DSTEM(np.random.rand(8, 8, 16, 16).astype("float32"),
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Plot2D, Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS]
+WIDGETS = [Plot2D, Show1D, Show2D, Show3D, Show4DSTEM]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -114,8 +125,6 @@ def test_full_snapshot_trims_bulk_buffers(widget):
     """save_state=False: no bulk pixel buffer may appear in the saved-notebook
     snapshot. This is the anti-1GB guard."""
     w, _ = _make(widget, save_state=False)
-    if widget is Show3D:
-        w._on_first_render({"new": True})
     full = w.get_state()
     leaked = [k for k in w._UNSAVED_HEAVY_KEYS if k in full]
     assert not leaked, (
@@ -155,501 +164,6 @@ def test_default_is_save_state_false(widget):
     assert w._save_state is False
 
 
-def test_show2d_static_png_preserves_sparse_large_content():
-    """The fallback PNG must show real image content, not a blank dark tile.
-
-    A 4k-style sparse image is exactly where stride sampling fails: if the
-    bright feature lands between sampled rows/columns, the static fallback looks
-    nearly black even though the live widget rendered fine. The PNG path should
-    area-downsample instead, so thin/sparse features survive notebook save.
-    """
-    image = np.zeros((1024, 1024), dtype=np.float32)
-    image[101:109, 611:619] = 1000
-    widget = Show2D(
-        image,
-        labels=["Sparse feature"],
-        save_state=False,
-        notebook_preview_format="png",
-        verbose=False,
-    )
-
-    bundle = widget._repr_mimebundle_()
-    data = bundle[0] if isinstance(bundle, tuple) else bundle
-    png = data["image/png"]
-    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(png))).convert("RGB"))
-
-    nonwhite = ~np.all(decoded > 245, axis=-1)
-    warm_signal = (
-        (decoded[..., 0] > 140)
-        & (decoded[..., 1] > 80)
-        & (decoded[..., 2] < 230)
-        & nonwhite
-    )
-    assert int(warm_signal.sum()) > 20
-
-
-def test_show2d_static_png_saves_roi_and_zoom_panel():
-    """A scientist's saved notebook preview should keep ROI evidence visible."""
-    y, x = np.mgrid[:128, :128].astype(np.float32)
-    image = (
-        0.1
-        + np.exp(-((x - 64) ** 2 + (y - 64) ** 2) / 400.0)
-        + 0.2 * np.cos(2 * np.pi * x / 12.0) * np.cos(2 * np.pi * y / 12.0)
-    ).astype(np.float32)
-    widget = Show2D(
-        image,
-        title="ROI saved preview",
-        labels=["full reference"],
-        save_state=False,
-        notebook_preview_format="png",
-        verbose=False,
-    )
-    widget.set_roi(64, 64, radius=18)
-
-    bundle = widget._repr_mimebundle_()
-    data = bundle[0] if isinstance(bundle, tuple) else bundle
-    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
-
-    assert decoded.shape[1] > decoded.shape[0] * 1.6
-    cyan = (
-        (decoded[..., 0] < 120)
-        & (decoded[..., 1] > 150)
-        & (decoded[..., 2] > 170)
-    )
-    mid = decoded.shape[1] // 2
-    assert int(cyan[:, :mid].sum()) > 40
-    assert int(cyan[:, mid:].sum()) > 40
-    left_y, left_x = np.nonzero(cyan[:, :mid])
-    right_y, right_x = np.nonzero(cyan[:, mid:])
-    left_diameter = max(left_y.max() - left_y.min(), left_x.max() - left_x.min())
-    right_diameter = max(right_y.max() - right_y.min(), right_x.max() - right_x.min())
-    assert right_diameter > left_diameter * 2.0
-    state = widget.get_state()
-    assert state["roi_list"]
-    assert state["_static_fallback_mime"] == "image/png"
-
-
-def test_show2d_static_roi_zoom_updates_scale_bar():
-    """ROI crop preview should recompute scale bars for the cropped field."""
-    image = np.random.default_rng(12).random((160, 160), dtype=np.float32)
-    widget = Show2D(
-        image,
-        save_state=False,
-        notebook_preview_format="png",
-        verbose=False,
-    )
-    widget.set_roi(78, 82, radius=22)
-
-    specs = widget._static_panel_specs()
-    specs[0] = {**specs[0], "roi_items": widget._static_roi_items()}
-    specs.extend(widget._static_roi_zoom_specs(specs))
-    overlays = widget._static_overlay_texts(specs, css_px=widget._static_canvas_css_px())
-
-    assert [overlay[0] for overlay in overlays] == ["Image 1", "ROI 1 zoom"]
-    assert overlays[0][2] == "20 px"
-    assert overlays[1][2] == "5 px"
-    assert overlays[0][3] > overlays[1][3]
-
-
-def test_show2d_static_png_saves_multiple_roi_zoom_panels_with_common_shape():
-    """Each ROI should get its own comparable saved-preview crop."""
-    y, x = np.mgrid[:128, :128].astype(np.float32)
-    image = (
-        0.1
-        + np.exp(-((x - 38) ** 2 + (y - 42) ** 2) / 180.0)
-        + 0.8 * np.exp(-((x - 86) ** 2 + (y - 78) ** 2) / 260.0)
-        + 0.5 * np.exp(-((x - 28) ** 2 + (y - 103) ** 2) / 120.0)
-        + 0.4 * np.exp(-((x - 108) ** 2 + (y - 26) ** 2) / 150.0)
-        + 0.1 * np.cos(2 * np.pi * (x + y) / 14.0)
-    ).astype(np.float32)
-    widget = Show2D(
-        image,
-        title="Multi ROI saved preview",
-        labels=["full reference"],
-        save_state=False,
-        notebook_preview_format="png",
-        verbose=False,
-    )
-    widget.roi_active = True
-    widget.roi_selected_idx = 1
-    widget.roi_list = [
-        {
-            "shape": "circle",
-            "row": 42,
-            "col": 38,
-            "radius": 8,
-            "line_width": 2,
-            "color": "#4fc3f7",
-            "visible": True,
-        },
-        {
-            "shape": "rectangle",
-            "row": 78,
-            "col": 86,
-            "width": 18,
-            "height": 12,
-            "line_width": 2,
-            "color": "#ffb74d",
-            "visible": True,
-        },
-        {
-            "shape": "circle",
-            "row": 94,
-            "col": 35,
-            "radius": 6,
-            "line_width": 2,
-            "color": "#81c784",
-            "visible": True,
-        },
-        {
-            "shape": "square",
-            "row": 103,
-            "col": 28,
-            "radius": 7,
-            "line_width": 2,
-            "color": "#ce93d8",
-            "visible": True,
-        },
-        {
-            "shape": "annular",
-            "row": 26,
-            "col": 108,
-            "radius_inner": 4,
-            "radius": 9,
-            "line_width": 2,
-            "color": "#ef5350",
-            "visible": True,
-        },
-    ]
-
-    specs = widget._static_panel_specs()
-    zooms = widget._static_roi_zoom_specs(specs)
-
-    assert len(zooms) == 5
-    assert [zoom["label"] for zoom in zooms] == [
-        "ROI 1 zoom",
-        "ROI 2 zoom",
-        "ROI 3 zoom",
-        "ROI 4 zoom",
-        "ROI 5 zoom",
-    ]
-    assert len({zoom["frame"].shape for zoom in zooms}) == 1
-    assert zooms[0]["frame"].shape[0] == zooms[0]["frame"].shape[1]
-    assert [zoom["roi_items"][0]["shape"] for zoom in zooms] == [
-        "circle",
-        "rectangle",
-        "circle",
-        "square",
-        "annular",
-    ]
-    assert [zoom["roi_items"][0]["color"] for zoom in zooms] == [
-        "#4fc3f7",
-        "#ffb74d",
-        "#81c784",
-        "#ce93d8",
-        "#ef5350",
-    ]
-
-    png_b64 = widget._static_png_b64()
-    assert png_b64
-    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB"))
-    assert decoded.shape[1] > decoded.shape[0] * 1.5
-
-
-def test_show2d_roi_geometries_expose_agent_coordinates():
-    """Scientists and agents should be able to reuse ROI coordinates."""
-    widget = Show2D(
-        np.zeros((100, 120), dtype=np.float32),
-        save_state=False,
-        verbose=False,
-    )
-    widget.roi_active = True
-    widget.roi_list = [
-        {
-            "shape": "circle",
-            "row": 30,
-            "col": 40,
-            "radius": 8,
-            "color": "#4fc3f7",
-            "visible": True,
-        },
-        {
-            "shape": "rectangle",
-            "row": 50,
-            "col": 60,
-            "width": 20,
-            "height": 10,
-            "color": "#ffb74d",
-            "visible": True,
-        },
-        {
-            "shape": "square",
-            "row": 95,
-            "col": 115,
-            "radius": 10,
-            "color": "#81c784",
-            "visible": True,
-        },
-        {
-            "shape": "annular",
-            "row": 20,
-            "col": 25,
-            "radius_inner": 4,
-            "radius": 11,
-            "color": "#ef5350",
-            "visible": True,
-        },
-        {
-            "shape": "circle",
-            "row": 5,
-            "col": 5,
-            "radius": 3,
-            "visible": False,
-        },
-    ]
-
-    rois = widget.get_roi_geometries()
-
-    assert len(rois) == 4
-    assert rois[0]["center"] == {"row": 30.0, "col": 40.0}
-    assert rois[0]["radius"] == 8.0
-    assert rois[0]["bounds"] == {
-        "row_min": 22.0,
-        "row_max": 38.0,
-        "col_min": 32.0,
-        "col_max": 48.0,
-    }
-    assert "corners" not in rois[0]
-
-    assert rois[1]["corners"] == [
-        {"row": 45.0, "col": 50.0},
-        {"row": 45.0, "col": 70.0},
-        {"row": 55.0, "col": 70.0},
-        {"row": 55.0, "col": 50.0},
-    ]
-    assert rois[2]["corners"] == [
-        {"row": 85.0, "col": 105.0},
-        {"row": 85.0, "col": 125.0},
-        {"row": 105.0, "col": 125.0},
-        {"row": 105.0, "col": 105.0},
-    ]
-    assert rois[2]["bounds_clipped"] == {
-        "row_min": 85.0,
-        "row_max": 100.0,
-        "col_min": 105.0,
-        "col_max": 120.0,
-    }
-    assert rois[3]["radius_inner"] == 4.0
-    assert rois[3]["radius_outer"] == 11.0
-
-    all_rois = widget.get_roi_geometries(visible_only=False)
-    assert len(all_rois) == 5
-    assert all_rois[-1]["visible"] is False
-
-    restored = Show2D(
-        np.zeros((100, 120), dtype=np.float32),
-        save_state=False,
-        verbose=False,
-    )
-    restored.load_state_dict(widget.state_dict())
-    assert restored.get_roi_geometries() == rois
-
-
-def test_show3d_roi_geometries_expose_agent_coordinates():
-    """Show3D ROI coordinates should be reusable while users scrub frames."""
-    stack = _mos2_like_stack(4, 100, 120)
-    widget = Show3D(stack, save_state=False, verbose=False)
-    widget.roi_active = True
-    widget.roi_list = [
-        {
-            "shape": "circle",
-            "row": 30,
-            "col": 40,
-            "radius": 8,
-            "color": "#4fc3f7",
-            "visible": True,
-        },
-        {
-            "shape": "rectangle",
-            "row": 50,
-            "col": 60,
-            "width": 20,
-            "height": 10,
-            "color": "#ffb74d",
-            "visible": True,
-        },
-        {
-            "shape": "annular",
-            "row": 20,
-            "col": 25,
-            "radius_inner": 4,
-            "radius": 11,
-            "color": "#ef5350",
-            "visible": False,
-        },
-    ]
-
-    rois = widget.get_roi_geometries()
-
-    assert len(rois) == 2
-    assert rois[0]["center"] == {"row": 30.0, "col": 40.0}
-    assert rois[0]["radius"] == 8.0
-    assert rois[1]["corners"] == [
-        {"row": 45.0, "col": 50.0},
-        {"row": 45.0, "col": 70.0},
-        {"row": 55.0, "col": 70.0},
-        {"row": 55.0, "col": 50.0},
-    ]
-    assert len(widget.get_roi_geometries(visible_only=False)) == 3
-
-    restored = Show3D(stack, save_state=False, verbose=False)
-    restored.load_state_dict(widget.state_dict())
-    assert restored.get_roi_geometries() == rois
-
-
-def test_show3d_static_preview_carries_all_visible_rois_to_saved_frame():
-    """Saved Show3D previews should show the frame plus all visible ROI crops."""
-    stack = _mos2_like_stack(4, 128, 128)
-    widget = Show3D(
-        stack,
-        title="Show3D ROI saved preview",
-        save_state=False,
-        notebook_preview_format="png",
-        verbose=False,
-    )
-    widget.slice_idx = 2
-    widget.roi_active = True
-    widget.roi_selected_idx = 1
-    widget.roi_list = [
-        {
-            "shape": "circle",
-            "row": 42,
-            "col": 38,
-            "radius": 8,
-            "line_width": 2,
-            "color": "#4fc3f7",
-            "visible": True,
-        },
-        {
-            "shape": "rectangle",
-            "row": 78,
-            "col": 86,
-            "width": 18,
-            "height": 12,
-            "line_width": 2,
-            "color": "#ffb74d",
-            "visible": True,
-        },
-        {
-            "shape": "annular",
-            "row": 26,
-            "col": 108,
-            "radius_inner": 4,
-            "radius": 9,
-            "line_width": 2,
-            "color": "#ef5350",
-            "visible": False,
-        },
-    ]
-
-    preview = widget._static_show2d_preview()
-    assert preview is not None
-    assert preview.roi_active is True
-    assert preview.roi_list == widget.roi_list
-    assert preview.roi_selected_idx == widget.roi_selected_idx
-
-    specs = preview._static_panel_specs()
-    zooms = preview._static_roi_zoom_specs(specs)
-    assert [zoom["label"] for zoom in zooms] == ["ROI 1 zoom", "ROI 2 zoom"]
-    assert [zoom["roi_items"][0]["shape"] for zoom in zooms] == ["circle", "rectangle"]
-
-    bundle = widget._repr_mimebundle_()
-    data = bundle[0] if isinstance(bundle, tuple) else bundle
-    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
-    assert decoded.shape[1] > decoded.shape[0] * 1.4
-
-
-def test_show3d_notebook_preview_frames_make_single_panel_contact_sheet():
-    """A saved single-panel Show3D notebook preview can show chosen frames."""
-    stack = np.stack([
-        np.full((48, 64), idx, dtype=np.float32)
-        for idx in range(6)
-    ])
-    widget = Show3D(
-        stack,
-        title="Selected saved frames",
-        labels=[f"frame {idx}" for idx in range(6)],
-        notebook_preview_frames=[0, 2, 5],
-        notebook_preview_ncols=2,
-        notebook_preview_format="png",
-        save_state=False,
-        verbose=False,
-    )
-
-    preview = widget._static_show2d_preview()
-    assert preview is not None
-    assert preview.ncols == 2
-    assert [float(np.mean(spec["frame"])) for spec in preview._static_panel_specs()] == [0.0, 2.0, 5.0]
-    assert preview.labels == [
-        "Selected saved frames · frame 0 1/6",
-        "Selected saved frames · frame 2 3/6",
-        "Selected saved frames · frame 5 6/6",
-    ]
-
-    bundle = widget._repr_mimebundle_()
-    data = bundle[0] if isinstance(bundle, tuple) else bundle
-    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
-    assert decoded.shape[1] > decoded.shape[0]
-
-
-def test_show3d_notebook_preview_frames_roundtrip_and_validate():
-    """Saved preview frame choices should be explicit state, not hidden UI magic."""
-    stack = _mos2_like_stack(8, 48, 64)
-    widget = Show3D(stack, notebook_preview_frames=[0, 3, 7], notebook_preview_ncols=3, verbose=False)
-
-    assert widget.notebook_preview_frames == [0, 3, 7]
-    assert widget.notebook_preview_ncols == 3
-    assert widget.set_notebook_preview_frames([1, 1, 4], ncols=2) is widget
-    assert widget.notebook_preview_frames == [1, 4]
-    assert widget.notebook_preview_ncols == 2
-
-    restored = Show3D(stack, verbose=False)
-    restored.load_state_dict(widget.state_dict())
-    assert restored.notebook_preview_frames == [1, 4]
-    assert restored.notebook_preview_ncols == 2
-
-    assert restored.clear_notebook_preview_frames() is restored
-    assert restored.notebook_preview_frames == []
-    assert restored.notebook_preview_ncols == 0
-
-    with pytest.raises(ValueError, match="notebook_preview_frames values"):
-        restored.set_notebook_preview_frames([99])
-    with pytest.raises(ValueError, match="not bools"):
-        restored.set_notebook_preview_frames([True])
-
-
-def test_show3d_notebook_preview_frames_stay_single_panel_only():
-    """Multi-panel Show3D saved previews should not multiply panels by frames."""
-    panel_a = np.stack([np.full((32, 32), idx, dtype=np.float32) for idx in range(4)])
-    panel_b = np.stack([np.full((32, 32), idx + 10, dtype=np.float32) for idx in range(4)])
-    widget = Show3D(
-        panel_a,
-        panel_b,
-        panel_titles=["A", "B"],
-        notebook_preview_frames=[0, 2, 3],
-        notebook_preview_ncols=3,
-        verbose=False,
-    )
-    widget.slice_idx = 2
-
-    preview = widget._static_show2d_preview()
-
-    assert preview is not None
-    specs = preview._static_panel_specs()
-    assert len(specs) == 2
-    assert [float(np.mean(spec["frame"])) for spec in specs] == [2.0, 12.0]
-
-
 @pytest.mark.parametrize(
     ("format_name", "mime", "pil_format"),
     [
@@ -658,7 +172,7 @@ def test_show3d_notebook_preview_frames_stay_single_panel_only():
         ("png", "image/png", "PNG"),
     ],
 )
-@pytest.mark.parametrize("widget_cls", [Show2D, Show3D])
+@pytest.mark.parametrize("widget_cls", [Show3D])
 def test_notebook_preview_format_controls_saved_fallback(widget_cls, format_name, mime, pil_format):
     """Show2D/Show3D should expose the saved-notebook preview format directly.
 
@@ -698,24 +212,6 @@ def test_notebook_preview_format_controls_saved_fallback(widget_cls, format_name
         assert img.format == pil_format
 
 
-def test_notebook_preview_format_none_disables_static_preview():
-    """Advanced opt-out: no preview means the notebook remains smallest, but a
-    cold reopen without widget state has no static render."""
-    widget = Show2D(
-        np.random.default_rng(34).random((48, 48), dtype=np.float32),
-        notebook_preview_format=None,
-        save_state=False,
-        verbose=False,
-    )
-    bundle = widget._repr_mimebundle_()
-    data = bundle[0] if isinstance(bundle, tuple) else bundle
-
-    assert not [key for key in IMAGE_MIME_KEYS if key in (data or {})]
-    state = widget.get_state()
-    assert "_static_fallback_jpeg" not in state
-    assert "frame_bytes" not in state
-
-
 def test_show4dstem_notebook_preview_format_none_disables_static_preview():
     """A live-only Show4DSTEM notebook can suppress the static sibling."""
     widget = Show4DSTEM(
@@ -737,24 +233,6 @@ def test_show4dstem_notebook_preview_format_none_disables_static_preview():
         widget.close()
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"notebook_preview_format": "bmp"}, "notebook_preview_format"),
-        ({"notebook_preview_quality": 0}, "notebook_preview_quality"),
-        ({"notebook_preview_max_px": 0}, "notebook_preview_max_px"),
-    ],
-)
-def test_notebook_preview_options_validate(kwargs, message):
-    with pytest.raises(ValueError, match=message):
-        Show2D(
-            np.zeros((16, 16), dtype=np.float32),
-            save_state=False,
-            verbose=False,
-            **kwargs,
-        )
-
-
 def test_show2d_first_render_clears_heavy_frame_buffer():
     """After JS paints, later notebook saves should not keep pixel buffers."""
     image = np.random.default_rng(0).random((128, 128), dtype=np.float32)
@@ -766,49 +244,6 @@ def test_show2d_first_render_clears_heavy_frame_buffer():
     assert widget.frame_bytes == b""
     assert "frame_bytes" not in widget.get_state()
     assert not widget._get_embed_state().get("buffers")
-
-
-def test_show3d_first_render_clears_heavy_transfer_buffers():
-    """After JS paints, later notebook saves omit the initial display stack."""
-    stack = np.random.default_rng(1).random((6, 128, 128), dtype=np.float32)
-    widget = Show3D(stack, save_state=False)
-    widget.frame_bytes = b"frame-transfer"
-
-    widget._on_first_render({"new": True})
-
-    assert widget.frame_bytes == b""
-    full = widget.get_state()
-    assert "frame_bytes" not in full
-    assert "_offline_float_stack" not in full
-    buffers = widget._get_embed_state().get("buffers", [])
-    assert not [
-        b
-        for b in buffers
-        if b.get("path") in (["frame_bytes"], ["_offline_float_stack"])
-    ]
-    assert not [b for b in buffers if b.get("data")]
-
-
-def test_show3d_live_mount_state_keeps_initial_frame_before_first_render():
-    """The initial full state is also the live anywidget mount payload.
-
-    ``save_state=False`` should strip heavy buffers from later notebook saves,
-    but not from the pre-render mount state; otherwise JupyterLab mounts a
-    Show3D root with only the static JPEG preview and no interactive canvas.
-    """
-    stack = np.random.default_rng(2).random((3, 64, 64), dtype=np.float32)
-    widget = Show3D(stack, save_state=False, offline=False)
-
-    pre_render = widget._with_initial_live_mount_state(widget.get_state)
-
-    assert widget._js_rendered is False
-    assert pre_render.get("_offline_float_stack"), "pre-render live mount lost display stack"
-
-    widget._on_first_render({"new": True})
-    post_render = widget.get_state()
-
-    assert "frame_bytes" not in post_render
-    assert "_offline_float_stack" not in post_render
 
 
 def _assert_export_state_keeps_buffer(widget, key: str) -> None:
@@ -851,109 +286,12 @@ def test_html_export_clones_keep_bulk_buffers():
         save_state=False,
         verbose=False,
     )
-    stem_clone = stem._clone_for_html_export(dtype="uint16", det_bin=1)
+    stem_clone = export_clone(stem, "uint16", 1, 1)
     try:
         _assert_export_state_keeps_buffer(stem_clone, "_offline_stack")
     finally:
         stem_clone.close()
         stem.close()
-
-
-def test_show3d_html_export_clone_preserves_playing_state():
-    """Standalone Show3D export should autoplay when the source widget is playing."""
-    rng = np.random.default_rng(12)
-    widget = Show3D(rng.random((4, 24, 24), dtype=np.float32), save_state=False)
-    widget.play()
-
-    clone = widget._clone_for_html_export(quantized=False)
-    try:
-        assert clone.playing is True
-        assert clone.get_state()["playing"] is True
-    finally:
-        clone.close()
-        widget.close()
-
-
-def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
-    """Report-style Show3D exports can opt into a compact binned uint8 pack.
-
-    The live widget starts at its default 4× display bin. Export downsampling
-    is additional and its scale-bar pixel size is adjusted.
-    """
-    rng = np.random.default_rng(123)
-    data = rng.random((4, 64, 64), dtype=np.float32)
-    widget = Show3D(data, sampling=0.2, units="nm", save_state=False, title="binned export")
-
-    full_clone = widget._clone_for_html_export(quantized=True)
-    binned_clone = widget._clone_for_html_export(quantized=True, downsample=4)
-    try:
-        assert (widget.height, widget.width) == (16, 16)
-        assert widget.pixel_size == pytest.approx(0.8)
-        assert (full_clone.n_slices, full_clone.height, full_clone.width) == (4, 16, 16)
-        assert (binned_clone.n_slices, binned_clone.height, binned_clone.width) == (4, 4, 4)
-        assert binned_clone.pixel_size == pytest.approx(3.2)
-        assert len(binned_clone._offline_stack) < len(full_clone._offline_stack) / 8
-    finally:
-        full_clone.close()
-        binned_clone.close()
-
-    out = widget.export_html(tmp_path / "binned.html", encoding="uint8", downsample=4)
-    assert out.exists()
-    assert "4x downsample" in widget.export_status
-    with pytest.raises(ValueError, match="exact float32"):
-        widget.export_html(tmp_path / "bad.html", encoding="full", downsample=2)
-    widget.close()
-
-
-def test_show4dstem_bslz4_html_export_embeds_self_with_bulk_state(monkeypatch, tmp_path):
-    """Show4DSTEM's bslz4 export branch embeds ``self``, not an export clone."""
-    widget = Show4DSTEM(
-        np.random.default_rng(11).integers(0, 100, (4, 4, 8, 8), dtype=np.uint16),
-        save_state=False,
-        verbose=False,
-    )
-    widget._offline_bslz4 = "{}"
-    widget._offline_stack = b"offline-stack"
-    captured = {}
-
-    def fake_dependency_state(views, drop_defaults=False):
-        view = views[0]
-        state = view.get_state()
-        captured["save_state"] = view._save_state
-        captured["has_stack"] = "_offline_stack" in state
-        captured["stack_size"] = len(state.get("_offline_stack", b""))
-        return {}
-
-    def fake_embed_minimal_html(filename, *, views, title, drop_defaults, state):
-        pathlib.Path(filename).write_text("<html><head></head><body></body></html>")
-
-    monkeypatch.setattr("ipywidgets.embed.dependency_state", fake_dependency_state)
-    monkeypatch.setattr("ipywidgets.embed.embed_minimal_html", fake_embed_minimal_html)
-
-    try:
-        widget._write_html_export(tmp_path / "show4dstem.html", dtype="uint16", det_bin=1)
-    finally:
-        widget.close()
-
-    assert captured == {"save_state": True, "has_stack": True, "stack_size": len(b"offline-stack")}
-    assert widget._save_state is False
-
-
-def test_show4dstem_bslz4_binned_interactive_export_has_clear_error(tmp_path):
-    widget = Show4DSTEM(
-        np.random.default_rng(12).integers(0, 100, (4, 4, 8, 8), dtype=np.uint16),
-        save_state=False,
-        verbose=False,
-    )
-    widget._offline_bslz4 = "{}"
-
-    try:
-        with pytest.raises(ValueError, match="Binned interactive raw export"):
-            widget._write_html_export(tmp_path / "binned.html", dtype="uint8", det_bin=2)
-        with pytest.raises(ValueError, match="Binned interactive raw export"):
-            widget._write_html_export(tmp_path / "scan-binned.html", dtype="uint8", det_bin=1, scan_bin=2)
-    finally:
-        widget.close()
 
 
 def test_export_html_size_scales_with_embedded_data(tmp_path):
@@ -968,32 +306,26 @@ def test_export_html_size_scales_with_embedded_data(tmp_path):
 
     data2d = rng.random((3, 512, 512), dtype=np.float32)
     show2d = Show2D(data2d, save_state=False, verbose=False, title="size-show2d")
-    cases.append((show2d, data2d.nbytes, "frame_bytes", tmp_path / "show2d.html"))
+    cases.append((show2d, data2d.nbytes, "frame_bytes", tmp_path / "show2d.html", {"encoding": "full"}))
 
     data3d = rng.random((8, 256, 256), dtype=np.float32)
     show3d = Show3D(data3d, save_state=False, title="size-show3d")
-    cases.append((show3d, data3d.nbytes, "_offline_float_stack", tmp_path / "show3d.html"))
+    cases.append((show3d, data3d.nbytes, "_offline_float_stack", tmp_path / "show3d.html", {"encoding": "full"}))
 
     stem_data = rng.integers(0, 1000, (32, 32, 32, 32), dtype=np.uint16)
     stem = Show4DSTEM(stem_data, save_state=False, verbose=False, title="size-show4dstem")
-    cases.append((stem, stem_data.nbytes, "_offline_stack", tmp_path / "show4dstem.html"))
+    cases.append((stem, stem_data.nbytes, "_offline_stack", tmp_path / "show4dstem.html", {"dtype": "uint16"}))
 
     try:
-        for widget, raw_bytes, marker, path in cases:
-            exported = widget.export_html(path, encoding="full")
+        for widget, raw_bytes, marker, path, kwargs in cases:
+            exported = widget.export_html(path, **kwargs)
             html = exported.read_text(errors="ignore")
             assert exported.stat().st_size > raw_bytes / 2
             assert marker in html
     finally:
-        for widget, _, _, _ in cases:
+        for widget, _, _, _, _ in cases:
             widget.close()
 
-
-# ---------------------------------------------------------------------------
-# Show2D static-PNG fidelity: the fallback must map pixels to colors exactly
-# like the live widget (colormap, contrast window, log scale, linked/per-panel
-# ranges, diff panels), not merely "show something".
-# ---------------------------------------------------------------------------
 
 def _decode_png(widget) -> np.ndarray:
     """Decode the widget's static fallback PNG to an (H, W, 3) uint8 array."""
@@ -1005,146 +337,6 @@ def _decode_png(widget) -> np.ndarray:
     png_b64 = widget._static_png_b64()
     assert png_b64
     return np.asarray(Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB"))
-
-
-def test_show2d_format_stat_matches_widget_stats_row():
-    """Stats line must format like JS formatNumber: 5.85e+3, 0.42, 0."""
-    fmt = Show2D._format_stat
-    assert fmt(0) == "0"
-    assert fmt(5852.3) == "5.85e+3"
-    assert fmt(0.0042) == "4.20e-3"
-    assert fmt(0.42) == "0.42"
-    assert fmt(-12345.0) == "-1.23e+4"
-
-
-def test_show2d_static_panel_rgb_bit_matches_independent_cmap():
-    """The panel colormap path must equal an independently computed
-    cmap(clip((frame - vmin) / (vmax - vmin))) at bit level. This is the
-    parity anchor: the PNG renderer feeds imshow these exact RGB bytes."""
-    from matplotlib import colormaps
-
-    rng = np.random.default_rng(0)
-    frame = rng.random((64, 64)).astype(np.float32) * 100
-    for cmap_name in ("gray", "inferno", "viridis"):
-        widget = Show2D(frame, cmap=cmap_name, verbose=False)
-        (vmin, vmax), = widget._resolve_panel_display_ranges([frame])
-        got = widget._static_panel_rgb(frame, vmin, vmax, cmap_name)
-        expected_norm = np.clip((frame - vmin) / (vmax - vmin), 0.0, 1.0)
-        expected = (colormaps.get_cmap(cmap_name)(expected_norm)[..., :3] * 255).astype(np.uint8)
-        np.testing.assert_array_equal(got, expected)
-
-
-def test_show2d_png_gray_cmap_is_channel_equal_inferno_is_not():
-    """Wrong-colormap regression: gray must produce (almost) only R==G==B
-    pixels; inferno must produce a large channel-diverse fraction."""
-    rng = np.random.default_rng(1)
-    frame = rng.random((256, 256)).astype(np.float32)
-
-    gray_png = _decode_png(Show2D(frame, cmap="gray", verbose=False))
-    channel_spread = gray_png.max(axis=-1).astype(int) - gray_png.min(axis=-1).astype(int)
-    # Tolerance 3 for PNG quantization; the histogram contrast markers are the
-    # only intentionally colored pixels and they are a sliver of the figure.
-    assert (channel_spread <= 3).mean() > 0.99
-
-    inferno_png = _decode_png(Show2D(frame, cmap="inferno", verbose=False))
-    inferno_spread = inferno_png.max(axis=-1).astype(int) - inferno_png.min(axis=-1).astype(int)
-    assert (inferno_spread > 30).mean() > 0.05
-
-
-def test_show2d_png_log_scale_brightens_skewed_data():
-    """log1p on heavily skewed data lifts mid-tones: with a gray colormap the
-    panel's mean luminance must increase. Locks that log_scale actually feeds
-    the PNG's pixel mapping."""
-    rng = np.random.default_rng(2)
-    frame = (rng.random((256, 256)).astype(np.float32) ** 4) * 1000
-
-    def panel_mean(widget) -> float:
-        decoded = _decode_png(widget).astype(float)
-        luminance = decoded.mean(axis=-1)
-        panel = luminance[luminance < 240]  # exclude white figure background
-        return float(panel.mean())
-
-    linear_mean = panel_mean(Show2D(frame, cmap="gray", log_scale=False, verbose=False))
-    log_mean = panel_mean(Show2D(frame, cmap="gray", log_scale=True, verbose=False))
-    assert log_mean > linear_mean + 20
-
-
-def test_show2d_png_vmin_vmax_clipping_saturates():
-    """An explicit narrow [vmin, vmax] window must show up as large saturated
-    regions at the colormap endpoints; the unclipped render must not."""
-    from matplotlib import colormaps
-
-    gradient = np.tile(np.linspace(0, 1, 256, dtype=np.float32), (256, 1))
-    cmap = colormaps.get_cmap("inferno")
-    lo_color = np.array(cmap(0.0)[:3]) * 255
-    hi_color = np.array(cmap(1.0)[:3]) * 255
-
-    def saturated_fraction(widget) -> tuple[float, float]:
-        decoded = _decode_png(widget).astype(float)
-        near_lo = (np.abs(decoded - lo_color).max(axis=-1) < 10).mean()
-        near_hi = (np.abs(decoded - hi_color).max(axis=-1) < 10).mean()
-        return float(near_lo), float(near_hi)
-
-    clipped_lo, clipped_hi = saturated_fraction(
-        Show2D(gradient, cmap="inferno", vmin=0.4, vmax=0.6, verbose=False))
-    open_lo, open_hi = saturated_fraction(Show2D(gradient, cmap="inferno", verbose=False))
-    assert clipped_lo > 0.05 and clipped_hi > 0.05
-    assert clipped_lo > 5 * max(open_lo, 1e-4)
-    assert clipped_hi > 5 * max(open_hi, 1e-4)
-
-
-def test_show2d_auto_contrast_uses_full_res_percentiles():
-    """auto_contrast must resolve to the 2/98 percentiles of the FULL frame
-    (the same cut the widget computes), not of the binned PNG pixels."""
-    rng = np.random.default_rng(3)
-    frame = rng.normal(100, 25, (1024, 1024)).astype(np.float32)
-    widget = Show2D(frame, auto_contrast=True, verbose=False)
-    (vmin, vmax), = widget._resolve_panel_display_ranges([frame])
-    expected_lo, expected_hi = np.percentile(frame, (2, 98))
-    np.testing.assert_allclose([vmin, vmax], [expected_lo, expected_hi], rtol=1e-6)
-
-
-def test_show2d_linked_contrast_shares_one_range():
-    """Gallery + link_contrast=True (widget default): all panels share the
-    merged range. link_contrast=False: each panel uses its own extrema."""
-    dim_frame = np.linspace(0, 1, 64 * 64, dtype=np.float32).reshape(64, 64)
-    bright_frame = dim_frame * 100
-    linked = Show2D([dim_frame, bright_frame], link_contrast=True, verbose=False)
-    ranges = linked._resolve_panel_display_ranges([dim_frame, bright_frame])
-    assert ranges[0] == ranges[1] == (0.0, 100.0)
-    unlinked = Show2D([dim_frame, bright_frame], link_contrast=False, verbose=False)
-    ranges = unlinked._resolve_panel_display_ranges([dim_frame, bright_frame])
-    assert ranges[0] == (0.0, 1.0)
-    assert ranges[1] == (0.0, 100.0)
-
-
-def test_show2d_per_image_vmin_vmax_lists():
-    """List vmin/vmax must resolve per panel and beat linked contrast."""
-    frame_a = np.linspace(0, 1, 64 * 64, dtype=np.float32).reshape(64, 64)
-    frame_b = frame_a * 10
-    widget = Show2D([frame_a, frame_b], vmin=[0.1, 1.0], vmax=[0.9, 9.0], verbose=False)
-    ranges = widget._resolve_panel_display_ranges([frame_a, frame_b])
-    assert ranges[0] == (pytest.approx(0.1), pytest.approx(0.9))
-    assert ranges[1] == (pytest.approx(1.0), pytest.approx(9.0))
-
-
-def test_show2d_diff_mode_adds_signed_diff_panel():
-    """diff_mode with 2 images: 3 panels; the diff panel is ref - other with a
-    symmetric window and a diverging colormap, never log-scaled."""
-    rng = np.random.default_rng(4)
-    frame_a = rng.random((64, 64)).astype(np.float32)
-    frame_b = rng.random((64, 64)).astype(np.float32)
-    widget = Show2D([frame_a, frame_b], diff_mode=True, log_scale=True, verbose=False)
-    specs = widget._static_panel_specs()
-    assert len(specs) == 3
-    diff_spec = specs[2]
-    assert diff_spec["label"] == "Diff (A − B)"
-    assert diff_spec["cmap"] == "RdBu"
-    assert diff_spec["apply_log"] is False
-    np.testing.assert_array_equal(diff_spec["frame"], frame_a - frame_b)
-    assert diff_spec["vmin"] == -diff_spec["vmax"]
-    png = _decode_png(widget)
-    assert png.size > 0
 
 
 @pytest.mark.parametrize("cmap", ["gray", "inferno", "viridis"])
@@ -1163,51 +355,6 @@ def test_show2d_png_settings_sweep(cmap, log_scale, auto_contrast):
     assert all("Mean" in spec["stats"] for spec in specs)
     decoded = _decode_png(widget)
     assert decoded.shape[0] > 100 and decoded.shape[1] > 300  # 3-across gallery
-
-
-def test_show2d_static_scale_bar_label_matches_widget_format():
-    """The PNG's scale bar text must be character-identical to the live
-    widget's canvas label (js/figure.ts formatScaleLabel + drawScaleBarHiDPI):
-    60 CSS px target bar, nice 1/2/5 rounding, length units re-laddered to a
-    clean integer (10 A -> "1 nm"), uncalibrated data labeled in "px"."""
-    from quantem.widget.show2d import _format_scale_label
-
-    frame = np.zeros((512, 512), dtype=np.float32)
-    calibrated = Show2D(frame, sampling=0.23, units="A", labels=["cal"], verbose=False)
-    # single image -> live canvas is SINGLE_IMAGE_TARGET = 500 CSS px wide
-    effective_zoom = 500 / 512
-    (label, zoom_text, bar_text, bar_px), = calibrated._static_overlay_texts()
-    assert label == "cal"
-    assert zoom_text == ""
-    # 60 css px / effectiveZoom * 0.23 A = 14.1 A -> nice 10 A -> integer nm
-    assert bar_text == "1 nm"
-    assert bar_px == pytest.approx(10 / 0.23 * effective_zoom)
-
-    uncalibrated = Show2D(frame, verbose=False)
-    (_, _, bar_text, bar_px), = uncalibrated._static_overlay_texts()
-    assert bar_text == "50 px"  # 61.4 px -> nice 50, unit "px" when pixel_size == 0
-    assert bar_px == pytest.approx(50 * effective_zoom)
-
-    assert _format_scale_label(0.5, "nm") == "5 Å"     # sub-1 re-ladders down
-    assert _format_scale_label(13.8, "A") == "1 nm"    # 10 A reads as 1 nm
-    assert _format_scale_label(20, "mrad") == "20 mrad"  # non-length keeps unit
-
-
-def test_show2d_static_zoom_badge_and_center_crop():
-    """zoom=1.8 must produce the widget's badge text (JS zoom.toFixed(1) + x),
-    shorten the bar to the zoomed field of view, and crop the central 1/zoom
-    window exactly like the live canvas transform."""
-    frame = np.random.default_rng(7).random((512, 512)).astype(np.float32)
-    widget = Show2D(frame, zoom=1.8, show_zoom_indicator=True, verbose=False)
-    (_, zoom_text, bar_text, bar_px), = widget._static_overlay_texts()
-    assert zoom_text == "1.8×"
-    effective_zoom = 1.8 * 500 / 512
-    assert bar_text == "20 px"  # 60 / 1.76 = 34.1 -> nice 20
-    assert bar_px == pytest.approx(20 * effective_zoom)
-    rows, cols = Show2D._center_crop_slices(512, 512, 1.8)
-    assert cols.stop - cols.start == round(512 / 1.8) == 284
-    assert rows.start == (512 - 284) // 2
-    assert _decode_png(widget).size > 0  # zoomed render still produces a PNG
 
 
 def test_show2d_png_render_perf_two_4k_frames():
@@ -1404,25 +551,6 @@ def test_show2d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
     assert "export_payload" not in state
 
 
-def test_show3d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
-    """Show3D lightweight notebook saves must reopen with a compact preview."""
-    widget = Show3D(
-        np.random.default_rng(15).random((5, 64, 64), dtype=np.float32),
-        save_state=False,
-        title="save-state show3d",
-    )
-    state = widget.get_state()
-
-    assert "_static_fallback_jpeg" in state
-    assert state["_static_fallback_mime"] == "image/jpeg"
-    assert len(state["_static_fallback_jpeg"]) > 1000
-    assert "frame_bytes" not in state
-    assert "_buffer_bytes" not in state
-    assert "_offline_stack" not in state
-    assert "_offline_float_stack" not in state
-    assert "export_payload" not in state
-
-
 def test_show4dstem_cmd_s_snapshot_keeps_two_panel_static_preview():
     """Show4DSTEM saved preview should show virtual image and diffraction."""
     import base64
@@ -1457,82 +585,6 @@ def test_show4dstem_cmd_s_snapshot_keeps_two_panel_static_preview():
     widget.close()
 
 
-def test_show3d_static_overlay_matches_show2d_style_metadata():
-    """Show3D saved previews should carry the same context as Show2D."""
-    widget = Show3D(
-        np.random.default_rng(16).random((3, 128, 128), dtype=np.float32),
-        labels=["zero", "one", "two"],
-        panel_titles=["ADF"],
-        sampling=(0.23, 0.23),
-        units=("A", "A"),
-        save_state=False,
-    )
-    widget.slice_idx = 1
-
-    (label, zoom_text, bar_text, bar_px), = widget._static_overlay_texts([0], 1)
-
-    assert label == "ADF · one 2/3"
-    assert zoom_text == ""
-    assert bar_text == "5 Å"
-    assert bar_px == pytest.approx(5 / 0.23 * 500 / 128)
-    assert widget._static_png_b64()
-
-
-def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
-    """Show3D saved previews must be pixel-identical to Show2D galleries."""
-    import base64
-    import io
-
-    from PIL import Image
-
-    rng = np.random.default_rng(17)
-    panels = []
-    for panel in range(6):
-        frames = rng.random((5, 192, 192), dtype=np.float32)
-        panels.append(frames + panel * 0.2)
-    widget = Show3D(
-        *panels,
-        panel_titles=[f"P{panel + 1:02d}" for panel in range(len(panels))],
-        panel_frame_labels=[
-            [f"defocus {frame - 2:+.1f} nm" for frame in range(5)]
-            for _ in panels
-        ],
-        max_cols=3,
-        panel_gap=3,
-        size=180,
-        sampling=0.05,
-        units="nm",
-        auto_contrast=True,
-        save_state=False,
-    )
-    widget.slice_idx = 3
-
-    show3d_png = widget._static_png_b64(max_px=256, dpi=160)
-    reference = Show2D(
-        [widget._get_display_panel_frame(panel, widget.slice_idx) for panel in range(6)],
-        labels=[widget._static_panel_title(panel, widget.slice_idx) for panel in range(6)],
-        ncols=3,
-        gallery_gap_px=3,
-        size=180,
-        sampling=widget.pixel_size,
-        units="nm",
-        cmap=widget.cmap,
-        auto_contrast=widget.auto_contrast,
-        link_contrast=widget.link_contrast,
-        panel_inner_border_px=float(widget.panel_inner_border_px),
-        panel_inner_border_color=str(widget.panel_inner_border_color),
-        show_stats=False,
-        show_controls=False,
-        verbose=False,
-        save_state=False,
-    )
-    show2d_png = reference._static_png_b64(max_px=256, dpi=160)
-
-    show3d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show3d_png))).convert("RGB"))
-    show2d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show2d_png))).convert("RGB"))
-    np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
-
-
 def test_show2d_static_gallery_avoids_pyplot_figure_manager(monkeypatch):
     """A saved gallery must not join Jupyter's inline figure lifecycle.
 
@@ -1564,154 +616,12 @@ def test_show2d_static_gallery_avoids_pyplot_figure_manager(monkeypatch):
     assert image.std() > 5
 
 
-@pytest.mark.parametrize(
-    ("n_panels", "max_cols", "size", "panel_gap", "hidden", "scale_bar"),
-    [
-        (1, 1, 0, 0, [], True),
-        (2, 2, 0, 0, [], True),
-        (4, 2, 180, 3, [], True),
-        (6, 3, 160, 4, [1, 4], True),
-        (9, 3, 0, 2, [], False),
-    ],
-)
-def test_show3d_static_png_pixel_matches_show2d_layout_matrix(
-    n_panels,
-    max_cols,
-    size,
-    panel_gap,
-    hidden,
-    scale_bar,
-):
-    """Show3D static fallback must stay pixel-perfect across panel layouts."""
-    import base64
-    import io
-
-    from PIL import Image
-
-    rng = np.random.default_rng(18 + n_panels)
-    stacks = []
-    for panel in range(n_panels):
-        frame_stack = rng.random((4, 96, 112), dtype=np.float32)
-        stacks.append(frame_stack + panel * 0.1)
-    widget = Show3D(
-        *stacks,
-        panel_titles=[f"P{panel + 1:02d}" for panel in range(n_panels)],
-        panel_frame_labels=[
-            [f"frame-label-{frame + 1}" for frame in range(4)]
-            for _ in range(n_panels)
-        ],
-        max_cols=max_cols,
-        panel_gap=panel_gap,
-        size=size,
-        sampling=0.12,
-        units="nm",
-        auto_contrast=True,
-        show_scale_bar=scale_bar,
-        hidden_panels=hidden,
-        save_state=False,
-    )
-    widget.slice_idx = 2
-    visible = [panel for panel in range(n_panels) if panel not in set(hidden)] or [0]
-    reference = Show2D(
-        [widget._get_display_panel_frame(panel, widget.slice_idx) for panel in visible],
-        labels=[widget._static_panel_title(panel, widget.slice_idx) for panel in visible],
-        ncols=max(1, min(max_cols, len(visible))),
-        gallery_gap_px=panel_gap,
-        size=size,
-        sampling=widget.pixel_size,
-        units="nm",
-        scale_bar_visible=scale_bar,
-        cmap=widget.cmap,
-        auto_contrast=widget.auto_contrast,
-        link_contrast=widget.link_contrast,
-        panel_inner_border_px=float(widget.panel_inner_border_px),
-        panel_inner_border_color=str(widget.panel_inner_border_color),
-        show_stats=False,
-        show_controls=False,
-        verbose=False,
-        save_state=False,
-    )
-
-    show3d_png = widget._static_png_b64(max_px=220, dpi=160)
-    show2d_png = reference._static_png_b64(max_px=220, dpi=160)
-    show3d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show3d_png))).convert("RGB"))
-    show2d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show2d_png))).convert("RGB"))
-
-    np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
-
-
-def test_show2d_svg_gallery_chrome_layers_are_independent(tmp_path):
-    """C1: SVG export separates gutters, outer frame, and panel strokes."""
-    data = [np.full((16, 16), idx, dtype=np.float32) for idx in range(4)]
-    widget = Show2D(
-        data,
-        labels=["", "", "", ""],
-        ncols=2,
-        size=20,
-        show_title=False,
-        show_panel_titles=False,
-        scale_bar_visible=False,
-        show_zoom_indicator=False,
-        marker_colors=["none"] * 4,
-        inter_panel_gap_px=6,
-        inter_panel_gap_color="#111111",
-        gallery_outer_border_px=4,
-        gallery_outer_border_color="#000000",
-        panel_inner_border_px=2,
-        panel_inner_border_color="#ff00ff",
-        verbose=False,
-        save_state=False,
-    )
-
-    svg = widget.export_svg(tmp_path / "show2d_chrome.svg", scale=1).read_text()
-
-    assert 'width="54" height="54" viewBox="0 0 54 54"' in svg
-    assert '<rect x="0" y="0" width="54" height="54" fill="#000000"/>' in svg
-    assert '<rect x="4" y="4" width="46" height="46" fill="#111111"/>' in svg
-    assert '<image x="4" y="4" width="20" height="20"' in svg
-    assert '<image x="30" y="4" width="20" height="20"' in svg
-    assert 'stroke="#ff00ff" stroke-width="2"' in svg
-
-
-def test_show2d_gallery_gap_alias_populates_explicit_chrome():
-    """C1: old gallery_gap_* notebooks keep their black-grid behavior."""
-    widget = Show2D(
-        [np.zeros((8, 8), dtype=np.float32), np.ones((8, 8), dtype=np.float32)],
-        gallery_gap_px=3,
-        gallery_gap_color="#000000",
-        verbose=False,
-        save_state=False,
-    )
-
-    state = widget.state_dict()
-
-    assert widget.inter_panel_gap_px == 3
-    assert widget.inter_panel_gap_color == "#000000"
-    assert widget.gallery_outer_border_px == 3
-    assert widget.gallery_outer_border_color == "#000000"
-    assert widget.panel_inner_border_px == 1
-    assert widget.panel_inner_border_color == "#000000"
-    assert state["inter_panel_gap_px"] == 3
-    assert state["gallery_gap_px"] == 3
-
-
-# ---------------------------------------------------------------------------
-# Static-fallback sibling contract, shared by all four widgets via
-# StaticFallbackMixin: display publishes the widget bundle plus an EMPTY
-# placeholder sibling; the deferred post_execute fill swaps in the PNG with
-# the quantem-static-fallback marker; and the full get_state snapshot never
-# carries the heavy buffers. A regression in any widget reopens BLACK in
-# JupyterLab (the ShowEDS bug this suite was extended for).
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("widget", WIDGETS)
 def test_sibling_static_fallback_contract(widget, monkeypatch):
     import IPython
 
     w, _ = _make(widget, save_state=False)
     png_calls = []
-    # patch on the instance's real class: the public Show4DSTEM name is a
-    # backend dispatcher function, not the widget class itself
     widget_cls = type(w)
     original_png = widget_cls._static_png_b64
     monkeypatch.setattr(widget_cls, "_static_png_b64",

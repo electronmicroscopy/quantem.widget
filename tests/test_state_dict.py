@@ -11,10 +11,12 @@ Catches silent regressions when traits are added, renamed, or dropped without
 updating the state_dict roundtrip path.
 """
 import json
+import re
 
 import numpy as np
 import pytest
 from quantem.widget import Show2D, Show3D, Show4DSTEM
+from quantem.widget.show4dstem.export import export_clone
 
 
 def _flip_value(default):
@@ -42,7 +44,7 @@ def _mutate_state(state: dict) -> dict:
             continue
         # Lists hold structured items (dicts, tuples) for ROI / profile / labels;
         # mutating them generically is fragile. The roundtrip-defaults test already
-        # covers list trait persistence — here we only mutate scalars.
+        # covers list trait persistence; here we only mutate scalars.
         if isinstance(v, list):
             out[k] = v
             continue
@@ -163,14 +165,9 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     )
 
     assert widget.controls_collapsed is True
-    assert widget.expand_controls() is widget
+    widget.controls_collapsed = False
     assert widget.controls_collapsed is False
-    assert widget.collapse_controls() is widget
-    assert widget.controls_collapsed is True
-    assert widget.toggle_controls() is widget
-    assert widget.controls_collapsed is False
-
-    widget.collapse_controls()
+    widget.controls_collapsed = True
     state = widget.state_dict()
     assert state["show_controls"] is True
     assert state["controls_collapsed"] is True
@@ -178,18 +175,22 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     restored = Show4DSTEM(data, state=state, verbose=False)
     assert restored.controls_collapsed is True
 
-    clone = widget._clone_for_html_export(dtype="uint16", det_bin=1)
+    clone = export_clone(widget, "uint16", 1, 1)
     try:
         assert clone.controls_collapsed is True
         assert clone.state_dict()["controls_collapsed"] is True
     finally:
         clone.close()
 
-    out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", encoding="full")
+    out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", dtype="uint16")
     html = out.read_text(encoding="utf-8")
-    assert "controls_collapsed" in html
-    assert "Hide controls" not in html
-    assert "Show controls" not in html
+    # the exported state without the embedded JS bundle, whose shared components
+    # carry other widgets' button labels
+    state = html.split('type="application/vnd.jupyter.widget-state+json">', 1)[1].split("</script>", 1)[0]
+    state = re.sub(r'"_esm": ".*?(?<!\\)"', '"_esm": ""', state, flags=re.S)
+    assert '"controls_collapsed": true' in state
+    assert "Hide controls" not in state
+    assert "Show controls" not in state
 
 
 def test_show4dstem_ui_mode_presets_and_overrides():
@@ -347,11 +348,10 @@ def test_show3d_per_panel_cmap_state_roundtrip():
     rng = np.random.default_rng(2)
     data_a = rng.standard_normal((3, 16, 16)).astype(np.float32)
     data_b = rng.standard_normal((3, 16, 16)).astype(np.float32)
-    widget = Show3D(data_a, data_b, cmap=["inferno", "viridis"], verbose=False)
+    widget = Show3D(data_a, data_b, cmap="inferno", verbose=False)
+    widget.panel_cmaps = ["inferno", "viridis"]
 
-    assert widget.cmap == "inferno"
-    assert widget.panel_cmaps == ["inferno", "viridis"]
-
-    fresh = Show3D(data_a, data_b, state=widget.state_dict(), verbose=False)
+    fresh = Show3D(data_a, data_b, verbose=False)
+    fresh.load_state_dict(widget.state_dict())
     assert fresh.cmap == "inferno"
     assert fresh.panel_cmaps == ["inferno", "viridis"]

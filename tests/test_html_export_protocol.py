@@ -1,23 +1,20 @@
-from __future__ import annotations
-
 import inspect
 import json
 import pathlib
 
 import numpy as np
 import pytest
+from ipywidgets.widgets.widget import _instances
 
-from quantem.widget.export import HTML_EXPORT_TRAITS, supports_html_export
 from quantem.widget.show1d import Show1D
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
-from quantem.widget.show4dstem import Show4DSTEM
+from quantem.widget import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
-from quantem.widget.showeds import ShowEDS
 
 
-EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction)
+EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction)
 
 
 def _show1d() -> Show1D:
@@ -45,7 +42,8 @@ def test_show2d_html_export_preserves_per_panel_cmaps(tmp_path) -> None:
 def test_show3d_html_export_preserves_per_panel_cmaps(tmp_path) -> None:
     data_a = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
     data_b = np.flip(data_a, axis=-1).copy()
-    widget = Show3D(data_a, data_b, title="Panel Cmaps", cmap=["inferno", "viridis"], verbose=False)
+    widget = Show3D(data_a, data_b, title="Panel Cmaps", cmap="inferno", verbose=False)
+    widget.panel_cmaps = ["inferno", "viridis"]
 
     path = widget.export_html(tmp_path / "show3d-panel-cmaps.html")
     html = path.read_text()
@@ -70,11 +68,6 @@ def _show4dstem() -> Show4DSTEM:
     return Show4DSTEM(data, title="Protocol Show4DSTEM", verbose=False)
 
 
-def _showeds() -> ShowEDS:
-    data = np.arange(3 * 4 * 5, dtype=np.uint16).reshape(3, 4, 5)
-    return ShowEDS(data, title="Protocol ShowEDS", band=(1, 4), roi=(0, 1, 2, 2))
-
-
 def _showdiffraction() -> ShowDiffraction:
     data = np.random.rand(48, 48).astype(np.float32)
     return ShowDiffraction(data, title="Protocol ShowDiffraction", verbose=False)
@@ -85,21 +78,30 @@ EXPORT_WIDGET_CASES = (
     pytest.param(_show2d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show2D", id="show2d"),
     pytest.param(_show3d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3D", id="show3d"),
     pytest.param(_show3dslices, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3DSlices", id="show3dslices"),
-    pytest.param(_show4dstem, {"encoding": "uint8", "downsample": 1}, {"mode": "single", "encoding": "uint8", "downsample": 1}, "Protocol Show4DSTEM", id="show4dstem"),
-    pytest.param(_showeds, {"mode": "single", "encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowEDS", id="showeds"),
-    pytest.param(_showdiffraction, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowDiffraction", id="showdiffraction"),
+    pytest.param(_show4dstem, {"dtype": "uint8"}, {"mode": "single", "dtype": "uint8"}, "Protocol Show4DSTEM", id="show4dstem"),
+    pytest.param(_showdiffraction, {}, {"mode": "single"}, "Protocol ShowDiffraction", id="showdiffraction"),
 )
 
 
 def test_widgets_expose_structural_html_export_protocol() -> None:
     for cls in EXPORT_WIDGET_CLASSES:
-        assert supports_html_export(cls)
+        assert callable(cls.export_html)
         signature = inspect.signature(cls.export_html)
         assert "path" in signature.parameters
         assert signature.parameters["path"].default is None
         assert "title" in signature.parameters
         assert signature.parameters["title"].default is None
         assert signature.return_annotation in {pathlib.Path, "pathlib.Path"}
+
+
+HTML_EXPORT_TRAITS = (
+    "export_request",
+    "export_status",
+    "export_enabled",
+    "export_payload",
+    "export_payload_id",
+    "export_filename",
+)
 
 
 def test_widgets_expose_standard_frontend_html_export_traits() -> None:
@@ -119,9 +121,12 @@ def test_widget_export_html_writes_standalone_state(
     widget = factory()
     filename_stem = f"{request_payload['mode']}_{request_payload.get('encoding', 'full')}_{request_payload.get('downsample', 1)}"
 
-    assert supports_html_export(widget)
+    assert callable(widget.export_html)
+    open_models = set(_instances)
     out = widget.export_html(tmp_path / f"{filename_stem}.html", **export_kwargs)
 
+    # the page is written from a clone: it and its Layout must close, or every export leaves models open
+    assert set(_instances) == open_models
     assert out == tmp_path / f"{filename_stem}.html"
     assert out.exists()
     html = out.read_text()

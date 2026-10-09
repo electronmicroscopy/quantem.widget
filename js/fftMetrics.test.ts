@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeFftQualityMetrics, summarizeFftQualityMetrics } from "./fftMetrics";
+import { computeFftQualityMetrics, summarizeFftQualityMetrics } from "./display/fftMetrics";
 
 function addGaussian(mag: Float32Array, width: number, height: number, row: number, col: number, amp: number, sigma: number) {
   const r0 = Math.max(0, Math.floor(row - sigma * 3));
