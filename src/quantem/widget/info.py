@@ -10,30 +10,16 @@ from importlib.metadata import PackageNotFoundError, distribution, version
 from importlib.util import find_spec
 from pathlib import Path
 from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
 
-from packaging.version import Version
-
-
-def _concise_cuda_name(name: str) -> str:
-    """Return a stable, readable CUDA device label for notebook reports."""
-
-    match = re.match(r"^(NVIDIA RTX PRO \d+)", str(name).strip())
-    return match.group(1) if match else str(name).strip()
+import torch
 
 
-def profile(*, check_updates: bool = False) -> None:
+def profile() -> None:
     """Print the installed QuantEM stack and active compute environment.
 
     Use this single report in notebooks and bug reports instead of printing
-    individual package versions. The default report is local and does not
-    contact package indexes or Git remotes.
-
-    Parameters
-    ----------
-    check_updates : bool, default False
-        Compare installed widget and GPU metadata with TestPyPI. This opt-in
-        check needs network access.
+    individual package versions. The report is local and does not contact
+    package indexes or Git remotes.
 
     Examples
     --------
@@ -43,6 +29,7 @@ def profile(*, check_updates: bool = False) -> None:
     import quantem.widget as qw
 
     def editable_source(distribution_name: str) -> Path | None:
+        """The checkout an editable install points at, from its ``direct_url.json``; None for a published wheel."""
         try:
             raw = distribution(distribution_name).read_text("direct_url.json")
         except (PackageNotFoundError, OSError):
@@ -68,33 +55,12 @@ def profile(*, check_updates: bool = False) -> None:
             return None
         return Path(unquote(parsed.path)).resolve()
 
-    def print_update(distribution_name: str, installed: str) -> None:
-        package = distribution_name.replace(".", "-")
-        request = Request(
-            f"https://test.pypi.org/pypi/{package}/json",
-            headers={"User-Agent": "quantem.widget profile()"},
-        )
-        try:
-            with urlopen(request, timeout=4) as response:
-                latest = json.load(response)["info"]["version"]
-            installed_version = Version(installed)
-            latest_version = Version(latest)
-        except (KeyError, OSError, TypeError, ValueError):
-            print("  release       update check unavailable")
-            return
+    def print_distribution_status(distribution_name: str) -> None:
+        """Print whether the package is published, editable, or imported from a path that overrides its metadata.
 
-        print(f"  TestPyPI      latest {latest}")
-        if installed_version < latest_version:
-            print(f"  WARNING       installed metadata {installed} trails {latest}")
-        elif installed_version > latest_version:
-            print("  release       newer than TestPyPI")
-        else:
-            print("  release       current")
-
-    def print_distribution_status(
-        distribution_name: str,
-        installed: str,
-    ) -> None:
+        A source override (``PYTHONPATH`` ahead of an editable install) is the usual
+        reason a bug report does not match the code the reporter thinks they run.
+        """
         source = editable_source(distribution_name)
         try:
             spec = find_spec(distribution_name)
@@ -113,80 +79,76 @@ def profile(*, check_updates: bool = False) -> None:
         else:
             print("  install       editable checkout")
 
-        if check_updates:
-            print_update(distribution_name, installed)
+    from quantem.widget.adapters import core as core_adapter
+    from quantem.widget.adapters import gpu as gpu_adapter
 
     print(f"quantem.widget  {qw.__version__}")
-    print_distribution_status("quantem.widget", qw.__version__)
-    try:
-        gpu_version = version("quantem.gpu")
-        print(f"quantem.gpu     {gpu_version}")
-        print_distribution_status("quantem.gpu", gpu_version)
-    except PackageNotFoundError:
-        print("quantem.gpu     (not installed)")
-    try:
-        import quantem
-
-        print(f"quantem         {getattr(quantem, '__version__', '?')}")
-    except ImportError:
-        print("quantem         (not importable)")
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            device = f"cuda ({_concise_cuda_name(torch.cuda.get_device_name(0))})"
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            device = "mps (Apple)"
-        else:
-            device = "cpu"
-        print(f"torch           {torch.__version__}  device={device}")
-        if torch.cuda.is_available():
-            count = torch.cuda.device_count()
-            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
-            print(f"GPUs            {count} visible (CUDA_VISIBLE_DEVICES={visible})")
-            for index in range(count):
-                free, total = torch.cuda.mem_get_info(index)
-                print(
-                    f"  GPU{index}          {(total - free) / 1e9:5.1f} used / "
-                    f"{total / 1e9:.0f} GB  ({free / 1e9:.0f} free)"
-                )
+    print_distribution_status("quantem.widget")
+    for name, importable in (("quantem.gpu", gpu_adapter.available()), ("quantem", core_adapter.available())):
+        try:
+            installed = version(name)
+        except PackageNotFoundError:
+            print(f"{name:<15} (not installed)")
+            continue
+        print(f"{name:<15} {installed}{'' if importable else '  (installed but not importable)'}")
+        print_distribution_status(name)
+    if torch.cuda.is_available():
+        # the model family names the card; the edition suffix only lengthens the line
+        cuda_name = torch.cuda.get_device_name(0).strip()
+        model_family = re.match(r"^(NVIDIA RTX PRO \d+)", cuda_name)
+        device = f"cuda ({model_family.group(1) if model_family else cuda_name})"
+    elif torch.backends.mps.is_available():
+        device = "mps (Apple)"
+    else:
+        device = "cpu"
+    print(f"torch           {torch.__version__}  device={device}")
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
+        print(f"GPUs            {count} visible (CUDA_VISIBLE_DEVICES={visible})")
+        for index in range(count):
+            free, total = torch.cuda.mem_get_info(index)
             print(
-                f"  torch pool    {torch.cuda.memory_allocated() / 1e9:.1f} live / "
-                f"{torch.cuda.memory_reserved() / 1e9:.1f} reserved GB"
+                f"  GPU{index}          {(total - free) / 1e9:5.1f} used / "
+                f"{total / 1e9:.0f} GB  ({free / 1e9:.0f} free)"
             )
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            current = (
-                torch.mps.current_allocated_memory() / 1e9
-                if hasattr(torch.mps, "current_allocated_memory")
-                else 0.0
-            )
-            driver = (
-                torch.mps.driver_allocated_memory() / 1e9
-                if hasattr(torch.mps, "driver_allocated_memory")
-                else 0.0
-            )
-            print(f"VRAM (MPS)      {current:.1f} live / {driver:.1f} driver GB")
-    except ImportError:
-        print("torch           (not importable)")
+        print(
+            f"  torch pool    {torch.cuda.memory_allocated() / 1e9:.1f} live / "
+            f"{torch.cuda.memory_reserved() / 1e9:.1f} reserved GB"
+        )
+    elif torch.backends.mps.is_available():
+        current = torch.mps.current_allocated_memory() / 1e9
+        driver = torch.mps.driver_allocated_memory() / 1e9
+        print(f"VRAM (MPS)      {current:.1f} live / {driver:.1f} driver GB")
     print(f"python          {platform.python_version()}")
 
 
 def device_info(verbose: bool = True) -> dict[str, str]:
-    """Return and optionally print the active device information."""
-    from quantem.gpu.device import detect
+    """Return and optionally print where the widgets compute and which GPU path is installed.
 
+    ``backend`` is the device ``device="auto"`` picks (``cuda``, ``mps`` or
+    ``cpu``); ``gpu_path`` says whether quantem.gpu (encoded acquisitions and GPU
+    file loading) is importable, and ``quantem_core`` the same for quantem core.
+    """
     import quantem.widget as qw
+    from quantem.widget.adapters import core as core_adapter
+    from quantem.widget.adapters import gpu as gpu_adapter
+    from quantem.widget.device import gpu_notice_text, mps_available
 
-    backend = detect()
+    backend = "cuda" if torch.cuda.is_available() else "mps" if mps_available() else "cpu"
     report = {
         "widget_version": qw.__version__,
         "date": str(datetime.now().astimezone().date()),
         "backend": backend,
         "device": "CPU",
+        "torch": torch.__version__,
+        "gpu_path": "quantem.gpu" if gpu_adapter.available() else "not installed",
+        "quantem_core": "installed" if core_adapter.available() else "not installed",
     }
     if backend == "mps":
 
         def sysctl(key: str) -> str:
+            """One macOS ``sysctl`` value, or "" where the command is missing or slow."""
             try:
                 result = subprocess.run(
                     ["sysctl", "-n", key],
@@ -199,18 +161,17 @@ def device_info(verbose: bool = True) -> dict[str, str]:
                 return ""
             return result.stdout.strip()
 
-        chip = sysctl("machdep.cpu.brand_string") or "Apple Silicon"
+        chip = sysctl("machdep.cpu.brand_string") or "Apple"
         memory = sysctl("hw.memsize")
         memory_gb = f"{int(memory) // (1024**3)} GB" if memory.isdigit() else "?"
-        report["device"] = f"Apple Metal (MPS) - {chip}, {memory_gb} unified memory"
+        report["device"] = f"Apple Metal (MPS) - {chip}, {memory_gb} memory"
     elif backend == "cuda":
-        try:
-            import torch
-
-            report["device"] = f"CUDA - {torch.cuda.get_device_name(0)}"
-        except (AssertionError, ImportError, RuntimeError):
-            report["device"] = "CUDA"
+        report["device"] = f"CUDA - {torch.cuda.get_device_name(0)}"
     if verbose:
         print(f"quantem.widget {report['widget_version']}   |   {report['date']}")
-        print(f"compute: {report['device']}")
+        print(f"compute: {report['device']} (torch {report['torch']})")
+        print(f"GPU path: {report['gpu_path']}   |   quantem core: {report['quantem_core']}")
+        notice = gpu_notice_text()
+        if notice is not None:
+            print(notice)
     return report

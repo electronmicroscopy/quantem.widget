@@ -1,5 +1,5 @@
-export const DEFAULT_PANEL_PLAYBACK_FPS = 10;
-export const MAX_PANEL_PLAYBACK_FPS = 30;
+const DEFAULT_PANEL_PLAYBACK_FPS = 10;
+const MAX_PANEL_PLAYBACK_FPS = 30;
 export const GALLERY_FFT_CACHE_MAX_ENTRIES = 64;
 export const GALLERY_FFT_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 
@@ -9,13 +9,13 @@ export type GalleryFftCacheEntry = {
   fftHeight: number;
 };
 
-export type GalleryFftCacheStats = {
+type GalleryFftCacheStats = {
   entries: number;
   bytes: number;
   evictions: number;
 };
 
-export type VisibleDiffPlan = {
+type VisibleDiffPlan = {
   visibleGrayscale: number[];
   reference: number;
   others: number[];

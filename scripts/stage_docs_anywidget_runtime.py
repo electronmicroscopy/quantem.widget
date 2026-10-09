@@ -8,8 +8,6 @@ source is copied from the installed dependency at build time; no third-party
 bundle is vendored in the repository.
 """
 
-from __future__ import annotations
-
 import argparse
 import importlib.util
 import shutil
@@ -17,6 +15,7 @@ from pathlib import Path
 
 
 def _runtime_path() -> Path:
+    """The installed AnyWidget AMD runtime (``nbextension/index.js``); RuntimeError when it is missing."""
     spec = importlib.util.find_spec("anywidget")
     if spec is None or spec.origin is None:
         raise RuntimeError(
@@ -33,6 +32,7 @@ def _runtime_path() -> Path:
 
 
 def main() -> int:
+    """Copy the runtime to ``--output``, where the book build publishes it."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",

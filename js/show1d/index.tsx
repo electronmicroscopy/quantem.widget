@@ -24,12 +24,20 @@ import StopIcon from "@mui/icons-material/Stop";
 import TableChartIcon from "@mui/icons-material/TableChart";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
-import { COLORMAPS, COLORMAP_NAMES, getGPUColormapEngine } from "../colormaps";
-import { computeHistogramFromBytes, findDataRange, percentileClip } from "../stats";
-import { applyHannWindow2D, autoEnhanceFFT, computeMagnitude, fft2dAsync, fftshift, getWebGPUFFT, nextPow2, WebGPUFFT } from "../fft";
+import { COLORMAPS, COLORMAP_NAMES, getGPUColormapEngine } from "../display/colormaps";
+import { computeHistogramFromBytes, findDataRange, percentileClip } from "../display/stats";
+import { applyHannWindow2D, autoEnhanceFFT, computeMagnitude, fft2dAsync, fftshift, getDisplayFFT, nextPow2, DisplayFFT } from "../display/fft";
 import { formatScaleLabel, roundToNiceValue } from "../figure";
 import { useTheme } from "../theme";
 import { EmbeddedWidgetView } from "../embeddedWidget";
+import { exportTitleSlug, formatEstimatedHtmlSize, formatSavedBytes, isAbortLikeError } from "../shared/exportFormat";
+import { RenderPathBadge } from "../shared/RenderPathBadge";
+import { pointToSegmentDistance } from "../shared/geometry";
+import { columnStarts, indexTraces, pointWindow, traceToPath, yExtent } from "./traceIndex";
+
+// Show1D bundles are smaller than the image widgets, so its export estimate
+// uses a smaller fixed overhead than the shared HTML_EXPORT_OVERHEAD_BYTES.
+const SHOW1D_HTML_EXPORT_OVERHEAD_BYTES = 600_000;
 
 const SHOW1D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "image_cmap", target: "cmap" },
@@ -39,20 +47,6 @@ const SHOW1D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "controls_collapsed" },
   { source: "scale_bar_visible" },
 ];
-
-type Marker = {
-  x?: number;
-  label?: string;
-  mobile_label?: string;
-  kind?: string;
-};
-
-function markerColor(marker: Marker, colors: ReturnType<typeof useTheme>["colors"]): string {
-  if (marker.kind === "increase") return "#00897b";
-  if (marker.kind === "decrease") return "#d1495b";
-  if (marker.kind === "checkpoint") return "#f59e0b";
-  return colors.textMuted;
-}
 
 type ProfilePoint = {
   row?: number;
@@ -107,27 +101,6 @@ type SnapshotFftCacheEntry = {
 type SnapshotFftCacheRef = React.MutableRefObject<Map<string, SnapshotFftCacheEntry>>;
 type SnapshotFftPendingRef = React.MutableRefObject<Map<string, Promise<SnapshotFftCacheEntry>>>;
 type SnapshotFftGenerationRef = React.MutableRefObject<number>;
-
-type Show1DPerfCounters = {
-  pointerEvents: number;
-  pointerFrames: number;
-  pointsScanned: number;
-  lastPointerLatencyMs: number;
-  maxPointerLatencyMs: number;
-  lastNearestPointMs: number;
-  basePlotDraws: number;
-  lastBasePlotDrawMs: number;
-  hoverOverlayDraws: number;
-  lastHoverOverlayDrawMs: number;
-  fftCacheHits: number;
-  fftCacheMisses: number;
-  fftPendingHits: number;
-  fftComputes: number;
-  lastFftComputeMs: number;
-  fftCacheEntries: number;
-  fftCacheBytes: number;
-  fftCacheEvictions: number;
-};
 
 type PlotThumbnailCacheEntry = {
   canvas: HTMLCanvasElement;
@@ -185,7 +158,6 @@ type Show1DSavePickerOptions = {
 
 type Show1DWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show1DSavePickerOptions) => Promise<Show1DFileHandle>;
-  __quantemShow1DPerf?: Show1DPerfCounters;
 };
 
 type Show1DInitialInteractiveState = {
@@ -271,55 +243,15 @@ const compactButton = {
   },
 };
 
-function getShow1DPerfCounters(): Show1DPerfCounters | null {
-  if (typeof window === "undefined") return null;
-  const host = window as Show1DWindow;
-  if (!host.__quantemShow1DPerf) {
-    host.__quantemShow1DPerf = {
-      pointerEvents: 0,
-      pointerFrames: 0,
-      pointsScanned: 0,
-      lastPointerLatencyMs: 0,
-      maxPointerLatencyMs: 0,
-      lastNearestPointMs: 0,
-      basePlotDraws: 0,
-      lastBasePlotDrawMs: 0,
-      hoverOverlayDraws: 0,
-      lastHoverOverlayDrawMs: 0,
-      fftCacheHits: 0,
-      fftCacheMisses: 0,
-      fftPendingHits: 0,
-      fftComputes: 0,
-      lastFftComputeMs: 0,
-      fftCacheEntries: 0,
-      fftCacheBytes: 0,
-      fftCacheEvictions: 0,
-    };
-  }
-  return host.__quantemShow1DPerf;
-}
-
-function updateSnapshotFftCacheMetrics(cache: Map<string, SnapshotFftCacheEntry>): void {
-  const perf = getShow1DPerfCounters();
-  if (!perf) return;
-  let bytes = 0;
-  for (const entry of cache.values()) bytes += entry.data.byteLength;
-  perf.fftCacheEntries = cache.size;
-  perf.fftCacheBytes = bytes;
-}
-
 function readSnapshotFftCache(
   cache: Map<string, SnapshotFftCacheEntry>,
   cacheKey: string,
-  countHit = true,
 ): SnapshotFftCacheEntry | null {
   const entry = cache.get(cacheKey) ?? null;
   if (!entry) return null;
+  // re-insert so the Map keeps insertion order as recency order for eviction
   cache.delete(cacheKey);
   cache.set(cacheKey, entry);
-  const perf = getShow1DPerfCounters();
-  if (perf && countHit) perf.fftCacheHits += 1;
-  updateSnapshotFftCacheMetrics(cache);
   return entry;
 }
 
@@ -329,7 +261,6 @@ function enforceSnapshotFftCacheBudget(
 ): void {
   let bytes = 0;
   for (const entry of cache.values()) bytes += entry.data.byteLength;
-  const perf = getShow1DPerfCounters();
   while (cache.size > SNAPSHOT_FFT_CACHE_MAX_ENTRIES || bytes > SNAPSHOT_FFT_CACHE_MAX_BYTES) {
     const oldestKey = cache.keys().next().value as string | undefined;
     if (!oldestKey) break;
@@ -337,18 +268,9 @@ function enforceSnapshotFftCacheBudget(
     const entry = cache.get(oldestKey);
     cache.delete(oldestKey);
     bytes -= entry?.data.byteLength ?? 0;
-    if (perf) perf.fftCacheEvictions += 1;
-  }
-  if (perf) {
-    perf.fftCacheEntries = cache.size;
-    perf.fftCacheBytes = Math.max(0, bytes);
   }
 }
-const upwardMenuProps = {
-  anchorOrigin: { vertical: "top" as const, horizontal: "left" as const },
-  transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
-  sx: { zIndex: 9999 },
-};
+
 const sliderStyles = {
   small: {
     py: 0,
@@ -381,7 +303,7 @@ const MIN_PLOT_HEIGHT = 220;
 const MAX_PLOT_HEIGHT = 960;
 const FFT_DISPLAY_RANGE: [number, number] = [0, 1];
 let snapshotFftWebGpuUnavailable = false;
-let snapshotFftWebGpuInitPromise: Promise<WebGPUFFT | null> | null = null;
+let snapshotFftWebGpuInitPromise: Promise<DisplayFFT | null> | null = null;
 const typography = {
   label: { fontSize: 11 },
   value: { fontSize: 10, fontVariantNumeric: "tabular-nums" as const },
@@ -445,17 +367,7 @@ function jsonValuesEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 }
 
-function numberArraysEqual(a: number[] | null | undefined, b: number[] | null | undefined): boolean {
-  const left = Array.isArray(a) ? a : [];
-  const right = Array.isArray(b) ? b : [];
-  if (left.length !== right.length) return false;
-  for (let idx = 0; idx < left.length; idx += 1) {
-    if (left[idx] !== right[idx]) return false;
-  }
-  return true;
-}
-
-function stringArraysEqual(a: string[] | null | undefined, b: string[] | null | undefined): boolean {
+function arraysEqual<T extends number | string>(a: T[] | null | undefined, b: T[] | null | undefined): boolean {
   const left = Array.isArray(a) ? a : [];
   const right = Array.isArray(b) ? b : [];
   if (left.length !== right.length) return false;
@@ -501,39 +413,6 @@ function xExtent(xData: Float32Array, nPoints: number): [number, number] {
   return [0, Math.max(1, nPoints - 1)];
 }
 
-function yExtent(
-  yData: Float32Array,
-  nTraces: number,
-  nPoints: number,
-  xData: Float32Array,
-  xRange: [number, number],
-  logScale: boolean,
-  hiddenTraces?: Set<number>,
-): [number, number] {
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (let trace = 0; trace < nTraces; trace += 1) {
-    if (hiddenTraces?.has(trace)) continue;
-    const offset = trace * nPoints;
-    for (let point = 0; point < nPoints; point += 1) {
-      const x = xData.length > point ? xData[point] : point;
-      if (x < xRange[0] || x > xRange[1]) continue;
-      const y = yData[offset + point];
-      if (!Number.isFinite(y) || (logScale && y <= 0)) continue;
-      if (y < lo) lo = y;
-      if (y > hi) hi = y;
-    }
-  }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return logScale ? [1e-6, 1] : [0, 1];
-  if (lo === hi) {
-    const pad = Math.max(Math.abs(lo) * 0.05, logScale ? Math.max(lo * 0.5, 1e-9) : 1);
-    return [Math.max(logScale ? Number.MIN_VALUE : -Infinity, lo - pad), hi + pad];
-  }
-  if (logScale) return [Math.max(lo / 1.25, Number.MIN_VALUE), hi * 1.25];
-  const pad = (hi - lo) * 0.08;
-  return [lo - pad, hi + pad];
-}
-
 function niceTicks(lo: number, hi: number, target = 5): number[] {
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return [lo];
   const span = Math.abs(hi - lo);
@@ -549,6 +428,28 @@ function niceTicks(lo: number, hi: number, target = 5): number[] {
     if (ticks.length > 12) break;
   }
   return ticks.length ? ticks : [lo, hi];
+}
+
+// Log axes label round values. Nice steps of the exponent read 10^3.75 = 5623.4
+// once a zoom spans less than a few decades, so a fractional exponent step gives
+// way to whole decades when two or more are in range, else to 1, 2 and 5 times a
+// power of ten, else to the linear nice ticks of the range.
+function logTicks(lo: number, hi: number, target = 5): number[] {
+  const exponents = niceTicks(log10(lo), log10(hi), target);
+  if (exponents.length > 1 && exponents[1] - exponents[0] >= 1) return exponents.map((value) => Math.pow(10, value));
+  const decades: number[] = [];
+  const mantissas: number[] = [];
+  for (let decade = Math.floor(log10(lo)); decade <= Math.ceil(log10(hi)); decade += 1) {
+    for (const mantissa of [1, 2, 5]) {
+      const value = mantissa * Math.pow(10, decade);
+      if (value < lo || value > hi) continue;
+      mantissas.push(value);
+      if (mantissa === 1) decades.push(value);
+    }
+  }
+  if (decades.length >= 2) return decades;
+  if (mantissas.length >= 2) return mantissas;
+  return niceTicks(lo, hi, target).filter((value) => value > 0);
 }
 
 // Counted quantities (epochs, iterations) only have whole-number ticks.
@@ -581,8 +482,8 @@ function dataToY(y: number, geom: PlotGeometry): number {
 }
 
 function pixelToX(px: number, geom: PlotGeometry): number {
-  const t = (px - geom.left) / Math.max(geom.plotW, 1);
-  return geom.xMin + t * (geom.xMax - geom.xMin);
+  const fraction = (px - geom.left) / Math.max(geom.plotW, 1);
+  return geom.xMin + fraction * (geom.xMax - geom.xMin);
 }
 
 function pixelToY(py: number, geom: PlotGeometry): number {
@@ -638,10 +539,6 @@ function labelPositionAwayFromInset(insetPosition: string): "top-left" | "top-ri
   return normaliseSnapshotOverlayPosition(insetPosition).endsWith("right") ? "top-left" : "top-right";
 }
 
-function shortMethodLabel(label: string): string {
-  return compactScienceLabel(label);
-}
-
 function trialKey(label: string): string {
   return String(label || "")
     .normalize("NFKC")
@@ -677,6 +574,17 @@ function parseLambdaLabel(label: string): number {
 
 function isReferenceLabel(label: string): boolean {
   return trialKey(label).includes("reference");
+}
+
+// One order for the snapshot grid and the plot thumbnails: reference trials
+// first, then review rank (unranked last), then label.
+function compareSnapshotLabels(aLabel: string, bLabel: string, trialRowByKey: Map<string, TrialRanking>): number {
+  if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
+  const aRank = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
+  const bRank = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
+  return (Number.isFinite(aRank) ? aRank : Number.MAX_SAFE_INTEGER)
+    - (Number.isFinite(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
+    || aLabel.localeCompare(bLabel);
 }
 
 function optionalFiniteNumber(value: unknown): number {
@@ -720,37 +628,16 @@ function formatRangeValue(value: number): string {
   return formatCompactValue(value, 2);
 }
 
-function axisPositionText(value: number, label: string, unit: string): string {
-  const formatted = formatAxisValue(value);
+function axisPositionText(value: number, label: string, unit: string, precise = false): string {
+  const formatted = precise && Number.isFinite(value) ? value.toPrecision(6) : formatAxisValue(value);
   if (!formatted) return "";
   const axis = label.trim() || "x";
   return `${axis} ${formatted}${unit.trim() ? ` ${unit.trim()}` : ""}`;
 }
 
 function makeExportFilename(title: string, nTraces: number, nPoints: number, mode: "html" | "csv" | "png"): string {
-  let slug = (title || "show1d").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
-  if (!slug) slug = "show1d";
+  const slug = exportTitleSlug(title, "show1d");
   return `${slug}_${nTraces}x${nPoints}.${mode}`;
-}
-
-function formatSavedBytes(bytes: number): string {
-  const mb = Math.max(0, bytes) / (1024 * 1024);
-  if (mb >= 100) return `${Math.round(mb)} MB`;
-  if (mb >= 10) return `${mb.toFixed(1)} MB`;
-  return `${mb.toFixed(2)} MB`;
-}
-
-function formatEstimatedHtmlSize(payloadBytes: number): string {
-  const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + 600_000;
-  const mb = htmlBytes / (1024 * 1024);
-  if (mb >= 100) return `~${Math.round(mb)} MB`;
-  if (mb >= 10) return `~${mb.toFixed(1)} MB`;
-  return `~${mb.toFixed(2)} MB`;
-}
-
-function isAbortLikeError(err: unknown): boolean {
-  return err instanceof DOMException && err.name === "AbortError";
 }
 
 function csvCell(value: string): string {
@@ -887,40 +774,29 @@ function imageViewToApi(
 }
 
 function sampleLineProfile(data: Float32Array, width: number, height: number, row0: number, col0: number, row1: number, col1: number): Float32Array {
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const length = Math.sqrt(dc * dc + dr * dr);
-  const n = Math.max(2, Math.ceil(length) + 1);
-  const out = new Float32Array(n);
-  for (let idx = 0; idx < n; idx += 1) {
-    const t = idx / Math.max(1, n - 1);
-    const col = col0 + t * dc;
-    const row = row0 + t * dr;
-    const ci = Math.floor(col);
-    const ri = Math.floor(row);
-    const cf = col - ci;
-    const rf = row - ri;
-    const c0 = clampValue(ci, 0, width - 1);
-    const c1 = clampValue(ci + 1, 0, width - 1);
-    const r0 = clampValue(ri, 0, height - 1);
-    const r1 = clampValue(ri + 1, 0, height - 1);
-    out[idx] = data[r0 * width + c0] * (1 - cf) * (1 - rf)
-      + data[r0 * width + c1] * cf * (1 - rf)
-      + data[r1 * width + c0] * (1 - cf) * rf
-      + data[r1 * width + c1] * cf * rf;
+  const deltaCol = col1 - col0;
+  const deltaRow = row1 - row0;
+  const length = Math.sqrt(deltaCol * deltaCol + deltaRow * deltaRow);
+  const sampleCount = Math.max(2, Math.ceil(length) + 1);
+  const out = new Float32Array(sampleCount);
+  for (let idx = 0; idx < sampleCount; idx += 1) {
+    const fraction = idx / Math.max(1, sampleCount - 1);
+    const col = col0 + fraction * deltaCol;
+    const row = row0 + fraction * deltaRow;
+    const colFloor = Math.floor(col);
+    const rowFloor = Math.floor(row);
+    const colWeight = col - colFloor;
+    const rowWeight = row - rowFloor;
+    const colLeft = clampValue(colFloor, 0, width - 1);
+    const colRight = clampValue(colFloor + 1, 0, width - 1);
+    const rowTop = clampValue(rowFloor, 0, height - 1);
+    const rowBottom = clampValue(rowFloor + 1, 0, height - 1);
+    out[idx] = data[rowTop * width + colLeft] * (1 - colWeight) * (1 - rowWeight)
+      + data[rowTop * width + colRight] * colWeight * (1 - rowWeight)
+      + data[rowBottom * width + colLeft] * (1 - colWeight) * rowWeight
+      + data[rowBottom * width + colRight] * colWeight * rowWeight;
   }
   return out;
-}
-
-function pointToSegmentDistance(col: number, row: number, col0: number, row0: number, col1: number, row1: number): number {
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const lenSq = dc * dc + dr * dr;
-  if (lenSq <= 1e-12) return Math.sqrt((col - col0) ** 2 + (row - row0) ** 2);
-  const t = clampValue(((col - col0) * dc + (row - row0) * dr) / lenSq, 0, 1);
-  const projCol = col0 + t * dc;
-  const projRow = row0 + t * dr;
-  return Math.sqrt((col - projCol) ** 2 + (row - projRow) ** 2);
 }
 
 function isFiniteProfilePoint(point: ProfilePoint | undefined): point is Required<ProfilePoint> {
@@ -997,12 +873,12 @@ function normaliseFftDisplay(data: Float32Array, width: number, height: number):
 }
 
 async function getSnapshotFftWebGpu(
-  gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
-): Promise<WebGPUFFT | null> {
+  gpuFftRef: React.MutableRefObject<DisplayFFT | null>,
+): Promise<DisplayFFT | null> {
   if (gpuFftRef.current) return gpuFftRef.current;
   if (snapshotFftWebGpuUnavailable) return null;
   if (!snapshotFftWebGpuInitPromise) {
-    snapshotFftWebGpuInitPromise = getWebGPUFFT()
+    snapshotFftWebGpuInitPromise = getDisplayFFT()
       .then((fft) => {
         if (!fft) snapshotFftWebGpuUnavailable = true;
         return fft;
@@ -1025,8 +901,7 @@ async function computeSnapshotFft(
   width: number,
   height: number,
   useWindow: boolean,
-  preferWebgpu: boolean,
-  gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
+  gpuFftRef: React.MutableRefObject<DisplayFFT | null>,
 ): Promise<SnapshotFftCacheEntry> {
   if (!image.length || width <= 0 || height <= 0) return blankSnapshotFft();
   const fftW = nextPow2(width);
@@ -1038,7 +913,7 @@ async function computeSnapshotFft(
     real.set(source.subarray(row * width, row * width + width), row * fftW);
   }
   const imag = new Float32Array(real.length);
-  if (preferWebgpu && !snapshotFftWebGpuUnavailable) {
+  if (!snapshotFftWebGpuUnavailable) {
     try {
       const fft = await getSnapshotFftWebGpu(gpuFftRef);
       if (fft) {
@@ -1072,9 +947,8 @@ function snapshotFftCacheKey(
   width: number,
   height: number,
   useWindow: boolean,
-  preferWebgpu: boolean,
 ): string {
-  return `${generation}:${imageIndex}:${width}x${height}:${useWindow ? "hann" : "raw"}:${preferWebgpu ? "gpu" : "cpu"}`;
+  return `${generation}:${imageIndex}:${width}x${height}:${useWindow ? "hann" : "raw"}`;
 }
 
 function computeSnapshotFftCached(
@@ -1083,32 +957,21 @@ function computeSnapshotFftCached(
   width: number,
   height: number,
   useWindow: boolean,
-  preferWebgpu: boolean,
   cacheRef: SnapshotFftCacheRef,
   pendingRef: SnapshotFftPendingRef,
-  gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
+  gpuFftRef: React.MutableRefObject<DisplayFFT | null>,
   generationRef: SnapshotFftGenerationRef,
   generation: number,
 ): Promise<SnapshotFftCacheEntry> {
   const cached = readSnapshotFftCache(cacheRef.current, cacheKey);
-  const perf = getShow1DPerfCounters();
   if (cached) return Promise.resolve(cached);
   const pending = pendingRef.current.get(cacheKey);
-  if (pending) {
-    if (perf) perf.fftPendingHits += 1;
-    return pending;
-  }
-  if (perf) perf.fftCacheMisses += 1;
-  const computeStartedAt = typeof performance === "undefined" ? 0 : performance.now();
-  const promise = computeSnapshotFft(image, width, height, useWindow, preferWebgpu, gpuFftRef)
+  if (pending) return pending;
+  const promise = computeSnapshotFft(image, width, height, useWindow, gpuFftRef)
     .then((entry) => {
       if (generationRef.current !== generation) return entry;
       cacheRef.current.set(cacheKey, entry);
       enforceSnapshotFftCacheBudget(cacheRef.current, cacheKey);
-      if (perf) {
-        perf.fftComputes += 1;
-        perf.lastFftComputeMs = computeStartedAt > 0 ? performance.now() - computeStartedAt : 0;
-      }
       return entry;
     })
     .finally(() => {
@@ -1148,6 +1011,39 @@ function extractPackedImage(
   return out;
 }
 
+// Colours a float image through the LUT at its native size, so callers can
+// scale it with drawImage. The window is displayRange when it is a valid
+// interval, otherwise the finite extent; non-finite pixels stay transparent.
+function floatImageBitmap(
+  ctx: CanvasRenderingContext2D,
+  data: Float32Array,
+  height: number,
+  width: number,
+  lut: Uint8Array,
+  displayRange?: [number, number],
+): HTMLCanvasElement {
+  const [vmin, vmax] = displayRange && Number.isFinite(displayRange[0]) && Number.isFinite(displayRange[1]) && displayRange[0] < displayRange[1]
+    ? displayRange
+    : finiteExtent(data, [0, 1]);
+  const imageData = ctx.createImageData(width, height);
+  const scale = 255 / Math.max(vmax - vmin, 1e-12);
+  for (let i = 0; i < width * height; i += 1) {
+    const raw = data[i];
+    const finite = Number.isFinite(raw);
+    const level = finite ? Math.max(0, Math.min(255, Math.round((raw - vmin) * scale))) : 0;
+    const lutIdx = level * 3;
+    imageData.data[i * 4] = lut[lutIdx];
+    imageData.data[i * 4 + 1] = lut[lutIdx + 1];
+    imageData.data[i * 4 + 2] = lut[lutIdx + 2];
+    imageData.data[i * 4 + 3] = finite ? 255 : 0;
+  }
+  const bitmap = document.createElement("canvas");
+  bitmap.width = width;
+  bitmap.height = height;
+  bitmap.getContext("2d")?.putImageData(imageData, 0, 0);
+  return bitmap;
+}
+
 function drawFloatImage(
   canvas: HTMLCanvasElement,
   data: Float32Array,
@@ -1174,26 +1070,7 @@ function drawFloatImage(
   ctx.fillRect(0, 0, cssW, cssH);
   if (!data.length || height <= 0 || width <= 0) return;
 
-  const [vmin, vmax] = displayRange && Number.isFinite(displayRange[0]) && Number.isFinite(displayRange[1]) && displayRange[0] < displayRange[1]
-    ? displayRange
-    : finiteExtent(data, [0, 1]);
-  const img = ctx.createImageData(width, height);
-  const scale = 255 / Math.max(vmax - vmin, 1e-12);
-  for (let i = 0; i < width * height; i += 1) {
-    const raw = data[i];
-    const finite = Number.isFinite(raw);
-    const v = finite ? Math.max(0, Math.min(255, Math.round((raw - vmin) * scale))) : 0;
-    const lutIdx = v * 3;
-    img.data[i * 4] = lut[lutIdx];
-    img.data[i * 4 + 1] = lut[lutIdx + 1];
-    img.data[i * 4 + 2] = lut[lutIdx + 2];
-    img.data[i * 4 + 3] = finite ? 255 : 0;
-  }
-
-  const bitmap = document.createElement("canvas");
-  bitmap.width = width;
-  bitmap.height = height;
-  bitmap.getContext("2d")?.putImageData(img, 0, 0);
+  const bitmap = floatImageBitmap(ctx, data, height, width, lut, displayRange);
   const fit = Math.min(cssW / width, cssH / height);
   const zoom = clampImageZoom(view.zoom);
   const drawW = Math.max(1, width * fit * zoom);
@@ -1252,26 +1129,7 @@ function drawFloatThumbnail(
   ctx.fillRect(x, y, targetW, targetH);
   ctx.globalAlpha = 1;
 
-  const [vmin, vmax] = displayRange && Number.isFinite(displayRange[0]) && Number.isFinite(displayRange[1]) && displayRange[0] < displayRange[1]
-    ? displayRange
-    : finiteExtent(data, [0, 1]);
-  const img = ctx.createImageData(width, height);
-  const scale = 255 / Math.max(vmax - vmin, 1e-12);
-  for (let i = 0; i < width * height; i += 1) {
-    const raw = data[i];
-    const finite = Number.isFinite(raw);
-    const v = finite ? Math.max(0, Math.min(255, Math.round((raw - vmin) * scale))) : 0;
-    const lutIdx = v * 3;
-    img.data[i * 4] = lut[lutIdx];
-    img.data[i * 4 + 1] = lut[lutIdx + 1];
-    img.data[i * 4 + 2] = lut[lutIdx + 2];
-    img.data[i * 4 + 3] = finite ? 255 : 0;
-  }
-
-  const bitmap = document.createElement("canvas");
-  bitmap.width = width;
-  bitmap.height = height;
-  bitmap.getContext("2d")?.putImageData(img, 0, 0);
+  const bitmap = floatImageBitmap(ctx, data, height, width, lut, displayRange);
   const fit = Math.max(targetW / width, targetH / height);
   const drawW = Math.max(1, width * fit);
   const drawH = Math.max(1, height * fit);
@@ -1878,7 +1736,6 @@ function SnapshotImageCanvas({
   showFft,
   deferFft,
   fftWindow,
-  preferWebgpu,
   fftLayout,
   contrastPreset,
   contrastRange,
@@ -1918,7 +1775,6 @@ function SnapshotImageCanvas({
   showFft: boolean;
   deferFft: boolean;
   fftWindow: boolean;
-  preferWebgpu: boolean;
   fftLayout: "overlay" | "below";
   contrastPreset: string;
   contrastRange: [number, number] | null;
@@ -1936,7 +1792,7 @@ function SnapshotImageCanvas({
   profileLine: ProfilePoint[];
   fftCacheRef: SnapshotFftCacheRef;
   fftPendingRef: SnapshotFftPendingRef;
-  fftGpuRef: React.MutableRefObject<WebGPUFFT | null>;
+  fftGpuRef: React.MutableRefObject<DisplayFFT | null>;
   fftCacheVersion: number;
   fftGenerationRef: SnapshotFftGenerationRef;
   fftGeneration: number;
@@ -1971,8 +1827,8 @@ function SnapshotImageCanvas({
     [contrastPreset, contrastRange, image],
   );
   const fftCacheKey = React.useMemo(
-    () => snapshotFftCacheKey(fftGeneration, imageIndex, imageWidth, imageHeight, fftWindow, preferWebgpu),
-    [fftGeneration, fftWindow, imageHeight, imageIndex, imageWidth, preferWebgpu],
+    () => snapshotFftCacheKey(fftGeneration, imageIndex, imageWidth, imageHeight, fftWindow),
+    [fftGeneration, fftWindow, imageHeight, imageIndex, imageWidth],
   );
   const cachedFftEntry = React.useMemo(
     () => readSnapshotFftCache(fftCacheRef.current, fftCacheKey),
@@ -2012,7 +1868,6 @@ function SnapshotImageCanvas({
       imageWidth,
       imageHeight,
       fftWindow,
-      preferWebgpu,
       fftCacheRef,
       fftPendingRef,
       fftGpuRef,
@@ -2047,7 +1902,6 @@ function SnapshotImageCanvas({
     image,
     imageHeight,
     imageWidth,
-    preferWebgpu,
     showFft,
   ]);
 
@@ -2348,18 +2202,18 @@ function SnapshotProfilePlot({
     const padBottom = 17;
     const plotW = Math.max(1, cssW - padLeft - padRight);
     const plotH = Math.max(1, cssH - padTop - padBottom);
-    let gMin = Infinity;
-    let gMax = -Infinity;
+    let valueMin = Infinity;
+    let valueMax = -Infinity;
     for (const profile of validProfiles) {
       for (let idx = 0; idx < profile.values.length; idx += 1) {
         const value = profile.values[idx];
         if (!Number.isFinite(value)) continue;
-        gMin = Math.min(gMin, value);
-        gMax = Math.max(gMax, value);
+        valueMin = Math.min(valueMin, value);
+        valueMax = Math.max(valueMax, value);
       }
     }
-    if (!Number.isFinite(gMin) || !Number.isFinite(gMax)) return;
-    const range = Math.max(gMax - gMin, 1e-12);
+    if (!Number.isFinite(valueMin) || !Number.isFinite(valueMax)) return;
+    const range = Math.max(valueMax - valueMin, 1e-12);
     ctx.strokeStyle = colors.border;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -2368,17 +2222,17 @@ function SnapshotProfilePlot({
     ctx.lineTo(padLeft + plotW, padTop + plotH);
     ctx.stroke();
 
-    for (let pIdx = 0; pIdx < validProfiles.length; pIdx += 1) {
-      const profile = validProfiles[pIdx];
+    for (let profileIdx = 0; profileIdx < validProfiles.length; profileIdx += 1) {
+      const profile = validProfiles[profileIdx];
       const values = profile.values;
       const active = profile.imageIdx === selectedImageIndex || validProfiles.length === 1;
-      ctx.strokeStyle = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[pIdx % PROFILE_COLORS.length];
+      ctx.strokeStyle = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[profileIdx % PROFILE_COLORS.length];
       ctx.lineWidth = active ? 1.6 : 1;
       ctx.globalAlpha = active ? 1 : 0.48;
       ctx.beginPath();
       for (let idx = 0; idx < values.length; idx += 1) {
         const x = padLeft + (idx / Math.max(1, values.length - 1)) * plotW;
-        const y = padTop + plotH - ((values[idx] - gMin) / range) * plotH;
+        const y = padTop + plotH - ((values[idx] - valueMin) / range) * plotH;
         if (idx === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -2411,17 +2265,17 @@ function SnapshotProfilePlot({
     }
     ctx.textAlign = "right";
     ctx.textBaseline = "top";
-    ctx.fillText(formatCompactValue(gMax, 3), padLeft - 4, padTop);
+    ctx.fillText(formatCompactValue(valueMax, 3), padLeft - 4, padTop);
     ctx.textBaseline = "bottom";
-    ctx.fillText(formatCompactValue(gMin, 3), padLeft - 4, padTop + plotH);
+    ctx.fillText(formatCompactValue(valueMin, 3), padLeft - 4, padTop + plotH);
 
     ctx.textBaseline = "top";
     ctx.font = "9px system-ui, sans-serif";
     let legendX = cssW - 4;
-    for (let pIdx = validProfiles.length - 1; pIdx >= 0; pIdx -= 1) {
-      const profile = validProfiles[pIdx];
+    for (let profileIdx = validProfiles.length - 1; profileIdx >= 0; profileIdx -= 1) {
+      const profile = validProfiles[profileIdx];
       const label = compactScienceLabel(profile.label);
-      const color = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[pIdx % PROFILE_COLORS.length];
+      const color = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[profileIdx % PROFILE_COLORS.length];
       const textW = ctx.measureText(label).width;
       if (legendX - textW < padLeft + 20) break;
       ctx.globalAlpha = profile.imageIdx === selectedImageIndex ? 1 : 0.55;
@@ -2448,6 +2302,52 @@ function SnapshotProfilePlot({
       }}
     />
   );
+}
+
+function SnapshotHistogram({ data, imageIndex, packedHeight, packedWidth, imageWidth, imageHeight, label, range, preset, colors, width, height, onChange }: {
+  data: Float32Array; imageIndex: number; packedHeight: number; packedWidth: number;
+  imageWidth: number; imageHeight: number; label: string;
+  range: number[] | null; preset: string;
+  colors: { bgAlt: string; border: string; textMuted: string; accent: string };
+  width: number; height: number;
+  onChange: (range: [number, number] | []) => void;
+}) {
+  const image = React.useMemo(() => extractPackedImage(data, imageIndex, packedHeight, packedWidth, imageHeight, imageWidth),
+    [data, imageIndex, packedHeight, packedWidth, imageHeight, imageWidth]);
+  const slot = React.useRef(20000 + Math.floor(Math.random() * 1000000));
+  const [bins, setBins] = React.useState<number[]>([]);
+  const [backend, setBackend] = React.useState("");
+  const bounds = React.useMemo(() => findDataRange(image), [image]);
+  const dataMin = bounds.min;
+  const dataMax = bounds.max > dataMin ? bounds.max : dataMin + 1;
+  const clip = resolveSnapshotDisplayRange(image, preset, range && range.length === 2 ? range as [number, number] : null);
+  React.useEffect(() => {
+    let canceled = false;
+    const fallback = () => {
+      if (!canceled) { setBins(computeHistogramFromBytes(image, 256, dataMin, dataMax)); setBackend("CPU"); }
+    };
+    void getGPUColormapEngine().then(async engine => {
+      if (canceled) return;
+      if (!engine) { fallback(); return; }
+      try {
+        engine.uploadData(slot.current, image, imageWidth, imageHeight);
+        const values = await engine.computeHistogramWithRange(slot.current, dataMin, dataMax, false);
+        if (!canceled) { setBins(values); setBackend("WebGPU"); }
+      } catch { fallback(); }
+    }).catch(fallback);
+    return () => { canceled = true; };
+  }, [image, imageWidth, imageHeight, dataMin, dataMax]);
+  return <Box data-testid="show1d-panel-histogram" aria-label={`${label} contrast`} sx={{ minWidth: 0, px: 0.5 }}>
+    <Typography sx={{ fontSize: 11, color: colors.textMuted }}>{label}</Typography>
+    <MiniHistogram bins={bins} dataMin={dataMin} dataMax={dataMax} clipMin={clip[0]} clipMax={clip[1]}
+      colors={colors} width={width} height={height} onClipRangeChange={onChange} />
+    <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+      <Button size="small" onClick={() => onChange([dataMin, dataMax])}>Full</Button>
+      <Button size="small" onClick={() => onChange(resolveSnapshotDisplayRange(image, "1-99", null))}>1–99%</Button>
+      <Button size="small" onClick={() => onChange([])}>Reset</Button>
+      {backend === "CPU" && <Typography sx={{ fontSize: 10 }}>CPU histogram</Typography>}
+    </Box>
+  </Box>;
 }
 
 function MiniHistogram({
@@ -2693,7 +2593,6 @@ function Show1DWidget() {
   const [nPoints] = useModelState<number>("n_points");
   const [labels] = useModelState<string[]>("labels");
   const [colors] = useModelState<string[]>("colors");
-  const [methodLabels] = useModelState<string[]>("method_labels");
   const [xLabel] = useModelState<string>("x_label");
   const [xInteger] = useModelState<boolean>("x_integer");
   const [yLabel] = useModelState<string>("y_label");
@@ -2720,7 +2619,6 @@ function Show1DWidget() {
   const [focusedTrace, setFocusedTrace] = useModelState<number>("focused_trace");
   const [xRange, setXRange] = useModelState<number[]>("x_range");
   const [yRange, setYRange] = useModelState<number[]>("y_range");
-  const [markers] = useModelState<Marker[]>("markers");
   const [statsMean] = useModelState<number[]>("stats_mean");
   const [statsMin] = useModelState<number[]>("stats_min");
   const [statsMax] = useModelState<number[]>("stats_max");
@@ -2762,6 +2660,7 @@ function Show1DWidget() {
   const [snapshotFftWindow, setSnapshotFftWindow] = useModelState<boolean>("snapshot_fft_window");
   const [snapshotFftCmap, setSnapshotFftCmap] = useModelState<string>("snapshot_fft_cmap");
   const [snapshotContrastPreset, setSnapshotContrastPreset] = useModelState<string>("snapshot_contrast_preset");
+  const [panelContrastRanges, setPanelContrastRanges] = useModelState<Record<string, number[]>>("snapshot_panel_contrast_ranges");
   const [snapshotContrastRange, setSnapshotContrastRange] = useModelState<number[]>("snapshot_contrast_range");
   const [snapshotHistogramWidth] = useModelState<number>("snapshot_histogram_width");
   const [snapshotHistogramHeight] = useModelState<number>("snapshot_histogram_height");
@@ -2770,6 +2669,9 @@ function Show1DWidget() {
   const [snapshotColumns, setSnapshotColumns] = useModelState<number>("snapshot_columns");
   const [snapshotOverlayPosition, setSnapshotOverlayPosition] = useModelState<string>("snapshot_overlay_position");
   const [imageCmap, setImageCmap] = useModelState<string>("image_cmap");
+  const [snapshotLinkViews] = useModelState<boolean>("snapshot_link_views");
+  const [panelImageViews, setPanelImageViews] = React.useState<Record<string, ImageViewApiState>>({});
+  const [panelFftViews, setPanelFftViews] = React.useState<Record<string, ImageViewApiState>>({});
   const [snapshotRealSpaceZoom, setSnapshotRealSpaceZoom] = useModelState<number>("snapshot_real_space_zoom");
   const [snapshotRealSpaceCenter, setSnapshotRealSpaceCenter] = useModelState<number[]>("snapshot_real_space_center");
   const [snapshotFftZoom, setSnapshotFftZoom] = useModelState<number>("snapshot_fft_zoom");
@@ -2780,7 +2682,6 @@ function Show1DWidget() {
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [pixelSize] = useModelState<number>("pixel_size");
   const [pixelUnit] = useModelState<string>("pixel_unit");
-  const [preferWebgpu] = useModelState<boolean>("prefer_webgpu");
   const [snapshotPlaying, setSnapshotPlaying] = useModelState<boolean>("snapshot_playing");
   const [snapshotFps, setSnapshotFps] = useModelState<number>("snapshot_fps");
   const [snapshotLoop, setSnapshotLoop] = useModelState<boolean>("snapshot_loop");
@@ -2899,10 +2800,10 @@ function Show1DWidget() {
       rows.sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
     } else {
       rows.sort((a, b) => {
-        const av = rankingNumber(a, normalisedSortKey);
-        const bv = rankingNumber(b, normalisedSortKey);
-        if (Number.isFinite(av) && Number.isFinite(bv) && av !== bv) return av - bv;
-        if (Number.isFinite(av) !== Number.isFinite(bv)) return Number.isFinite(av) ? -1 : 1;
+        const aScore = rankingNumber(a, normalisedSortKey);
+        const bScore = rankingNumber(b, normalisedSortKey);
+        if (Number.isFinite(aScore) && Number.isFinite(bScore) && aScore !== bScore) return aScore - bScore;
+        if (Number.isFinite(aScore) !== Number.isFinite(bScore)) return Number.isFinite(aScore) ? -1 : 1;
         return String(a.label || "").localeCompare(String(b.label || ""));
       });
     }
@@ -3036,20 +2937,15 @@ function Show1DWidget() {
     tileAspect: number;
   } | null>(null);
   const snapshotViewportWidthRef = React.useRef(0);
-  const histogramSlotRef = React.useRef(9000 + Math.floor(Math.random() * 100000));
-  const [snapshotHistogramBins, setSnapshotHistogramBins] = React.useState<number[]>(new Array(256).fill(0));
-  const [snapshotHistogramRange, setSnapshotHistogramRange] = React.useState<[number, number]>([0, 1]);
-  const [snapshotHistogramClipRange, setSnapshotHistogramClipRange] = React.useState<[number, number]>([0, 1]);
-  const [, setSnapshotHistogramBackend] = React.useState("cpu");
+
   const snapshotFftCacheRef = React.useRef<Map<string, SnapshotFftCacheEntry>>(new Map());
   const snapshotFftPendingRef = React.useRef<Map<string, Promise<SnapshotFftCacheEntry>>>(new Map());
-  const snapshotFftGpuRef = React.useRef<WebGPUFFT | null>(null);
+  const snapshotFftGpuRef = React.useRef<DisplayFFT | null>(null);
   const snapshotFftGenerationRef = React.useRef(0);
   const snapshotFftGeneration = React.useMemo(() => {
     snapshotFftGenerationRef.current += 1;
     snapshotFftCacheRef.current.clear();
     snapshotFftPendingRef.current.clear();
-    updateSnapshotFftCacheMetrics(snapshotFftCacheRef.current);
     return snapshotFftGenerationRef.current;
   }, [snapshotData, snapshotHeight, snapshotHeights, snapshotWidth, snapshotWidths]);
   const [snapshotFftCacheVersion, setSnapshotFftCacheVersion] = React.useState(0);
@@ -3059,8 +2955,7 @@ function Show1DWidget() {
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
   const pendingHoverSnapshotGroupRef = React.useRef<number | null | undefined>(undefined);
-  const pendingHoverPointerRef = React.useRef<{ clientX: number; clientY: number; queuedAt: number } | null>(null);
-  const perfTelemetryRef = React.useRef<HTMLOutputElement>(null);
+  const pendingHoverPointerRef = React.useRef<{ clientX: number; clientY: number } | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
@@ -3069,26 +2964,19 @@ function Show1DWidget() {
 
   const fullXRange = React.useMemo(() => xExtent(xData, nPoints), [xData, nPoints]);
 
-  React.useEffect(() => {
-    const publish = () => {
-      if (perfTelemetryRef.current) {
-        perfTelemetryRef.current.textContent = JSON.stringify(getShow1DPerfCounters());
-      }
-    };
-    publish();
-    const id = window.setInterval(publish, 250);
-    return () => window.clearInterval(id);
-  }, []);
-
   const effectiveXRange: [number, number] = React.useMemo(() => {
     if (xRange?.length === 2 && Number.isFinite(xRange[0]) && Number.isFinite(xRange[1]) && xRange[0] < xRange[1]) {
       return [xRange[0], xRange[1]];
     }
     return fullXRange;
   }, [xRange, fullXRange]);
+  const traceIndex = React.useMemo(
+    () => indexTraces(yData, xData, nTraces, nPoints, logScale),
+    [yData, xData, nTraces, nPoints, logScale],
+  );
   const fullYRange = React.useMemo(
-    () => yExtent(yData, nTraces, nPoints, xData, effectiveXRange, logScale, excludedTraceSet),
-    [yData, nTraces, nPoints, xData, effectiveXRange, logScale, excludedTraceSet],
+    () => yExtent(traceIndex, effectiveXRange, excludedTraceSet),
+    [traceIndex, effectiveXRange, excludedTraceSet],
   );
   const effectiveYRange: [number, number] = React.useMemo(() => {
     if (yRange?.length === 2 && Number.isFinite(yRange[0]) && Number.isFinite(yRange[1]) && yRange[0] < yRange[1]) {
@@ -3153,16 +3041,7 @@ function Show1DWidget() {
   const selectedGroupAllImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
   const selectedGroupImageIndices = selectedGroupAllImageIndices
     .filter((imageIdx) => isSnapshotImageVisible(imageIdx))
-    .sort((a, b) => {
-      const aLabel = imageLabelForIndex(a);
-      const bLabel = imageLabelForIndex(b);
-      if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-      const ar = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
-      const br = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
-      const aRank = Number.isFinite(ar) ? ar : Number.MAX_SAFE_INTEGER;
-      const bRank = Number.isFinite(br) ? br : Number.MAX_SAFE_INTEGER;
-      return aRank - bRank || aLabel.localeCompare(bLabel);
-    });
+    .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b), trialRowByKey));
   const selectedSnapshot = selectedGroupImageIndices.includes(legacySelectedSnapshot)
     ? legacySelectedSnapshot
     : selectedGroupImageIndices[0] ?? -1;
@@ -3182,8 +3061,7 @@ function Show1DWidget() {
   const currentSnapshotGroupBookmarked = selectedGroup >= 0
     && normalisedBookmarkedSnapshotGroups.includes(selectedGroup);
   const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats || showReview;
-  const plotTitleVisible = false;
-  const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
+  const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4, SHOW1D_HTML_EXPORT_OVERHEAD_BYTES);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
   const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT));
   const plotHeightExplicit = Math.abs(plotHeight - DEFAULT_PLOT_HEIGHT) > 0.5;
@@ -3193,9 +3071,9 @@ function Show1DWidget() {
     ? 620
     : rawSidePanelWidth;
   const rawSnapshotPanelWidth = Number.isFinite(snapshotPanelWidthPx) ? Number(snapshotPanelWidthPx) : 0;
-  const requestedSidePanelWidth = rawSnapshotPanelWidth > 0
-    ? rawSnapshotPanelWidth
-    : autoSidePanelWidth;
+  const requestedSidePanelWidth = plotWidthPx > 0
+    ? Math.max(MIN_SIDE_PANEL_WIDTH, mainGridSize.width - plotWidthPx)
+    : rawSnapshotPanelWidth > 0 ? rawSnapshotPanelWidth : autoSidePanelWidth;
   const availableSidePanelWidth = Math.round(clampValue(
     Math.min(MAX_SIDE_PANEL_WIDTH, mainGridSize.width - MIN_PLOT_WIDTH),
     MIN_SIDE_PANEL_WIDTH,
@@ -3229,7 +3107,9 @@ function Show1DWidget() {
   const mainGridTemplateColumns = sidePanelVisible
     ? {
       xs: "1fr",
-      md: `minmax(${MIN_PLOT_WIDTH}px, 1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${sidePanelWidth}px)`,
+      md: plotWidthPx > 0
+        ? `${Math.max(MIN_PLOT_WIDTH, plotWidthPx)}px minmax(0, 1fr)`
+        : `minmax(${MIN_PLOT_WIDTH}px, 1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${sidePanelWidth}px)`,
     }
     : "1fr";
   const normalisedSnapshotContrastPreset = normaliseSnapshotContrastPreset(snapshotContrastPreset);
@@ -3255,16 +3135,9 @@ function Show1DWidget() {
     const cache = new Map<number, PlotThumbnailCacheEntry>();
     if (!showSnapshotThumbnails || !hasSnapshots || groupCount <= 0) return cache;
     for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
-      const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => isSnapshotImageVisible(idx)).sort((a, b) => {
-        const aLabel = imageLabelForIndex(a);
-        const bLabel = imageLabelForIndex(b);
-        if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-        const ar = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
-        const br = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
-        return (Number.isFinite(ar) ? ar : Number.MAX_SAFE_INTEGER)
-          - (Number.isFinite(br) ? br : Number.MAX_SAFE_INTEGER)
-          || aLabel.localeCompare(bLabel);
-      });
+      const imageIndices = (snapshotGroups[groupIdx] ?? [])
+        .filter((idx) => isSnapshotImageVisible(idx))
+        .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b), trialRowByKey));
       const firstImageIdx = imageIndices[0];
       if (firstImageIdx === undefined) continue;
       const iteration = Number.isFinite(snapshotGroupIterations?.[groupIdx])
@@ -3325,12 +3198,8 @@ function Show1DWidget() {
     "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
     "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.accent },
   };
-  const themedMenuProps = {
-    ...upwardMenuProps,
-    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
-  };
   const themedTopMenuProps = {
-    PaperProps: themedMenuProps.PaperProps,
+    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
     sx: { zIndex: 9999 },
   };
   const snapshotControlMenuProps = {
@@ -3510,18 +3379,18 @@ function Show1DWidget() {
       const start = plotResizeStartRef.current;
       if (plotResizePointerIdRef.current !== pointerId || !start) return;
       moveEvent.preventDefault();
-      const dx = moveEvent.clientX - start.x;
-      const dy = moveEvent.clientY - start.y;
-      pending = { height: Math.round(clampValue(start.plotHeight + dy, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)) };
+      const deltaX = moveEvent.clientX - start.x;
+      const deltaY = moveEvent.clientY - start.y;
+      pending = { height: Math.round(clampValue(start.plotHeight + deltaY, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)) };
       if (!sidePanelVisible) {
-        pending.width = Math.round(clampValue(start.gridWidth + dx, Math.min(MIN_PLOT_WIDTH, widthLimit), widthLimit));
+        pending.width = Math.round(clampValue(start.gridWidth + deltaX, Math.min(MIN_PLOT_WIDTH, widthLimit), widthLimit));
       } else {
         const minPlotWidth = MIN_PLOT_WIDTH;
         const minSidePanelWidth = MIN_SIDE_PANEL_WIDTH;
         const maxSidePanelWidth = Math.min(MAX_SIDE_PANEL_WIDTH, start.gridWidth - start.nonPlotWidth - minPlotWidth);
         const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
         if (maxSidePanelWidth >= minSidePanelWidth && maxPlotWidth >= minPlotWidth) {
-          const nextPlotWidth = clampValue(start.plotWidth + dx, minPlotWidth, maxPlotWidth);
+          const nextPlotWidth = clampValue(start.plotWidth + deltaX, minPlotWidth, maxPlotWidth);
           pending.sideWidth = Math.round(clampValue(
             start.gridWidth - start.nonPlotWidth - nextPlotWidth,
             minSidePanelWidth,
@@ -3867,7 +3736,6 @@ function Show1DWidget() {
             imageWidth,
             imageHeight,
             Boolean(snapshotFftWindow),
-            Boolean(preferWebgpu),
           );
           if (readSnapshotFftCache(snapshotFftCacheRef.current, cacheKey)) continue;
           const image = extractPackedImage(snapshotData, imageIdx, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
@@ -3879,7 +3747,6 @@ function Show1DWidget() {
               imageWidth,
               imageHeight,
               Boolean(snapshotFftWindow),
-              Boolean(preferWebgpu),
               snapshotFftCacheRef,
               snapshotFftPendingRef,
               snapshotFftGpuRef,
@@ -3913,7 +3780,6 @@ function Show1DWidget() {
     groupCount,
     hasSnapshots,
     nSnapshots,
-    preferWebgpu,
     showSnapshotFft,
     snapshotData,
     snapshotFftGeneration,
@@ -3952,85 +3818,6 @@ function Show1DWidget() {
     snapshotGroups,
     snapshotPlaying,
     transientSnapshotGroupIdx,
-  ]);
-
-  React.useEffect(() => {
-    if (!showSnapshotHistogram || snapshotPlaying) return;
-    if (!hasSnapshots || selectedSnapshot < 0) {
-      setSnapshotHistogramBins(new Array(256).fill(0));
-      setSnapshotHistogramRange([0, 1]);
-      setSnapshotHistogramClipRange([0, 1]);
-      setSnapshotHistogramBackend("off");
-      return;
-    }
-    const imageHeight = snapshotHeights?.[selectedSnapshot] || snapshotHeight;
-    const imageWidth = snapshotWidths?.[selectedSnapshot] || snapshotWidth;
-    const image = extractPackedImage(snapshotData, selectedSnapshot, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
-    const dataRange = findDataRange(image);
-    const dataMin = dataRange.min;
-    const dataMax = dataRange.max > dataRange.min ? dataRange.max : dataRange.min + 1;
-    setSnapshotHistogramRange([dataMin, dataMax]);
-    let canceled = false;
-    const useCpu = () => {
-      if (canceled) return;
-      setSnapshotHistogramBins(computeHistogramFromBytes(image, 256, dataMin, dataMax));
-      setSnapshotHistogramBackend("cpu");
-    };
-    if (!preferWebgpu) {
-      useCpu();
-      return () => { canceled = true; };
-    }
-    void getGPUColormapEngine().then(async (engine) => {
-      if (!engine || canceled) {
-        useCpu();
-        return;
-      }
-      try {
-        engine.uploadData(histogramSlotRef.current, image, imageWidth, imageHeight);
-        const bins = await engine.computeHistogramWithRange(histogramSlotRef.current, dataMin, dataMax, false);
-        if (canceled) return;
-        setSnapshotHistogramBins(bins);
-        setSnapshotHistogramBackend("webgpu");
-      } catch {
-        useCpu();
-      }
-    });
-    return () => { canceled = true; };
-  }, [
-    hasSnapshots,
-    preferWebgpu,
-    selectedSnapshot,
-    showSnapshotHistogram,
-    snapshotPlaying,
-    snapshotData,
-    snapshotHeight,
-    snapshotHeights,
-    snapshotWidth,
-    snapshotWidths,
-  ]);
-
-  React.useEffect(() => {
-    if (!showSnapshotHistogram || snapshotPlaying) return;
-    if (!hasSnapshots || selectedSnapshot < 0) {
-      setSnapshotHistogramClipRange([0, 1]);
-      return;
-    }
-    const imageHeight = snapshotHeights?.[selectedSnapshot] || snapshotHeight;
-    const imageWidth = snapshotWidths?.[selectedSnapshot] || snapshotWidth;
-    const image = extractPackedImage(snapshotData, selectedSnapshot, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
-    setSnapshotHistogramClipRange(resolveSnapshotDisplayRange(image, normalisedSnapshotContrastPreset, customSnapshotContrastRange));
-  }, [
-    customSnapshotContrastRange,
-    hasSnapshots,
-    normalisedSnapshotContrastPreset,
-    selectedSnapshot,
-    showSnapshotHistogram,
-    snapshotPlaying,
-    snapshotData,
-    snapshotHeight,
-    snapshotHeights,
-    snapshotWidth,
-    snapshotWidths,
   ]);
 
   React.useEffect(() => {
@@ -4145,15 +3932,17 @@ function Show1DWidget() {
     });
   }, [hasProfileImage, imageLut, profileImageData, profileImageHeight, profileImageWidth, profileLine, themeColors]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
       plotThumbnailHitAreasRef.current = [];
       return;
     }
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(plotSize.width * dpr);
-    canvas.height = Math.round(plotSize.height * dpr);
+    const pixelWidth = Math.round(plotSize.width * dpr);
+    const pixelHeight = Math.round(plotSize.height * dpr);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     canvas.style.width = `${plotSize.width}px`;
     canvas.style.height = `${plotSize.height}px`;
     const ctx = canvas.getContext("2d");
@@ -4161,7 +3950,6 @@ function Show1DWidget() {
       plotThumbnailHitAreasRef.current = [];
       return;
     }
-    const drawStartedAt = performance.now();
     const nextPlotThumbnailHitAreas: PlotThumbnailHitArea[] = [];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = themeColors.bg;
@@ -4170,12 +3958,12 @@ function Show1DWidget() {
     const geom: PlotGeometry = {
       left: 64,
       right: 8,
-      top: plotTitleVisible ? 28 : 16,
+      top: 16,
       bottom: 46,
       width: plotSize.width,
       height: plotSize.height,
       plotW: Math.max(1, plotSize.width - 72),
-      plotH: Math.max(1, plotSize.height - (plotTitleVisible ? 74 : 62)),
+      plotH: Math.max(1, plotSize.height - 62),
       xMin: effectiveXRange[0],
       xMax: effectiveXRange[1],
       yMin: effectiveYRange[0],
@@ -4188,14 +3976,17 @@ function Show1DWidget() {
     ctx.lineWidth = 1;
     ctx.strokeRect(geom.left, geom.top, geom.plotW, geom.plotH);
     ctx.save();
+    // The canvas keeps the last trace's polyline as its current path between
+    // draws (save/restore do not reset it): clip to the frame alone.
+    ctx.beginPath();
     ctx.rect(geom.left, geom.top, geom.plotW, geom.plotH);
     ctx.clip();
 
     const xTicks = xInteger
       ? integerTicks(geom.xMin, geom.xMax, 6)
-      : niceTicks(geom.xMin, geom.xMax, methodLabels?.length ? Math.min(methodLabels.length, 6) : 6);
+      : niceTicks(geom.xMin, geom.xMax, 6);
     const yTickValues = logScale
-      ? niceTicks(log10(geom.yMin), log10(geom.yMax), 5).map((value) => Math.pow(10, value))
+      ? logTicks(geom.yMin, geom.yMax, 5)
       : niceTicks(geom.yMin, geom.yMax, 5);
 
     if (showGrid) {
@@ -4221,30 +4012,6 @@ function Show1DWidget() {
       ctx.globalAlpha = 1;
     }
 
-    const plotMarkers = markers ?? [];
-    for (let markerIndex = 0; markerIndex < plotMarkers.length; markerIndex += 1) {
-      const marker = plotMarkers[markerIndex];
-      if (!Number.isFinite(marker.x)) continue;
-      const x = dataToX(Number(marker.x), geom);
-      if (x < geom.left || x > geom.left + geom.plotW) continue;
-      const color = markerColor(marker, themeColors);
-      ctx.strokeStyle = color;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      ctx.moveTo(x, geom.top);
-      ctx.lineTo(x, geom.top + geom.plotH);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      const markerLabel = geom.plotW < 520 && marker.mobile_label !== undefined
-        ? marker.mobile_label
-        : marker.label;
-      if (markerLabel) {
-        ctx.fillStyle = color;
-        ctx.font = "10px system-ui, sans-serif";
-        ctx.fillText(markerLabel, x + 4, geom.top + 12 + (markerIndex % 3) * 12);
-      }
-    }
-
     if (selectedSnapshotIteration !== null) {
       const x = dataToX(selectedSnapshotIteration, geom);
       if (x >= geom.left && x <= geom.left + geom.plotW) {
@@ -4258,6 +4025,11 @@ function Show1DWidget() {
       }
     }
 
+    const plotMapping = { ...geom, dpr, toX: (x: number) => dataToX(x, geom), toY: (y: number) => dataToY(y, geom) };
+    const columns = columnStarts(traceIndex, plotMapping);
+    // A decimated polyline turns sharply at each column's extremes, where miter
+    // joins would spike past the reach of the full polyline; bevel joins stay inside.
+    ctx.lineJoin = columns ? "bevel" : "miter";
     for (let trace = 0; trace < nTraces; trace += 1) {
       if (!visibleTraceSet.has(trace)) continue;
       const isFocused = focusedTrace < 0 || focusedTrace === trace;
@@ -4265,28 +4037,11 @@ function Show1DWidget() {
       ctx.lineWidth = Math.max(1, lineWidth) * (focusedTrace === trace ? 1.8 : 1);
       ctx.globalAlpha = isFocused ? 1 : 0.22;
       ctx.beginPath();
-      let active = false;
-      const offset = trace * nPoints;
-      for (let point = 0; point < nPoints; point += 1) {
-        const xValue = xData.length > point ? xData[point] : point;
-        const yValue = yData[offset + point];
-        if (!Number.isFinite(xValue) || !Number.isFinite(yValue) || (logScale && yValue <= 0)) {
-          active = false;
-          continue;
-        }
-        if (xValue < geom.xMin || xValue > geom.xMax) continue;
-        const px = dataToX(xValue, geom);
-        const py = dataToY(yValue, geom);
-        if (!active) {
-          ctx.moveTo(px, py);
-          active = true;
-        } else {
-          ctx.lineTo(px, py);
-        }
-      }
+      traceToPath(ctx, traceIndex, trace, plotMapping, columns);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+    ctx.lineJoin = "miter";
 
     if (showSnapshotThumbnails && hasSnapshots && groupCount > 0) {
       const thumbW = thumbnailSize;
@@ -4318,43 +4073,26 @@ function Show1DWidget() {
     ctx.fillStyle = themeColors.text;
     ctx.font = "12px system-ui, sans-serif";
     ctx.textAlign = "center";
-    const methodTickCharBudget = Math.max(
-      4,
-      Math.floor(geom.plotW / Math.max(1, xTicks.length) / 7),
-    );
     for (const tick of xTicks) {
       const x = dataToX(tick, geom);
-      let label = formatAxisValue(tick);
-      if (methodLabels?.length) {
-        const idx = Math.round(tick);
-        if (Math.abs(idx - tick) < 0.05 && idx >= 0 && idx < methodLabels.length) {
-          const methodTick = shortMethodLabel(methodLabels[idx]);
-          if (methodTick.length <= methodTickCharBudget) label = methodTick;
-        }
-      }
-      ctx.fillText(label, x, geom.top + geom.plotH + 18);
+      ctx.fillText(formatAxisValue(tick), x, geom.top + geom.plotH + 18);
     }
     ctx.textAlign = "right";
     for (const tick of yTickValues) {
       if (logScale && tick <= 0) continue;
       const y = dataToY(tick, geom);
-      ctx.fillText(formatRangeValue(tick), geom.left - 8, y + 4);
+      ctx.fillText(tick !== 0 && Math.abs(tick) < 0.1 ? tick.toExponential(2) : formatAxisValue(tick), geom.left - 8, y + 4);
     }
     ctx.textAlign = "center";
-    const xlabel = xLabel ? `${xLabel}${xUnit ? ` (${xUnit})` : ""}` : xUnit;
-    const ylabel = yLabel ? `${yLabel}${yUnit ? ` (${yUnit})` : ""}` : yUnit;
-    if (xlabel) ctx.fillText(xlabel, geom.left + geom.plotW / 2, plotSize.height - 8);
-    if (ylabel) {
+    const xAxisTitle = xLabel ? `${xLabel}${xUnit ? ` (${xUnit})` : ""}` : xUnit;
+    const yAxisTitle = yLabel ? `${yLabel}${yUnit ? ` (${yUnit})` : ""}` : yUnit;
+    if (xAxisTitle) ctx.fillText(xAxisTitle, geom.left + geom.plotW / 2, plotSize.height - 8);
+    if (yAxisTitle) {
       ctx.save();
       ctx.translate(14, geom.top + geom.plotH / 2);
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText(ylabel, 0, 0);
+      ctx.fillText(yAxisTitle, 0, 0);
       ctx.restore();
-    }
-    if (plotTitleVisible) {
-      ctx.textAlign = "left";
-      ctx.font = "600 13px system-ui, sans-serif";
-      ctx.fillText(title, geom.left, 18);
     }
     if (nPoints === 0 || nTraces === 0) {
       ctx.fillStyle = themeColors.textMuted;
@@ -4363,23 +4101,15 @@ function Show1DWidget() {
       ctx.fillText("No data", geom.left + geom.plotW / 2, geom.top + geom.plotH / 2);
     }
     plotThumbnailHitAreasRef.current = nextPlotThumbnailHitAreas;
-    const perf = getShow1DPerfCounters();
-    if (perf) {
-      perf.basePlotDraws += 1;
-      perf.lastBasePlotDrawMs = performance.now() - drawStartedAt;
-    }
   }, [
     plotSize,
     themeColors,
     title,
-    plotTitleVisible,
-    yData,
-    xData,
+    traceIndex,
     nTraces,
     nPoints,
     labels,
     colors,
-    methodLabels,
     xLabel,
     xInteger,
     yLabel,
@@ -4392,7 +4122,6 @@ function Show1DWidget() {
     visibleTraceSet,
     effectiveXRange,
     effectiveYRange,
-    markers,
     selectedSnapshotIteration,
     showSnapshotThumbnails,
     hasSnapshots,
@@ -4414,7 +4143,6 @@ function Show1DWidget() {
   React.useEffect(() => {
     const canvas = plotHoverCanvasRef.current;
     if (!canvas) return;
-    const drawStartedAt = performance.now();
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(plotDpr, 0, 0, plotDpr, 0, 0);
@@ -4422,6 +4150,7 @@ function Show1DWidget() {
     const geom = geomRef.current;
     if (hover && geom) {
       ctx.save();
+      ctx.beginPath();
       ctx.rect(geom.left, geom.top, geom.plotW, geom.plotH);
       ctx.clip();
       ctx.strokeStyle = themeColors.textMuted;
@@ -4441,50 +4170,39 @@ function Show1DWidget() {
       ctx.fill();
       ctx.restore();
     }
-    const perf = getShow1DPerfCounters();
-    if (perf) {
-      perf.hoverOverlayDraws += 1;
-      perf.lastHoverOverlayDrawMs = performance.now() - drawStartedAt;
-    }
   }, [colors, hover, plotDpr, plotSize.height, plotSize.width, themeColors.textMuted]);
 
   const nearestPoint = React.useCallback((clientX: number, clientY: number): HoverPoint | null => {
     const canvas = canvasRef.current;
     const geom = geomRef.current;
     if (!canvas || !geom || nPoints <= 0 || nTraces <= 0) return null;
-    const startedAt = performance.now();
     const rect = canvas.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
     if (px < geom.left || px > geom.left + geom.plotW || py < geom.top || py > geom.top + geom.plotH) return null;
     let best: HoverPoint | null = null;
-    let bestDist = 24 * 24;
-    let pointsScanned = 0;
+    let bestDistSquared = 24 * 24;
+    // Sorted x: only points within 24 px horizontally can be the nearest.
+    const [start, end] = traceIndex.sorted ? pointWindow(traceIndex, pixelToX(px - 25, geom), pixelToX(px + 25, geom)) : [0, nPoints];
     for (let trace = 0; trace < nTraces; trace += 1) {
       if (!visibleTraceSet.has(trace)) continue;
       const offset = trace * nPoints;
-      for (let point = 0; point < nPoints; point += 1) {
-        pointsScanned += 1;
+      for (let point = start; point < end; point += 1) {
         const x = xData.length > point ? xData[point] : point;
         const y = yData[offset + point];
         if (!Number.isFinite(x) || !Number.isFinite(y) || (logScale && y <= 0)) continue;
         if (x < geom.xMin || x > geom.xMax || y < geom.yMin || y > geom.yMax) continue;
-        const dx = dataToX(x, geom) - px;
-        const dy = dataToY(y, geom) - py;
-        const dist = dx * dx + dy * dy;
-        if (dist < bestDist) {
-          bestDist = dist;
+        const offsetX = dataToX(x, geom) - px;
+        const offsetY = dataToY(y, geom) - py;
+        const distSquared = offsetX * offsetX + offsetY * offsetY;
+        if (distSquared < bestDistSquared) {
+          bestDistSquared = distSquared;
           best = { trace, point, x, y, px: dataToX(x, geom), py: dataToY(y, geom) };
         }
       }
     }
-    const perf = getShow1DPerfCounters();
-    if (perf) {
-      perf.pointsScanned += pointsScanned;
-      perf.lastNearestPointMs = performance.now() - startedAt;
-    }
     return best;
-  }, [logScale, nPoints, nTraces, visibleTraceSet, xData, yData]);
+  }, [logScale, nPoints, nTraces, traceIndex, visibleTraceSet, xData, yData]);
 
   const snapshotGroupForPoint = React.useCallback((point: HoverPoint | null): number | null => {
     if (!point || !hasSnapshots || groupCount <= 0) return null;
@@ -4516,24 +4234,12 @@ function Show1DWidget() {
     const pointer = pendingHoverPointerRef.current;
     pendingHoverPointerRef.current = null;
     if (pointer) {
-      const perf = getShow1DPerfCounters();
-      if (perf) perf.pointerFrames += 1;
-      const recordVisibleLatency = () => {
-        if (!perf) return;
-        window.requestAnimationFrame(() => {
-          const latency = performance.now() - pointer.queuedAt;
-          perf.lastPointerLatencyMs = latency;
-          perf.maxPointerLatencyMs = Math.max(perf.maxPointerLatencyMs, latency);
-        });
-      };
       if (previewPlotThumbnailAtPointer(pointer.clientX, pointer.clientY)) {
         commitScheduledHover(null);
-        recordVisibleLatency();
         return;
       }
       const point = nearestPoint(pointer.clientX, pointer.clientY);
       commitScheduledHover(point, snapshotGroupForPoint(point));
-      recordVisibleLatency();
       return;
     }
     commitScheduledHover(pendingHoverRef.current, pendingHoverSnapshotGroupRef.current);
@@ -4552,9 +4258,7 @@ function Show1DWidget() {
   }, [requestHoverFrame]);
 
   const scheduleHoverAtPointer = React.useCallback((clientX: number, clientY: number) => {
-    const perf = getShow1DPerfCounters();
-    if (perf) perf.pointerEvents += 1;
-    pendingHoverPointerRef.current = { clientX, clientY, queuedAt: performance.now() };
+    pendingHoverPointerRef.current = { clientX, clientY };
     requestHoverFrame();
   }, [requestHoverFrame]);
 
@@ -4643,10 +4347,10 @@ function Show1DWidget() {
     setSnapshotFftCmap(initial.snapshotFftCmap);
     snapshotFftCacheRef.current.clear();
     snapshotFftPendingRef.current.clear();
-    updateSnapshotFftCacheMetrics(snapshotFftCacheRef.current);
     setSnapshotFftCacheVersion((value) => value + 1);
     setSnapshotContrastPreset(initial.snapshotContrastPreset);
     setSnapshotContrastRange([...initial.snapshotContrastRange]);
+    setPanelContrastRanges({});
     setSnapshotThumbnailSize(initial.snapshotThumbnailSize);
     setSnapshotOverlayPosition(initial.snapshotOverlayPosition);
     setImageCmap(initial.imageCmap);
@@ -4709,7 +4413,7 @@ function Show1DWidget() {
       || showStats !== initial.showStats
       || showReview !== initial.showReview
       || showLegend !== initial.showLegend
-      || !stringArraysEqual(starredSnapshotImageLabels, initial.starredSnapshotImageLabels)
+      || !arraysEqual(starredSnapshotImageLabels, initial.starredSnapshotImageLabels)
       || !jsonValuesEqual(trialNotes, initial.trialNotes)
       || !jsonValuesEqual(trialTags, initial.trialTags)
       || showTrialNotes !== initial.showTrialNotes
@@ -4724,26 +4428,26 @@ function Show1DWidget() {
       || snapshotPanelWidthPx !== initial.snapshotPanelWidthPx
       || sidePanelWidthUserAdjusted
       || focusedTrace !== initial.focusedTrace
-      || !numberArraysEqual(xRange, initial.xRange)
-      || !numberArraysEqual(yRange, initial.yRange)
+      || !arraysEqual(xRange, initial.xRange)
+      || !arraysEqual(yRange, initial.yRange)
       || selectedSnapshotIdx !== initial.selectedSnapshotIdx
       || selectedSnapshotGroupIdx !== initial.selectedSnapshotGroupIdx
-      || !numberArraysEqual(bookmarkedSnapshotGroups, initial.bookmarkedSnapshotGroups)
-      || !stringArraysEqual(hiddenSnapshotImageLabels, initial.hiddenSnapshotImageLabels)
+      || !arraysEqual(bookmarkedSnapshotGroups, initial.bookmarkedSnapshotGroups)
+      || !arraysEqual(hiddenSnapshotImageLabels, initial.hiddenSnapshotImageLabels)
       || showSnapshotHistogram !== initial.showSnapshotHistogram
       || showSnapshotFft !== initial.showSnapshotFft
       || snapshotFftLayout !== initial.snapshotFftLayout
       || snapshotFftWindow !== initial.snapshotFftWindow
       || snapshotFftCmap !== initial.snapshotFftCmap
       || snapshotContrastPreset !== initial.snapshotContrastPreset
-      || !numberArraysEqual(snapshotContrastRange, initial.snapshotContrastRange)
+      || !arraysEqual(snapshotContrastRange, initial.snapshotContrastRange)
       || snapshotThumbnailSize !== initial.snapshotThumbnailSize
       || snapshotOverlayPosition !== initial.snapshotOverlayPosition
       || imageCmap !== initial.imageCmap
       || snapshotRealSpaceZoom !== initial.snapshotRealSpaceZoom
-      || !numberArraysEqual(snapshotRealSpaceCenter, initial.snapshotRealSpaceCenter)
+      || !arraysEqual(snapshotRealSpaceCenter, initial.snapshotRealSpaceCenter)
       || snapshotFftZoom !== initial.snapshotFftZoom
-      || !numberArraysEqual(snapshotFftCenter, initial.snapshotFftCenter)
+      || !arraysEqual(snapshotFftCenter, initial.snapshotFftCenter)
       || showSnapshotProfile !== initial.showSnapshotProfile
       || !profileLinesEqual(snapshotProfileLine, initial.snapshotProfileLine)
       || snapshotPlaying !== initial.snapshotPlaying
@@ -4789,14 +4493,21 @@ function Show1DWidget() {
     yRange,
   ]);
 
-  const handleWheel = React.useCallback((event: React.WheelEvent<HTMLCanvasElement>) => {
+  // Wheel zoom must not scroll the notebook. React registers onWheel as a
+  // passive listener, where preventDefault is ignored, so the plot canvas takes
+  // a native non-passive listener instead. Chrome turns a Shift+wheel notch
+  // into a horizontal scroll (deltaX, deltaY = 0), so the zoom reads whichever
+  // axis carries the larger delta.
+  const handleWheel = React.useCallback((event: WheelEvent) => {
     const geom = geomRef.current;
-    if (!geom) return;
+    const canvas = canvasRef.current;
+    if (!geom || !canvas) return;
     event.preventDefault();
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-    const factor = Math.exp(event.deltaY * 0.001);
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    const factor = Math.exp(delta * 0.001);
     if (event.shiftKey) {
       const center = pixelToY(py, geom);
       const lo = center + (geom.yMin - center) * factor;
@@ -4809,6 +4520,13 @@ function Show1DWidget() {
       setXRange(clampRange([lo, hi], fullXRange));
     }
   }, [fullXRange, setXRange, setYRange]);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleWheel);
+  }, [handleWheel]);
 
   const handleExportSelect = React.useCallback(async (kind: "html" | "csv" | "png") => {
     setExportAnchor(null);
@@ -4959,7 +4677,7 @@ function Show1DWidget() {
     ? snapshotGridHeight
       + 58
       + (showSnapshotProfile ? snapshotProfilePlotHeight : 0)
-      + (showSnapshotHistogram && selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 42 : 0)
+      + (showSnapshotHistogram && selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 76 : 0)
       + (showStats ? 130 : 0)
     : 0;
   const plotNonCanvasHeightEstimate = showLegend && visibleTraceIndices.length > 0 ? 54 : 12;
@@ -5378,7 +5096,7 @@ function Show1DWidget() {
       ref={rootRef}
       data-testid="show1d-root"
       sx={{
-        width: (resizePreview?.width ?? plotWidthPx) > 0 ? `${resizePreview?.width ?? plotWidthPx}px` : "100%",
+        width: (resizePreview?.width ?? 0) > 0 ? `${resizePreview?.width}px` : "100%",
         maxWidth: maxWidth > 0 ? `min(100%, ${maxWidth}px)` : "100%",
         bgcolor: themeColors.bg,
         color: themeColors.text,
@@ -5390,12 +5108,6 @@ function Show1DWidget() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <output
-        ref={perfTelemetryRef}
-        data-testid="show1d-perf-telemetry"
-        aria-hidden="true"
-        style={{ display: "none" }}
-      />
       {showControls && (
         <Box sx={{ px: 0, py: 0.75, bgcolor: themeColors.bg }}>
           <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: controlsVisible ? 0.75 : 0, px: 1.25 }}>
@@ -5405,6 +5117,7 @@ function Show1DWidget() {
                 {title || "Show1D"}
               </Typography>
             )}
+            {showTitle && <RenderPathBadge colors={themeColors} />}
             <Box sx={{ flex: 1 }} />
             <Button
               size="small"
@@ -5501,7 +5214,6 @@ function Show1DWidget() {
               onPointerLeave={handlePointerLeave}
               onClick={handleClick}
               onDoubleClick={resetPlotAndSnapshotViews}
-              onWheel={handleWheel}
               style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
             />
             <canvas
@@ -5539,10 +5251,10 @@ function Show1DWidget() {
                 {hover ? compactScienceLabel(labels?.[hover.trace] || `Trace ${hover.trace + 1}`) : "\u00a0"}
               </Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.25, minHeight: 14 }}>
-                {hover ? (methodLabels?.[hover.point] ? shortMethodLabel(methodLabels[hover.point]) : axisPositionText(hover.x, xLabel, xUnit)) : "\u00a0"}
+                {hover ? axisPositionText(hover.x, xLabel, xUnit) : "\u00a0"}
               </Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.25, minHeight: 14 }}>
-                {hover ? axisPositionText(hover.y, yLabel, yUnit) : "\u00a0"}
+                {hover ? axisPositionText(hover.y, yLabel, yUnit, true) : "\u00a0"}
               </Typography>
             </Box>
           </Box>
@@ -5737,20 +5449,19 @@ function Show1DWidget() {
                           showFft={Boolean(showSnapshotFft)}
                           deferFft={Boolean(snapshotPlaying)}
                           fftWindow={Boolean(snapshotFftWindow)}
-                          preferWebgpu={Boolean(preferWebgpu)}
                           fftLayout={resolvedSnapshotFftLayout}
                           contrastPreset={normalisedSnapshotContrastPreset}
-                          contrastRange={customSnapshotContrastRange}
+                          contrastRange={panelContrastRanges?.[imageLabel]?.length === 2 ? panelContrastRanges[imageLabel] as [number, number] : customSnapshotContrastRange}
                           selected={selected}
                           label={compactScienceLabel(imageLabel)}
                           scaleBarVisible={Boolean(scaleBarVisible)}
                           overlayPosition={resolvedSnapshotOverlayPosition}
                           pixelSize={Number.isFinite(pixelSize) && pixelSize > 0 ? pixelSize : 1}
                           pixelUnit={pixelSize > 0 ? pixelUnit : "px"}
-                          imageViewZoom={snapshotRealSpaceZoom}
-                          imageViewCenter={snapshotRealSpaceCenter}
-                          fftViewZoom={snapshotFftZoom}
-                          fftViewCenter={snapshotFftCenter}
+                          imageViewZoom={snapshotLinkViews ? snapshotRealSpaceZoom : (panelImageViews[imageLabel]?.zoom ?? 1)}
+                          imageViewCenter={snapshotLinkViews ? snapshotRealSpaceCenter : (panelImageViews[imageLabel]?.center ?? [0.5, 0.5])}
+                          fftViewZoom={snapshotLinkViews ? snapshotFftZoom : (panelFftViews[imageLabel]?.zoom ?? 1)}
+                          fftViewCenter={snapshotLinkViews ? snapshotFftCenter : (panelFftViews[imageLabel]?.center ?? [0.5, 0.5])}
                           profileActive={Boolean(showSnapshotProfile)}
                           profileLine={snapshotProfileLine ?? []}
                           fftCacheRef={snapshotFftCacheRef}
@@ -5759,8 +5470,8 @@ function Show1DWidget() {
                           fftCacheVersion={snapshotFftCacheVersion}
                           fftGenerationRef={snapshotFftGenerationRef}
                           fftGeneration={snapshotFftGeneration}
-                          onImageViewChange={setSnapshotRealSpaceView}
-                          onFftViewChange={setSnapshotFftView}
+                          onImageViewChange={snapshotLinkViews ? setSnapshotRealSpaceView : (view) => setPanelImageViews((current) => ({ ...current, [imageLabel]: view }))}
+                          onFftViewChange={snapshotLinkViews ? setSnapshotFftView : (view) => setPanelFftViews((current) => ({ ...current, [imageLabel]: view }))}
                           onProfileLineChange={setSnapshotProfileLine}
                           onFftOverlayPositionChange={setSnapshotOverlayPosition}
                           onSelect={() => selectSnapshotImage(imageIdx)}
@@ -6002,67 +5713,20 @@ function Show1DWidget() {
                   </IconButton>
                 </Box>
                 {showSnapshotHistogram && selectedSnapshot >= 0 && (
-                  <Box sx={{ mb: 0.75, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start" }}>
-                    <MiniHistogram
-                      bins={snapshotHistogramBins}
-                      dataMin={snapshotHistogramRange[0]}
-                      dataMax={snapshotHistogramRange[1]}
-                      clipMin={snapshotHistogramClipRange[0]}
-                      clipMax={snapshotHistogramClipRange[1]}
-                      colors={themeColors}
-                      onClipRangeChange={(range) => setSnapshotContrastRange([range[0], range[1]])}
-                      width={snapshotHistogramDisplayWidth}
-                      height={snapshotHistogramDisplayHeight}
-                    />
-                    <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", border: "none", bgcolor: "transparent", px: 0, py: 0.25, mt: 0.5 }}>
-                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
-                      <Select
-                        size="small"
-                        value={COLORMAPS[imageCmap] ? imageCmap : "viridis"}
-                        onChange={(event) => setImageCmap(event.target.value)}
-                        sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
-                        MenuProps={themedMenuProps}
-                        inputProps={{ "aria-label": "Snapshot image colormap" }}
-                      >
-                        {COLORMAP_NAMES.map((name) => (
-                          <MenuItem key={name} value={name}>{name}</MenuItem>
-                        ))}
-                      </Select>
-                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>clip</Typography>
-                      {snapshotContrastPresets.map((preset) => {
-                        const active = preset.value === normalisedSnapshotContrastPreset;
-                        return (
-                          <Button
-                            key={preset.value}
-                            size="small"
-                            variant={active && !customSnapshotContrastRange ? "contained" : "outlined"}
-                            onClick={() => {
-                              setSnapshotContrastRange([]);
-                              setSnapshotContrastPreset(preset.value);
-                            }}
-                            sx={{
-                              minWidth: preset.value === "full" ? 38 : 48,
-                              height: 24,
-                              px: 0.75,
-                              py: 0,
-                              fontSize: 10,
-                              lineHeight: 1,
-                              textTransform: "none",
-                              color: active && !customSnapshotContrastRange ? "#fff" : themeColors.text,
-                              bgcolor: active && !customSnapshotContrastRange ? themeColors.accent : "transparent",
-                              borderColor: active && !customSnapshotContrastRange ? themeColors.accent : themeColors.border,
-                              "&:hover": {
-                                bgcolor: active && !customSnapshotContrastRange ? themeColors.accent : themeColors.bgAlt,
-                                borderColor: themeColors.accent,
-                              },
-                            }}
-                            aria-label={`Set snapshot contrast clip ${preset.label}`}
-                          >
-                            {preset.label}
-                          </Button>
-                        );
-                      })}
-                    </Box>
+                  <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${selectedImageColumns}, minmax(0, 1fr))`, ...snapshotViewportSx }}>
+                    {selectedGroupImageIndices.map(imageIdx => {
+                      const label = imageLabelForIndex(imageIdx);
+                      const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
+                      const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
+                      return <SnapshotHistogram key={label}
+                        data={snapshotData} imageIndex={imageIdx} packedHeight={snapshotHeight} packedWidth={snapshotWidth}
+                        imageWidth={imageWidth} imageHeight={imageHeight} label={label}
+                        range={panelContrastRanges?.[label] ?? customSnapshotContrastRange}
+                        preset={normalisedSnapshotContrastPreset} colors={themeColors}
+                        width={Math.min(snapshotHistogramDisplayWidth, snapshotTileDisplayWidth - 8)}
+                        height={snapshotHistogramDisplayHeight}
+                        onChange={range => setPanelContrastRanges({ ...panelContrastRanges, [label]: range })} />;
+                    })}
                   </Box>
                 )}
               </Box>

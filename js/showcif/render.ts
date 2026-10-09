@@ -23,6 +23,8 @@ struct Out {@builtin(position) p:vec4f,@location(0) disk:vec2f,@location(1) colo
  let nz=sqrt(max(0.,1.-rr));let light=.35+.65*max(0.,dot(vec3f(i.disk,nz),normalize(vec3f(-.4,.5,1.))));
  return vec4f(i.color*light,1.);
 }`;
+/** Clear colour of the atom scene (0 to 1 per channel), also the backdrop of its scale bars. */
+export const SCENE_CLEAR = { r: 0.018, g: 0.024, b: 0.04, a: 1 };
 export class AtomRenderer {
   private pipeline: GPURenderPipeline;
   private bind: GPUBindGroup;
@@ -53,9 +55,9 @@ export class AtomRenderer {
         depthCompare: "less-equal",
       },
     });
-    const buf = (bytes: number, usage: number) =>
+    const createBuffer = (bytes: number, usage: number) =>
       device.createBuffer({ size: Math.max(16, bytes), usage });
-    this.atomBuffer = buf(
+    this.atomBuffer = createBuffer(
       atoms.byteLength,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     );
@@ -64,11 +66,11 @@ export class AtomRenderer {
       0,
       atoms as Float32Array<ArrayBuffer>,
     );
-    this.colors = buf(
+    this.colors = createBuffer(
       species.length * 16,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     );
-    this.uniform = buf(176, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.uniform = createBuffer(176, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.bind = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -109,11 +111,11 @@ export class AtomRenderer {
       });
       this.size = `${w},${h}`;
     }
-    const c = new Float32Array(
+    const speciesColors = new Float32Array(
       colors.flatMap((rgb, i) => [...rgb, visible[i] ? 1 : 0]),
     );
-    this.device.queue.writeBuffer(this.colors, 0, c);
-    const u = new Float32Array([
+    this.device.queue.writeBuffer(this.colors, 0, speciesColors);
+    const params = new Float32Array([
       ...basis.right,
       2 / span,
       ...basis.up,
@@ -133,23 +135,23 @@ export class AtomRenderer {
       0,
       0,
     ]);
-    this.device.queue.writeBuffer(this.uniform, 0, u);
+    this.device.queue.writeBuffer(this.uniform, 0, params);
     this.device.queue.writeBuffer(
       this.uniform,
       112,
-      new Float32Array(unit.flatMap((v) => [...v, 0])),
+      new Float32Array(unit.flatMap((vector) => [...vector, 0])),
     );
     this.device.queue.writeBuffer(
       this.uniform,
       160,
       new Uint32Array([...repeats, atomsPerCell]),
     );
-    const enc = this.device.createCommandEncoder();
-    const pass = enc.beginRenderPass({
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
           view: this.context.getCurrentTexture().createView(),
-          clearValue: { r: 0.018, g: 0.024, b: 0.04, a: 1 },
+          clearValue: SCENE_CLEAR,
           loadOp: "clear",
           storeOp: "store",
         },
@@ -165,7 +167,7 @@ export class AtomRenderer {
     pass.setBindGroup(0, this.bind);
     pass.draw(6, count);
     pass.end();
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([encoder.finish()]);
   }
   destroy() {
     this.depth?.destroy();

@@ -7,8 +7,6 @@ Usage: scripts/widget_release_check.sh [--skip-wheel]
 
 Runs the local quantem.widget release gates:
   - npm typecheck/test/static widget build
-  - standalone browser build
-  - offline browser build
   - Python compile smoke
   - local wheel build and wheel-content check
 
@@ -41,22 +39,8 @@ npm run build
 test -s src/quantem/widget/static/show2d.js
 test -s src/quantem/widget/static/show4dstem.js
 
-echo "== standalone browser build =="
-(
-  cd web
-  npm run build
-  npm run build:offline
-)
-test -s web/dist/index.html
-
-echo "== stage offline browser artifact for wheel check =="
-rm -rf src/quantem/widget/static/browser
-mkdir -p src/quantem/widget/static/browser
-cp -R web/dist/. src/quantem/widget/static/browser/
-test -s src/quantem/widget/static/browser/index.html
-
 echo "== Python compile smoke =="
-python -m compileall -q src/quantem/widget/show4dstem_mps.py src/quantem/widget/__init__.py
+python -m compileall -q src/quantem/widget
 
 if [[ "$skip_wheel" == "0" ]]; then
   echo "== local wheel build/content check =="
@@ -72,7 +56,6 @@ if len(wheels) != 1:
 wheel = wheels[0]
 required = {
     "quantem/widget/static/chooselattice.js",
-    "quantem/widget/static/planptycho.js",
     "quantem/widget/static/show1d.js",
     "quantem/widget/static/plot2d.js",
     "quantem/widget/static/show2d.js",
@@ -80,9 +63,7 @@ required = {
     "quantem/widget/static/show3dslices.js",
     "quantem/widget/static/show4dstem.js",
     "quantem/widget/static/showdiffraction.js",
-    "quantem/widget/static/showeds.js",
     "quantem/widget/static/showptycho.js",
-    "quantem/widget/static/browser/index.html",
 }
 with zipfile.ZipFile(wheel) as zf:
     names = set(zf.namelist())

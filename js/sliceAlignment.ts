@@ -24,15 +24,15 @@
  * WebGPU, and is what the parity tests exercise against the Python estimator.
  */
 
-import { WebGPUFFT, fft2d, nextPow2 } from "./fft";
+import { WebGPUFFT, fft2d, nextPow2, type DisplayFFT } from "./display/fft";
 
-// Matches _SLICE_ALIGNMENT_* in src/quantem/widget/show3dslices.py. Changing one
+// Matches src/quantem/widget/show3dslices/alignment.py. Changing one
 // side without the other makes the browser and the kernel disagree on the shift.
 const HIGHPASS_SIGMA_PX = 12.0;
 const UPSAMPLE_FACTOR = 20;
 const DFT_REGION_FACTOR = 1.5;
 
-export interface SliceAlignmentEstimate {
+interface SliceAlignmentEstimate {
   rowShiftPxPerSlice: number;
   colShiftPxPerSlice: number;
   adjacentShiftPx: number[][];
@@ -78,9 +78,9 @@ function selectInPlace(values: Float32Array, k: number): number {
   while (left < right) {
     // Median-of-three pivot keeps already-sorted input off the O(n^2) path.
     const middle = (left + right) >> 1;
-    if (values[middle] < values[left]) { const t = values[middle]; values[middle] = values[left]; values[left] = t; }
-    if (values[right] < values[left]) { const t = values[right]; values[right] = values[left]; values[left] = t; }
-    if (values[right] < values[middle]) { const t = values[right]; values[right] = values[middle]; values[middle] = t; }
+    if (values[middle] < values[left]) { const swap = values[middle]; values[middle] = values[left]; values[left] = swap; }
+    if (values[right] < values[left]) { const swap = values[right]; values[right] = values[left]; values[left] = swap; }
+    if (values[right] < values[middle]) { const swap = values[right]; values[right] = values[middle]; values[middle] = swap; }
     const pivot = values[middle];
     let i = left;
     let j = right;
@@ -88,7 +88,7 @@ function selectInPlace(values: Float32Array, k: number): number {
       while (values[i] < pivot) i++;
       while (values[j] > pivot) j--;
       if (i <= j) {
-        const t = values[i]; values[i] = values[j]; values[j] = t;
+        const swap = values[i]; values[i] = values[j]; values[j] = swap;
         i++; j--;
       }
     }
@@ -357,8 +357,9 @@ fn colPass(@builtin(global_invocation_id) gid: vec3u) {
 `;
 
 /**
- * GPU helper holding the blur and upsampled-DFT pipelines for one estimate run.
- * Falls back to null when WebGPU is unavailable so callers can take the CPU path.
+ * GPU helper holding the blur, registration, reduction and upsampled-DFT
+ * pipelines for one estimate run. Built only when a device exists; without one
+ * the estimate takes the CPU path.
  */
 class SliceAlignmentGPU {
   private device: GPUDevice;
@@ -417,6 +418,22 @@ class SliceAlignmentGPU {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  /** Read the first `byteLength` bytes of a device buffer back as float32 through a mappable copy. */
+  private async readBack(source: GPUBuffer, byteLength: number): Promise<Float32Array<ArrayBuffer>> {
+    const readBuffer = this.device.createBuffer({
+      size: byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(source, 0, readBuffer, 0, byteLength);
+    this.device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+    readBuffer.destroy();
+    return out;
+  }
+
+  /** Bind `entries` to `pipeline` and submit one dispatch. */
   private dispatch(
     pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[], groupsX: number, groupsY = 1,
   ): void {
@@ -430,6 +447,7 @@ class SliceAlignmentGPU {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  /** Uniform for RESIDENT_SHADER: plane and padded sizes, element count and dispatched groups. */
   private residentParams(
     width: number, height: number, paddedWidth: number, paddedHeight: number,
     count: number, groups = 0,
@@ -496,7 +514,7 @@ class SliceAlignmentGPU {
   /** Reduce a complex buffer to per-workgroup partials, then finish on the CPU. */
   private async reduce(
     pipeline: GPUComputePipeline, src: GPUBuffer, count: number, stride: number,
-  ): Promise<Float32Array> {
+  ): Promise<Float32Array<ArrayBuffer>> {
     const groups = 64;
     const partials = this.device.createBuffer({
       size: groups * stride * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -510,16 +528,8 @@ class SliceAlignmentGPU {
       { binding: 1, resource: { buffer: src } },
       { binding: 2, resource: { buffer: partials } },
     ], groups);
-    const readBuffer = this.device.createBuffer({
-      size: groups * stride * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(partials, 0, readBuffer, 0, groups * stride * 4);
-    this.device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(readBuffer.getMappedRange().slice(0));
-    readBuffer.unmap();
-    partials.destroy(); params.destroy(); readBuffer.destroy();
+    const out = await this.readBack(partials, groups * stride * 4);
+    partials.destroy(); params.destroy();
     return out;
   }
 
@@ -551,15 +561,12 @@ class SliceAlignmentGPU {
   async upsampledDftResident(
     spectrum: GPUBuffer, rows: number, cols: number, region: number,
     upsample: number, offsetRow: number, offsetCol: number,
-  ): Promise<Float32Array> {
+  ): Promise<Float32Array<ArrayBuffer>> {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const midBuffer = this.device.createBuffer({ size: region * cols * 2 * 4, usage: storage });
     const dstBuffer = this.device.createBuffer({ size: region * region * 2 * 4, usage: storage });
     const paramsBuffer = this.device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const readBuffer = this.device.createBuffer({
-      size: region * region * 2 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
     const params = new ArrayBuffer(32);
     new Uint32Array(params, 0, 4).set([rows, cols, region, upsample]);
@@ -575,68 +582,25 @@ class SliceAlignmentGPU {
       { binding: 1, resource: { buffer: midBuffer } },
       { binding: 2, resource: { buffer: dstBuffer } },
     ], Math.ceil(region / 8), Math.ceil(region / 8));
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(dstBuffer, 0, readBuffer, 0, region * region * 2 * 4);
-    this.device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(readBuffer.getMappedRange().slice(0));
-    readBuffer.unmap();
-    midBuffer.destroy(); dstBuffer.destroy(); paramsBuffer.destroy(); readBuffer.destroy();
+    const out = await this.readBack(dstBuffer, region * region * 2 * 4);
+    midBuffer.destroy(); dstBuffer.destroy(); paramsBuffer.destroy();
     return out;
   }
 
   /** Reflect-boundary Gaussian blur, run as two separable passes. */
   async blur(image: Float32Array<ArrayBuffer>, width: number, height: number, sigma: number): Promise<Float32Array<ArrayBuffer>> {
     const kernel = gaussianKernel1d(sigma);
-    const radius = (kernel.length - 1) / 2;
-    const byteLength = image.byteLength;
     const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    const bufferA = this.device.createBuffer({ size: byteLength, usage });
-    const bufferB = this.device.createBuffer({ size: byteLength, usage });
+    const planeBuffer = this.device.createBuffer({ size: image.byteLength, usage });
+    const scratchBuffer = this.device.createBuffer({ size: image.byteLength, usage });
     const kernelBuffer = this.device.createBuffer({
       size: kernel.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    const paramsBuffer = this.device.createBuffer({
-      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const readBuffer = this.device.createBuffer({
-      size: byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(bufferA, 0, image);
+    this.device.queue.writeBuffer(planeBuffer, 0, image);
     this.device.queue.writeBuffer(kernelBuffer, 0, kernel);
-
-    const pass = (src: GPUBuffer, dst: GPUBuffer, horizontal: boolean) => {
-      this.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([width, height, radius, horizontal ? 1 : 0]));
-      const bindGroup = this.device.createBindGroup({
-        layout: this.blurPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: paramsBuffer } },
-          { binding: 1, resource: { buffer: src } },
-          { binding: 2, resource: { buffer: kernelBuffer } },
-          { binding: 3, resource: { buffer: dst } },
-        ],
-      });
-      const encoder = this.device.createCommandEncoder();
-      const compute = encoder.beginComputePass();
-      compute.setPipeline(this.blurPipeline);
-      compute.setBindGroup(0, bindGroup);
-      compute.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16));
-      compute.end();
-      this.device.queue.submit([encoder.finish()]);
-    };
-    // Two submits: the params uniform changes between the horizontal and
-    // vertical pass, so they cannot share one command buffer.
-    pass(bufferA, bufferB, true);
-    pass(bufferB, bufferA, false);
-
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(bufferA, 0, readBuffer, 0, byteLength);
-    this.device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(readBuffer.getMappedRange().slice(0));
-    readBuffer.unmap();
-    bufferA.destroy(); bufferB.destroy(); kernelBuffer.destroy();
-    paramsBuffer.destroy(); readBuffer.destroy();
+    this.blurResident(planeBuffer, scratchBuffer, kernelBuffer, width, height, (kernel.length - 1) / 2);
+    const out = await this.readBack(planeBuffer, image.byteLength);
+    planeBuffer.destroy(); scratchBuffer.destroy(); kernelBuffer.destroy();
     return out;
   }
 
@@ -650,52 +614,13 @@ class SliceAlignmentGPU {
     offsetRow: number,
     offsetCol: number,
   ): Promise<Float32Array<ArrayBuffer>> {
-    const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    const srcBuffer = this.device.createBuffer({ size: spectrum.byteLength, usage: storage });
-    const midBuffer = this.device.createBuffer({ size: region * cols * 2 * 4, usage: storage });
-    const dstBuffer = this.device.createBuffer({ size: region * region * 2 * 4, usage: storage });
-    const paramsBuffer = this.device.createBuffer({
-      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    const spectrumBuffer = this.device.createBuffer({
+      size: spectrum.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    const readBuffer = this.device.createBuffer({
-      size: region * region * 2 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(srcBuffer, 0, spectrum);
-    const params = new ArrayBuffer(32);
-    new Uint32Array(params, 0, 4).set([rows, cols, region, upsample]);
-    new Float32Array(params, 16, 2).set([offsetRow, offsetCol]);
-    this.device.queue.writeBuffer(paramsBuffer, 0, params);
-
-    const runPass = (
-      pipeline: GPUComputePipeline, src: GPUBuffer, dst: GPUBuffer, groupsX: number, groupsY: number,
-    ) => {
-      const bindGroup = this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: paramsBuffer } },
-          { binding: 1, resource: { buffer: src } },
-          { binding: 2, resource: { buffer: dst } },
-        ],
-      });
-      const encoder = this.device.createCommandEncoder();
-      const compute = encoder.beginComputePass();
-      compute.setPipeline(pipeline);
-      compute.setBindGroup(0, bindGroup);
-      compute.dispatchWorkgroups(groupsX, groupsY);
-      compute.end();
-      this.device.queue.submit([encoder.finish()]);
-    };
-    runPass(this.rowPassPipeline, srcBuffer, midBuffer, region, Math.ceil(cols / 64));
-    runPass(this.colPassPipeline, midBuffer, dstBuffer, Math.ceil(region / 8), Math.ceil(region / 8));
-
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(dstBuffer, 0, readBuffer, 0, region * region * 2 * 4);
-    this.device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(readBuffer.getMappedRange().slice(0));
-    readBuffer.unmap();
-    srcBuffer.destroy(); midBuffer.destroy(); dstBuffer.destroy();
-    paramsBuffer.destroy(); readBuffer.destroy();
+    this.device.queue.writeBuffer(spectrumBuffer, 0, spectrum);
+    const out = await this.upsampledDftResident(spectrumBuffer, rows, cols, region, upsample, offsetRow, offsetCol);
+    spectrumBuffer.destroy();
     return out;
   }
 }
@@ -764,19 +689,19 @@ function blurCpu(image: Float32Array, width: number, height: number, sigma: numb
   const kernel = gaussianKernel1d(sigma);
   const radius = (kernel.length - 1) / 2;
   const horizontal = new Float32Array(image.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
       let acc = 0;
-      for (let t = -radius; t <= radius; t++) acc += image[y * width + reflectIndex(x + t, width)] * kernel[t + radius];
-      horizontal[y * width + x] = acc;
+      for (let tap = -radius; tap <= radius; tap++) acc += image[row * width + reflectIndex(col + tap, width)] * kernel[tap + radius];
+      horizontal[row * width + col] = acc;
     }
   }
   const out = new Float32Array(image.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
       let acc = 0;
-      for (let t = -radius; t <= radius; t++) acc += horizontal[reflectIndex(y + t, height) * width + x] * kernel[t + radius];
-      out[y * width + x] = acc;
+      for (let tap = -radius; tap <= radius; tap++) acc += horizontal[reflectIndex(row + tap, height) * width + col] * kernel[tap + radius];
+      out[row * width + col] = acc;
     }
   }
   return out;
@@ -793,21 +718,21 @@ async function registrationImage(
 ): Promise<Float32Array<ArrayBuffer>> {
   const centered = new Float32Array(slice.length);
   for (let i = 0; i < slice.length; i++) centered[i] = Number.isFinite(slice[i]) ? slice[i] : 0;
-  const mid = median(centered);
-  for (let i = 0; i < centered.length; i++) centered[i] -= mid;
+  const medianValue = median(centered);
+  for (let i = 0; i < centered.length; i++) centered[i] -= medianValue;
   const sigma = Math.min(HIGHPASS_SIGMA_PX, Math.max(1.0, Math.min(width, height) / 6.0));
   const blurred = gpu
     ? await gpu.blur(centered, width, height, sigma)
     : blurCpu(centered, width, height, sigma);
   const rowWindow = new Float32Array(height);
-  for (let y = 0; y < height; y++) rowWindow[y] = height > 1 ? 0.5 - 0.5 * Math.cos((2 * Math.PI * y) / (height - 1)) : 1;
+  for (let row = 0; row < height; row++) rowWindow[row] = height > 1 ? 0.5 - 0.5 * Math.cos((2 * Math.PI * row) / (height - 1)) : 1;
   const colWindow = new Float32Array(width);
-  for (let x = 0; x < width; x++) colWindow[x] = width > 1 ? 0.5 - 0.5 * Math.cos((2 * Math.PI * x) / (width - 1)) : 1;
+  for (let col = 0; col < width; col++) colWindow[col] = width > 1 ? 0.5 - 0.5 * Math.cos((2 * Math.PI * col) / (width - 1)) : 1;
   const out = new Float32Array(slice.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x;
-      out[i] = (centered[i] - blurred[i]) * rowWindow[y] * colWindow[x];
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = row * width + col;
+      out[i] = (centered[i] - blurred[i]) * rowWindow[row] * colWindow[col];
     }
   }
   return out;
@@ -821,7 +746,7 @@ function padToPow2(
   const paddedHeight = nextPow2(height);
   if (paddedWidth === width && paddedHeight === height) return { data: image, width, height };
   const data = new Float32Array(paddedWidth * paddedHeight);
-  for (let y = 0; y < height; y++) data.set(image.subarray(y * width, (y + 1) * width), y * paddedWidth);
+  for (let row = 0; row < height; row++) data.set(image.subarray(row * width, (row + 1) * width), row * paddedWidth);
   return { data, width: paddedWidth, height: paddedHeight };
 }
 
@@ -848,7 +773,41 @@ function linearFit(z: number[], y: number[]): { slope: number; intercept: number
   return { slope, intercept, r2: ssTot > 0 ? 1 - ssRes / ssTot : 0 };
 }
 
-/** Assemble the per-pair shifts into a slope, matching the CPU path exactly. */
+/**
+ * Unwrap a correlation peak's flat index into a signed (row, col) shift, then
+ * round it onto the 1/UPSAMPLE_FACTOR grid the subpixel refinement starts from.
+ * Indices past the midpoint are negative shifts wrapped around the FFT frame.
+ */
+function coarseShift(peakIndex: number, paddedWidth: number, paddedHeight: number): [number, number] {
+  let shiftRow = Math.floor(peakIndex / paddedWidth);
+  let shiftCol = peakIndex % paddedWidth;
+  if (shiftRow > Math.trunc(paddedHeight / 2)) shiftRow -= paddedHeight;
+  if (shiftCol > Math.trunc(paddedWidth / 2)) shiftCol -= paddedWidth;
+  return [
+    Math.round(shiftRow * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR,
+    Math.round(shiftCol * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR,
+  ];
+}
+
+/**
+ * Subpixel (row, col) correction from the upsampled region: the brightest
+ * |value|^2 sample (first one on ties), offset from the region center and
+ * divided by UPSAMPLE_FACTOR.
+ */
+function subpixelOffset(refined: Float32Array, region: number, dftShift: number): [number, number] {
+  let bestIndex = 0;
+  let bestValue = -1;
+  for (let i = 0; i < region * region; i++) {
+    const magnitude = refined[i * 2] * refined[i * 2] + refined[i * 2 + 1] * refined[i * 2 + 1];
+    if (magnitude > bestValue) { bestValue = magnitude; bestIndex = i; }
+  }
+  return [
+    (Math.floor(bestIndex / region) - dftShift) / UPSAMPLE_FACTOR,
+    ((bestIndex % region) - dftShift) / UPSAMPLE_FACTOR,
+  ];
+}
+
+/** Accumulate the per-pair shifts and fit each axis's shift per slice by least squares. */
 function fitFromAdjacent(adjacent: number[][], nz: number, backend: "webgpu" | "cpu", quality: number[]) {
   const cumulative: number[][] = [[0, 0]];
   for (let i = 0; i < adjacent.length; i++) {
@@ -911,8 +870,8 @@ async function estimateResident(
   const buildSpectrum = async (z: number, target: GPUBuffer): Promise<number> => {
     const slice = volume.subarray(z * planeSize, (z + 1) * planeSize);
     for (let i = 0; i < planeSize; i++) centered[i] = Number.isFinite(slice[i]) ? slice[i] : 0;
-    const mid = median(centered);
-    for (let i = 0; i < planeSize; i++) centered[i] -= mid;
+    const medianValue = median(centered);
+    for (let i = 0; i < planeSize; i++) centered[i] -= medianValue;
     // The one upload per slice. Everything downstream stays on the device.
     gpu.write(centeredBuffer, centered);
     // blurResident overwrites its source, so blur a device-side copy and keep
@@ -946,12 +905,7 @@ async function estimateResident(
     gpu.copyBuffer(productBuffer, correlationBuffer, complexCount * 2 * 4);
     await fft.fft2DResident(correlationBuffer, paddedWidth, paddedHeight, true);
     const peak = await gpu.peakResident(correlationBuffer, complexCount);
-    let shiftRow = Math.floor(peak.index / paddedWidth);
-    let shiftCol = peak.index % paddedWidth;
-    if (shiftRow > Math.trunc(paddedHeight / 2)) shiftRow -= paddedHeight;
-    if (shiftCol > Math.trunc(paddedWidth / 2)) shiftCol -= paddedWidth;
-    let refinedRow = Math.round(shiftRow * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR;
-    let refinedCol = Math.round(shiftCol * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR;
+    const [refinedRow, refinedCol] = coarseShift(peak.index, paddedWidth, paddedHeight);
     // The refinement samples conj(product), exactly as the CPU path does.
     // conj(ref * conj(mov)) == mov * conj(ref), so the same cross-power kernel
     // with the operands swapped produces it without a dedicated conjugate pass.
@@ -961,15 +915,8 @@ async function estimateResident(
       dftShift - refinedRow * UPSAMPLE_FACTOR,
       dftShift - refinedCol * UPSAMPLE_FACTOR,
     );
-    let bestIndex = 0;
-    let bestValue = -1;
-    for (let i = 0; i < region * region; i++) {
-      const magnitude = refined[i * 2] * refined[i * 2] + refined[i * 2 + 1] * refined[i * 2 + 1];
-      if (magnitude > bestValue) { bestValue = magnitude; bestIndex = i; }
-    }
-    refinedRow += (Math.floor(bestIndex / region) - dftShift) / UPSAMPLE_FACTOR;
-    refinedCol += ((bestIndex % region) - dftShift) / UPSAMPLE_FACTOR;
-    adjacent.push([refinedRow, refinedCol]);
+    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift);
+    adjacent.push([refinedRow + rowCorrection, refinedCol + colCorrection]);
     const norm = Math.sqrt(previousEnergy * movEnergy);
     quality.push(norm > 0 ? Math.sqrt(peak.value) / norm : 0);
     previousEnergy = movEnergy;
@@ -985,7 +932,7 @@ async function estimateResident(
  * Estimate the global row/col shift per slice for one volume.
  *
  * @param volume Contiguous z-major float volume (nz planes of ny x nx).
- * @param fft Shared WebGPU FFT helper; when null the CPU FFT is used.
+ * @param fft Display FFT (WebGPUFFT runs the GPU-resident estimate); when null the CPU FFT is used.
  * @param device WebGPU device for the blur and refinement passes, or null.
  */
 export async function estimateSliceAlignment(
@@ -993,12 +940,12 @@ export async function estimateSliceAlignment(
   nx: number,
   ny: number,
   nz: number,
-  fft: WebGPUFFT | null,
+  fft: DisplayFFT | null,
   device: GPUDevice | null,
 ): Promise<SliceAlignmentEstimate> {
   if (nz < 2) throw new Error("slice alignment requires at least 2 slices");
   const gpu = device ? new SliceAlignmentGPU(device) : null;
-  if (gpu && fft) return estimateResident(volume, nx, ny, nz, fft, gpu);
+  if (gpu && fft instanceof WebGPUFFT) return estimateResident(volume, nx, ny, nz, fft, gpu);
   const planeSize = nx * ny;
 
   const spectra: { real: Float32Array; imag: Float32Array }[] = [];
@@ -1059,14 +1006,7 @@ export async function estimateSliceAlignment(
       const magnitude = corrReal[i] * corrReal[i] + corrImag[i] * corrImag[i];
       if (magnitude > peakValue) { peakValue = magnitude; peakIndex = i; }
     }
-    let shiftRow = Math.floor(peakIndex / paddedWidth);
-    let shiftCol = peakIndex % paddedWidth;
-    // Correlation indices past the midpoint are negative shifts wrapped around.
-    if (shiftRow > Math.trunc(paddedHeight / 2)) shiftRow -= paddedHeight;
-    if (shiftCol > Math.trunc(paddedWidth / 2)) shiftCol -= paddedWidth;
-
-    let refinedRow = Math.round(shiftRow * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR;
-    let refinedCol = Math.round(shiftCol * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR;
+    const [refinedRow, refinedCol] = coarseShift(peakIndex, paddedWidth, paddedHeight);
     // Refine against conj(product) and conjugate back, matching the Python
     // path; only the peak location is used, so the conjugation is about
     // keeping the sampled grid identical rather than the values themselves.
@@ -1084,34 +1024,10 @@ export async function estimateSliceAlignment(
       : upsampledDftCpu(
         conjugated, paddedHeight, paddedWidth, region, UPSAMPLE_FACTOR, offsetRow, offsetCol,
       );
-    let bestIndex = 0;
-    let bestValue = -1;
-    for (let i = 0; i < region * region; i++) {
-      const magnitude = refined[i * 2] * refined[i * 2] + refined[i * 2 + 1] * refined[i * 2 + 1];
-      if (magnitude > bestValue) { bestValue = magnitude; bestIndex = i; }
-    }
-    refinedRow += (Math.floor(bestIndex / region) - dftShift) / UPSAMPLE_FACTOR;
-    refinedCol += ((bestIndex % region) - dftShift) / UPSAMPLE_FACTOR;
-    adjacent.push([refinedRow, refinedCol]);
+    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift);
+    adjacent.push([refinedRow + rowCorrection, refinedCol + colCorrection]);
     const norm = Math.sqrt(energies[z] * energies[z + 1]);
     quality.push(norm > 0 ? Math.sqrt(peakValue) / norm : 0);
   }
-
-  const cumulative: number[][] = [[0, 0]];
-  for (let i = 0; i < adjacent.length; i++) {
-    const previous = cumulative[i];
-    cumulative.push([previous[0] + adjacent[i][0], previous[1] + adjacent[i][1]]);
-  }
-  const z = Array.from({ length: nz }, (_, i) => i);
-  const rowFit = linearFit(z, cumulative.map((entry) => entry[0]));
-  const colFit = linearFit(z, cumulative.map((entry) => entry[1]));
-  return {
-    rowShiftPxPerSlice: rowFit.slope,
-    colShiftPxPerSlice: colFit.slope,
-    adjacentShiftPx: adjacent,
-    cumulativeShiftPx: cumulative,
-    fitR2: { row: rowFit.r2, col: colFit.r2 },
-    quality,
-    backend: gpu ? "webgpu" : "cpu",
-  };
+  return fitFromAdjacent(adjacent, nz, gpu ? "webgpu" : "cpu", quality);
 }

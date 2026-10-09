@@ -42,9 +42,7 @@ jobs:
       # the WebGPU engine sources from quantem.gpu (scripts/sync-gpu-webgpu.mjs),
       # which imports quantem.gpu and its deps (numpy).
       - run: pip install -r docs/requirements.txt
-      # .[hub] pulls quantem.data (widget_export tutorial); the loaders need
-      # huggingface_hub + h5py + tifffile to download and read tutorial data.
-      - run: pip install --extra-index-url https://test.pypi.org/simple/ -e ".[hub]" huggingface_hub h5py tifffile
+      - run: pip install --extra-index-url https://test.pypi.org/simple/ -e .
       # The TestPyPI quantem.gpu release can lag the webgpu module the sync
       # script imports, so install quantem.gpu from its source tip instead
       # (the installed quantem package is regular, not namespace, so a

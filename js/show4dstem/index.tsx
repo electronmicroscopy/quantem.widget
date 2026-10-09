@@ -1,19 +1,10 @@
-import { useScanPositionState } from "./scanPositionState";
-import { captureGpuCanvas } from "./captureGpuCanvas";
-import { ResidentDpDisplay, type ResidentPatternSource, type DpDisplayOptions } from "./residentDp";
-import { createLatestFrameQueue } from "./latestFrameQueue";
-import { liveRoiGeometry } from "./roiRadiusDrag";
-import { createDpPointerOwner } from "./dpPointerOwner";
 /// <reference types="@webgpu/types" />
-import { residentDisplayValues, residentRawValues, residentScalarType, residentDivisor, type ResidentBatchInfo, type ResidentValues } from "./batchValues";
-import { useResidentTransport } from "./residentTransport";
-import { useResidentPerformance, useResidentRenderTiming, useResidentChanges } from "./residentPerformance";
+import { captureGpuCanvas } from "./captureGpuCanvas";
+import { createLatestFrameQueue } from "./latestFrameQueue";
+import { createDpPointerOwner } from "./dpPointerOwner";
 import * as React from "react";
 import { createRender, useModelState, useModel } from "@anywidget/react";
-import { CompareBatchCanvas } from "./batchCanvas";
 import { readSettledCompareHistogram } from "./settledHistogram";
-import { sharedCanvasLayout } from "./sharedCanvasLayout";
-import { source112MeanDelta, sameDetectorMaskSupport, countImagesForRender, createComparePaintScheduler, type CompareCountImages, type CompareGpuRenderer } from "./source112MeanDelta";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -35,62 +26,55 @@ import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
-import { COLORMAPS, GPUColormapEngine, applyColormap, type Uint32ImageView } from "../colormaps";
-import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, reciprocalCoordinatesFromShiftedOffset } from "../fft";
-import { findFFTPeakWebGPU, sampleLineProfileWebGPU } from "../geometry";
+import { COLORMAPS, GPUColormapEngine, applyColormap } from "../display/colormaps";
+import { DisplayFFT, getDisplayFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, reciprocalCoordinatesFromShiftedOffset } from "../display/fft";
+import { findFFTPeakBrowser, sampleLineProfileBrowser } from "../display/geometry";
 import {
   buildDetectorMask,
   buildFullDetectorMask,
   buildScanMask,
   DetectorCompute,
-} from "../.generated/engine/detector/compute/webgpu/backend";
-import { readH5MasterInfo, readH5Volume } from "../.generated/engine/io/backends/webgpu/h5reader";
-import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/io/backends/webgpu/bslz4";
+} from "../.generated/engine/detector/webgpu/backend";
+import { readH5MasterInfo, readH5Volume } from "../.generated/engine/io/hdf5/webgpu/h5reader";
+import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/io/hdf5/webgpu/bslz4";
 import {
   collectShow4DSTEMLocalH5Files,
   loadShow4DSTEMLocalH5MaskedSum,
   loadShow4DSTEMLocalH5Master,
   setShow4DSTEMLocalFiles,
   show4DSTEMHasLocalFiles,
-} from "../.generated/engine/io/backends/webgpu/local-h5";
-import { getGPUInfo, isSoftwareGPUAdapter, getGPUDevice } from "../.generated/engine/device/webgpu";
-import { Source112ResidentSet } from "../.generated/engine/detector/compute/webgpu/source112";
-import { RansResidentSet, isRansBatch } from "../.generated/engine/detector/compute/webgpu/rans";
-import { LazyShow4DSTEM } from "./lazy";
+} from "../.generated/engine/io/hdf5/webgpu/local-h5";
 import { AllDiffractionGrid } from "./AllDiffractionGrid";
 import { latestRegion } from "./latestRegion";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
-import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
+import { findDataRange, sliderRange, computeStats, percentileClip } from "../display/stats";
 import { downloadBlob, extractBytes, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { MetadataSection } from "../widgetInfo";
 import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
+import { InfoTooltip } from "../shared/InfoTooltip";
+import { RenderPathBadge } from "../shared/RenderPathBadge";
+import { KeyboardShortcuts } from "../shared/KeyboardShortcuts";
+import { HTML_EXPORT_OVERHEAD_BYTES, exportTitleSlug, formatSavedBytes, isAbortLikeError } from "../shared/exportFormat";
+import { pointToSegmentDistance } from "../shared/geometry";
+import { Histogram } from "../shared/Histogram";
 import {
-  beginPendingProgressiveComparePage,
-  beginProgressiveComparePage,
-  compareMessageGeneration,
-  completeProgressiveComparePage,
-  mergeProgressiveComparePanel,
-  mergeProgressiveCompareCacheMetadata,
-  freshVisibleComparePagePaintAck,
-  progressiveCompareCacheBadge,
-  progressiveComparePanelPresentation,
-  recordComparePageClick,
-  recordComparePageFirstPanelPaint,
-  recordComparePageStaleDrop,
-  recordComparePageVisiblePaint,
-  reconcileCompletedCompareIndices,
-  reconcileProgressiveComparePanels,
-  retainCachedProgressiveComparePanels,
-  shouldClearProgressiveComparePage,
-  type ComparePageMessage,
-  type ProgressiveComparePage,
-} from "./progressiveCompare";
-import {
+  canvasToMask,
   clampDetectorCenter,
+  grabDetector,
+  maskToCanvas,
   resizeDetectorFromPointer,
+  type DetectorGrab,
+  type DetectorResizeStart,
   type DetectorRoiMode,
 } from "./detectorInteraction";
+
+// The exported page reduces the 4D counts on WebGPU (no JavaScript reducer);
+// without an adapter the saved views stay visible and the page says why.
+const OFFLINE_NEEDS_WEBGPU =
+  "Needs WebGPU: this page computes virtual images and diffraction patterns from the 4D data on WebGPU, " +
+  "which this browser does not provide. The images shown were saved at export and do not follow the detector. " +
+  "Open the page in a browser with WebGPU (Chrome, Edge or Safari 26) to explore.";
 
 function normaliseViSource(value: unknown): string {
   const raw = String(value || "roi").trim();
@@ -112,29 +96,6 @@ function viSourceLabel(source: string): string {
   return source;
 }
 
-function ViSourceLabel({ source }: { source: string }) {
-  return <>{viSourceLabel(source)}</>;
-}
-
-function viSourceUsesSymmetricRange(source: string): boolean {
-  return source === "DPC_row" || source === "DPC_col" || source === "iDPC";
-}
-
-function publishShow4DSTEMViDisplay(detail: Record<string, unknown>) {
-  try {
-    const target = window as unknown as {
-      __sh4dViDisplay?: Record<string, unknown>;
-      __sh4dDpcDisplay?: Record<string, unknown>;
-    };
-    target.__sh4dViDisplay = detail;
-    if (detail.source === "DPC_row" || detail.source === "DPC_col" || detail.source === "iDPC") {
-      target.__sh4dDpcDisplay = detail;
-    }
-  } catch {
-    // Diagnostics must not affect rendering.
-  }
-}
-
 const VI_GPU_SLOT = 41;
 const COMPARE_GPU_SLOT_BASE = 60;   // per-panel compare slots: 60, 61, 62, ...
 type DpcGpuSource = "DPC_row" | "DPC_col" | "iDPC";
@@ -149,145 +110,72 @@ type ViGpuImage = {
   rawVersionAfter: number;
 };
 
+// DPC products are signed center-of-mass shifts: they share the WebGPU DPC
+// path and display on a range symmetric about zero.
 function isDpcGpuSource(source: string): source is DpcGpuSource {
   return source === "DPC_row" || source === "DPC_col" || source === "iDPC";
 }
 
+type Show4DSTEMModel = ReturnType<typeof useModel>;
+
+type ViProductMaps = { bytes: DataView; productIndex: number; frames: number; pixels: number };
+
+/**
+ * Locate the precomputed product maps (DPC, iDPC, SSB) Python sent for one VI
+ * source: vi_product_maps_bytes holds float32 [label, frame, scan row, scan col].
+ * Null when that source has no map, so the caller falls back to the ROI image.
+ */
+function viProductMaps(model: Show4DSTEMModel, source: string, scanRows: number, scanCols: number): ViProductMaps | null {
+  const labels = Array.isArray(model.get("vi_product_labels")) ? model.get("vi_product_labels") as string[] : [];
+  const productIndex = labels.indexOf(source);
+  if (productIndex < 0) return null;
+  const bytes = model.get("vi_product_maps_bytes") as DataView | undefined;
+  if (!bytes || bytes.byteLength === 0) return null;
+  const frames = Math.max(1, Math.round(Number(model.get("vi_product_map_frames") || 1)));
+  return { bytes, productIndex, frames, pixels: Math.max(1, scanRows * scanCols) };
+}
+
+/** Byte offset of one frame's map (frame clamped to the stored frames), or null when the payload is too short. */
+function viProductMapOffset(maps: ViProductMaps, frame: number): number | null {
+  const clampedFrame = maps.frames <= 1 ? 0 : Math.max(0, Math.min(maps.frames - 1, frame));
+  const start = ((maps.productIndex * maps.frames + clampedFrame) * maps.pixels) * 4;
+  return start + maps.pixels * 4 > maps.bytes.byteLength ? null : start;
+}
+
+/** The current frame's product map for the active (or given) VI source, as a view into the shared payload. */
 function viProductFrameView(
-  model: any,
+  model: Show4DSTEMModel,
   scanRows: number,
   scanCols: number,
   sourceOverride?: string,
 ): DataView | null {
   const source = normaliseViSource(sourceOverride ?? model.get("vi_source"));
   if (source === "roi") return null;
-  const labels = Array.isArray(model.get("vi_product_labels")) ? model.get("vi_product_labels") as string[] : [];
-  const productIndex = labels.indexOf(source);
-  if (productIndex < 0) return null;
-  const bytes = model.get("vi_product_maps_bytes") as DataView | undefined;
-  if (!bytes || bytes.byteLength === 0) return null;
-  const frames = Math.max(1, Math.round(Number(model.get("vi_product_map_frames") || 1)));
-  const pixels = Math.max(1, scanRows * scanCols);
-  const frame = frames <= 1 ? 0 : Math.max(0, Math.min(frames - 1, Math.round(Number(model.get("frame_idx") || 0))));
-  const start = ((productIndex * frames + frame) * pixels) * 4;
-  const end = start + pixels * 4;
-  if (end > bytes.byteLength) return null;
-  return new DataView(bytes.buffer, bytes.byteOffset + start, pixels * 4);
+  const maps = viProductMaps(model, source, scanRows, scanCols);
+  if (!maps) return null;
+  const start = viProductMapOffset(maps, Math.round(Number(model.get("frame_idx") || 0)));
+  if (start === null) return null;
+  return new DataView(maps.bytes.buffer, maps.bytes.byteOffset + start, maps.pixels * 4);
 }
 
+/** The active source's product maps for several frames, stacked in panel order for the compare grid. */
 function viProductStackForIndices(
-  model: any,
+  model: Show4DSTEMModel,
   indices: number[],
   scanRows: number,
   scanCols: number,
 ): DataView | null {
   const source = normaliseViSource(model.get("vi_source"));
   if (source === "roi" || indices.length === 0) return null;
-  const labels = Array.isArray(model.get("vi_product_labels")) ? model.get("vi_product_labels") as string[] : [];
-  const productIndex = labels.indexOf(source);
-  if (productIndex < 0) return null;
-  const bytes = model.get("vi_product_maps_bytes") as DataView | undefined;
-  if (!bytes || bytes.byteLength === 0) return null;
-  const frames = Math.max(1, Math.round(Number(model.get("vi_product_map_frames") || 1)));
-  const pixels = Math.max(1, scanRows * scanCols);
-  const out = new Float32Array(indices.length * pixels);
+  const maps = viProductMaps(model, source, scanRows, scanCols);
+  if (!maps) return null;
+  const stack = new Float32Array(indices.length * maps.pixels);
   for (let slot = 0; slot < indices.length; slot++) {
-    const frame = frames <= 1 ? 0 : Math.max(0, Math.min(frames - 1, Math.round(Number(indices[slot]) || 0)));
-    const start = ((productIndex * frames + frame) * pixels) * 4;
-    const end = start + pixels * 4;
-    if (end > bytes.byteLength) return null;
-    const src = new Float32Array(bytes.buffer, bytes.byteOffset + start, pixels);
-    out.set(src, slot * pixels);
+    const start = viProductMapOffset(maps, Math.round(Number(indices[slot]) || 0));
+    if (start === null) return null;
+    stack.set(new Float32Array(maps.bytes.buffer, maps.bytes.byteOffset + start, maps.pixels), slot * maps.pixels);
   }
-  return new DataView(out.buffer);
-}
-
-function float32MapStackForLabel(
-  model: any,
-  labelsTrait: string,
-  framesTrait: string,
-  bytesTrait: string,
-  label: string,
-  indices: number[],
-  scanRows: number,
-  scanCols: number,
-): DataView | null {
-  if (!indices.length) return null;
-  const labels = Array.isArray(model.get(labelsTrait)) ? model.get(labelsTrait) as string[] : [];
-  const mapIndex = labels.map((value) => String(value).toUpperCase()).indexOf(label.toUpperCase());
-  if (mapIndex < 0) return null;
-  const bytes = model.get(bytesTrait) as DataView | undefined;
-  if (!bytes || bytes.byteLength === 0) return null;
-  const frames = Math.max(1, Math.round(Number(model.get(framesTrait) || 1)));
-  const pixels = Math.max(1, scanRows * scanCols);
-  const out = new Float32Array(indices.length * pixels);
-  for (let slot = 0; slot < indices.length; slot++) {
-    const frame = frames <= 1 ? 0 : Math.max(0, Math.min(frames - 1, Math.round(Number(indices[slot]) || 0)));
-    const start = ((mapIndex * frames + frame) * pixels) * 4;
-    const end = start + pixels * 4;
-    if (end > bytes.byteLength) return null;
-    const src = new Float32Array(bytes.buffer, bytes.byteOffset + start, pixels);
-    out.set(src, slot * pixels);
-  }
-  return new DataView(out.buffer);
-}
-
-function viPresetLabelForCurrentRoi(model: any): string | null {
-  const mode = String(model.get("roi_mode") || "circle").trim().toLowerCase();
-  const bf = Math.max(1, Number(model.get("bf_radius") || 1));
-  const centerRow = Number(model.get("center_row") || 0);
-  const centerCol = Number(model.get("center_col") || 0);
-  const roiCenterRow = Number(model.get("roi_center_row") || centerRow);
-  const roiCenterCol = Number(model.get("roi_center_col") || centerCol);
-  const radius = Number(model.get("roi_radius") || 0);
-  const radiusInner = Number(model.get("roi_radius_inner") || 0);
-  const close = (a: number, b: number, tol = 1.0) => Math.abs(a - b) <= tol;
-  if (!close(roiCenterRow, centerRow) || !close(roiCenterCol, centerCol)) return null;
-  if (mode === "circle" && close(radius, bf)) return "BF";
-  if (mode === "annular" && close(radiusInner, bf * 0.5) && close(radius, bf)) return "ABF";
-  if (mode === "annular" && close(radiusInner, bf) && close(radius, bf * 2.0)) return "ADF";
-  if (mode === "annular" && close(radiusInner, bf * 2.0) && close(radius, bf * 4.0)) return "HAADF";
-  return null;
-}
-
-function viPresetFrameView(
-  model: any,
-  scanRows: number,
-  scanCols: number,
-): DataView | null {
-  const label = viPresetLabelForCurrentRoi(model);
-  if (!label) return null;
-  const frame = Math.round(Number(model.get("frame_idx") || 0));
-  return float32MapStackForLabel(
-    model,
-    "vi_preset_labels",
-    "vi_preset_map_frames",
-    "vi_preset_maps_bytes",
-    label,
-    [frame],
-    scanRows,
-    scanCols,
-  );
-}
-
-function viPresetStackForIndices(
-  model: any,
-  indices: number[],
-  scanRows: number,
-  scanCols: number,
-): DataView | null {
-  const label = viPresetLabelForCurrentRoi(model);
-  if (!label) return null;
-  return float32MapStackForLabel(
-    model,
-    "vi_preset_labels",
-    "vi_preset_map_frames",
-    "vi_preset_maps_bytes",
-    label,
-    indices,
-    scanRows,
-    scanCols,
-  );
+  return new DataView(stack.buffer);
 }
 
 const MIN_ZOOM = 0.5;
@@ -347,79 +235,6 @@ const CANVAS_SIZE = 480;  // Both DP and VI canvases
 const MIN_CANVAS_SIZE = 240;
 const COMPARE_GRID_DEFAULT_WIDTH = 980;
 const MIN_COMPARE_GRID_WIDTH = 320;
-const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
-
-function useDebugFps(enabled: boolean): number | null {
-  const [fps, setFps] = React.useState<number | null>(null);
-
-  React.useEffect(() => {
-    if (!enabled) {
-      setFps(null);
-      return;
-    }
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      return;
-    }
-    let disposed = false;
-    let frameCount = 0;
-    let last = window.performance.now();
-    let raf = 0;
-    const tick = (now: number) => {
-      if (disposed) return;
-      frameCount += 1;
-      const elapsed = now - last;
-      if (elapsed >= 500) {
-        setFps(Math.round((frameCount * 1000) / Math.max(1, elapsed)));
-        frameCount = 0;
-        last = now;
-      }
-      raf = window.requestAnimationFrame(tick);
-    };
-    raf = window.requestAnimationFrame(tick);
-    return () => {
-      disposed = true;
-      window.cancelAnimationFrame(raf);
-    };
-  }, [enabled]);
-
-  return fps;
-}
-
-function DebugPerfBadge({
-  widget,
-  fps,
-  themeColors,
-}: {
-  widget: string;
-  fps: number | null;
-  themeColors: { accent: string };
-}) {
-  const fpsText = fps === null ? "--" : String(fps);
-  return (
-    <Box
-      component="span"
-      data-quantem-debug-badge={widget}
-      title={`${widget} debug browser UI FPS`}
-      sx={{
-        ml: 0.75,
-        px: 0.5,
-        py: 0,
-        borderRadius: "3px",
-        border: `1px solid ${themeColors.accent}55`,
-        bgcolor: themeColors.accent + "18",
-        color: themeColors.accent,
-        fontSize: 10,
-        fontWeight: 600,
-        fontVariantNumeric: "tabular-nums",
-        whiteSpace: "nowrap",
-        verticalAlign: "middle",
-      }}
-    >
-      Debug UI FPS {fpsText}
-    </Box>
-  );
-}
-
 type Show4DSTEMWritableFile = {
   write: (data: BlobPart) => Promise<void>;
   close: () => Promise<void>;
@@ -488,12 +303,7 @@ function makeHtmlExportFilename(
   exportKind: HtmlExportKind,
   datasetScope: HtmlDatasetScope,
 ): string {
-  let slug = (title || "show4dstem")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
-  if (!slug) slug = "show4dstem";
+  const slug = exportTitleSlug(title, "show4dstem");
   const binnedScanRows = Math.max(1, Math.floor(scanRows / scanBin));
   const binnedScanCols = Math.max(1, Math.floor(scanCols / scanBin));
   const binnedRows = Math.max(1, Math.floor(detRows / detBin));
@@ -503,13 +313,6 @@ function makeHtmlExportFilename(
     : `${binnedScanRows}x${binnedScanCols}x${binnedRows}x${binnedCols}`;
   const prefix = exportKind === "report" ? `report_${datasetScope}` : dtype;
   return `${slug}_${shape}_${prefix}_rbin${scanBin}_kbin${detBin}.html`;
-}
-
-function formatSavedBytes(bytes: number): string {
-  const mb = Math.max(0, bytes) / (1024 * 1024);
-  if (mb >= 100) return `${Math.round(mb)} MB`;
-  if (mb >= 10) return `${mb.toFixed(1)} MB`;
-  return `${mb.toFixed(2)} MB`;
 }
 
 function formatEstimatedHtmlBytes(htmlBytes: number): string {
@@ -541,10 +344,6 @@ function estimateInteractiveHtmlBytes(
 
 function formatEstimatedHtmlSize(payloadBytes: number): string {
   return formatEstimatedHtmlBytes(Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES);
-}
-
-function isAbortLikeError(err: unknown): boolean {
-  return err instanceof DOMException && err.name === "AbortError";
 }
 
 // Theme-aware ROI colors for DP detector overlay
@@ -628,7 +427,7 @@ const compactButton = {
   },
 };
 
-// Control row style — bordered container per row.
+// Control row style: bordered container per row.
 const controlRow = {
   display: "flex",
   alignItems: "center",
@@ -654,9 +453,8 @@ function formatStat(value: number): string {
 }
 
 
-// ============================================================================
-// FFT peak finder (snap to Bragg spot with sub-pixel centroid refinement)
-// ============================================================================
+// Search radius (FFT pixels) that snaps a click to the nearest Bragg spot,
+// refined to a sub-pixel centroid.
 const FFT_SNAP_RADIUS = 5;
 
 /**
@@ -708,7 +506,6 @@ function drawViPositionMarker(
   ctx.strokeStyle = isDragging ? "rgba(255, 255, 0, 0.9)" : "rgba(255, 100, 100, 0.9)";
   ctx.lineWidth = lineWidth;
 
-  // Draw crosshair lines only
   ctx.beginPath();
   ctx.moveTo(screenX - crosshairSize, screenY);
   ctx.lineTo(screenX + crosshairSize, screenY);
@@ -725,11 +522,11 @@ function drawViPositionMarker(
     ctx.shadowOffsetY = 0;
     ctx.font = "11px monospace";
     ctx.textBaseline = "bottom";
-    const textW = ctx.measureText(label).width;
-    const labelX = Math.min(cssWidth - textW - 4, screenX + crosshairSize + 4);
+    const textWidth = ctx.measureText(label).width;
+    const labelX = Math.min(cssWidth - textWidth - 4, screenX + crosshairSize + 4);
     const labelY = Math.max(13, screenY - 4);
     ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-    ctx.fillRect(labelX - 2, labelY - 12, textW + 4, 13);
+    ctx.fillRect(labelX - 2, labelY - 12, textWidth + 4, 13);
     ctx.fillStyle = isDragging ? "rgba(255, 255, 0, 0.95)" : "rgba(255, 160, 160, 0.95)";
     ctx.fillText(label, labelX, labelY);
   }
@@ -772,9 +569,9 @@ function drawViRoiOverlayHiDPI(
   const scaleX = cssWidth / imageWidth;
   const scaleY = cssHeight / imageHeight;
 
-  // Convert image coordinates to screen coordinates (row→screenY, col→screenX)
-  const screenX = centerCol * zoom * scaleX + panX * scaleX;
-  const screenY = centerRow * zoom * scaleY + panY * scaleY;
+  // Scan-ROI center to CSS pixels, at the center of the scan pixel it selects (row→screenY, col→screenX)
+  const screenX = maskToCanvas(centerCol, zoom, panX) * scaleX;
+  const screenY = maskToCanvas(centerRow, zoom, panY) * scaleY;
 
   const lineWidth = 2.5;
   const crosshairSize = 10;
@@ -785,7 +582,7 @@ function drawViRoiOverlayHiDPI(
   ctx.shadowOffsetX = 1;
   ctx.shadowOffsetY = 1;
 
-  // Helper to draw resize handle (purple color for VI ROI to differentiate from DP)
+  // Purple handles keep the scan ROI distinct from the green detector ROI.
   const drawResizeHandle = (handleX: number, handleY: number) => {
     let handleFill: string;
     let handleStroke: string;
@@ -809,7 +606,6 @@ function drawViRoiOverlayHiDPI(
     ctx.stroke();
   };
 
-  // Helper to draw center crosshair (purple/magenta for VI ROI)
   const drawCenterCrosshair = () => {
     ctx.strokeStyle = isDragging ? "rgba(255, 200, 0, 0.9)" : "rgba(180, 80, 255, 0.9)";
     ctx.lineWidth = lineWidth;
@@ -915,9 +711,9 @@ function drawDpCrosshairHiDPI(
   const scaleX = cssWidth / detWidth;
   const scaleY = cssHeight / detHeight;
 
-  // Convert detector coordinates to CSS pixel coordinates
-  const screenX = kCol * zoom * scaleX + panX * scaleX;
-  const screenY = kRow * zoom * scaleY + panY * scaleY;
+  // Detector coordinates to CSS pixels, at the center of the pixel the mask selects
+  const screenX = maskToCanvas(kCol, zoom, panX) * scaleX;
+  const screenY = maskToCanvas(kRow, zoom, panY) * scaleY;
   
   // Fixed UI sizes in CSS pixels (consistent with VI crosshair)
   const crosshairSize = 18;
@@ -932,7 +728,6 @@ function drawDpCrosshairHiDPI(
   ctx.strokeStyle = isDragging ? roiColors.strokeDragging : roiColors.stroke;
   ctx.lineWidth = lineWidth;
   
-  // Draw crosshair
   ctx.beginPath();
   ctx.moveTo(screenX - crosshairSize, screenY);
   ctx.lineTo(screenX + crosshairSize, screenY);
@@ -940,7 +735,6 @@ function drawDpCrosshairHiDPI(
   ctx.lineTo(screenX, screenY + crosshairSize);
   ctx.stroke();
   
-  // Draw center dot
   ctx.beginPath();
   ctx.arc(screenX, screenY, dotRadius, 0, 2 * Math.PI);
   ctx.stroke();
@@ -986,9 +780,9 @@ function drawRoiOverlayHiDPI(
   const scaleX = cssWidth / detWidth;
   const scaleY = cssHeight / detHeight;
 
-  // Convert detector coordinates to CSS pixel coordinates
-  const screenX = centerCol * zoom * scaleX + panX * scaleX;
-  const screenY = centerRow * zoom * scaleY + panY * scaleY;
+  // Detector coordinates to CSS pixels: the mask centers pixel i at i, the image draws it over [i, i + 1)
+  const screenX = maskToCanvas(centerCol, zoom, panX) * scaleX;
+  const screenY = maskToCanvas(centerRow, zoom, panY) * scaleY;
   
   // Fixed UI sizes in CSS pixels
   const lineWidth = 2.5;
@@ -1000,7 +794,6 @@ function drawRoiOverlayHiDPI(
   ctx.shadowOffsetX = 1;
   ctx.shadowOffsetY = 1;
   
-  // Helper to draw resize handle
   const drawResizeHandle = (handleX: number, handleY: number, isInner: boolean = false) => {
     let handleFill: string;
     let handleStroke: string;
@@ -1026,7 +819,6 @@ function drawRoiOverlayHiDPI(
     ctx.stroke();
   };
   
-  // Helper to draw center crosshair
   const drawCenterCrosshair = () => {
     ctx.strokeStyle = isDragging ? roiColors.strokeDragging : roiColors.stroke;
     ctx.lineWidth = lineWidth;
@@ -1050,7 +842,6 @@ function drawRoiOverlayHiDPI(
     ctx.ellipse(screenX, screenY, screenRadiusX, screenRadiusY, 0, 0, 2 * Math.PI);
     ctx.stroke();
 
-    // Semi-transparent fill
     ctx.fillStyle = isDragging ? roiColors.fillDragging : roiColors.fill;
     ctx.fill();
 
@@ -1105,14 +896,12 @@ function drawRoiOverlayHiDPI(
     const screenRadiusInnerX = (radiusInner || 0) * zoom * scaleX;
     const screenRadiusInnerY = (radiusInner || 0) * zoom * scaleY;
 
-    // Outer ellipse
     ctx.strokeStyle = isDragging ? roiColors.strokeDragging : roiColors.stroke;
     ctx.lineWidth = lineWidth;
     ctx.beginPath();
     ctx.ellipse(screenX, screenY, screenRadiusOuterX, screenRadiusOuterY, 0, 0, 2 * Math.PI);
     ctx.stroke();
 
-    // Inner ellipse
     ctx.strokeStyle = isDragging ? roiColors.innerStrokeDragging : roiColors.innerStroke;
     ctx.beginPath();
     ctx.ellipse(screenX, screenY, screenRadiusInnerX, screenRadiusInnerY, 0, 0, 2 * Math.PI);
@@ -1141,377 +930,294 @@ function drawRoiOverlayHiDPI(
   ctx.restore();
 }
 
-// ============================================================================
-// Histogram Component
-// ============================================================================
-
-interface HistogramProps {
-  data: Float32Array | null;
-  bins?: number[] | Float32Array | null;
-  vminPct: number;
-  vmaxPct: number;
-  onRangeChange: (min: number, max: number) => void;
-  width?: number;
-  height?: number;
-  theme?: "light" | "dark";
-  dataMin?: number;
-  dataMax?: number;
-}
-
 /**
- * Info tooltip component - small ⓘ icon with hover tooltip
+ * Crop the scan-ROI bounding box out of a float32 virtual image for the
+ * ROI-scoped FFT. A circle ROI zeroes the pixels outside its radius so the
+ * spectrum covers only the drawn region; square and rect keep the whole box.
+ * Returns null when the crop is smaller than 2x2.
  */
-function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
-  const isDark = theme === "dark";
-  const content = typeof text === "string"
-    ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
-    : text;
-  return (
-    <Tooltip
-      title={content}
-      arrow
-      placement="bottom"
-      componentsProps={{
-        tooltip: {
-          sx: {
-            bgcolor: isDark ? "#333" : "#fff",
-            color: isDark ? "#ddd" : "#333",
-            border: `1px solid ${isDark ? "#555" : "#ccc"}`,
-            maxWidth: 280,
-            p: 1,
-          },
-        },
-        arrow: {
-          sx: {
-            color: isDark ? "#333" : "#fff",
-            "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` },
-          },
-        },
-      }}
-    >
-      <Typography
-        component="span"
-        sx={{
-          fontSize: 12,
-          color: isDark ? "#888" : "#666",
-          cursor: "help",
-          ml: 0.5,
-          "&:hover": { color: isDark ? "#aaa" : "#444" },
-        }}
-      >
-        ⓘ
-      </Typography>
-    </Tooltip>
-  );
-}
-
-function KeyboardShortcuts({ items }: { items: [string, string][] }) {
-  return (
-    <Box component="table" sx={{ borderCollapse: "collapse", "& td": { py: 0.25, fontSize: 11, lineHeight: 1.3, verticalAlign: "top" }, "& td:first-of-type": { pr: 1.5, opacity: 0.7, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" } }}>
-      <tbody>
-        {items.map(([key, desc], i) => (
-          <tr key={i}><td>{key}</td><td>{desc}</td></tr>
-        ))}
-      </tbody>
-    </Box>
-  );
-}
-
-/**
- * Histogram component with integrated vmin/vmax slider and statistics.
- * Shows data distribution with adjustable clipping.
- */
-function Histogram({
-  data,
-  bins: precomputedBins = null,
-  vminPct,
-  vmaxPct,
-  onRangeChange,
-  width = 120,
-  height = 40,
-  theme = "dark",
-  dataMin = 0,
-  dataMax = 1,
-}: HistogramProps) {
-  const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const sliderRef = React.useRef<HTMLDivElement | null>(null);
-  const minLabelRef = React.useRef<HTMLElement | null>(null);
-  const maxLabelRef = React.useRef<HTMLElement | null>(null);
-  const onRangeChangeRef = React.useRef(onRangeChange);
-  const pendingRangeRef = React.useRef<[number, number] | null>(null);
-  const rangeRafRef = React.useRef<number | null>(null);
-  const bins = React.useMemo(
-    () => precomputedBins ? Array.from(precomputedBins) : computeHistogramFromBytes(data),
-    [data, precomputedBins],
-  );
-
-  // Theme-aware colors
-  const colors = theme === "dark" ? {
-    bg: "#1a1a1a",
-    barActive: "#888",
-    barInactive: "#444",
-    border: "#333",
-  } : {
-    bg: "#f0f0f0",
-    barActive: "#666",
-    barInactive: "#bbb",
-    border: "#ccc",
-  };
-
-  const formatValue = React.useCallback((pct: number) => {
-    const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
-  }, [dataMax, dataMin]);
-
-  // Draw histogram (vertical gray bars)
-  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    ctx.scale(dpr, dpr);
-
-    // Clear with theme background
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, width, height);
-
-    // Reduce to fewer bins for cleaner display
-    const displayBins = 64;
-    const binRatio = Math.floor(bins.length / displayBins);
-    const reducedBins: number[] = [];
-    for (let i = 0; i < displayBins; i++) {
-      let sum = 0;
-      for (let j = 0; j < binRatio; j++) {
-        sum += bins[i * binRatio + j] || 0;
-      }
-      reducedBins.push(sum / binRatio);
-    }
-
-    // Normalize
-    const maxVal = Math.max(...reducedBins, 0.001);
-    const barWidth = width / displayBins;
-
-    // Calculate which bins are in the clipped range
-    const vminBin = Math.floor((loPct / 100) * displayBins);
-    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
-
-    // Draw histogram bars
-    for (let i = 0; i < displayBins; i++) {
-      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
-      const x = i * barWidth;
-
-      // Bars inside range are highlighted, outside are dimmed
-      const inRange = i >= vminBin && i <= vmaxBin;
-      ctx.fillStyle = inRange ? colors.barActive : colors.barInactive;
-      ctx.fillRect(x + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
-    }
-
-  }, [bins, colors, height, width]);
-
-  const applyRangePreview = React.useCallback((next: [number, number]) => {
-    const [lo, hi] = next;
-    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
-    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
-    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
-    if (thumbs && thumbs.length >= 2) {
-      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
-      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
-    }
-    if (track) {
-      track.style.left = `${lo}%`;
-      track.style.width = `${Math.max(0, hi - lo)}%`;
-    }
-    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
-    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
-    drawHistogram(lo, hi);
-  }, [drawHistogram, formatValue]);
-
-  React.useEffect(() => {
-    drawHistogram(vminPct, vmaxPct);
-  }, [drawHistogram, vmaxPct, vminPct]);
-
-  React.useEffect(() => {
-    onRangeChangeRef.current = onRangeChange;
-  }, [onRangeChange]);
-  const flushRangePreview = React.useCallback(() => {
-    if (rangeRafRef.current != null) {
-      window.cancelAnimationFrame(rangeRafRef.current);
-      rangeRafRef.current = null;
-    }
-    const pending = pendingRangeRef.current;
-    pendingRangeRef.current = null;
-    if (pending) {
-      applyRangePreview(pending);
-      onRangeChangeRef.current(pending[0], pending[1]);
-    }
-  }, [applyRangePreview]);
-  React.useEffect(() => () => {
-    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
-  }, []);
-  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
-    const startX = event.clientX;
-    const span = Math.max(1, hi0 - lo0);
-    const previousCursor = document.body.style.cursor;
-    document.body.style.cursor = "grabbing";
-    const onMove = (moveEvent: MouseEvent) => {
-      moveEvent.preventDefault();
-      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
-      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
-      const next: [number, number] = [lo, lo + span];
-      pendingRangeRef.current = next;
-      if (rangeRafRef.current == null) {
-        rangeRafRef.current = window.requestAnimationFrame(() => {
-          rangeRafRef.current = null;
-          const pending = pendingRangeRef.current;
-          if (pending) {
-            applyRangePreview(pending);
-            onRangeChangeRef.current(pending[0], pending[1]);
-          }
-        });
-      }
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = previousCursor;
-      flushRangePreview();
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [applyRangePreview, flushRangePreview]);
-
-  const sliderInset = 6;
-  const sliderWidth = Math.max(1, width - sliderInset * 2);
-
-  return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
-      <Box sx={{ position: "relative", width, height: height + 6, overflow: "visible" }}>
-      <canvas
-        ref={canvasRef}
-        style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
-      />
-      <Box
-        ref={sliderRef}
-        onMouseDownCapture={(e) => {
-          if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
-          const rect = sliderRef.current?.getBoundingClientRect();
-          if (!rect) return;
-          const lo = Math.max(0, Math.min(100, Math.min(vminPct, vmaxPct)));
-          const hi = Math.max(0, Math.min(100, Math.max(vminPct, vmaxPct)));
-          const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
-          if (pct < lo || pct > hi) return;
-          const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
-          if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
-          beginRangeDrag(e, rect.width, lo, hi);
-          e.preventDefault();
-          e.stopPropagation();
-          e.nativeEvent.stopImmediatePropagation();
-        }}
-        sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
-      >
-        <Slider
-          value={[vminPct, vmaxPct]}
-          onChange={(_, v) => {
-            const [newMin, newMax] = v as number[];
-            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
-          }}
-          min={0}
-          max={100}
-          size="small"
-          valueLabelDisplay="auto"
-          valueLabelFormat={formatValue}
-          sx={{
-            width: sliderWidth,
-            py: 0,
-            position: "relative",
-            zIndex: 3,
-            overflow: "visible",
-            "& .MuiSlider-rail": { height: 2, zIndex: 1 },
-            "& .MuiSlider-track": { height: 2, cursor: "grab", zIndex: 2 },
-            "& .MuiSlider-thumb": { width: 8, height: 8, zIndex: 4 },
-            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", zIndex: 5 },
-          }}
-        />
-      </Box>
-      </Box>
-      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography><Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography></Box>
-    </Box>
-  );
-}
-
-// ============================================================================
-// Line Profile Sampling
-// ============================================================================
-
-function pointToSegmentDistance(col: number, row: number, col0: number, row0: number, col1: number, row1: number): number {
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const lenSq = dc * dc + dr * dr;
-  if (lenSq <= 1e-12) return Math.sqrt((col - col0) ** 2 + (row - row0) ** 2);
-  const tRaw = ((col - col0) * dc + (row - row0) * dr) / lenSq;
-  const t = Math.max(0, Math.min(1, tRaw));
-  const projCol = col0 + t * dc;
-  const projRow = row0 + t * dr;
-  return Math.sqrt((col - projCol) ** 2 + (row - projRow) ** 2);
-}
-
-// ============================================================================
-// Crop single-mode ROI region from raw float32 data for ROI-scoped FFT
-// ============================================================================
 function cropSingleROI(
-  data: Float32Array, imgW: number, imgH: number,
+  data: Float32Array, imageWidth: number, imageHeight: number,
   mode: string, centerRow: number, centerCol: number,
-  radius: number, roiW: number, roiH: number,
+  radius: number, roiWidth: number, roiHeight: number,
 ): { cropped: Float32Array; cropW: number; cropH: number } | null {
   if (mode === "off") return null;
-  let x0: number, y0: number, x1: number, y1: number;
+  let colStart: number, rowStart: number, colEnd: number, rowEnd: number;
 
   if (mode === "rect") {
-    const hw = roiW / 2, hh = roiH / 2;
-    x0 = Math.max(0, Math.floor(centerCol - hw));
-    y0 = Math.max(0, Math.floor(centerRow - hh));
-    x1 = Math.min(imgW, Math.ceil(centerCol + hw));
-    y1 = Math.min(imgH, Math.ceil(centerRow + hh));
+    const halfWidth = roiWidth / 2, halfHeight = roiHeight / 2;
+    colStart = Math.max(0, Math.floor(centerCol - halfWidth));
+    rowStart = Math.max(0, Math.floor(centerRow - halfHeight));
+    colEnd = Math.min(imageWidth, Math.ceil(centerCol + halfWidth));
+    rowEnd = Math.min(imageHeight, Math.ceil(centerRow + halfHeight));
   } else {
-    x0 = Math.max(0, Math.floor(centerCol - radius));
-    y0 = Math.max(0, Math.floor(centerRow - radius));
-    x1 = Math.min(imgW, Math.ceil(centerCol + radius));
-    y1 = Math.min(imgH, Math.ceil(centerRow + radius));
+    colStart = Math.max(0, Math.floor(centerCol - radius));
+    rowStart = Math.max(0, Math.floor(centerRow - radius));
+    colEnd = Math.min(imageWidth, Math.ceil(centerCol + radius));
+    rowEnd = Math.min(imageHeight, Math.ceil(centerRow + radius));
   }
 
-  const cropW = x1 - x0, cropH = y1 - y0;
+  const cropW = colEnd - colStart, cropH = rowEnd - rowStart;
   if (cropW < 2 || cropH < 2) return null;
 
   const cropped = new Float32Array(cropW * cropH);
   if (mode === "circle") {
-    const rSq = radius * radius;
-    for (let dy = 0; dy < cropH; dy++) {
-      for (let dx = 0; dx < cropW; dx++) {
-        const ix = x0 + dx, iy = y0 + dy;
-        const distSq = (ix - centerCol) * (ix - centerCol) + (iy - centerRow) * (iy - centerRow);
-        cropped[dy * cropW + dx] = distSq <= rSq ? data[iy * imgW + ix] : 0;
+    const radiusSq = radius * radius;
+    for (let cropRow = 0; cropRow < cropH; cropRow++) {
+      for (let cropCol = 0; cropCol < cropW; cropCol++) {
+        const col = colStart + cropCol, row = rowStart + cropRow;
+        const distSq = (col - centerCol) * (col - centerCol) + (row - centerRow) * (row - centerRow);
+        cropped[cropRow * cropW + cropCol] = distSq <= radiusSq ? data[row * imageWidth + col] : 0;
       }
     }
   } else {
-    for (let dy = 0; dy < cropH; dy++) {
-      const srcOff = (y0 + dy) * imgW + x0;
-      cropped.set(data.subarray(srcOff, srcOff + cropW), dy * cropW);
+    for (let cropRow = 0; cropRow < cropH; cropRow++) {
+      const sourceOffset = (rowStart + cropRow) * imageWidth + colStart;
+      cropped.set(data.subarray(sourceOffset, sourceOffset + cropW), cropRow * cropW);
     }
   }
   return { cropped, cropW, cropH };
 }
 
-const EMPTY_COMPARE_PANELS: Float32Array[] = [];
+/**
+ * Copy a rows x cols image into the top-left corner of a zeroed padRows x
+ * padCols buffer. fft2d needs power-of-two sides and would otherwise truncate
+ * the frequency content of the image.
+ */
+function zeroPadImage(image: Float32Array, rows: number, cols: number, padRows: number, padCols: number): Float32Array {
+  const padded = new Float32Array(padRows * padCols);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      padded[row * padCols + col] = image[row * cols + col];
+    }
+  }
+  return padded;
+}
+
+/**
+ * Dispose the oldest resident detector volumes until at most `limit` remain,
+ * never the one just loaded nor the one on screen. Map order is load order, so
+ * the earliest-loaded other volume goes first; this bounds GPU memory when
+ * scrubbing through more datasets than fit at once.
+ */
+function evictOldVolumes(cache: Map<number, DetectorCompute>, limit: number, loaded: number, active: number) {
+  while (cache.size > limit) {
+    const oldest = [...cache.keys()].find((index) => index !== loaded && index !== active);
+    if (oldest === undefined) break;
+    cache.get(oldest)!.dispose();
+    cache.delete(oldest);
+  }
+}
+
+/** A profile-line drag: the pointer at the press and both endpoints at that moment. */
+type ProfileLineDrag = { row: number; col: number; p0: { row: number; col: number }; p1: { row: number; col: number } };
+
+/**
+ * Move both profile endpoints by the pointer's offset from the press, clamped
+ * so the whole line stays inside a rows x cols image; otherwise a drag past the
+ * edge would push an endpoint off the data the sampler reads.
+ */
+function dragProfileLine(drag: ProfileLineDrag, pointerRow: number, pointerCol: number, rows: number, cols: number) {
+  let deltaRow = pointerRow - drag.row;
+  let deltaCol = pointerCol - drag.col;
+  const minRow = Math.min(drag.p0.row, drag.p1.row);
+  const maxRow = Math.max(drag.p0.row, drag.p1.row);
+  const minCol = Math.min(drag.p0.col, drag.p1.col);
+  const maxCol = Math.max(drag.p0.col, drag.p1.col);
+  deltaRow = Math.max(deltaRow, -minRow);
+  deltaRow = Math.min(deltaRow, (rows - 1) - maxRow);
+  deltaCol = Math.max(deltaCol, -minCol);
+  deltaCol = Math.min(deltaCol, (cols - 1) - maxCol);
+  return [
+    { row: drag.p0.row + deltaRow, col: drag.p0.col + deltaCol },
+    { row: drag.p1.row + deltaRow, col: drag.p1.col + deltaCol },
+  ];
+}
+
+type ProfileLayout = {
+  padLeft: number; plotW: number; padTop: number; plotH: number;
+  valueMin: number; valueMax: number; totalDist: number; xUnit: string;
+};
+
+/**
+ * Paint a line-profile sparkline (axes, curve, distance ticks, min/max labels)
+ * on a HiDPI canvas. Returns the painted image and plot layout that the hover
+ * readout restores and maps the pointer through, or null after painting the
+ * empty-state hint when there are fewer than two samples. `distance` is the
+ * line length with its unit; null labels the axis in samples. The DP and VI
+ * profiles share it so both panels read the same.
+ */
+function drawProfileSparkline(
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  cssW: number,
+  cssH: number,
+  data: Float32Array | null,
+  distance: { total: number; unit: string } | null,
+  emptyHint: string,
+  isDark: boolean,
+  accent: string,
+): { base: ImageData; layout: ProfileLayout } | null {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = isDark ? "#1a1a1a" : "#f0f0f0";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  if (!data || data.length < 2) {
+    ctx.font = "10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.fillStyle = isDark ? "#555" : "#999";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(emptyHint, cssW / 2, cssH / 2);
+    return null;
+  }
+
+  const padLeft = 40;
+  const padRight = 8;
+  const padTop = 6;
+  const padBottom = 18;
+  const plotW = cssW - padLeft - padRight;
+  const plotH = cssH - padTop - padBottom;
+
+  let valueMin = Infinity, valueMax = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] < valueMin) valueMin = data[i];
+    if (data[i] > valueMax) valueMax = data[i];
+  }
+  const range = valueMax - valueMin || 1;
+
+  // X-axis: calibrated line length, or sample count when the caller has none
+  const totalDist = distance ? distance.total : data.length - 1;
+  const xUnit = distance ? distance.unit : "px";
+
+  ctx.strokeStyle = isDark ? "#555" : "#bbb";
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(padLeft, padTop);
+  ctx.lineTo(padLeft, padTop + plotH);
+  ctx.lineTo(padLeft + plotW, padTop + plotH);
+  ctx.stroke();
+
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = padLeft + (i / (data.length - 1)) * plotW;
+    const y = padTop + plotH - ((data[i] - valueMin) / range) * plotH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  const tickY = padTop + plotH;
+  ctx.strokeStyle = isDark ? "#555" : "#bbb";
+  ctx.lineWidth = 0.5;
+  const idealTicks = Math.max(2, Math.floor(plotW / 70));
+  const tickStep = roundToNiceValue(totalDist / idealTicks);
+  ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillStyle = isDark ? "#888" : "#666";
+  ctx.textBaseline = "top";
+  const ticks: number[] = [];
+  for (let tick = 0; tick <= totalDist + tickStep * 0.01; tick += tickStep) {
+    if (tick > totalDist * 1.001) break;
+    ticks.push(tick);
+  }
+  for (let i = 0; i < ticks.length; i++) {
+    const tick = ticks[i];
+    const frac = totalDist > 0 ? tick / totalDist : 0;
+    const x = padLeft + frac * plotW;
+    ctx.beginPath(); ctx.moveTo(x, tickY); ctx.lineTo(x, tickY + 3); ctx.stroke();
+    ctx.textAlign = frac < 0.05 ? "left" : frac > 0.95 ? "right" : "center";
+    const label = tick % 1 === 0 ? tick.toFixed(0) : tick.toFixed(1);
+    ctx.fillText(i === ticks.length - 1 ? `${label} ${xUnit}` : label, x, tickY + 4);
+  }
+
+  // Y-axis min/max labels (left margin)
+  ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillStyle = isDark ? "#888" : "#666";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(formatNumber(valueMax), 2, padTop);
+  ctx.textBaseline = "bottom";
+  ctx.fillText(formatNumber(valueMin), 2, padTop + plotH);
+
+  return {
+    base: ctx.getImageData(0, 0, canvas.width, canvas.height),
+    layout: { padLeft, plotW, padTop, plotH, valueMin, valueMax, totalDist, xUnit },
+  };
+}
+
+/**
+ * Redraw a profile sparkline's base image, then the hover crosshair, the dot on
+ * the curve and the value/distance readout at CSS x position `cssX`. Outside the
+ * plot area only the base image is restored, which clears a stale readout.
+ */
+function drawProfileHover(
+  ctx: CanvasRenderingContext2D,
+  base: ImageData,
+  layout: ProfileLayout,
+  data: Float32Array,
+  cssX: number,
+  isDark: boolean,
+  accent: string,
+) {
+  const { padLeft, plotW, padTop, plotH, valueMin, valueMax, totalDist, xUnit } = layout;
+  const range = valueMax - valueMin || 1;
+
+  ctx.putImageData(base, 0, 0);
+
+  if (cssX < padLeft || cssX > padLeft + plotW) return;
+  const frac = (cssX - padLeft) / plotW;
+
+  const dpr = window.devicePixelRatio || 1;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  ctx.strokeStyle = isDark ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 2]);
+  ctx.beginPath();
+  ctx.moveTo(cssX, padTop);
+  ctx.lineTo(cssX, padTop + plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const sampleIndex = Math.min(data.length - 1, Math.max(0, Math.round(frac * (data.length - 1))));
+  const value = data[sampleIndex];
+  const y = padTop + plotH - ((value - valueMin) / range) * plotH;
+  ctx.fillStyle = accent;
+  ctx.beginPath();
+  ctx.arc(cssX, y, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  const hoverDistance = frac * totalDist;
+  const label = `${formatNumber(value)}  @  ${hoverDistance.toFixed(1)} ${xUnit}`;
+  ctx.font = "bold 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const textWidth = ctx.measureText(label).width;
+  const labelX = Math.min(cssX + 6, padLeft + plotW - textWidth - 2);
+  const labelY = padTop + 2;
+  ctx.fillStyle = isDark ? "rgba(0,0,0,0.7)" : "rgba(255,255,255,0.8)";
+  ctx.fillRect(labelX - 2, labelY - 1, textWidth + 4, 11);
+  ctx.fillStyle = isDark ? "#fff" : "#000";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(label, labelX, labelY);
+
+  ctx.restore();
+}
+
+/** Restore a profile sparkline's base image so the hover readout disappears when the pointer leaves. */
+function restoreProfileBase(canvas: HTMLCanvasElement | null, base: ImageData | null) {
+  if (!canvas || !base) return;
+  canvas.getContext("2d")?.putImageData(base, 0, 0);
+}
 
 interface CompareVirtualGridProps {
   kind?: "virtual" | "diffraction";
   scanRegion?: {mode: string; row: number; col: number; radius: number; width: number; height: number};
-  batchInfo?: ResidentBatchInfo;
   bytes: DataView | null | undefined;
   count: number;
   indices: number[];
@@ -1521,7 +1227,6 @@ interface CompareVirtualGridProps {
   gpuRanges?: Map<number, { min: number; max: number }> | null;
   gpuVersion?: number;
   gpuEngine?: GPUColormapEngine | null;
-  progressivePage?: ProgressiveComparePage | null;
   labels: string[];
   activeIdx: number;
   shapeRows: number;
@@ -1536,7 +1241,6 @@ interface CompareVirtualGridProps {
   cursorRow: number;
   cursorCol: number;
   status: string;
-  sourceLoading?: boolean;
   themeColors: ReturnType<typeof useTheme>["colors"];
   panelChromeVisible: boolean;
   showScaleBar: boolean;
@@ -1558,19 +1262,12 @@ interface CompareVirtualGridProps {
   onDragFrameChange: (idx: number | null) => void;
   onPendingMoveFrameChange: (idx: number | null) => void;
   onPositionChange: (row: number, col: number, commit?: boolean) => void;
-  onFreshVisiblePaint?: (
-    page: ProgressiveComparePage,
-    paintedIndices: number[],
-  ) => void;
-  onGpuPaint?: (panelCount: number) => void;
-  onGpuRenderError?: (error: unknown) => void;
-  onGpuRendererReady?: (renderNow: CompareGpuRenderer | null) => void;
+  onGpuRendererReady?: (renderNow: (() => number) | null) => void;
 }
 
 const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   kind = "virtual",
   scanRegion,
-  batchInfo,
   bytes,
   count,
   indices,
@@ -1578,7 +1275,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   gpuRanges,
   gpuVersion,
   gpuEngine,
-  progressivePage,
   labels,
   activeIdx,
   shapeRows,
@@ -1593,7 +1289,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   cursorRow,
   cursorCol,
   status,
-  sourceLoading = false,
   themeColors,
   panelChromeVisible,
   showScaleBar,
@@ -1615,45 +1310,21 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   onDragFrameChange,
   onPendingMoveFrameChange,
   onPositionChange,
-  onFreshVisiblePaint,
-  onGpuPaint,
-  onGpuRenderError,
   onGpuRendererReady,
 }: CompareVirtualGridProps) {
   const positionRafRef = React.useRef(0);
-  const panDragRef = React.useRef<{col:number; row:number; panX:number; panY:number} | null>(null);
+  const panDragRef = React.useRef<{clientX:number; clientY:number; panX:number; panY:number} | null>(null);
   const pendingPositionRef = React.useRef<[number, number]>([0, 0]);
   React.useEffect(() => () => cancelAnimationFrame(positionRafRef.current), []);
   const batchModel = useModel();
-  const batchCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  const batchGridRef = React.useRef<HTMLDivElement | null>(null);
-  const batchRendererRef = React.useRef<Awaited<ReturnType<typeof CompareBatchCanvas.create>> | null>(null);
-  const [batchReady, setBatchReady] = React.useState(false);
-  const [batchFailed, setBatchFailed] = React.useState(false);
-  const residentSource = kind !== "diffraction" && Boolean(batchModel.get("_rans_url"));
-  const sharedGpuEnabled = Boolean(residentSource && gpuEngine && gpuSlots?.size && !progressivePage && !reorderMode);
-  const [sharedGpuReady, setSharedGpuReady] = React.useState(false);
-  const sharedGpuReadyRef = React.useRef(false);
-  const sharedContextRef = React.useRef<GPUCanvasContext | null>(null);
-  const sharedLayoutRef = React.useRef<ReturnType<typeof sharedCanvasLayout>>(null);
-  const scalarType = residentScalarType(batchInfo);
-  const integerCounts = scalarType !== "<f4";
-  const batchEnabled = Boolean(!sharedGpuEnabled && batchInfo?.request_id && !progressivePage && !autoContrast && bytes && count > 0);
-  useResidentRenderTiming(batchEnabled, "grid_render_to_commit_ms");
-  const batchTimingRef = React.useRef({ received: 0, requested: new Map<string, number>(), lastPaint: 0, lastId: -1 });
-  const batchWorkRef = React.useRef({ busy: false, pending: null as (() => Promise<void>) | null });
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const gpuRenderGenerationRef = React.useRef(0);
-  const gpuCanvasContextsRef = React.useRef<(GPUCanvasContext | null)[]>([]);
   const canvasDrawCacheRef = React.useRef(new Map<number, {
     canvas: HTMLCanvasElement;
     panel: Float32Array;
     styleKey: string;
   }>());
-  const progressivePageForPaintRef = React.useRef<ProgressiveComparePage | null>(progressivePage ?? null);
-  const visiblePanelByFrameRef = React.useRef(new Map<number, Float32Array>());
-  const visiblePaintRafRef = React.useRef({ beforePaint: 0, afterPaint: 0 });
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
   const isDraggingPositionRef = React.useRef(false);
@@ -1664,70 +1335,27 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   const [comparePanY, setComparePanY] = React.useState(0);
   const compareViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
   const panelPixels = Math.max(1, shapeRows * shapeCols);
-  // The exact source view survives display normalization and GPU uploads. Pointer
-  // readouts borrow it; they never read a rounded Float32 display intermediate.
-  const rawBatch = React.useMemo(() => bytes && batchInfo?.request_id
-    ? residentRawValues(bytes, batchInfo) : null, [bytes, batchInfo]);
-  const rawReadoutRef = React.useRef<{values: ResidentValues | null; indices: number[]; rows: number; cols: number}>({values:null,indices:[],rows:0,cols:0});
-  rawReadoutRef.current = {values:rawBatch,indices,rows:shapeRows,cols:shapeCols};
-  const readoutRefs = React.useRef<(HTMLSpanElement | null)[]>([]);
-  const readoutRafRef = React.useRef(0);
-  const updateRawReadout = React.useCallback((localIdx: number, frame: number, tile: HTMLDivElement, x: number, y: number) => {
-    if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current);
-    readoutRafRef.current = requestAnimationFrame(() => {
-      readoutRafRef.current = 0;
-      const node = readoutRefs.current[localIdx];
-      if (!node) return;
-      const {values,indices:frames,rows,cols} = rawReadoutRef.current;
-      const rect = tile.getBoundingClientRect();
-      const view = compareViewRef.current;
-      const col = Math.floor(((x-rect.left)/rect.width*cols-view.panX)/view.zoom);
-      const row = Math.floor(((y-rect.top)/rect.height*rows-view.panY)/view.zoom);
-      const source = frames.indexOf(frame);
-      if (!values || source < 0 || row < 0 || row >= rows || col < 0 || col >= cols) {
-        node.style.opacity = "0";
-        return;
-      }
-      node.textContent = `(${row}, ${col}) ${values[(source*rows+row)*cols+col]}`;
-      node.style.opacity = "1";
-    });
-  }, []);
-  const hideRawReadout = React.useCallback((localIdx: number) => {
-    if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current);
-    readoutRafRef.current = 0;
-    const node = readoutRefs.current[localIdx];
-    if (node) node.style.opacity = "0";
-  }, []);
-  React.useEffect(() => () => { if (readoutRafRef.current) cancelAnimationFrame(readoutRafRef.current); }, []);
 
   const panels = React.useMemo(() => {
-    if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * (scalarType === "<u2" ? 2 : 4)) {
+    if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * 4) {
       return [] as Float32Array[];
     }
-    // Raw integer batches remain on the GPU during interaction.
-    if (integerCounts && batchEnabled && !batchFailed) return EMPTY_COMPARE_PANELS;
-    const raw = residentDisplayValues(bytes, batchInfo);
+    const raw = new Float32Array(bytes.buffer, bytes.byteOffset, panelPixels * count);
     return Array.from({ length: count }, (_, idx) => {
       const start = idx * panelPixels;
       return raw.subarray(start, start + panelPixels);
     });
-  }, [bytes, count, panelPixels, scalarType, integerCounts, batchEnabled, batchFailed, batchInfo]);
-  const sourceIndices = progressivePage ? progressivePage.expectedIndices : (indices || []);
+  }, [bytes, count, panelPixels]);
+  const sourceIndices = indices || [];
   const [previewIndices, setPreviewIndices] = React.useState<number[] | null>(null);
-  const panelByFrame = React.useMemo(
-    () => reconcileProgressiveComparePanels(
-      progressivePage ?? null,
-      indices || [],
-      panels,
-    ),
-    [indices, panels, progressivePage],
-  );
-  progressivePageForPaintRef.current = progressivePage ?? null;
-  visiblePanelByFrameRef.current = panelByFrame;
-  const cacheBadge = React.useMemo(
-    () => progressiveCompareCacheBadge(progressivePage ?? null, panelByFrame),
-    [panelByFrame, progressivePage],
-  );
+  const panelByFrame = React.useMemo(() => {
+    const byFrame = new Map<number, Float32Array>();
+    (indices || []).forEach((frame, index) => {
+      const panel = panels[index];
+      if (panel) byFrame.set(frame, panel);
+    });
+    return byFrame;
+  }, [indices, panels]);
   const displayIndices = React.useMemo(() => {
     const available = new Set(sourceIndices);
     const hiddenSet = new Set((hidden || []).filter((idx) => Number.isInteger(idx) && available.has(idx)));
@@ -1760,112 +1388,15 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
       .map((frame) => ({
         frame,
         panel: panelByFrame.get(frame),
-        gpuLoaded: Boolean((integerCounts && batchEnabled && !batchFailed) || (gpuSlots?.has(frame) && gpuEngine && (residentSource || gpuRanges?.has(frame)))),
+        gpuLoaded: Boolean(gpuSlots?.has(frame) && gpuEngine && gpuRanges?.has(frame)),
       }))
-      // Reserve loading tiles so a ready image does not move beneath a drag.
-      .filter((entry) => sourceLoading || Boolean(progressivePage) || entry.panel !== undefined || entry.gpuLoaded);
-  }, [integerCounts, batchEnabled, batchFailed, gpuEngine, gpuRanges, gpuSlots, gpuVersion, panelByFrame, progressivePage, residentSource, sourceLoading, renderIndices, scaleMode]);
+      .filter((entry) => entry.panel !== undefined || entry.gpuLoaded);
+  }, [gpuEngine, gpuRanges, gpuSlots, gpuVersion, panelByFrame, renderIndices, scaleMode]);
 
-  const countImagesRef = React.useRef<CompareCountImages | null>(null);
-  const comparePaintScheduler = React.useMemo(() => createComparePaintScheduler(), []);
-  const latestComparePaintRef = React.useRef<() => void>(() => {});
-  React.useLayoutEffect(() => () => {
-    comparePaintScheduler.cancel();
-    countImagesRef.current = null;
-  }, [comparePaintScheduler]);
-  const renderGpuSlotsNow = React.useCallback((counts?: CompareCountImages | null | "invalidate", deferPaint = false): number => {
-    if (counts === "invalidate") {
-      comparePaintScheduler.cancel();
-      const previous = countImagesRef.current;
-      countImagesRef.current = null;
-      // Queue a stable float snapshot before another ROI operation overwrites
-      // the shared count buffer. Its divisor still belongs to these old counts.
-      countImagesForRender(previous, false);
-      return 0;
-    }
-    // Null means a settled/full update already refreshed the stable float slots.
-    if (counts === null) {
-      comparePaintScheduler.cancel();
-      countImagesRef.current = null;
-      return 0;
-    }
-    if (!deferPaint) comparePaintScheduler.cancel();
-    if (counts) countImagesRef.current = counts;
-    const sharedReady = Boolean(sharedGpuEnabled && gpuEngine && gpuSlots && sharedLayoutRef.current && batchCanvasRef.current
-      && sharedLayoutRef.current.rectangles.length === renderEntries.length);
-    // New hot counts fall back in their caller. Previously retained views must
-    // refresh floats before a legacy/missing-canvas repaint can use those slots.
-    if (counts && !sharedReady) {
-      comparePaintScheduler.cancel();
-      countImagesRef.current = null;
-      return 0;
-    }
-    if (counts && deferPaint) {
-      if (!counts.isCurrent() || !sharedContextRef.current
-        || !renderEntries.every(entry => gpuSlots!.has(entry.frame) && counts.images.has(entry.frame))) {
-        comparePaintScheduler.cancel();
-        countImagesRef.current = null;
-        return 0;
-      }
-      // Retain the newest area immediately after its count submission. At RAF,
-      // drawing uses these current views; no await separates selection/submission.
-      comparePaintScheduler.schedule(() => { latestComparePaintRef.current(); }, error => {
-        const previous = countImagesRef.current;
-        countImagesRef.current = null;
-        try { countImagesForRender(previous, false); }
-        catch { /* Preserve the render error if the device also rejects fallback. */ }
-        onGpuRenderError?.(error);
-      });
-      return renderEntries.length;
-    }
-    countImagesRef.current = countImagesForRender(countImagesRef.current, sharedReady);
+  const renderGpuSlotsNow = React.useCallback((): number => {
     if (!gpuEngine || !gpuSlots) return 0;
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
     gpuEngine.uploadLUT(colormap, lut);
-    if (sharedGpuEnabled) {
-      const layout = sharedLayoutRef.current;
-      const canvas = batchCanvasRef.current;
-      if (!layout || !canvas || layout.rectangles.length !== renderEntries.length) return 0;
-      if (!sharedContextRef.current || canvas.width !== layout.width || canvas.height !== layout.height) {
-        sharedContextRef.current = gpuEngine.configureCanvas(canvas, layout.width, layout.height);
-      }
-      const context = sharedContextRef.current;
-      if (!context) {
-        if (!counts) countImagesRef.current?.refreshFloat();
-        countImagesRef.current = null;
-        return 0;
-      }
-      const slots: number[] = [];
-      const rectangles: typeof layout.rectangles = [];
-      const currentCounts = countImagesRef.current;
-      const countViews = currentCounts ? new Map<number, Uint32ImageView>() : undefined;
-      let missingCountView = false;
-      renderEntries.forEach((entry, i) => {
-        const slot = gpuSlots.get(entry.frame);
-        if (slot === undefined) return;
-        slots.push(slot); rectangles.push(layout.rectangles[i]);
-        if (countViews) {
-          const view = currentCounts!.images.get(entry.frame);
-          if (view) countViews.set(slot, view);
-          else missingCountView = true;
-        }
-      });
-      if (missingCountView) {
-        countImagesRef.current = null;
-        if (!counts) currentCounts!.refreshFloat();
-        else return 0;
-      }
-      const painted = gpuEngine.renderSlotsDirectWithGpuRangeToCanvas(slots, rectangles, context, vminPct, vmaxPct, scaleMode === "log", {
-        width: layout.width, height: layout.height, bgRgb: 0, counts: countImagesRef.current ? countViews : undefined,
-        transform: { zoom: compareZoom, panX: comparePanX, panY: comparePanY }, smooth,
-      });
-      if (painted > 0) {
-        if (!sharedGpuReadyRef.current) { sharedGpuReadyRef.current = true; setSharedGpuReady(true); }
-        onGpuPaint?.(painted);
-      }
-      return painted;
-    }
-    if (!residentSource) {
     const generation = ++gpuRenderGenerationRef.current;
     const panels: {
       canvas: HTMLCanvasElement;
@@ -1915,7 +1446,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
         bitmap?.close();
         return;
       }
-      let painted = 0;
       panels.forEach((panel, index) => {
         if (!panel.canvas.isConnected) return;
         if (panel.canvas.width !== shapeCols) panel.canvas.width = shapeCols;
@@ -1935,59 +1465,11 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
           shapeCols,
           shapeRows,
         );
-        painted++;
       });
       bitmap.close();
-      if (painted > 0) onGpuPaint?.(painted);
     })();
     return panels.length;
-    }
-    const slots: number[] = [];
-    const contexts: GPUCanvasContext[] = [];
-    renderEntries.forEach((entry, localIdx) => {
-      const slot = gpuSlots.get(entry.frame);
-      const canvas = gpuCanvasRefs.current[localIdx];
-      if (slot === undefined || !canvas) return;
-      if (
-        canvas.width !== shapeCols
-        || canvas.height !== shapeRows
-        || !gpuCanvasContextsRef.current[localIdx]
-      ) {
-        gpuCanvasContextsRef.current[localIdx] = gpuEngine.configureCanvas(canvas, shapeCols, shapeRows);
-      }
-      const ctx = gpuCanvasContextsRef.current[localIdx];
-      if (!ctx) return;
-      slots.push(slot);
-      contexts.push(ctx);
-    });
-    const painted = gpuEngine.renderSlotsDirectWithGpuRangeToCanvases(
-      slots, contexts, vminPct, vmaxPct, scaleMode === "log", {
-        width: shapeCols, height: shapeRows, bgRgb: 0,
-        transform: { zoom: compareZoom, panX: comparePanX, panY: comparePanY }, smooth,
-      },
-    );
-    if (painted > 0) onGpuPaint?.(painted);
-    return painted;
-  }, [colormap, comparePaintScheduler, comparePanX, comparePanY, compareZoom, gpuEngine, gpuRanges, gpuSlots, onGpuPaint, onGpuRenderError, renderEntries, residentSource, scaleMode, shapeCols, shapeRows, sharedGpuEnabled, smooth, vmaxPct, vminPct]);
-
-  React.useLayoutEffect(() => {
-    latestComparePaintRef.current = () => { renderGpuSlotsNow(); };
-  }, [renderGpuSlotsNow]);
-
-  React.useLayoutEffect(() => {
-    if (sharedGpuEnabled) {
-      gpuCanvasContextsRef.current.forEach(context => context?.unconfigure());
-      gpuCanvasContextsRef.current = [];
-    }
-    sharedGpuReadyRef.current = false;
-    setSharedGpuReady(false);
-    return () => {
-      sharedContextRef.current?.unconfigure();
-      sharedContextRef.current = null;
-      sharedLayoutRef.current = null;
-      sharedGpuReadyRef.current = false;
-    };
-  }, [gpuEngine, sharedGpuEnabled]);
+  }, [colormap, comparePanX, comparePanY, compareZoom, gpuEngine, gpuRanges, gpuSlots, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
     onGpuRendererReady?.(renderGpuSlotsNow);
@@ -1997,108 +1479,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   React.useEffect(() => {
     renderGpuSlotsNow();
   }, [gpuVersion, renderGpuSlotsNow]);
-
-  React.useEffect(() => {
-    const receive = () => { batchTimingRef.current.received = performance.now(); };
-    const request = () => {
-      const inner = batchModel.get("roi_mode") === "annular" ? batchModel.get("roi_radius_inner") : 0;
-      const key = JSON.stringify([batchModel.get("roi_center"), inner, batchModel.get("roi_radius")]);
-      const requests = batchTimingRef.current.requested;
-      requests.set(key, performance.now());
-      if (requests.size > 512) requests.delete(requests.keys().next().value!);
-    };
-    batchModel.on("change:compare_virtual_image_bytes", receive);
-    batchModel.on("change:roi_center change:roi_mode change:roi_radius_inner change:roi_radius", request);
-    return () => {
-      batchModel.off("change:compare_virtual_image_bytes", receive);
-      batchModel.off("change:roi_center change:roi_mode change:roi_radius_inner change:roi_radius", request);
-    };
-  }, [batchModel]);
-
-  React.useEffect(() => {
-    if (!batchEnabled || !batchCanvasRef.current) return;
-    let disposed = false;
-    const canvas = batchCanvasRef.current;
-    const started = performance.now();
-    setBatchFailed(false);
-    void CompareBatchCanvas.create(canvas, count, shapeRows, shapeCols, scalarType).then(renderer => {
-      if (disposed) { renderer.destroy(); return; }
-      batchRendererRef.current = renderer;
-      canvas.dataset.adapter = renderer.adapter;
-      canvas.dataset.initializationMs = String(performance.now()-started);
-      setBatchReady(true);
-    }).catch(error => {
-      canvas.dataset.batchError = String(error);
-      setBatchFailed(true);
-      batchModel.send({ type: "resident_batch_error", error: String(error) });
-    });
-    return () => { disposed = true; batchRendererRef.current?.destroy(); batchRendererRef.current = null; setBatchReady(false); };
-  }, [batchEnabled, count, shapeRows, shapeCols, scalarType, batchModel]);
-
-  React.useEffect(() => {
-    if (!batchReady || !bytes || !batchEnabled) return;
-    const work = batchWorkRef.current;
-    work.pending = async () => {
-      const renderer = batchRendererRef.current;
-      const canvas = batchCanvasRef.current;
-      const grid = batchGridRef.current;
-      if (!renderer || !canvas || !grid) return;
-      const rect = grid.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      const width = Math.max(1, Math.round(rect.width * dpr));
-      const height = Math.max(1, Math.round(rect.height * dpr));
-      if (canvas.width !== width) canvas.width = width;
-      if (canvas.height !== height) canvas.height = height;
-      const rectangles = new Float32Array(renderEntries.length * 4);
-      const sources = new Uint32Array(renderEntries.length);
-      renderEntries.forEach(({frame}, i) => {
-        const tile = tileRefs.current[i]!.getBoundingClientRect();
-        rectangles.set([(tile.left-rect.left)*dpr,(tile.top-rect.top)*dpr,tile.width*dpr,tile.height*dpr], i*4);
-        sources[i] = indices.indexOf(frame);
-      });
-      const timing = batchTimingRef.current;
-      const received = batchInfo?.received_performance_ms ?? timing.received;
-      const requestKey = JSON.stringify([batchInfo?.center, batchInfo?.inner, batchInfo?.outer]);
-      const requested = timing.requested.get(requestKey);
-      const result = await renderer.render(bytes, rectangles, sources, COLORMAPS[colormap] || COLORMAPS.inferno,
-        { log: scaleMode === "log", auto: autoContrast, min: vminPct, max: vmaxPct, zoom: compareZoom, panX: comparePanX, panY: comparePanY, smooth, dtype: scalarType, divisor: residentDivisor(batchInfo), normalizationOffset: batchInfo?.normalization_offset });
-      if (batchInfo?.validate_display && "readRanges" in renderer) {
-        batchModel.send({type:"resident_display_validation",request_id:batchInfo.request_id,
-          ranges:renderer.readRanges(),logarithmic:scaleMode==="log"});
-      }
-      // GPU completion and a following animation frame are observable browser
-      // milestones. Neither is a physical monitor scanout timestamp.
-      requestAnimationFrame(() => {
-        if (!canvas.isConnected) return;
-        const now = performance.now();
-        const fresh = batchInfo?.request_id !== timing.lastId;
-        const sample = { ...result, fresh, request_id: batchInfo?.request_id,
-          worker_superseded: batchInfo?.worker_superseded,
-          mask_sha256: batchInfo?.detector_mask_sha256,
-          receive_to_frame_ms: received ? now-received : null,
-          request_to_frame_ms: requested !== undefined ? now-requested : null,
-          fresh_interval_ms: fresh && timing.lastPaint ? now-timing.lastPaint : null,
-          frame_time_ms: now, frame_epoch_ms: performance.timeOrigin + now,
-          request_epoch_ms: requested !== undefined ? performance.timeOrigin + requested : null,
-          source_shape: [count,shapeRows,shapeCols] };
-        canvas.dataset.batchPaint = JSON.stringify(sample);
-        if (fresh) { timing.lastPaint = now; timing.lastId = batchInfo?.request_id ?? -1; batchModel.send({type:"resident_batch_paint", ...sample}); }
-      });
-    };
-    const drain = async () => {
-      if (work.busy) return;
-      work.busy = true;
-      try {
-        while (work.pending) { const job = work.pending; work.pending = null; await job(); }
-      } catch (error) {
-        if (batchCanvasRef.current) batchCanvasRef.current.dataset.batchError = String(error);
-        batchModel.send({type:"resident_batch_error", error:String(error)});
-        setBatchReady(false);
-        setBatchFailed(true);
-      } finally { work.busy = false; }
-    };
-    void drain();
-  }, [batchReady,batchEnabled,bytes,batchInfo,renderEntries,indices,colormap,scaleMode,autoContrast,vminPct,vmaxPct,compareZoom,comparePanX,comparePanY,smooth,overlayVersion,count,shapeRows,shapeCols,batchModel]);
 
   const movePreviewFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
     if (dragFrame === targetFrame) return;
@@ -2113,7 +1493,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   }, [displayIndices]);
 
   React.useEffect(() => {
-    if (batchEnabled && !batchFailed) return;
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
     if (gpuEngine) gpuEngine.uploadLUT(colormap, lut);
     const styleKey = [
@@ -2175,59 +1554,7 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
       ctx.putImageData(imageData, 0, 0);
       canvasDrawCacheRef.current.set(frame, { canvas, panel, styleKey });
     });
-    if (batchInfo?.request_id && renderEntries.length === count) {
-      const requestId = batchInfo.request_id;
-      requestAnimationFrame(() => {
-        const timing = batchTimingRef.current;
-        if (timing.lastId === requestId) return;
-        const now = performance.now();
-        const key = JSON.stringify([batchInfo.center,batchInfo.inner,batchInfo.outer]);
-        const requested = timing.requested.get(key);
-        batchModel.send({type:"resident_batch_paint",fresh:true,request_id:requestId,
-          mask_sha256:batchInfo.detector_mask_sha256,panels:count,adapter:"CPU canvas fallback",
-          receive_to_frame_ms:timing.received?now-timing.received:null,
-          request_to_frame_ms:requested!==undefined?now-requested:null,
-          fresh_interval_ms:timing.lastPaint?now-timing.lastPaint:null,
-          frame_time_ms:now,source_shape:[count,shapeRows,shapeCols]});
-        timing.lastId=requestId;timing.lastPaint=now;
-      });
-    }
-    const expected = progressivePage?.expectedIndices ?? [];
-    const drawnExpectedIndices = expected.filter((frame) => {
-      const currentPanel = panelByFrame.get(frame);
-      const drawn = canvasDrawCacheRef.current.get(frame);
-      return Boolean(
-        (currentPanel && drawn?.panel === currentPanel && drawn.canvas.isConnected)
-        || (gpuEngine && gpuSlots?.has(frame)),
-      );
-    });
-    const paintRaf = visiblePaintRafRef.current;
-    if (drawnExpectedIndices.length > 0 && paintRaf.beforePaint === 0 && paintRaf.afterPaint === 0) {
-      paintRaf.beforePaint = requestAnimationFrame(() => {
-        paintRaf.beforePaint = 0;
-        paintRaf.afterPaint = requestAnimationFrame(() => {
-          paintRaf.afterPaint = 0;
-          const currentPage = progressivePageForPaintRef.current;
-          if (!currentPage) return;
-          const currentPanels = visiblePanelByFrameRef.current;
-          const paintedIndices = currentPage.expectedIndices.filter((frame) => {
-            const currentPanel = currentPanels.get(frame);
-            const drawn = canvasDrawCacheRef.current.get(frame);
-            return Boolean(
-              (currentPanel && drawn?.panel === currentPanel && drawn.canvas.isConnected)
-              || (gpuEngine && gpuSlots?.has(frame)),
-            );
-          });
-          recordComparePageFirstPanelPaint(currentPage, paintedIndices);
-          // Performance telemetry is optional and may not be initialized when
-          // a notebook view reconnects from trait state. Scientific paint
-          // acknowledgement must therefore be validated independently.
-          recordComparePageVisiblePaint(currentPage, paintedIndices);
-          onFreshVisiblePaint?.(currentPage, paintedIndices);
-        });
-      });
-    }
-  }, [batchInfo, batchModel, count, batchEnabled, batchReady, batchFailed, autoContrast, colormap, gpuEngine, gpuSlots, gpuVersion, onFreshVisiblePaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+  }, [autoContrast, colormap, gpuEngine, gpuSlots, gpuVersion, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
     if (!gpuEngine || !gpuSlots || kind === "diffraction") return;
@@ -2259,7 +1586,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
       );
       if (!bitmaps) return;
 
-      let painted = 0;
       bitmaps.forEach((bitmap, i) => {
         if (!bitmap) return;
         const entry = gpuEntries[i];
@@ -2277,16 +1603,13 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
         ctx.drawImage(bitmap, 0, 0, shapeCols, shapeRows);
         bitmap.close?.();
         canvasDrawCacheRef.current.delete(entry.frame);
-        painted++;
       });
-      if (painted > 0) onGpuPaint?.(painted);
     })();
   }, [
     kind,
     colormap,
     gpuEngine,
     gpuSlots,
-    onGpuPaint,
     renderEntries,
     scaleMode,
     shapeCols,
@@ -2296,40 +1619,12 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     vminPct,
   ]);
 
-  React.useEffect(() => {
-    return () => {
-      const paintRaf = visiblePaintRafRef.current;
-      if (paintRaf.beforePaint) cancelAnimationFrame(paintRaf.beforePaint);
-      if (paintRaf.afterPaint) cancelAnimationFrame(paintRaf.afterPaint);
-      paintRaf.beforePaint = 0;
-      paintRaf.afterPaint = 0;
-    };
-  }, []);
-
   const displayCount = Math.max(1, renderEntries.length);
   const autoCols = displayCount >= 8 ? 4 : displayCount >= 5 ? 3 : displayCount >= 2 ? 2 : 1;
   const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
-  React.useLayoutEffect(() => {
-    if (!sharedGpuEnabled || !gpuEngine) return;
-    const grid = batchGridRef.current;
-    if (!grid) return;
-    const measure = () => {
-      const tiles = renderEntries.map((_, i) => tileRefs.current[i]);
-      if (tiles.some(tile => !tile)) return;
-      sharedLayoutRef.current = sharedCanvasLayout(grid.getBoundingClientRect(),
-        tiles.map(tile => tile!.getBoundingClientRect()), shapeRows, shapeCols,
-        gpuEngine.getDevice().limits.maxTextureDimension2D);
-      renderGpuSlotsNow();
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(grid);
-    tileRefs.current.slice(0, renderEntries.length).forEach(tile => { if (tile) observer.observe(tile); });
-    return () => observer.disconnect();
-  }, [gpuEngine, sharedGpuEnabled, renderEntries, renderGpuSlotsNow, gridCols, gridGapPx, shapeRows, shapeCols, overlayVersion]);
 
   const resizeGripSx = React.useMemo(() => ({
     position: "absolute",
@@ -2356,7 +1651,8 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     view.panY = comparePanY;
   }, [compareZoom, comparePanX, comparePanY]);
 
-  React.useEffect(() => {
+  // Identity view for a new image shape, a double-click and the Reset button.
+  const resetCompareView = React.useCallback(() => {
     const view = compareViewRef.current;
     view.zoom = 1;
     view.panX = 0;
@@ -2364,6 +1660,10 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     setCompareZoom(1);
     setComparePanX(0);
     setComparePanY(0);
+  }, []);
+
+  React.useEffect(() => {
+    resetCompareView();
   }, [shapeCols, shapeRows]);
 
   React.useEffect(() => {
@@ -2415,14 +1715,8 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
   const handleCompareDoubleClick = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    const view = compareViewRef.current;
-    view.zoom = 1;
-    view.panX = 0;
-    view.panY = 0;
-    setCompareZoom(1);
-    setComparePanX(0);
-    setComparePanY(0);
-  }, []);
+    resetCompareView();
+  }, [resetCompareView]);
 
   const updatePositionFromPointer = React.useCallback((
     tile: HTMLDivElement,
@@ -2434,8 +1728,8 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     if (rect.width <= 0 || rect.height <= 0) return;
     const tileX = ((clientX - rect.left) / rect.width) * shapeCols;
     const tileY = ((clientY - rect.top) / rect.height) * shapeRows;
-    const col = Math.round(Math.max(0, Math.min(shapeCols - 1, (tileX - comparePanX) / compareZoom)));
-    const row = Math.round(Math.max(0, Math.min(shapeRows - 1, (tileY - comparePanY) / compareZoom)));
+    const col = Math.round(Math.max(0, Math.min(shapeCols - 1, canvasToMask(tileX, compareZoom, comparePanX))));
+    const row = Math.round(Math.max(0, Math.min(shapeRows - 1, canvasToMask(tileY, compareZoom, comparePanY))));
     pendingPositionRef.current = [row, col];
     if (commit) {
       cancelAnimationFrame(positionRafRef.current);
@@ -2510,24 +1804,7 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     return () => { if (raf) cancelAnimationFrame(raf); batchModel.off("change:pos_row", changed); batchModel.off("change:pos_col", changed); };
   }, [batchModel, kind, comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar, scanRegion]);
 
-  useResidentChanges(batchEnabled, "panel_tile_dependency", {
-    renderEntries, panels, panelByFrame, indices, progressivePage, sourceLoading, activeIdx, labels, starred, draggingFrame,
-    pendingMoveFrame, themeColors, reorderMode, handleCompareDoubleClick,
-    updatePositionFromPointer, updateRawReadout, hideRawReadout, onSelect, onPendingMoveFrameChange, onReorderFrame,
-    displayIndices, onDragFrameChange, movePreviewFrame, batchReady, sharedGpuReady, shapeCols, shapeRows,
-    imageLeft, imageTop, imageWidth, imageHeight, smooth, panelChromeVisible,
-    onToggleStar, onHide, onResizeStart, mobileGridCols, gridCols, resizeGripSx, kind,
-  });
-  // Keep panel controls and overlay DOM stable when only the exact batch changes.
-  const panelTiles = React.useMemo(() => renderEntries.map(({ frame, panel, gpuLoaded }, localIdx) => {
-          const loaded = panel !== undefined || gpuLoaded;
-          const panelPresentation = progressiveComparePanelPresentation(
-            progressivePage ?? null,
-            frame,
-            loaded,
-          );
-          const waiting = !loaded && (sourceLoading || (progressivePage?.loading ?? false));
-          const placeholderText = waiting ? "Loading" : "Unavailable";
+  const panelTiles = React.useMemo(() => renderEntries.map(({ frame, gpuLoaded }, localIdx) => {
           const active = frame === activeIdx;
           const label = labels && labels.length > frame ? labels[frame] : `Dataset ${frame + 1}`;
           const isStarred = (starred || []).includes(frame);
@@ -2543,21 +1820,18 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
               key={`${frame}-${localIdx}`}
               ref={(node: HTMLDivElement | null) => { tileRefs.current[localIdx] = node; }}
               role="button"
-              aria-label={`Show4DSTEM ${kind === "diffraction" ? "diffraction" : "multiple"} panel ${frame + 1}${panelPresentation.labelSuffix}`}
+              aria-label={`Show4DSTEM ${kind === "diffraction" ? "diffraction" : "multiple"} panel ${frame + 1}`}
               data-comparison-zoom={compareZoom}
               data-comparison-pan={`${comparePanX},${comparePanY}`}
-              aria-busy={panelPresentation.busy}
-              aria-disabled={panelPresentation.disabled}
-              data-show4dstem-panel-cache={panelPresentation.cached ? "cached" : loaded ? "fresh" : "empty"}
               tabIndex={0}
-              draggable={loaded && reorderMode}
+              draggable={reorderMode}
               onDoubleClick={handleCompareDoubleClick}
               onPointerDown={(event) => {
                 const target = event.target instanceof Element ? event.target : null;
-                if (!loaded || reorderMode || target?.closest("button")) return;
+                if (reorderMode || target?.closest("button")) return;
                 try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
                 if (event.shiftKey) {
-                  panDragRef.current={col:event.clientX,row:event.clientY,panX:comparePanX,panY:comparePanY};
+                  panDragRef.current={clientX:event.clientX,clientY:event.clientY,panX:comparePanX,panY:comparePanY};
                   return;
                 }
                 isDraggingPositionRef.current = true;
@@ -2571,19 +1845,17 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                   event.preventDefault();
                   const rect=event.currentTarget.getBoundingClientRect();
                   const view=compareViewRef.current;
-                  view.panX=pan.panX+(event.clientX-pan.col)*shapeCols/rect.width;
-                  view.panY=pan.panY+(event.clientY-pan.row)*shapeRows/rect.height;
+                  view.panX=pan.panX+(event.clientX-pan.clientX)*shapeCols/rect.width;
+                  view.panY=pan.panY+(event.clientY-pan.clientY)*shapeRows/rect.height;
                   if (!view.raf) view.raf=requestAnimationFrame(() => {
                     view.raf=0;setComparePanX(view.panX);setComparePanY(view.panY);
                   });
                   return;
                 }
-                updateRawReadout(localIdx, frame, event.currentTarget, event.clientX, event.clientY);
                 if (!isDraggingPositionRef.current || reorderMode) return;
                 event.preventDefault();
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
               }}
-              onPointerLeave={() => hideRawReadout(localIdx)}
               onPointerUp={(event) => {
                 if (panDragRef.current) {panDragRef.current=null;return;}
                 if (!isDraggingPositionRef.current) return;
@@ -2599,7 +1871,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                 setIsDraggingPosition(false);
               }}
               onClick={() => {
-                if (!loaded) return;
                 if (!reorderMode) {
                   onSelect(frame);
                   return;
@@ -2616,7 +1887,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                 onPendingMoveFrameChange(null);
               }}
               onKeyDown={(event) => {
-                if (!loaded) return;
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
                   if (reorderMode) {
@@ -2634,24 +1904,24 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                 }
               }}
               onDragStart={(event) => {
-                if (!loaded || !reorderMode) return;
+                if (!reorderMode) return;
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", String(frame));
                 setPreviewIndices([...displayIndices]);
                 onDragFrameChange(frame);
               }}
               onDragEnter={(event) => {
-                if (!loaded || !reorderMode || draggingFrame == null || draggingFrame === frame) return;
+                if (!reorderMode || draggingFrame == null || draggingFrame === frame) return;
                 event.preventDefault();
                 movePreviewFrame(draggingFrame, frame);
               }}
               onDragOver={(event) => {
-                if (!loaded || !reorderMode) return;
+                if (!reorderMode) return;
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
               }}
               onDrop={(event) => {
-                if (!loaded || !reorderMode) return;
+                if (!reorderMode) return;
                 event.preventDefault();
                 const rawFrame = event.dataTransfer.getData("text/plain");
                 const dragFrame = rawFrame ? Number(rawFrame) : draggingFrame;
@@ -2668,12 +1938,12 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
               }}
               sx={{
                 position: "relative",
-                bgcolor: batchReady || sharedGpuReady ? "transparent" : "#000",
+                bgcolor: "#000",
                 containerType: "inline-size",
                 border: "none",
                 boxSizing: "border-box",
                 outline: "none",
-                cursor: loaded ? (reorderMode ? "grab" : "crosshair") : waiting ? "progress" : "default",
+                cursor: reorderMode ? "grab" : "crosshair",
                 overflow: "hidden",
                 touchAction: reorderMode ? "auto" : "none",
                 opacity: isDragging ? 0.45 : 1,
@@ -2715,10 +1985,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                 } : {}),
               }}
             >
-              <span ref={node => { readoutRefs.current[localIdx] = node; }}
-                data-show4dstem-exact-readout={frame}
-                style={{position:"absolute",left:4,bottom:4,zIndex:4,pointerEvents:"none",opacity:0,
-                  color:"white",background:"rgba(0,0,0,.55)",fontSize:11,padding:"1px 3px",fontVariantNumeric:"tabular-nums"}} />
               <canvas
                 data-quantem-scientific-output={`show4dstem-compare-${frame}`}
                 ref={(node) => { canvasRefs.current[localIdx] = node; }}
@@ -2732,7 +1998,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                   height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
                   pointerEvents: "none",
-                  opacity: batchReady || sharedGpuReady ? 0 : panel || gpuLoaded ? 1 : 0,
                   transition: "opacity 160ms ease",
                 }}
               />
@@ -2751,31 +2016,10 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                   height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
                   pointerEvents: "none",
-                  opacity: gpuLoaded && !sharedGpuReady ? 1 : 0,
+                  opacity: gpuLoaded ? 1 : 0,
                   zIndex: 2,
                 }}
               />
-              <Box
-                aria-hidden="true"
-                data-show4dstem-panel-loading={loaded ? "false" : "true"}
-                sx={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  bgcolor: themeColors.bgAlt,
-                  color: themeColors.textMuted,
-                  fontSize: 10,
-                  letterSpacing: "0.02em",
-                  opacity: loaded ? 0 : 1,
-                  transition: "opacity 160ms ease",
-                  pointerEvents: "none",
-                  zIndex: 1,
-                }}
-              >
-                {loaded ? "" : placeholderText}
-              </Box>
               <canvas
                 ref={(node) => { overlayRefs.current[localIdx] = node; }}
                 style={{
@@ -2821,7 +2065,7 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                 <span className="show4dstem-full-tile-label">{label}</span>
                 <span className="show4dstem-compact-tile-label">{frame + 1}</span>
               </Box>
-              {loaded && panelChromeVisible && reorderMode && (
+              {panelChromeVisible && reorderMode && (
                 <Box
                   sx={{
                     position: "absolute",
@@ -2843,7 +2087,7 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                   <DragIndicatorIcon sx={{ fontSize: 18 }} />
                 </Box>
               )}
-              {loaded && panelChromeVisible && (
+              {panelChromeVisible && (
                 <Tooltip title={(isStarred ? "Unstar " : "Star ") + label}>
                   <IconButton
                     size="small"
@@ -2888,7 +2132,7 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
                   </IconButton>
                 </Tooltip>
               )}
-              {loaded && panelChromeVisible && (
+              {panelChromeVisible && (
                 <Tooltip title={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide ${label}`}>
                   <IconButton
                     size="small"
@@ -2944,10 +2188,10 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
             </Box>
           );
         }), [
-    renderEntries, progressivePage, sourceLoading, activeIdx, labels, starred, draggingFrame,
+    renderEntries, activeIdx, labels, starred, draggingFrame,
     pendingMoveFrame, themeColors, reorderMode, handleCompareDoubleClick,
-    updatePositionFromPointer, updateRawReadout, hideRawReadout, onSelect, onPendingMoveFrameChange, onReorderFrame,
-    displayIndices, onDragFrameChange, movePreviewFrame, batchReady, sharedGpuReady, shapeCols, shapeRows,
+    updatePositionFromPointer, onSelect, onPendingMoveFrameChange, onReorderFrame,
+    displayIndices, onDragFrameChange, movePreviewFrame, shapeCols, shapeRows,
     imageLeft, imageTop, imageWidth, imageHeight, smooth, panelChromeVisible,
     onToggleStar, onHide, onResizeStart, mobileGridCols, gridCols, resizeGripSx, kind, compareZoom, comparePanX, comparePanY,
   ]);
@@ -2966,51 +2210,10 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
     <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
       <Box sx={{ display: "flex", alignItems: "center", gap: 1, color: themeColors.textMuted, fontSize: 10 }}>
         <span>Scroll to zoom · Shift-drag to pan</span>
-        <Button size="small" sx={{ fontSize: 10, minWidth: 0 }} onClick={() => {
-          compareViewRef.current.zoom = 1;
-          compareViewRef.current.panX = 0;
-          compareViewRef.current.panY = 0;
-          setCompareZoom(1);
-          setComparePanX(0);
-          setComparePanY(0);
-        }}>Reset</Button>
+        <Button size="small" sx={{ fontSize: 10, minWidth: 0 }} onClick={resetCompareView}>Reset</Button>
         <span>{compareZoom.toFixed(1)}×</span>
       </Box>
-      {cacheBadge && (
-        <Box
-          role="status"
-          aria-live="polite"
-          data-testid="show4dstem-compare-cache-status"
-          data-show4dstem-cache-tone={cacheBadge.tone}
-          sx={{
-            display: "inline-flex",
-            alignItems: "center",
-            minHeight: 20,
-            mb: 0.5,
-            px: 0.75,
-            py: 0.25,
-            border: `1px solid ${cacheBadge.tone === "warning" ? "#d97706" : cacheBadge.tone === "fresh" ? "#16a34a" : themeColors.border}`,
-            borderRadius: "10px",
-            bgcolor: cacheBadge.tone === "warning"
-              ? "rgba(217,119,6,0.12)"
-              : cacheBadge.tone === "fresh"
-                ? "rgba(22,163,74,0.1)"
-                : themeColors.controlBg,
-            color: cacheBadge.tone === "warning"
-              ? "#d97706"
-              : cacheBadge.tone === "fresh"
-                ? "#16a34a"
-                : themeColors.textMuted,
-            fontSize: 10,
-            fontWeight: 600,
-            lineHeight: 1.2,
-          }}
-        >
-          {cacheBadge.label}
-        </Box>
-      )}
       <Box
-        ref={batchGridRef}
         sx={{
           position: "relative",
           display: "grid",
@@ -3023,8 +2226,6 @@ const CompareVirtualGrid = React.memo(function CompareVirtualGrid({
           },
         }}
       >
-        <canvas key={sharedGpuEnabled ? "resident" : "batch"} ref={batchCanvasRef} data-quantem-scientific-output="show4dstem-compare-batch" data-resident-transport={sharedGpuEnabled ? "webgpu-resident" : batchInfo?.transport || "jupyter"}
-          style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",opacity:batchReady || sharedGpuReady?1:0,imageRendering:smooth?"auto":"pixelated"}} />
         {panelTiles}
       </Box>
     </Box>
@@ -3048,9 +2249,8 @@ function Show4DSTEM() {
   const [detRows] = useModelState<number>("det_rows");
   const [detCols] = useModelState<number>("det_cols");
 
-  const liveScanDisplayRef = React.useRef(false);
-  const [[posRow, posCol], setPosRow, setPosCol] = useScanPositionState(model, liveScanDisplayRef);
-  const dpPositionLabelRef = React.useRef<HTMLSpanElement | null>(null);
+  const [posRow, setPosRow] = useModelState<number>("pos_row");
+  const [posCol, setPosCol] = useModelState<number>("pos_col");
   const [roiCenterCol, setRoiCenterCol] = useModelState<number>("roi_center_col");
   const [roiCenterRow, setRoiCenterRow] = useModelState<number>("roi_center_row");
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -3062,8 +2262,6 @@ function Show4DSTEM() {
   const [showTitle] = useModelState<boolean>("show_title");
   const [folderWatchState] = useModelState<string>("folder_watch_state");
   const [folderWatchDetail] = useModelState<string>("folder_watch_detail");
-  const [gpuMemoryLabel] = useModelState<string>("gpu_memory_label");
-  const [memoryWarning] = useModelState<string>("memory_warning");
 
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [virtualImageBytes, setVirtualImageBytes] = useModelState<DataView>("virtual_image_bytes");
@@ -3080,9 +2278,7 @@ function Show4DSTEM() {
   const [ssbComputeRefine, setSsbComputeRefine] = useModelState<boolean>("ssb_compute_refine");
   const [ssbComputeLockC10, setSsbComputeLockC10] = useModelState<boolean>("ssb_compute_lock_c10");
   const [ssbComputeLockC12, setSsbComputeLockC12] = useModelState<boolean>("ssb_compute_lock_c12");
-  const [ssbComputeBfSubsample, setSsbComputeBfSubsample] = useModelState<number>("ssb_compute_bf_subsample");
   const [ssbComputeBfPixels] = useModelState<number>("ssb_compute_bf_pixels");
-  const [ssbComputeBfSelectedPixels] = useModelState<number>("ssb_compute_bf_selected_pixels");
   const [ssbComputeC10Nm, setSsbComputeC10Nm] = useModelState<number>("ssb_compute_c10_nm");
   const [ssbComputeC12Nm, setSsbComputeC12Nm] = useModelState<number>("ssb_compute_c12_nm");
   const [ssbComputePhi12Deg, setSsbComputePhi12Deg] = useModelState<number>("ssb_compute_phi12_deg");
@@ -3091,8 +2287,8 @@ function Show4DSTEM() {
   const [ssbComputeCalibrationFilename] = useModelState<string>("ssb_compute_calibration_filename");
 
   // ROI state
-  const [roiRadiusModel, setRoiRadius] = useModelState<number>("roi_radius");
-  const [roiRadiusInnerModel, setRoiRadiusInner] = useModelState<number>("roi_radius_inner");
+  const [roiRadius, setRoiRadius] = useModelState<number>("roi_radius");
+  const [roiRadiusInner, setRoiRadiusInner] = useModelState<number>("roi_radius_inner");
   const [roiMode, setRoiMode] = useModelState<string>("roi_mode");
   const [roiWidth, setRoiWidth] = useModelState<number>("roi_width");
   const [roiHeight, setRoiHeight] = useModelState<number>("roi_height");
@@ -3101,21 +2297,13 @@ function Show4DSTEM() {
   const [dpGlobalMin] = useModelState<number>("dp_global_min");
   const [dpGlobalMax] = useModelState<number>("dp_global_max");
 
-  // VI min/max for normalization (from Python)
-  // viDataMin/viDataMax are derived JS-side from virtual_image_bytes (computed below).
+  // VI min/max (viDataMin/viDataMax) are derived JS-side from virtual_image_bytes below.
   // Keeping them out of Python traits avoids a comm-message ordering race where
   // bytes from click N arrive with min/max from click N-1.
 
   // Detector calibration (for presets)
   const [centerCol] = useModelState<number>("center_col");
   const [centerRow] = useModelState<number>("center_row");
-
-  // Path animation state
-  const [pathPlaying, setPathPlaying] = useModelState<boolean>("path_playing");
-  const [pathIndex, setPathIndex] = useModelState<number>("path_index");
-  const [pathLength] = useModelState<number>("path_length");
-  const [pathIntervalMs] = useModelState<number>("path_interval_ms");
-  const [pathLoop] = useModelState<boolean>("path_loop");
 
   // Frame animation state (5D time/tilt series)
   const [frameIdx, setFrameIdx] = useModelState<number>("frame_idx");
@@ -3128,40 +2316,9 @@ function Show4DSTEM() {
   const [frameReverse, setFrameReverse] = useModelState<boolean>("frame_reverse");
   const [frameBoomerang, setFrameBoomerang] = useModelState<boolean>("frame_boomerang");
   const [viewMode, setViewMode] = useModelState<string>("view_mode");
-  const [compareLayout] = useModelState<string>("compare_layout");
   const [compareCols, setCompareCols] = useModelState<number>("compare_cols");
-  const [compareWireBytes] = useModelState<DataView>("compare_virtual_image_bytes");
+  const [compareVirtualImageBytes] = useModelState<DataView>("compare_virtual_image_bytes");
   const [comparePanelCount] = useModelState<number>("compare_panel_count");
-  const [residentBatchMetadata] = useModelState<CompareVirtualGridProps["batchInfo"]>("resident_batch_info");
-  const [residentStreamConfig] = useModelState<{url?:string;enabled?:boolean;generation?:string}>("resident_stream");
-  useResidentPerformance(model, Boolean(residentStreamConfig?.enabled));
-  const {bytes: compareVirtualImageBytes,info: residentBatchInfo} = useResidentTransport(model,residentStreamConfig,compareWireBytes,residentBatchMetadata);
-  React.useEffect(() => {
-    let lastReceived = "";
-    let lastReceivedPayload: DataView | undefined;
-    const received = () => {
-      const info = model.get("resident_batch_info");
-      const payload = model.get("compare_virtual_image_bytes") as DataView | undefined;
-      if (info?.delivery_ack !== "received" || !payload || payload.byteLength !== info.bytes) return;
-      const key = `${info.generation}:${info.request_id}`;
-      if (key === lastReceived || payload === lastReceivedPayload) return;
-      lastReceived = key;
-      lastReceivedPayload = payload;
-      // The received ArrayBuffer belongs to the browser. CPU pinned storage
-      // may now be reused while this immutable browser batch renders.
-      model.send({type: "resident_batch_received", request_id: info.request_id,
-        generation: info.generation, byte_length: payload.byteLength,
-        received_epoch_ms: Date.now(), received_performance_ms: performance.now()});
-    };
-    model.on("change:compare_virtual_image_bytes", received);
-    model.on("change:resident_batch_info", received);
-    received();
-    return () => {
-      model.off("change:compare_virtual_image_bytes", received);
-      model.off("change:resident_batch_info", received);
-    };
-  }, [model]);
-
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
   const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
@@ -3170,30 +2327,10 @@ function Show4DSTEM() {
   const [compareGroupMode, setCompareGroupMode] = useModelState<string>("compare_group_mode");
   const [comparePageIdx, setComparePageIdx] = useModelState<number>("compare_page_idx");
   const [comparePageCount] = useModelState<number>("compare_page_count");
-  const [comparePanelGapPx] = useModelState<number>("compare_panel_gap_px");
   const [compareMaxPanels] = useModelState<number>("compare_max_panels");
   const [comparePanelOrder, setComparePanelOrder] = useModelState<number[]>("compare_panel_order");
   const [compareHiddenPanels, setCompareHiddenPanels] = useModelState<number[]>("compare_hidden_panels");
   const [compareStarredPanels, setCompareStarredPanels] = useModelState<number[]>("compare_starred_panels");
-  const [comparePageProgressiveEnabled] = useModelState<boolean>("compare_page_progressive_enabled");
-  const [comparePageExpectedIndices] = useModelState<number[]>("compare_page_expected_indices");
-  const [comparePageLoading] = useModelState<boolean>("compare_page_loading");
-  const [comparePageGeneration] = useModelState<number>("compare_page_generation");
-  const [comparePagePanelBytes] = useModelState<DataView>("compare_page_panel_bytes");
-  const [comparePagePanelFrameIdx] = useModelState<number>("compare_page_panel_frame_idx");
-  const [comparePagePanelSlot] = useModelState<number>("compare_page_panel_slot");
-  const [comparePagePanelSequence] = useModelState<number>("compare_page_panel_sequence");
-  const [comparePagePanelCached] = useModelState<boolean>("compare_page_panel_cached");
-  const [comparePageCachedIndices] = useModelState<number[]>("compare_page_cached_indices");
-  const [comparePageCacheState] = useModelState<string>("compare_page_cache_state");
-  const [progressiveComparePage, setProgressiveComparePage] = React.useState<ProgressiveComparePage | null>(null);
-  const progressiveCompareGenerationRef = React.useRef<string | null>(null);
-  const progressiveCompareLastNumericGenerationRef = React.useRef<number | null>(null);
-  const progressiveComparePendingGenerationRef = React.useRef(0);
-  const comparePagePaintAckKeyRef = React.useRef<string | null>(null);
-  const comparePagePaintClientIdRef = React.useRef(
-    `show4dstem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
-  );
 
   React.useEffect(() => {
     try {
@@ -3204,248 +2341,12 @@ function Show4DSTEM() {
     } catch {
       // A closing notebook comm has no mounted UI left to initialize.
     }
-    try {
-      model.send({
-        type: "compare_page_paint_capability",
-        version: 1,
-        active: true,
-        client_id: comparePagePaintClientIdRef.current,
-      });
-    } catch {
-      // A closing notebook comm has no mounted UI left to acknowledge.
-    }
-    return () => {
-      try {
-        model.send({
-          type: "compare_page_paint_capability",
-          version: 1,
-          active: false,
-          client_id: comparePagePaintClientIdRef.current,
-        });
-      } catch {
-        // The comm can already be gone during notebook teardown.
-      }
-    };
   }, [model]);
-
-  const acknowledgeFreshComparePagePaint = React.useCallback((
-    page: ProgressiveComparePage,
-    paintedIndices: number[],
-  ) => {
-    const acknowledgement = freshVisibleComparePagePaintAck(
-      page,
-      paintedIndices,
-      comparePagePaintAckKeyRef.current,
-    );
-    if (!acknowledgement) return;
-    try {
-      model.send(acknowledgement.message);
-      comparePagePaintAckKeyRef.current = acknowledgement.key;
-    } catch {
-      // The delayed after-paint callback may outlive a closing notebook comm.
-    }
-  }, [model]);
-
-  React.useEffect(() => {
-    const handler = (
-      content: ComparePageMessage,
-      buffers?: Array<DataView | ArrayBuffer | Uint8Array>,
-    ) => {
-      const type = String(content?.type || "");
-      if (type === "compare_page_start") {
-        const incomingGeneration = compareMessageGeneration(content);
-        if (incomingGeneration === null) return;
-        const incomingPageValue = content.page_idx ?? content.page;
-        const incomingPage = Number(incomingPageValue);
-        const currentPage = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
-        if (incomingPageValue !== undefined && Number.isFinite(incomingPage) && Math.round(incomingPage) !== currentPage) {
-          recordComparePageStaleDrop();
-          return;
-        }
-        const nextNumber = Number(incomingGeneration);
-        const lastNumber = progressiveCompareLastNumericGenerationRef.current;
-        if (
-          Number.isFinite(nextNumber)
-          && lastNumber !== null
-          && nextNumber <= lastNumber
-        ) {
-          recordComparePageStaleDrop();
-          return;
-        }
-        const next = beginProgressiveComparePage(content);
-        if (!next) return;
-        progressiveCompareGenerationRef.current = next.generation;
-        if (Number.isFinite(nextNumber)) progressiveCompareLastNumericGenerationRef.current = nextNumber;
-        setProgressiveComparePage((current) => retainCachedProgressiveComparePanels(next, current));
-        return;
-      }
-
-      if (type !== "compare_panel" && type !== "compare_page_complete") return;
-      const generation = compareMessageGeneration(content);
-      if (generation === null || generation !== progressiveCompareGenerationRef.current) {
-        recordComparePageStaleDrop();
-        return;
-      }
-      setProgressiveComparePage((current) => {
-        if (!current || current.generation !== generation) return current;
-        if (type === "compare_panel") {
-          return mergeProgressiveComparePanel(
-            current,
-            content,
-            buffers,
-            Math.max(1, shapeRows * shapeCols),
-          ) ?? current;
-        }
-        return completeProgressiveComparePage(current, content) ?? current;
-      });
-    };
-    model.on("msg:custom", handler);
-    return () => model.off("msg:custom", handler);
-  }, [model, shapeCols, shapeRows]);
-
-  React.useEffect(() => {
-    const sequence = Math.max(0, Math.round(Number(comparePagePanelSequence) || 0));
-    const frame = Math.round(Number(comparePagePanelFrameIdx));
-    if (sequence <= 0 || frame < 0 || !comparePagePanelBytes || comparePagePanelBytes.byteLength === 0) return;
-    const generation = String(Math.round(Number(comparePageGeneration) || 0));
-    const page = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
-    setProgressiveComparePage((current) => {
-      const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
-      const base = current && current.generation === generation
-        ? current
-        : {
-            generation,
-            page,
-            expectedIndices: [...expected],
-            panels: new Map<number, Float32Array>(),
-            cachedIndices: new Set<number>(),
-            cacheState: "off" as const,
-            loading: true,
-            complete: false,
-          };
-      const withCacheMetadata = mergeProgressiveCompareCacheMetadata(
-        base,
-        comparePageCachedIndices,
-        comparePageCacheState,
-      );
-      return mergeProgressiveComparePanel(
-        withCacheMetadata,
-        {
-          type: "compare_panel",
-          generation,
-          page_idx: page,
-          frame_idx: frame,
-          slot: Math.round(Number(comparePagePanelSlot) || 0),
-          cached: Boolean(comparePagePanelCached),
-        },
-        [comparePagePanelBytes],
-        Math.max(1, shapeRows * shapeCols),
-      ) ?? withCacheMetadata;
-    });
-  }, [
-    comparePageCachedIndices,
-    comparePageCacheState,
-    comparePageExpectedIndices,
-    comparePageGeneration,
-    comparePagePanelBytes,
-    comparePagePanelCached,
-    comparePagePanelFrameIdx,
-    comparePagePanelSequence,
-    comparePagePanelSlot,
-    model,
-    shapeCols,
-    shapeRows,
-  ]);
-
-  React.useEffect(() => {
-    if (!comparePageProgressiveEnabled) {
-      progressiveCompareGenerationRef.current = null;
-      setProgressiveComparePage(null);
-    }
-  }, [comparePageProgressiveEnabled]);
-
-  React.useEffect(() => {
-    if (!comparePageProgressiveEnabled) return;
-    const generation = String(Math.round(Number(comparePageGeneration) || 0));
-    const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
-    const page = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
-    setProgressiveComparePage((current) => {
-      if (current?.generation.startsWith("pending:") && current.generation !== generation) {
-        return current;
-      }
-      if (!current && expected.length === 0) return current;
-      const base = current && current.generation === generation
-        ? {
-            ...current,
-            expectedIndices: expected.length > 0 ? [...expected] : current.expectedIndices,
-          }
-        : {
-            generation,
-            page,
-            expectedIndices: [...expected],
-            panels: new Map<number, Float32Array>(),
-            cachedIndices: new Set<number>(),
-            cacheState: "off" as const,
-            loading: Boolean(comparePageLoading),
-            complete: false,
-          };
-      progressiveCompareGenerationRef.current = generation;
-      return mergeProgressiveCompareCacheMetadata(
-        base,
-        comparePageCachedIndices,
-        comparePageCacheState,
-      );
-    });
-  }, [
-    comparePageCachedIndices,
-    comparePageCacheState,
-    comparePageExpectedIndices,
-    comparePageGeneration,
-    comparePageLoading,
-    comparePageProgressiveEnabled,
-    model,
-  ]);
-
-  React.useEffect(() => {
-    if (comparePageLoading) return;
-    const generation = String(Math.round(Number(comparePageGeneration) || 0));
-    const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
-    const durable = Array.isArray(comparePanelIndices) ? comparePanelIndices : [];
-    if (shouldClearProgressiveComparePage(false, expected, durable)) {
-      progressiveCompareGenerationRef.current = null;
-      setProgressiveComparePage(null);
-      return;
-    }
-    setProgressiveComparePage((current) => {
-      if (!current || current.generation !== generation || current.complete) return current;
-      return {
-        ...mergeProgressiveCompareCacheMetadata(
-          current,
-          comparePageCachedIndices,
-          comparePageCacheState,
-        ),
-        expectedIndices: reconcileCompletedCompareIndices(
-          current.expectedIndices,
-          durable,
-        ),
-        loading: false,
-        complete: true,
-      };
-    });
-  }, [
-    comparePageCachedIndices,
-    comparePageCacheState,
-    comparePageExpectedIndices,
-    comparePageGeneration,
-    comparePageLoading,
-    comparePanelIndices,
-  ]);
 
   // Profile line state (synced with Python)
   const [profileLine, setProfileLine] = useModelState<{row: number; col: number}[]>("profile_line");
   const [profileWidth] = useModelState<number>("profile_width");
 
-  // Auto-detection trigger
   // ─────────────────────────────────────────────────────────────────────────
   // Local State (UI-only, not synced to Python)
   // ─────────────────────────────────────────────────────────────────────────
@@ -3463,12 +2364,8 @@ function Show4DSTEM() {
     const [row, col] = pending;
     scanPositionPendingRef.current = null;
     scanPositionCurrentRef.current = [row, col];
-    if (liveScanDisplayRef.current) {
-      if (dpPositionLabelRef.current) dpPositionLabelRef.current.textContent = `DP at (${row}, ${col})`;
-    } else {
-      setLocalPosRow(row);
-      setLocalPosCol(col);
-    }
+    setLocalPosRow(row);
+    setLocalPosCol(col);
     model.set("pos_row", row);
     model.set("pos_col", col);
     model.save_changes();
@@ -3514,59 +2411,41 @@ function Show4DSTEM() {
   // Python comm message per animation frame. Without this, drag fires 60+
   // events/sec at >100ms Python compute each → queue piles up → laggy UX.
   const roiCenterPendingRef = React.useRef<[number, number] | null>(null);
-  const drawDpLiveRef = React.useRef<((center?: [number, number]) => void) | null>(null);
-  const isResidentCompareDrag = React.useCallback(() => Boolean(model.get("_rans_url"))
-    && ["multiple", "compare"].includes(String(model.get("view_mode")))
-    && Number(model.get("n_frames")) > 1
-    && normaliseViSource(model.get("vi_source")) === "roi", [model]);
   const roiCenterRafRef = React.useRef<number | null>(null);
   const flushRoiCenter = React.useCallback((paint = true) => {
     if (roiCenterPendingRef.current) {
-      const [r, c] = roiCenterPendingRef.current;
-      if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
-        // The GPU consumes this center directly; publish traits when the drag settles.
-        if (paint) drawDpLiveRef.current?.([r, c]);
-      } else {
-        writeRoiCenterModel(r, c);
-        roiCenterPendingRef.current = null;
-        setLocalKRow(r);
-        setLocalKCol(c);
-      }
+      const [row, col] = roiCenterPendingRef.current;
+      writeRoiCenterModel(row, col);
+      roiCenterPendingRef.current = null;
+      setLocalKRow(row);
+      setLocalKCol(col);
     }
     if (paint) roiCenterRafRef.current = null;
-  }, [isResidentCompareDrag, writeRoiCenterModel]);
+  }, [writeRoiCenterModel]);
   const queueRoiCenter = React.useCallback((row: number, col: number) => {
     roiCenterPendingRef.current = [row, col];
     if (roiCenterRafRef.current === null) {
       roiCenterRafRef.current = requestAnimationFrame(() => flushRoiCenter());
     }
   }, [flushRoiCenter]);
-  // Both circular handles preserve latest geometry for resident computation;
-  // Imperative ring paints and nonresident model writes remain RAF-coalesced.
-  const roiRadius = roiRadiusModel;
-  const roiRadiusInner = roiRadiusInnerModel;
+  // Radius drags keep the latest geometry in refs (read by the DP overlay and
+  // the live recompute) and write the model at most once per animation frame.
   const roiRadiusPendingRef = React.useRef<number | null>(null);
   const roiRadiusInnerPendingRef = React.useRef<number | null>(null);
   const roiRadiusRafRef = React.useRef<number | null>(null);
   const flushRoiRadius = React.useCallback((paint = true) => {
     if (paint && roiRadiusRafRef.current !== null) cancelAnimationFrame(roiRadiusRafRef.current);
-    if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
-      // Keep the refs current for every scientific update. Publish final traits
-      // after release; ring repaint is independent of scientific submission.
-      if (paint) drawDpLiveRef.current?.();
-    } else {
-      const updates: Record<string, number> = {};
-      if (roiRadiusPendingRef.current !== null) updates.roi_radius = roiRadiusPendingRef.current;
-      if (roiRadiusInnerPendingRef.current !== null) updates.roi_radius_inner = roiRadiusInnerPendingRef.current;
-      roiRadiusPendingRef.current = null;
-      roiRadiusInnerPendingRef.current = null;
-      if (Object.keys(updates).length) {
-        for (const [name, radius] of Object.entries(updates)) model.set(name, radius);
-        model.save_changes();
-      }
+    const updates: Record<string, number> = {};
+    if (roiRadiusPendingRef.current !== null) updates.roi_radius = roiRadiusPendingRef.current;
+    if (roiRadiusInnerPendingRef.current !== null) updates.roi_radius_inner = roiRadiusInnerPendingRef.current;
+    roiRadiusPendingRef.current = null;
+    roiRadiusInnerPendingRef.current = null;
+    if (Object.keys(updates).length) {
+      for (const [name, radius] of Object.entries(updates)) model.set(name, radius);
+      model.save_changes();
     }
     if (paint) roiRadiusRafRef.current = null;
-  }, [isResidentCompareDrag, model]);
+  }, [model]);
   const sendRoiRadius = React.useCallback((radius: number, boundary: "inner" | "outer" = "outer") => {
     if (boundary === "inner") roiRadiusInnerPendingRef.current = radius;
     else roiRadiusPendingRef.current = radius;
@@ -3581,29 +2460,17 @@ function Show4DSTEM() {
   const requestViFinalizeRef = React.useRef<(() => void) | null>(null);
   const requestCompareViLiveRef = React.useRef<(() => void) | null>(null);
   const compareViLiveRafRef = React.useRef<number | null>(null);
-  const compareViLiveMicrotaskRef = React.useRef<(() => void) | null>(null);
   const compareViLiveInFlightRef = React.useRef(false);
   const compareViLivePendingRef = React.useRef(false);
   const requestDpFrameLiveRef = React.useRef<(() => void) | null>(null);
   const dpFrameLiveRafRef = React.useRef<number | null>(null);
   const requestCompareViLive = React.useCallback(() => {
-    if (dpRoiInteractiveRef.current && isResidentCompareDrag()) {
-      if (compareViLiveMicrotaskRef.current) return;
-      const dispatch = () => {
-        if (compareViLiveMicrotaskRef.current !== dispatch) return;
-        compareViLiveMicrotaskRef.current = null;
-        requestCompareViLiveRef.current?.();
-      };
-      compareViLiveMicrotaskRef.current = dispatch;
-      queueMicrotask(dispatch);
-      return;
-    }
     if (compareViLiveRafRef.current !== null) return;
     compareViLiveRafRef.current = requestAnimationFrame(() => {
       compareViLiveRafRef.current = null;
       requestCompareViLiveRef.current?.();
     });
-  }, [isResidentCompareDrag]);
+  }, []);
   const requestDpFrameLive = React.useCallback(() => {
     if (dpFrameLiveRafRef.current !== null) return;
     dpFrameLiveRafRef.current = requestAnimationFrame(() => {
@@ -3624,7 +2491,6 @@ function Show4DSTEM() {
   const finishDpRoiInteraction = React.useCallback(() => {
     const wasInteractive = dpRoiInteractiveRef.current;
     dpRoiInteractiveRef.current = false;
-    compareViLiveMicrotaskRef.current = null;
     if (compareViLiveRafRef.current !== null) {
       cancelAnimationFrame(compareViLiveRafRef.current);
       compareViLiveRafRef.current = null;
@@ -3645,11 +2511,12 @@ function Show4DSTEM() {
   const [isDraggingResizeInner, setIsDraggingResizeInner] = React.useState(false); // For annular inner handle
   const [isHoveringResize, setIsHoveringResize] = React.useState(false);
   const [isHoveringResizeInner, setIsHoveringResizeInner] = React.useState(false);
-  const resizeAspectRef = React.useRef<number | null>(null);
+  const resizeStartRef = React.useRef<DetectorResizeStart | null>(null);
   // VI ROI drag/resize states (same pattern as DP)
   const [isDraggingViRoi, setIsDraggingViRoi] = React.useState(false);
   const [isDraggingViRoiResize, setIsDraggingViRoiResize] = React.useState(false);
   const [isHoveringViRoiResize, setIsHoveringViRoiResize] = React.useState(false);
+  const viResizeStartRef = React.useRef<DetectorResizeStart | null>(null);
   // Independent colormaps for DP and VI panels
   const [showDpColorbar, setShowDpColorbar] = useModelState<boolean>("dp_show_colorbar");
   const [dpColormap, setDpColormap] = useModelState<string>("dp_colormap");
@@ -3668,7 +2535,7 @@ function Show4DSTEM() {
   const [dpScaleMode, setDpScaleMode] = useModelState<"linear" | "log">("dp_scale_mode");
   const [viScaleMode, setViScaleMode] = useModelState<"linear" | "log">("vi_scale_mode");
   // VI auto-contrast (1st/99th percentile clip) + Smooth (CSS bilinear blit).
-  // DP doesn't need them — Bragg spots read best with the slider's percentile
+  // DP doesn't need them: Bragg spots read best with the slider's percentile
   // range and nearest-neighbor blit.
   const [viAutoContrast, setViAutoContrast] = useModelState<boolean>("vi_auto_contrast");
   const [viSmooth, setViSmooth] = useModelState<boolean>("vi_smooth");
@@ -3677,9 +2544,9 @@ function Show4DSTEM() {
     if (on) {
       viPreAutoPctRef.current = [viVminPct, viVmaxPct];
     } else if (viPreAutoPctRef.current) {
-      const [vmn, vmx] = viPreAutoPctRef.current;
-      setViVminPct(vmn);
-      setViVmaxPct(vmx);
+      const [savedVminPct, savedVmaxPct] = viPreAutoPctRef.current;
+      setViVminPct(savedVminPct);
+      setViVmaxPct(savedVmaxPct);
       viPreAutoPctRef.current = null;
     }
     setViAutoContrast(on);
@@ -3710,18 +2577,6 @@ function Show4DSTEM() {
   const [viGpuVersion, setViGpuVersion] = React.useState(0);
   const [viGpuRetainedReady, setViGpuRetainedReady] = React.useState(false);
   const viGpuImageRef = React.useRef<ViGpuImage | null>(null);
-  const dpGpuCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  const dpGpuDisplayRef = React.useRef<ResidentDpDisplay | null>(null);
-  const dpGpuOptionsRef = React.useRef<DpDisplayOptions | null>(null);
-  const [dpGpuReady, setDpGpuReady] = React.useState(false);
-  const [dpGpuPending, setDpGpuPending] = React.useState(false);
-  const clearDpGpuDisplay = () => {
-    liveScanDisplayRef.current = false;
-    dpGpuDisplayRef.current?.destroy();
-    dpGpuDisplayRef.current = null;
-    setDpGpuReady(false);
-  };
-
   // GPU-resident compare panels: frame index -> engine colormap slot. Written by
   // the interactive compare recompute (no readback), consumed by the grid painter.
   const [compareGpuVersion, setCompareGpuVersion] = React.useState(0);
@@ -3736,80 +2591,19 @@ function Show4DSTEM() {
     }
     dpRoiInteractiveRef.current = true;
   }, []);
-  const compareGpuRenderNowRef = React.useRef<CompareGpuRenderer | null>(null);
+  const compareGpuRenderNowRef = React.useRef<(() => number) | null>(null);
   const compareIncrementalRef = React.useRef<{
     mask: Uint32Array;
     buffers: Map<number, GPUBuffer>;
     indicesKey: string;
   } | null>(null);
-  const liveCompareViStatsRef = React.useRef({
-    computeTimes: [] as number[],
-    paintTimes: [] as number[],
-    lastComputeMs: 0,
-    lastPaintMs: 0,
-    lastAdoptedPanels: 0,
-    lastRequestedPanels: 0,
-    lastPaintedPanels: 0,
-    lastRangeReadbackBytes: 0,
-  });
-  const publishLiveCompareViStats = React.useCallback((
-    event: string,
-    detail: { ms?: number; adoptedPanels?: number; requestedPanels?: number; paintedPanels?: number; addedPixels?: number; removedPixels?: number; rangeReadbackBytes?: number },
-  ) => {
-    const now = performance.now();
-    const stats = liveCompareViStatsRef.current;
-    if (event !== "paint") {
-      if ((detail.adoptedPanels ?? 0) > 0) stats.computeTimes.push(now);
-      stats.lastComputeMs = detail.ms ?? 0;
-      stats.lastAdoptedPanels = detail.adoptedPanels ?? 0;
-      stats.lastRequestedPanels = detail.requestedPanels ?? 0;
-      stats.lastRangeReadbackBytes = detail.rangeReadbackBytes ?? 0;
-    } else {
-      stats.paintTimes.push(now);
-      stats.lastPaintMs = now;
-      stats.lastPaintedPanels = detail.paintedPanels ?? 0;
-    }
-    const cutoff = now - 1000;
-    while (stats.computeTimes.length && stats.computeTimes[0] < cutoff) stats.computeTimes.shift();
-    while (stats.paintTimes.length && stats.paintTimes[0] < cutoff) stats.paintTimes.shift();
-    const recentCompute = stats.computeTimes.length;
-    const recentPaint = stats.paintTimes.length;
-    const payload = {
-      event,
-      gpuOnlyHotPath: stats.lastRangeReadbackBytes === 0,
-      rangeReadbackBytes: stats.lastRangeReadbackBytes,
-      computeFps: Math.round(recentCompute * 10) / 10,
-      paintFps: Math.round(recentPaint * 10) / 10,
-      lastComputeMs: Math.round(stats.lastComputeMs * 10) / 10,
-      lastAdoptedPanels: stats.lastAdoptedPanels,
-      lastRequestedPanels: stats.lastRequestedPanels,
-      lastPaintedPanels: stats.lastPaintedPanels,
-      addedPixels: detail.addedPixels ?? 0,
-      removedPixels: detail.removedPixels ?? 0,
-      updatedAtMs: Math.round(now),
-      note: "computeFps counts fresh GPU virtual-image buffers only; paintFps counts WebGPU render submissions, including repeats of the latest image; it does not measure physical presentation.",
-    };
-    const statsWindow = window as unknown as {
-      __sh4dLiveViStats?: Record<string, unknown>;
-      __sh4dLiveCompareStats?: Record<string, unknown>;
-      __sh4dLiveCompareHistory?: Record<string, unknown>[];
-    };
-    statsWindow.__sh4dLiveViStats = payload;
-    statsWindow.__sh4dLiveCompareStats = payload;
-    const history = statsWindow.__sh4dLiveCompareHistory ?? [];
-    history.push(payload);
-    if (history.length > 240) history.splice(0, history.length - 240);
-    statsWindow.__sh4dLiveCompareHistory = history;
-  }, []);
   const rawVirtualImageVersionRef = React.useRef(0);
   const viGpuColormapRef = React.useRef<GPUColormapEngine | null>(null);
   const viGpuColormapDeviceRef = React.useRef<GPUDevice | null>(null);
   const ensureViGpuColormap = React.useCallback((
     backend: DetectorCompute,
-  ): GPUColormapEngine | null => {
-    const maybeDevice = backend as unknown as { getDevice?: () => GPUDevice };
-    const device = typeof maybeDevice.getDevice === "function" ? maybeDevice.getDevice() : null;
-    if (!device) return null;
+  ): GPUColormapEngine => {
+    const device = backend.getDevice();
     if (!viGpuColormapRef.current || viGpuColormapDeviceRef.current !== device) {
       viGpuColormapRef.current?.destroy();
       viGpuColormapRef.current = new GPUColormapEngine(device);
@@ -3820,8 +2614,7 @@ function Show4DSTEM() {
   const clearViGpuDisplay = React.useCallback(() => {
     if (!viGpuImageRef.current) return;
     viGpuImageRef.current = null;
-    publishShow4DSTEMViDisplay({ gpuBufferToDisplay: false, rendered: false });
-    setViGpuVersion(v => v + 1);
+    setViGpuVersion(version => version + 1);
   }, []);
 
   React.useEffect(() => () => {
@@ -3840,20 +2633,9 @@ function Show4DSTEM() {
   // so the browser masked-sum (u32 accumulate) is bit-exact to the kernel.
   const [offline] = useModelState<boolean>("offline");
   const [offlineBackendLoading, setOfflineBackendLoading] = React.useState(false);
-  const [residentSeriesLoading, setResidentSeriesLoading] = React.useState(false);
   const [offlineBackendStatus, setOfflineBackendStatus] = React.useState("");
   const [offlineBackendError, setOfflineBackendError] = React.useState("");
-  const h5SourceAvailable = Boolean(
-    model.get("_h5_url")
-    || model.get("_h5_urls")
-    || model.get("_lazy_url")
-    || model.get("_lazy_urls")
-  );
-  const ransSourceAvailable = Boolean(model.get("_rans_url"));
-  const qemSource = model.get("_rans_format") === "qem-v1";
-  const source112Source = model.get("_rans_format") === "source112-tans1024-pair-v1";
-  const [ransLocalFiles, setRansLocalFiles] = React.useState<File[] | null>(null);
-  const [ransLocalDirectory, setRansLocalDirectory] = React.useState<Parameters<typeof RansResidentSet.loadLocal>[1] | null>(null);
+  const h5SourceAvailable = Boolean(model.get("_h5_urls"));
   const [h5LocalFilesGranted, setH5LocalFilesGranted] = React.useState(show4DSTEMHasLocalFiles());
   const [h5LocalSourceStatus, setH5LocalSourceStatus] = React.useState("");
   const h5LocalInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -3872,32 +2654,16 @@ function Show4DSTEM() {
   const onH5LocalInput = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files ? Array.from(event.target.files) : [];
     if (!files.length) return;
-    if (ransSourceAvailable) {
-      setRansLocalDirectory(null);
-      setRansLocalFiles(files);
-      setH5LocalSourceStatus("Local lossless source selected");
-      return;
-    }
     setShow4DSTEMLocalFiles(files);
     setH5LocalFilesGranted(true);
     setH5LocalSourceStatus(`${files.length} local HDF5 file${files.length === 1 ? "" : "s"} granted`);
-  }, [ransSourceAvailable]);
+  }, []);
   const grantH5LocalFiles = React.useCallback(async () => {
     setH5LocalSourceStatus("");
-    if (qemSource || source112Source) {
-      h5LocalInputRef.current?.click();
-      return;
-    }
     const picker = (globalThis as Show4DSTEMWindow).showDirectoryPicker;
     if (picker) {
       try {
         const handle = await picker.call(globalThis, { mode: "read", startIn: "downloads" });
-        if (ransSourceAvailable) {
-          setRansLocalFiles(null);
-          setRansLocalDirectory(handle as Parameters<typeof RansResidentSet.loadLocal>[1]);
-          setH5LocalSourceStatus("Local lossless source selected");
-          return;
-        }
         const files = await collectShow4DSTEMLocalH5Files(
           handle as Parameters<typeof collectShow4DSTEMLocalH5Files>[0],
         );
@@ -3908,13 +2674,13 @@ function Show4DSTEM() {
           return;
         }
         setH5LocalSourceStatus("No HDF5 files found in that folder");
-      } catch (err) {
-        const name = err instanceof DOMException ? err.name : "";
-        if (name !== "AbortError") console.warn("Could not use directory picker for local HDF5 files", err);
+      } catch (error) {
+        const name = error instanceof DOMException ? error.name : "";
+        if (name !== "AbortError") console.warn("Could not use directory picker for local HDF5 files", error);
       }
     }
     h5LocalInputRef.current?.click();
-  }, [qemSource, source112Source, ransSourceAvailable]);
+  }, []);
   React.useEffect(() => {
     if (!offline) {
       setWebgpuDpcReady(false);
@@ -3924,79 +2690,34 @@ function Show4DSTEM() {
       return;
     }
     let disposed = false;
-    const sourceLoadAbort = new AbortController();
     let detach: (() => void) | null = null;
     setOfflineBackendLoading(true);
     setOfflineBackendError("");
     setOfflineBackendStatus(h5SourceAvailable ? "Loading WebGPU source" : "Loading offline 4D-STEM data");
     (async () => {
       const scanRows = model.get("shape_rows"), scanCols = model.get("shape_cols");
-      const detR = model.get("det_rows"), detC = model.get("det_cols");
-      // Companion mode: fetch the stack from a sibling file (mount already happened
-      // on the tiny widget-state JSON, and the inline initial virtual image is
-      // already painted - so this runs in the background). Inline mode: read the
-      // embedded bytes. Either way, create() infers uint8 vs uint16 from length.
-      const offlineUrl = model.get("_offline_url") as string | undefined;
-      const chunksMeta = model.get("_offline_chunks") as string | undefined;
-      const bslz4Meta = model.get("_offline_bslz4") as string | undefined;
-      const gunzip = async (b: Uint8Array) => new Uint8Array(await new Response(new Blob([b as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+      const detectorRows = model.get("det_rows"), detectorCols = model.get("det_cols");
+      // Inline mode: the embedded gzip stack. Browser HDF5 sources load below.
+      const gunzip = async (compressed: Uint8Array) => new Uint8Array(await new Response(new Blob([compressed as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
       let compute: DetectorCompute | null = null;
       let cpuStack: Uint8Array | null = null;  // full decompressed stack for the per-frame probe (single-chunk only)
       // Multi-VOLUME (5D): several datasets, decoded LAZILY (decode-on-scrub) with a
       // small LRU of resident volumes. Only the viewed dataset (plus a few recent)
       // lives in VRAM, so it runs on a laptop regardless of how many h5 files - and
       // first paint is one decode, not N. The frame slider picks the active dataset.
-      let computes: (DetectorCompute)[] = [];   // resident set for single / non-lazy paths
-      let volMetas: any[] = [];                  // multi-volume descriptors (lazy)
       const volCache = new Map<number, DetectorCompute>();   // LRU: idx -> decoded volume
       const volLoadPromises = new Map<number, Promise<DetectorCompute | null>>();
       const inlineVolCache = new Map<number, DetectorCompute>(); // LRU for inline gzip 5D exports
+      // Recent and compared volumes kept hot for instant scrub and detector drags.
       const compareResidentTarget = Math.max(3, Math.min(12, Math.max(1, Number(model.get("compare_max_panels") || 3))));
-      const MAX_RESIDENT = compareResidentTarget; // recent / compare volumes kept hot for instant scrub and detector drags
       let latestResidentVolumeIndex: number | null = null;
       let volumeCount = 0;
       let getVol: ((idx: number) => Promise<DetectorCompute | null>) | null = null;
       let initialVolumeLoad: Promise<DetectorCompute | null> | null = null;
       let h5VolumePreload: Promise<void> | null = null;
       let h5VolumePreloadDone = false;
-      // Browser HDF5 source: normal CLI exports use H5 URLs below. Lazy URLs are
-      // an explicit internal source path, not the default CLI launch path.
-      const lazyUrl = model.get("_lazy_url") as string | undefined;
-      const lazyUrlsJson = model.get("_lazy_urls") as string | undefined;
-      const lazyUrls = (() => {
-        if (!lazyUrlsJson) return [] as string[];
-        try {
-          const parsed = JSON.parse(lazyUrlsJson);
-          return Array.isArray(parsed) ? parsed.map((value) => String(value)).filter(Boolean) : [];
-        } catch {
-          return [] as string[];
-        }
-      })();
-      const h5Url = model.get("_h5_url") as string | undefined;
+      // Browser HDF5 source: the CLI WebGPU export lists its linked masters here.
       const h5UrlsJson = model.get("_h5_urls") as string | undefined;
-      const ransUrl = (model.get("_rans_url") as string | undefined) || "";
-      let ransSet: RansResidentSet | Source112ResidentSet | null = null;
-      let refreshResidentProgress: (() => void) | null = null;
-      let interactionUntil = 0;
-      const noteInteraction = (event: PointerEvent) => {
-        if (event.buttons) interactionUntil = performance.now() + 150;
-      };
-      const yieldToInteraction = async () => {
-        while (performance.now() < interactionUntil) {
-          sourceLoadAbort.signal.throwIfAborted();
-          await new Promise(resolve => setTimeout(resolve, 16));
-        }
-      };
-      const sourceDetectorMask = (
-        state: Parameters<typeof buildDetectorMask>[0], rows: number, cols: number,
-      ): Uint32Array => {
-        const mask = buildDetectorMask(state, rows, cols);
-        // Counts and presentation means must use the same admitted detector area.
-        if (ransSet instanceof Source112ResidentSet) {
-          for (const pixel of ransSet.badPx) mask[pixel] = 0;
-        }
-        return mask;
-      };
       const h5Urls = (() => {
         if (!h5UrlsJson) return [] as string[];
         try {
@@ -4021,21 +2742,14 @@ function Show4DSTEM() {
         .__QT_H5_ALLOW_U16_MULTI_PRELOAD === true;
       const h5RequestedResidentLimit = show4DSTEMGlobalInt(
         "__QT_H5_MAX_RESIDENT",
-        MAX_RESIDENT,
+        compareResidentTarget,
         1,
-        MAX_RESIDENT,
+        compareResidentTarget,
       );
       const h5ResidentLimit = h5UsesNativeU16 && !h5AllowU16MultiResident
         ? 1
         : h5RequestedResidentLimit;
-      if ((qemSource || source112Source) && !ransLocalFiles?.length) {
-        if (!disposed) {
-          setOfflineBackendStatus(source112Source ? "Select the complete encoded data folder to load all 66 acquisitions" : "Select the exported QEM files to load the lossless source");
-          setOfflineBackendLoading(false);
-        }
-        return;
-      }
-      if (requireLocalH5Files && (h5Url || h5Urls.length) && !show4DSTEMHasLocalFiles()) {
+      if (requireLocalH5Files && h5Urls.length && !show4DSTEMHasLocalFiles()) {
         if (!disposed) {
           setOfflineBackendStatus("Waiting for local HDF5 files");
           setOfflineBackendLoading(false);
@@ -4043,14 +2757,13 @@ function Show4DSTEM() {
         return;
       }
       const hasInlineViMaps = () => {
-        const preset = model.get("vi_preset_maps_bytes") as DataView | undefined;
         const product = model.get("vi_product_maps_bytes") as DataView | undefined;
-        return Boolean((preset && preset.byteLength > 0) || (product && product.byteLength > 0));
+        return Boolean(product && product.byteLength > 0);
       };
       const h5FamilyBase = (sourceUrl: string): string =>
         sourceUrl.replace(/_master\.h5(?:[?#].*)?$/, "");
-      const h5DataFileUrl = (sourceUrl: string, n: number): string =>
-        `${h5FamilyBase(sourceUrl)}_data_${String(n).padStart(6, "0")}.h5`;
+      const h5DataFileUrl = (sourceUrl: string, fileNumber: number): string =>
+        `${h5FamilyBase(sourceUrl)}_data_${String(fileNumber).padStart(6, "0")}.h5`;
       const h5RawFileCache = new Map<string, Promise<ArrayBuffer | null>>();
       const h5FetchCached = (url: string): Promise<ArrayBuffer | null> => {
         const existing = h5RawFileCache.get(url);
@@ -4071,9 +2784,7 @@ function Show4DSTEM() {
         if (!disposed) setOfflineBackendStatus(`Loading ${label}`);
         let h5BadPx = new Uint32Array(0);
         const embeddedBadPxJson = model.get("_offline_bad_px") as string | undefined;
-        const h5Uint8Lossless = Boolean(model.get("_h5_uint8_lossless"));
-        const low8Only = h5Uint8Lossless ||
-          (globalThis as { __QT_H5_FORCE_LOW8?: boolean }).__QT_H5_FORCE_LOW8 === true;
+        const low8Only = (globalThis as { __QT_H5_FORCE_LOW8?: boolean }).__QT_H5_FORCE_LOW8 === true;
         if (low8Only) {
           (globalThis as { __BSLZ4_LOW8_ONLY?: boolean }).__BSLZ4_LOW8_ONLY = true;
         } else {
@@ -4085,8 +2796,8 @@ function Show4DSTEM() {
             const parsed = JSON.parse(embeddedBadPxJson) as number[];
             h5BadPx = new Uint32Array(parsed);
             hasEmbeddedBadPx = true;
-          } catch (e) {
-            console.warn("Could not parse embedded HDF5 hot-pixel mask; falling back to master HDF5 metadata", e);
+          } catch (event) {
+            console.warn("Could not parse embedded HDF5 hot-pixel mask; falling back to master HDF5 metadata", event);
           }
         }
         if (show4DSTEMHasLocalFiles() && /_master\.h5(?:[?#].*)?$/.test(sourceUrl)) {
@@ -4112,17 +2823,6 @@ function Show4DSTEM() {
                   : undefined,
             });
             if (local) {
-              const bytesPerPixel = local.mode === 2 ? 4 : local.mode === 0 ? 2 : 1;
-              const decodedGB = local.profile.frames * local.detSize * bytesPerPixel / 1e9;
-              (window as unknown as { __loadprof: unknown }).__loadprof = {
-                ...local.profile,
-                fetchedCompressedGB: local.profile.compressedGB,
-                decodedGB: +decodedGB.toFixed(1),
-                localFiles: true,
-                decodeIncludesUpload: true,
-                decompressGBps: +(decodedGB / Math.max(0.001, local.profile.decompressMs / 1000)).toFixed(2),
-                targetFrames: local.scanCount,
-              };
               if (!disposed) setH5LocalSourceStatus(`Local HDF5 ${local.profile.totalMs} ms`);
               if (!disposed) setOfflineBackendStatus(`Local ${label} ready in ${local.profile.totalMs} ms`);
               const created = DetectorCompute.fromGpuChunks(
@@ -4139,26 +2839,26 @@ function Show4DSTEM() {
             if (requireLocalH5Files) {
               throw new Error(`Selected local HDF5 files did not match ${sourceUrl}.`);
             }
-          } catch (e) {
-            if (requireLocalH5Files) throw e;
+          } catch (event) {
+            if (requireLocalH5Files) throw event;
             if (!disposed) setH5LocalSourceStatus("Local HDF5 load failed; using URL fallback");
             if (!disposed) setOfflineBackendStatus(`Local ${label} failed; using URL fallback`);
-            console.warn("Local HDF5 WebGPU load failed; falling back to URL fetch", e);
+            console.warn("Local HDF5 WebGPU load failed; falling back to URL fetch", event);
           }
         }
         if (/_master\.h5(?:[?#].*)?$/.test(sourceUrl)) {
           if (!disposed) setOfflineBackendStatus(`Reading ${label}`);
           const fetchWindow = show4DSTEMGlobalInt("__QT_H5_FETCH_WINDOW", 8, 4, 24);
-          const fetchOne = async (n: number): Promise<ArrayBuffer | null> => {
-            return await h5FetchCached(h5DataFileUrl(sourceUrl, n));
+          const fetchOne = async (fileNumber: number): Promise<ArrayBuffer | null> => {
+            return await h5FetchCached(h5DataFileUrl(sourceUrl, fileNumber));
           };
           const inflight = new Map<number, Promise<ArrayBuffer | null>>();
           let next = 1;
           const gpuChunks: { buffer: GPUBuffer; startScan: number; nScan: number }[] = [];
-          let startScan = 0, ds = 0, computeMode = 1, decodedBytes = 0;
+          let startScan = 0, detectorSize = 0, computeMode = 1;
           let maxDataFiles = Number.POSITIVE_INFINITY;
           let h5TotalFrames = hasEmbeddedBadPx ? scanRows * scanCols : 0;
-          let dev: GPUDevice | null = null;
+          let device: GPUDevice | null = null;
           // Honor the lossless decode override on the HTTP/streamed path too, so a
           // served bundle can request native uint16 exactly like the local-file path.
           const httpDecodeOverride = String((globalThis as { __QT_H5_DECODE_DTYPE?: unknown }).__QT_H5_DECODE_DTYPE || "").toLowerCase();
@@ -4179,12 +2879,9 @@ function Show4DSTEM() {
             decodeBatch,
             16,
           );
-          const __t0 = performance.now(); let __decMs = 0, __parseMs = 0, __fetchBytes = 0, __waitMs = 0, __masterMs = 0;
-          let __uploadMs = 0, __buildMs = 0, __gpuWaitMs = 0, __decodeProfileMs = 0, __decodeCompressedMB = 0;
           let decodeDone = false;
           let decodeWake: (() => void) | null = null;
           let decodeSpaceWake: (() => void) | null = null;
-          let maxDecodeQueue = 0;
           const wakeDecode = () => {
             const wake = decodeWake;
             decodeWake = null;
@@ -4215,17 +2912,10 @@ function Show4DSTEM() {
               if (!group) return true;
               const groupDecodeDtype = group[0].decodeDtype;
               const groupSourceDtype = group[0].sourceDtype;
-              const __dt = performance.now();
               const decoded = await decodeBslz4Batch(group, groupDecodeDtype, groupSourceDtype, decodeBatch);
-              __decMs += performance.now() - __dt;
               if (!decoded) return false;
-              dev = decoded.device;
+              device = decoded.device;
               computeMode = decoded.mode;
-              __uploadMs += decoded.profile.uploadMs;
-              __buildMs += decoded.profile.buildMs;
-              __gpuWaitMs += decoded.profile.gpuWaitMs;
-              __decodeProfileMs += decoded.profile.totalMs;
-              __decodeCompressedMB += decoded.profile.compressedMB;
               decoded.buffers.forEach((buffer, i) => {
                 const spec = group[i];
                 gpuChunks.push({ buffer, startScan: spec.startScan, nScan: spec.nScan });
@@ -4235,9 +2925,7 @@ function Show4DSTEM() {
           try {
             const decodePromise = decodeWorker();
             try {
-              const __mt = performance.now();
               const masterInfo = await readH5MasterInfoCached(sourceUrl, "master");
-              __masterMs += performance.now() - __mt;
               if (masterInfo) {
                 if (!hasEmbeddedBadPx && masterInfo.badPixels.length) h5BadPx = new Uint32Array(masterInfo.badPixels);
                 h5TotalFrames = Math.max(0, Math.round(Number(masterInfo.totalFrames || h5TotalFrames || 0)));
@@ -4245,8 +2933,8 @@ function Show4DSTEM() {
                   maxDataFiles = Math.round(Number(masterInfo.dataFileCount));
                 }
               }
-            } catch (e) {
-              console.warn("Could not read HDF5 master metadata; continuing without detector mask/file-count bounds", e);
+            } catch (event) {
+              console.warn("Could not read HDF5 master metadata; continuing without detector mask/file-count bounds", event);
             }
             const initialFetchLimit = Number.isFinite(maxDataFiles)
               ? Math.min(fetchWindow, maxDataFiles)
@@ -4255,49 +2943,42 @@ function Show4DSTEM() {
               inflight.set(next, fetchOne(next));
             }
             for (let n = 1; !disposed; n++) {
-              const p = inflight.get(n);
-              if (!p) break;
+              const pending = inflight.get(n);
+              if (!pending) break;
               inflight.delete(n);
-              const __wt = performance.now();
-              const buf = await p;
-              __waitMs += performance.now() - __wt;
+              const fileBuffer = await pending;
               h5RawFileCache.delete(h5DataFileUrl(sourceUrl, n));
-              if (!buf) break;
+              if (!fileBuffer) break;
               if (!disposed) setOfflineBackendStatus(`Reading ${label}: data file ${n}`);
-              __fetchBytes += buf.byteLength;
-              const __pt = performance.now();
-              const vol = readH5Volume(buf, "merged");
-              __parseMs += performance.now() - __pt;
+              const fileVolume = readH5Volume(fileBuffer, "merged");
               if (!Number.isFinite(maxDataFiles)) {
-                maxDataFiles = Math.ceil((h5TotalFrames || scanRows * scanCols) / Math.max(1, vol.nFrames));
+                maxDataFiles = Math.ceil((h5TotalFrames || scanRows * scanCols) / Math.max(1, fileVolume.nFrames));
               }
-              ds = vol.detSize;
-              if (sourceDtype !== "unknown" && sourceDtype !== vol.srcDtype) {
-                throw new Error(`Mixed HDF5 source dtypes are not supported in one browser load: ${sourceDtype} and ${vol.srcDtype}.`);
+              detectorSize = fileVolume.detSize;
+              if (sourceDtype !== "unknown" && sourceDtype !== fileVolume.srcDtype) {
+                throw new Error(`Mixed HDF5 source dtypes are not supported in one browser load: ${sourceDtype} and ${fileVolume.srcDtype}.`);
               }
-              sourceDtype = vol.srcDtype;
-              decodeDtype = vol.srcDtype === "float32" ? "float32" : (wantU16 && vol.srcDtype === "uint16") ? "uint16" : "uint8";
-              decodedBytes += vol.nFrames * vol.detSize * (decodeDtype === "float32" ? 4 : decodeDtype === "uint16" ? 2 : 1);
+              sourceDtype = fileVolume.srcDtype;
+              decodeDtype = fileVolume.srcDtype === "float32" ? "float32" : (wantU16 && fileVolume.srcDtype === "uint16") ? "uint16" : "uint8";
               {
                 // Every chunk of this file, each at its own scan offset. Taking only
                 // chunks[0] silently dropped all later chunks of multi-chunk files,
                 // leaving the virtual image black outside the first chunk's scan rows.
                 let chunkStart = startScan;
-                for (const chunk of vol.chunks) {
+                for (const chunk of fileVolume.chunks) {
                   await waitForDecodeSpace();
                   decodeQueue.push({
                     ...chunk,
                     startScan: chunkStart,
                     nScan: chunk.nFrames,
                     decodeDtype,
-                    sourceDtype: vol.srcDtype,
+                    sourceDtype: fileVolume.srcDtype,
                   });
                   chunkStart += chunk.nFrames;
                 }
-                maxDecodeQueue = Math.max(maxDecodeQueue, decodeQueue.length);
                 wakeDecode();
               }
-              startScan += vol.nFrames;
+              startScan += fileVolume.nFrames;
               if (next <= maxDataFiles) {
                 inflight.set(next, fetchOne(next));
                 next++;
@@ -4308,39 +2989,14 @@ function Show4DSTEM() {
             if (!(await decodePromise)) {
               throw new Error("HDF5 BSLZ4 decode failed.");
             }
-          } catch (e) {
+          } catch (event) {
             decodeDone = true;
             wakeDecode();
             wakeDecodeSpace();
-            gpuChunks.forEach((c) => c.buffer.destroy());
-            throw e;
+            gpuChunks.forEach((chunk) => chunk.buffer.destroy());
+            throw event;
           }
-          const __decGB = decodedBytes / 1e9;
-          const profileDevice = dev as GPUDevice | null;
-          (window as unknown as { __loadprof: unknown }).__loadprof = { totalMs: Math.round(performance.now() - __t0),
-            fetchedCompressedGB: +(__fetchBytes / 1e9).toFixed(1), decodedGB: +__decGB.toFixed(1),
-            sourceDtype, decodeDtype, chunks: gpuChunks.length, frames: startScan,
-            badPixels: h5BadPx.length,
-            adapterInfo: getGPUInfo(), softwareAdapter: isSoftwareGPUAdapter(),
-            timestampQuery: Boolean(profileDevice?.features.has("timestamp-query")),
-            subgroups: Boolean(profileDevice?.features.has("subgroups" as GPUFeatureName)),
-            maxBufferGB: profileDevice ? +(Number(profileDevice.limits.maxBufferSize || 0) / 1e9).toFixed(2) : null,
-            maxStorageBufferGB: profileDevice ? +(Number(profileDevice.limits.maxStorageBufferBindingSize || 0) / 1e9).toFixed(2) : null,
-            dataFilesExpected: Number.isFinite(maxDataFiles) ? maxDataFiles : null,
-            decodeBatch,
-            fetchWindow,
-            decodeQueueTarget,
-            pipelineMode: "fetch-parse-decode-queue",
-            maxDecodeQueue,
-            targetFrames: h5TotalFrames || scanRows * scanCols,
-            fetchWaitMs: Math.round(__waitMs), masterFetchMs: Math.round(__masterMs),
-            decompressMs: Math.round(__decMs), parseMs: Math.round(__parseMs),
-            uploadMs: Math.round(__uploadMs), decodeBuildMs: Math.round(__buildMs),
-            gpuWaitMs: Math.round(__gpuWaitMs), decodeProfileMs: Math.round(__decodeProfileMs),
-            decodeCompressedMB: Math.round(__decodeCompressedMB),
-            decodeIncludesUpload: true,
-            decompressGBps: +(__decGB / Math.max(0.001, __decMs / 1000)).toFixed(2) };
-          const created = dev ? DetectorCompute.fromGpuChunks(dev, gpuChunks, scanRows * scanCols, ds, computeMode) : null;
+          const created = device ? DetectorCompute.fromGpuChunks(device, gpuChunks, scanRows * scanCols, detectorSize, computeMode) : null;
           if (created && h5BadPx.length) created.badPx = h5BadPx;
           if (!disposed) setOfflineBackendStatus(`${label} ready`);
           return created;
@@ -4350,118 +3006,23 @@ function Show4DSTEM() {
         try {
           const masterInfo = readH5MasterInfo(h5Buffer, "merged");
           if (masterInfo.badPixels.length) h5BadPx = new Uint32Array(masterInfo.badPixels);
-        } catch (e) {
-          console.warn("Could not read HDF5 hot-pixel mask; continuing without detector mask", e);
+        } catch (event) {
+          console.warn("Could not read HDF5 hot-pixel mask; continuing without detector mask", event);
         }
-        const vol = readH5Volume(h5Buffer, "merged");
-        const decodeDtype = vol.srcDtype === "float32" ? "float32" : "uint8";
+        const mergedVolume = readH5Volume(h5Buffer, "merged");
+        const decodeDtype = mergedVolume.srcDtype === "float32" ? "float32" : "uint8";
         let mergedStart = 0;
-        const mergedSpecs = vol.chunks.map((chunk) => {
+        const mergedSpecs = mergedVolume.chunks.map((chunk) => {
           const spec = { ...chunk, startScan: mergedStart, nScan: chunk.nFrames };
           mergedStart += chunk.nFrames;
           return spec;
         });
-        const created = await DetectorCompute.createFromBslz4Chunked(mergedSpecs, scanRows * scanCols, vol.detSize, decodeDtype, vol.srcDtype);
+        const created = await DetectorCompute.createFromBslz4Chunked(mergedSpecs, scanRows * scanCols, mergedVolume.detSize, decodeDtype, mergedVolume.srcDtype);
         if (created && h5BadPx.length) created.badPx = h5BadPx;
         if (!disposed) setOfflineBackendStatus(`${label} ready`);
         return created;
       };
-      if (lazyUrl || lazyUrls.length) {
-        const urls = lazyUrls.length ? lazyUrls : [lazyUrl!];
-        volumeCount = urls.length;
-        getVol = async (idx: number) => {
-          const clamped = Math.max(0, Math.min(urls.length - 1, idx));
-          if (volCache.has(clamped)) return volCache.get(clamped)!;
-          const existingLoad = volLoadPromises.get(clamped);
-          if (existingLoad) return await existingLoad;
-          const loadPromise = (async () => {
-            const cc = await LazyShow4DSTEM.create(urls[clamped]) as unknown as DetectorCompute | null;
-            if (cc) {
-              volCache.set(clamped, cc);
-              latestResidentVolumeIndex = clamped;
-              const activeFrame = Math.max(0, Math.min(urls.length - 1, model.get("frame_idx") | 0));
-              while (volCache.size > MAX_RESIDENT) {
-                const old = [...volCache.keys()].find((k) => k !== clamped && k !== activeFrame);
-                if (old === undefined) break;
-                volCache.get(old)!.dispose(); volCache.delete(old);
-              }
-            }
-            return cc;
-          })().finally(() => { volLoadPromises.delete(clamped); });
-          volLoadPromises.set(clamped, loadPromise);
-          return await loadPromise;
-        };
-        const initialIdx = Math.max(0, Math.min(urls.length - 1, model.get("frame_idx") | 0));
-        const lz = await getVol(initialIdx);
-        compute = lz as unknown as DetectorCompute;
-      } else if (ransUrl) {
-        // Browser-resident lossless series: encoded rANS streams live in GPU
-        // buffers and every detector change decodes only the changed columns.
-        const ransDevice = await getGPUDevice();
-        if (!ransDevice) throw new Error("WebGPU device unavailable for the rANS resident source");
-        void ransDevice.lost.then(info => {
-          if (disposed) return;
-          setOfflineBackendStatus("");
-          setOfflineBackendError(`The resident GPU source was lost. ${info.message || "The device is no longer available."} Reload the viewer and select the data folder again.`);
-        });
-        window.addEventListener("pointermove", noteInteraction, {passive: true, signal: sourceLoadAbort.signal});
-        window.addEventListener("pointerdown", noteInteraction, {passive: true, signal: sourceLoadAbort.signal});
-        const status = (text: string) => { if (!disposed) setOfflineBackendStatus(text); };
-        let canonicalFiles: File[] = [];
-        if (qemSource) {
-          const expected = JSON.parse(String(model.get("_rans_files") || "[]")) as string[];
-          canonicalFiles = expected.map(name => {
-            const file = ransLocalFiles?.find(candidate => candidate.name === name);
-            if (!file) throw new Error(`Missing ${name}. Select all exported QEM files together.`);
-            return file;
-          });
-          if (!canonicalFiles.length) throw new Error("This viewer has no QEM files configured. Export it again from the source files.");
-        }
-        ransSet = model.get("_rans_format") === "source112-tans1024-pair-v1"
-          ? await Source112ResidentSet.loadFiles(ransDevice, ransLocalFiles || [], status, sourceLoadAbort.signal, {
-              representation: 'huffman64', progressive: true,
-              maxAcquisitions: Math.max(1, Number(model.get("n_frames") || 1)),
-              yieldToInteraction,
-              onProgress: source => {
-                if (disposed) return;
-                setResidentSeriesLoading(source.loadedAcquisitions < source.acquisitionCount);
-                for (let i = 0; i < source.loadedAcquisitions; i++)
-                  volCache.set(i, source.computes[i] as unknown as DetectorCompute);
-                latestResidentVolumeIndex = source.loadedAcquisitions - 1;
-                refreshResidentProgress?.();
-              },
-            })
-          : qemSource
-          ? await RansResidentSet.loadCountANSFiles(ransDevice, canonicalFiles, status,
-              JSON.parse(String(model.get("_offline_bad_px") || "[]")) as number[])
-          : ransLocalDirectory
-          ? await RansResidentSet.loadLocal(ransDevice, ransLocalDirectory, status)
-          : ransLocalFiles
-            ? await RansResidentSet.loadFiles(ransDevice, ransLocalFiles, status)
-            : await RansResidentSet.load(ransDevice, ransUrl, status);
-        if (disposed) { ransSet.dispose(); return; }
-        const expectedShape = [scanRows, scanCols, detR, detC];
-        if ((ransSet.shape && ransSet.shape.some((size, i) => size !== expectedShape[i]))
-            || (qemSource && ransSet.nativeDtype !== model.get("_rans_dtype"))) {
-          ransSet.dispose();
-          throw new Error("Selected source geometry or native dtype differs from this viewer. Select the files exported with this viewer.");
-        }
-        computes = ransSet.computes as unknown as DetectorCompute[];
-        volumeCount = computes.length;
-        const readyCount = ransSet instanceof Source112ResidentSet ? ransSet.loadedAcquisitions : computes.length;
-        computes.slice(0, readyCount).forEach((c, i) => volCache.set(i, c));
-        getVol = async (idx: number) => volCache.get(Math.max(0, Math.min(computes.length - 1, idx))) ?? null;
-        if (ransSet instanceof Source112ResidentSet) {
-          h5VolumePreload = ransSet.completion.then(() => { h5VolumePreloadDone = true; });
-          void h5VolumePreload.catch(error => { if (!disposed) { setResidentSeriesLoading(false); setOfflineBackendError(`Loading stopped: ${String(error)}. Ready acquisitions remain available.`); } });
-        }
-        compute = volCache.get(model.get("frame_idx") | 0) ?? computes[0];
-        latestResidentVolumeIndex = readyCount - 1;
-        (globalThis as { __QT_RANS_PROFILE?: unknown }).__QT_RANS_PROFILE = {
-          volumes: computes.length, payloadBytes: ransSet.payloadBytes, loadMs: ransSet.loadMs, checkpointMs: ransSet.checkpointMs,
-          acquisitionMode: ransSet.acquisitionMode, timeToResidentReadyMs: ransSet.readyMs, loadProfile: ransSet.loadProfile,
-        };
-      } else if (h5Urls.length) {
+      if (h5Urls.length) {
         volumeCount = h5Urls.length;
         getVol = async (idx: number) => {
           const clamped = Math.max(0, Math.min(h5Urls.length - 1, idx));
@@ -4469,18 +3030,14 @@ function Show4DSTEM() {
           const existingLoad = volLoadPromises.get(clamped);
           if (existingLoad) return await existingLoad;
           const loadPromise = (async () => {
-            const cc = await loadH5Compute(h5Urls[clamped], `dataset ${clamped + 1}/${h5Urls.length}`);
-            if (cc) {
-              volCache.set(clamped, cc);
+            const volume = await loadH5Compute(h5Urls[clamped], `dataset ${clamped + 1}/${h5Urls.length}`);
+            if (volume) {
+              volCache.set(clamped, volume);
               latestResidentVolumeIndex = clamped;
               const activeFrame = Math.max(0, Math.min(h5Urls.length - 1, model.get("frame_idx") | 0));
-              while (volCache.size > h5ResidentLimit) {
-                const old = [...volCache.keys()].find((k) => k !== clamped && k !== activeFrame);
-                if (old === undefined) break;
-                volCache.get(old)!.dispose(); volCache.delete(old);
-              }
+              evictOldVolumes(volCache, h5ResidentLimit, clamped, activeFrame);
             }
-            return cc;
+            return volume;
           })().finally(() => { volLoadPromises.delete(clamped); });
           volLoadPromises.set(clamped, loadPromise);
           return await loadPromise;
@@ -4488,22 +3045,18 @@ function Show4DSTEM() {
         const initialIdx = Math.max(0, Math.min(h5Urls.length - 1, model.get("frame_idx") | 0));
         const startH5Preloads = (): Promise<void> => {
           if (!getVol) return Promise.resolve();
-          const preloadWantsU16 = h5UsesNativeU16;
-          const allowU16MultiPreload = h5AllowU16MultiResident;
-          const residentPreloadLimit = h5ResidentLimit;
           // Visit every dataset in the background. For uint16 this remains
           // serial (preloadWindow=1) and only one detector volume is resident,
           // but its BF/DF result is retained in a display slot before moving on.
           const maxPreload = Math.max(1, h5Urls.length);
-          const defaultPreload = h5Urls.length;
-          const preloadCount = show4DSTEMGlobalInt("__QT_H5_PRELOAD_VOLUMES", defaultPreload, 1, maxPreload);
+          const preloadCount = show4DSTEMGlobalInt("__QT_H5_PRELOAD_VOLUMES", h5Urls.length, 1, maxPreload);
           const preloadWindow = show4DSTEMGlobalInt(
             "__QT_H5_PRELOAD_WINDOW",
             1,
             1,
             Math.min(4, preloadCount),
           );
-          const prefetchNext = !preloadWantsU16 &&
+          const prefetchNext = !h5UsesNativeU16 &&
             (globalThis as { __QT_H5_PREFETCH_NEXT?: boolean }).__QT_H5_PREFETCH_NEXT !== false;
           const prefetchWindow = show4DSTEMGlobalInt("__QT_H5_PREFETCH_WINDOW", 2, 1, 8);
           const maxPrefetchFiles = show4DSTEMGlobalInt("__QT_H5_PREFETCH_FILES", 32, 1, 64);
@@ -4511,32 +3064,10 @@ function Show4DSTEM() {
             initialIdx,
             ...Array.from({ length: h5Urls.length }, (_v, i) => i).filter((i) => i !== initialIdx),
           ].slice(0, preloadCount);
-          const startedAt = performance.now();
-          const profile = {
-            source: "h5_urls",
-            volumeCount: h5Urls.length,
-            requested: preloadCount,
-            preloadWindow,
-            decodeDtype: preloadWantsU16 ? "uint16" : "uint8",
-            u16MultiPreloadAllowed: allowU16MultiPreload,
-            residentPreloadLimit,
-            prefetchNext,
-            prefetchWindow,
-            maxPrefetchFiles,
-            prefetched: [] as { index: number; files: number; elapsedMs: number }[],
-            order,
-            completed: 0,
-            failed: 0,
-            volumes: [] as { index: number; elapsedMs: number; ok: boolean; error?: string }[],
-            totalMs: 0,
-          };
-          (window as unknown as { __show4dstemH5PreloadProfile?: unknown }).__show4dstemH5PreloadProfile = profile;
           const prefetchStarted = new Set<number>();
           const prefetchVolume = async (index: number): Promise<void> => {
             if (!prefetchNext || prefetchStarted.has(index) || !/_master\.h5(?:[?#].*)?$/.test(h5Urls[index])) return;
             prefetchStarted.add(index);
-            const t = performance.now();
-            let files = 0;
             let fileLimit = maxPrefetchFiles;
             try {
               const masterInfo = await readH5MasterInfoCached(h5Urls[index], `prefetch-${index}`);
@@ -4552,52 +3083,38 @@ function Show4DSTEM() {
               inflight.set(nextFile, h5FetchCached(h5DataFileUrl(h5Urls[index], nextFile)));
             }
             for (let n = 1; n <= fileLimit && !disposed; n++) {
-              const p = inflight.get(n);
-              if (!p) break;
+              const pending = inflight.get(n);
+              if (!pending) break;
               inflight.delete(n);
-              const buf = await p.catch(() => null);
-              if (!buf) break;
-              files += 1;
+              const fileBuffer = await pending.catch(() => null);
+              if (!fileBuffer) break;
               if (nextFile <= fileLimit) {
                 inflight.set(nextFile, h5FetchCached(h5DataFileUrl(h5Urls[index], nextFile)));
                 nextFile += 1;
               }
             }
-            profile.prefetched.push({ index, files, elapsedMs: Math.round(performance.now() - t) });
           };
           let next = 0;
           const worker = async () => {
             while (!disposed) {
-              const at = next++;
-              if (at >= order.length) return;
-              const index = order[at];
-              if (prefetchNext && preloadWindow === 1 && at + 1 < order.length) {
-                void prefetchVolume(order[at + 1]).catch((error) => {
+              const orderIndex = next++;
+              if (orderIndex >= order.length) return;
+              const index = order[orderIndex];
+              if (prefetchNext && preloadWindow === 1 && orderIndex + 1 < order.length) {
+                void prefetchVolume(order[orderIndex + 1]).catch((error) => {
                   console.warn("Show4DSTEM HDF5 compressed prefetch failed", error);
                 });
               }
-              const t = performance.now();
               try {
-                const cc = await getVol!(index);
-                const elapsedMs = Math.round(performance.now() - t);
-                if (cc) profile.completed += 1;
-                else profile.failed += 1;
-                profile.volumes.push({ index, elapsedMs, ok: Boolean(cc) });
-                if (cc && !disposed) {
+                const volume = await getVol!(index);
+                if (volume && !disposed) {
                   latestResidentVolumeIndex = index;
                   requestCompareViLive();
                   requestDpFrameLive();
                 }
               } catch (error) {
-                profile.failed += 1;
-                profile.volumes.push({
-                  index,
-                  elapsedMs: Math.round(performance.now() - t),
-                  ok: false,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              } finally {
-                profile.totalMs = Math.round(performance.now() - startedAt);
+                // a background preload; the dataset loads again when the user selects it
+                console.warn(`Show4DSTEM HDF5 preload of dataset ${index} failed`, error);
               }
             }
           };
@@ -4614,84 +3131,15 @@ function Show4DSTEM() {
         void h5VolumePreload.catch((error) => {
           console.warn("Show4DSTEM HDF5 preload failed", error);
         });
-      } else if (h5Url) {
-        compute = await loadH5Compute(h5Url, "dataset 1/1");
-        if (compute) computes.push(compute);
-      } else if (bslz4Meta) {
-        // bslz4 mode: ship native HDF5 bitshuffle+LZ4 bytes (~6x smaller than uint16),
-        // decompress on the GPU into a uint8 stack. The meta JSON is single
-        // (chunked: {base, chunks}), or multi-volume ({volumes:[{base,chunks,badPx}]}).
-        const m = JSON.parse(bslz4Meta) as any;
-        const srcDtype = (m.srcDtype === "uint8" ? "uint8" : "uint16") as "uint8" | "uint16";  // 8-plane fast path if uint8-encoded
-        const fetchU8 = async (u: string) => new Uint8Array(await (await fetch(u)).arrayBuffer());
-        const fetchU32 = async (u: string) => new Uint32Array(await (await fetch(u)).arrayBuffer());
-        const decodeVol = async (v: any) => {
-          const specs: (Bslz4Spec & { startScan: number; nScan: number })[] = [];
-          for (const c of v.chunks) specs.push({ compressed: await fetchU8(v.base + c.bin), blockMeta: await fetchU32(v.base + c.meta),
-            nFrames: c.nScan, nBlocksPerFrame: c.nBlocksPerFrame, blockElems: c.blockElems,
-            detSize: detR * detC, startScan: c.startScan, nScan: c.nScan });
-          const cc = await DetectorCompute.createFromBslz4Chunked(specs, scanRows * scanCols, detR * detC, "uint8", srcDtype);
-          if (cc && v.badPx) cc.badPx = new Uint32Array(v.badPx);
-          return cc;
-        };
-        if (Array.isArray(m.volumes)) {
-          volMetas = m.volumes;
-          volumeCount = volMetas.length;
-          getVol = async (idx: number) => {
-            if (volCache.has(idx)) return volCache.get(idx)!;
-            const existingLoad = volLoadPromises.get(idx);
-            if (existingLoad) return await existingLoad;
-            const loadPromise = (async () => {
-              const cc = await decodeVol(volMetas[idx]);
-              if (cc) {
-                volCache.set(idx, cc);
-                latestResidentVolumeIndex = idx;
-                const activeFrame = Math.max(0, Math.min(volMetas.length - 1, model.get("frame_idx") | 0));
-                while (volCache.size > MAX_RESIDENT) {           // evict the oldest non-active volume
-                  const old = [...volCache.keys()].find((k) => k !== idx && k !== activeFrame);
-                  if (old === undefined) break;
-                  volCache.get(old)!.dispose(); volCache.delete(old);
-                }
-              }
-              return cc;
-            })().finally(() => { volLoadPromises.delete(idx); });
-            volLoadPromises.set(idx, loadPromise);
-            return await loadPromise;
-          };
-          compute = await getVol(Math.max(0, Math.min(volMetas.length - 1, model.get("frame_idx") | 0)));
-        } else if (Array.isArray(m.chunks)) {
-          const c = await decodeVol(m); if (c) computes.push(c); compute = c;
-        } else {
-          const raw = await fetchU8(offlineUrl!);
-          compute = await DetectorCompute.createFromBslz4({ compressed: raw, blockMeta: new Uint32Array(m.blockMeta),
-            nFrames: m.nFrames, nBlocksPerFrame: m.nBlocksPerFrame, blockElems: m.blockElems, detSize: detR * detC }, "uint8");
-          if (compute) computes.push(compute);
-        }
-      } else if (chunksMeta && offlineUrl) {
-        // Chunked companion: one gzip blob with N chunks; stream each into its own
-        // GPU buffer (handles stacks far bigger than one buffer / one ArrayBuffer).
-        const blob = new Uint8Array(await (await fetch(offlineUrl)).arrayBuffer());
-        const meta = JSON.parse(chunksMeta) as { coff: number; clen: number; startScan: number; nScan: number }[];
-        const specs = [];
-        for (const m of meta) {
-          const bytes = await gunzip(blob.subarray(m.coff, m.coff + m.clen));
-          specs.push({ bytes, startScan: m.startScan, nScan: m.nScan });
-        }
-        compute = await DetectorCompute.createChunked(specs, scanRows * scanCols, detR * detC);
       } else {
-        // Single stack: companion fetch or inline, then inflate (gzip, lossless).
-        let stack: Uint8Array;
-        if (offlineUrl) {
-          stack = new Uint8Array(await (await fetch(offlineUrl)).arrayBuffer());
-        } else {
-          const stackView = model.get("_offline_stack") as DataView | undefined;
-          if (!stackView || stackView.byteLength === 0) return;
-          stack = new Uint8Array(stackView.buffer, stackView.byteOffset, stackView.byteLength);
-        }
-        if (model.get("_offline_gzip")) stack = await gunzip(stack);
+        // Inline stack: inflate the gzip bytes (lossless); create() infers uint8 vs uint16 from the length.
+        const stackView = model.get("_offline_stack") as DataView | undefined;
+        if (!stackView || stackView.byteLength === 0) return;
+        let stack = new Uint8Array(stackView.buffer, stackView.byteOffset, stackView.byteLength);
+        stack = await gunzip(stack);
         const widgetFrames = Math.max(1, model.get("n_frames") | 0);
         const scanCount = scanRows * scanCols;
-        const detSize = detR * detC;
+        const detSize = detectorRows * detectorCols;
         const expectedU8 = widgetFrames * scanCount * detSize;
         const expectedU16 = expectedU8 * 2;
         if (widgetFrames > 1 && (stack.byteLength === expectedU8 || stack.byteLength === expectedU16)) {
@@ -4702,87 +3150,45 @@ function Show4DSTEM() {
             if (inlineVolCache.has(idx)) return inlineVolCache.get(idx)!;
             const start = idx * volumeBytes;
             const bytes = stack.subarray(start, start + volumeBytes);
-            const cc = await DetectorCompute.create(bytes, scanCount, detSize);
-            if (cc) {
-              inlineVolCache.set(idx, cc);
+            const volume = await DetectorCompute.create(bytes, scanCount, detSize);
+            if (volume) {
+              inlineVolCache.set(idx, volume);
               const activeFrame = Math.max(0, Math.min(widgetFrames - 1, model.get("frame_idx") | 0));
-              while (inlineVolCache.size > MAX_INLINE_RESIDENT) {
-                const old = [...inlineVolCache.keys()].find((k) => k !== idx && k !== activeFrame);
-                if (old === undefined) break;
-                inlineVolCache.get(old)!.dispose();
-                inlineVolCache.delete(old);
-              }
+              evictOldVolumes(inlineVolCache, MAX_INLINE_RESIDENT, idx, activeFrame);
             }
-            return cc;
+            return volume;
           };
           compute = await getVol(Math.max(0, Math.min(widgetFrames - 1, model.get("frame_idx") | 0)));
         } else {
           cpuStack = stack;  // keep for the per-frame probe (single-chunk only)
-          compute = await DetectorCompute.create(stack, scanRows * scanCols, detR * detC);
+          compute = await DetectorCompute.create(stack, scanRows * scanCols, detectorRows * detectorCols);
         }
       }
-      const publishComputeDpcReady = (backend: DetectorCompute) => {
-        setWebgpuDpcReady(Boolean(
-          (backend as unknown as { maskedDpcBuffer?: unknown }).maskedDpcBuffer
-          || (backend as unknown as { maskedIDpcBuffer?: unknown }).maskedIDpcBuffer
-          || (backend as unknown as { maskedDpc?: unknown }).maskedDpc
-          || (backend as unknown as { maskedCoM?: unknown }).maskedCoM,
-        ));
-      };
       if ((!compute && !initialVolumeLoad) || disposed) {
         compute?.dispose();
         if (!disposed) {
-          setOfflineBackendError(
-            "WebGPU is unavailable. Show4DSTEM scientific compute requires a GPU; no CPU fallback is used."
-          );
+          setOfflineBackendError(OFFLINE_NEEDS_WEBGPU);
           setOfflineBackendStatus("");
           setOfflineBackendLoading(false);
         }
         return;
       }
-      if (compute) publishComputeDpcReady(compute);
+      // Every DetectorCompute carries the DPC and iDPC kernels, so a loaded volume
+      // makes the DPC sources available.
+      if (compute) setWebgpuDpcReady(true);
       // Auto-filter hot/dead detector pixels (from the HDF5 pixel_mask) so the
       // offline result matches CUDA's apply_mask path - no manual masking needed.
       const badPxJson = model.get("_offline_bad_px") as string | undefined;
-      if (badPxJson && compute && compute.detSize === detR * detC) {
+      if (badPxJson && compute && compute.detSize === detectorRows * detectorCols) {
         compute.badPx = new Uint32Array(JSON.parse(badPxJson) as number[]);
       }
-      const dpcMask = buildFullDetectorMask(detR, detC);
+      const dpcMask = buildFullDetectorMask(detectorRows, detectorCols);
       const computeDpcImage = async (
         backend: DetectorCompute,
         source: DpcGpuSource,
-      ): Promise<Float32Array | null> => {
-        if (source === "iDPC") {
-          const maybeIDpc = backend as unknown as {
-            maskedIDpc?: (
-              mask: Uint32Array,
-              detCols: number,
-              scanRows: number,
-              scanCols: number,
-              rotationDeg?: number,
-              useTranspose?: boolean,
-            ) => Promise<Float32Array>;
-          };
-          if (typeof maybeIDpc.maskedIDpc !== "function") return null;
-          return await maybeIDpc.maskedIDpc(dpcMask, detC, scanRows, scanCols, 0, false);
-        }
-        const component = source === "DPC_row" ? "row" : "col";
-        const maybeDpc = backend as unknown as {
-          maskedDpc?: (mask: Uint32Array, detCols: number, component: "row" | "col") => Promise<Float32Array>;
-          maskedCoM?: (mask: Uint32Array, detCols: number) => Promise<{ comY: Float32Array; comX: Float32Array }>;
-        };
-        if (typeof maybeDpc.maskedDpc === "function") {
-          return await maybeDpc.maskedDpc(dpcMask, detC, component);
-        }
-        if (typeof maybeDpc.maskedCoM !== "function") return null;
-        const { comY, comX } = await maybeDpc.maskedCoM(dpcMask, detC);
-        const values = component === "row" ? comY : comX;
-        let mean = 0;
-        for (let i = 0; i < values.length; i++) mean += values[i];
-        mean /= Math.max(1, values.length);
-        const out = new Float32Array(values.length);
-        for (let i = 0; i < values.length; i++) out[i] = values[i] - mean;
-        return out;
+      ): Promise<Float32Array> => {
+        if (source === "iDPC") return await backend.maskedIDpc(dpcMask, detectorCols, scanRows, scanCols, 0, false);
+        return await backend.maskedDpc(dpcMask, detectorCols, source === "DPC_row" ? "row" : "col");
       };
       type WarmRoiPresetName = "bf" | "abf" | "adf";
       type WarmRoiGeometry = {
@@ -4794,21 +3200,17 @@ function Show4DSTEM() {
       };
       type WarmViCacheEntry = {
         source: ViGpuSource;
-        label: string;
         data: Float32Array;
         key: string;
-        kind: string;
-        computedMs: number;
       };
       const viWarmCache = new Map<string, WarmViCacheEntry>();
       let viWarmupStarted = false;
       let viWarmupGeneration = 0;
-      let viWarmupStatus: "idle" | "warming" | "ready" | "failed" = "idle";
       let suppressViTraitRecompute = false;
       const roundedCacheValue = (value: unknown): string => {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return "0";
-        return String(Math.round(n * 1000) / 1000);
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return "0";
+        return String(Math.round(numeric * 1000) / 1000);
       };
       const activeVolumeCacheKey = () => `vol:${Math.max(0, Math.round(Number(model.get("frame_idx") || 0)))}`;
       const dpcWarmCacheKey = (source: DpcGpuSource) => [
@@ -4816,7 +3218,7 @@ function Show4DSTEM() {
         "dpc",
         source,
         `scan:${scanRows}x${scanCols}`,
-        `det:${detR}x${detC}`,
+        `det:${detectorRows}x${detectorCols}`,
       ].join("|");
       const normalizedRadiusInner = (geometry: WarmRoiGeometry) =>
         geometry.mode === "annular" ? Math.max(0, geometry.radiusInner) : 0;
@@ -4829,29 +3231,29 @@ function Show4DSTEM() {
         `r:${roundedCacheValue(geometry.radius)}`,
         `ri:${roundedCacheValue(normalizedRadiusInner(geometry))}`,
         `scan:${scanRows}x${scanCols}`,
-        `det:${detR}x${detC}`,
+        `det:${detectorRows}x${detectorCols}`,
       ].join("|");
       const currentRoiGeometry = (): WarmRoiGeometry => {
         const mode = String(model.get("roi_mode") || "circle") === "annular" ? "annular" : "circle";
         return {
           mode,
-          centerRow: Number(model.get("roi_center_row") || model.get("center_row") || detR / 2),
-          centerCol: Number(model.get("roi_center_col") || model.get("center_col") || detC / 2),
+          centerRow: Number(model.get("roi_center_row") || model.get("center_row") || detectorRows / 2),
+          centerCol: Number(model.get("roi_center_col") || model.get("center_col") || detectorCols / 2),
           radius: Math.max(1, Number(model.get("roi_radius") || model.get("bf_radius") || 1)),
           radiusInner: mode === "annular" ? Math.max(0, Number(model.get("roi_radius_inner") || 0)) : 0,
         };
       };
       const presetRoiGeometry = (name: WarmRoiPresetName): WarmRoiGeometry => {
-        const bf = Math.max(1, Number(model.get("bf_radius") || 1));
-        const centerRow = Number(model.get("center_row") || model.get("roi_center_row") || detR / 2);
-        const centerCol = Number(model.get("center_col") || model.get("roi_center_col") || detC / 2);
+        const bfRadius = Math.max(1, Number(model.get("bf_radius") || 1));
+        const centerRow = Number(model.get("center_row") || model.get("roi_center_row") || detectorRows / 2);
+        const centerCol = Number(model.get("center_col") || model.get("roi_center_col") || detectorCols / 2);
         if (name === "abf") {
           return {
             mode: "annular",
             centerRow,
             centerCol,
-            radius: bf,
-            radiusInner: Math.max(0.5, bf * 0.5),
+            radius: bfRadius,
+            radiusInner: Math.max(0.5, bfRadius * 0.5),
           };
         }
         if (name === "adf") {
@@ -4859,19 +3261,19 @@ function Show4DSTEM() {
             mode: "annular",
             centerRow,
             centerCol,
-            radius: bf * 2,
-            radiusInner: bf,
+            radius: bfRadius * 2,
+            radiusInner: bfRadius,
           };
         }
         return {
           mode: "circle",
           centerRow,
           centerCol,
-          radius: bf,
+          radius: bfRadius,
           radiusInner: 0,
         };
       };
-      const maskForRoiGeometry = (geometry: WarmRoiGeometry): Uint32Array => sourceDetectorMask({
+      const maskForRoiGeometry = (geometry: WarmRoiGeometry): Uint32Array => buildDetectorMask({
         get: (name: string) => {
           if (name === "roi_center_row") return geometry.centerRow;
           if (name === "roi_center_col") return geometry.centerCol;
@@ -4881,43 +3283,14 @@ function Show4DSTEM() {
           if (name === "roi_width" || name === "roi_height") return 0;
           return model.get(name);
         },
-      }, detR, detC);
-      const warmCacheSummary = () => ({
-        status: viWarmupStatus,
-        generation: viWarmupGeneration,
-        count: viWarmCache.size,
-        keys: Array.from(viWarmCache.keys()),
-        entries: Array.from(viWarmCache.values()).map((entry) => ({
-          label: entry.label,
-          source: entry.source,
-          kind: entry.kind,
-          pixels: entry.data.length,
-          computedMs: entry.computedMs,
-        })),
-      });
-      const publishWarmCacheSummary = (extra: Record<string, unknown> = {}) => {
-        try {
-          (window as unknown as { __sh4dWarmCache?: unknown }).__sh4dWarmCache = {
-            ...warmCacheSummary(),
-            ...extra,
-          };
-        } catch {
-          // Diagnostics must not affect interaction.
-        }
-      };
+      }, detectorRows, detectorCols);
       const dataViewForFloat32 = (data: Float32Array): DataView => (
         new DataView(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength)
       );
       const setWarmCacheEntry = (entry: WarmViCacheEntry) => {
         viWarmCache.set(entry.key, entry);
-        publishWarmCacheSummary({ lastStored: entry.label });
       };
-      const serveWarmCacheEntry = (
-        key: string,
-        source: ViGpuSource,
-        startedAt: number,
-        generation: number,
-      ): boolean => {
+      const serveWarmCacheEntry = (key: string, source: ViGpuSource): boolean => {
         if (dpRoiInteractiveRef.current) return false;
         const cached = viWarmCache.get(key);
         if (!cached || cached.source !== source || cached.data.length !== scanRows * scanCols) {
@@ -4925,8 +3298,6 @@ function Show4DSTEM() {
         }
         clearViGpuDisplay();
         publishVirtualImageBytes(dataViewForFloat32(cached.data));
-        recordViProfile(source, `${cached.kind}_hit`, startedAt, generation);
-        publishWarmCacheSummary({ lastHit: cached.label });
         return true;
       };
       let dpcBufferQueue: Promise<void> = Promise.resolve();
@@ -4936,33 +3307,10 @@ function Show4DSTEM() {
       ): Promise<boolean> => {
         const run = async (): Promise<boolean> => {
           const engine = ensureViGpuColormap(backend);
-          if (!engine) {
-            return false;
-          }
           await engine.getDevice().queue.onSubmittedWorkDone().catch(() => {});
-          let result: { buffer: GPUBuffer; n: number; cleanup?: () => void } | null = null;
-          if (source === "iDPC") {
-            const maybeIDpc = backend as unknown as {
-              maskedIDpcBuffer?: (
-                mask: Uint32Array,
-                detCols: number,
-                scanRows: number,
-                scanCols: number,
-                rotationDeg?: number,
-                useTranspose?: boolean,
-              ) => Promise<{ buffer: GPUBuffer; n: number; cleanup?: () => void }>;
-            };
-            if (typeof maybeIDpc.maskedIDpcBuffer !== "function") return false;
-            result = await maybeIDpc.maskedIDpcBuffer(dpcMask, detC, scanRows, scanCols, 0, false);
-          } else {
-            const component = source === "DPC_row" ? "row" : "col";
-            const maybeDpc = backend as unknown as {
-              maskedDpcBuffer?: (mask: Uint32Array, detCols: number, component: "row" | "col") => { buffer: GPUBuffer; n: number; cleanup?: () => void };
-            };
-            if (typeof maybeDpc.maskedDpcBuffer !== "function") return false;
-            result = maybeDpc.maskedDpcBuffer(dpcMask, detC, component);
-          }
-          if (!result) return false;
+          const result: { buffer: GPUBuffer; n: number; cleanup?: () => void } = source === "iDPC"
+            ? await backend.maskedIDpcBuffer(dpcMask, detectorCols, scanRows, scanCols, 0, false)
+            : backend.maskedDpcBuffer(dpcMask, detectorCols, source === "DPC_row" ? "row" : "col");
           const { buffer, n, cleanup } = result;
           await engine.getDevice().queue.onSubmittedWorkDone().catch(() => {});
           cleanup?.();
@@ -4979,53 +3327,24 @@ function Show4DSTEM() {
             rangeMode: "gpu",
             rawVersionAfter: rawVirtualImageVersionRef.current + 1,
           };
-          setViGpuVersion(v => v + 1);
-          publishShow4DSTEMViDisplay({
-            source,
-            gpuBufferToDisplay: true,
-            rendered: false,
-            pixels: scanRows * scanCols,
-            slot: VI_GPU_SLOT,
-            rangeMode: "gpu",
-          });
+          setViGpuVersion(version => version + 1);
           return true;
         };
         const queued = dpcBufferQueue.then(run, run);
         dpcBufferQueue = queued.then(() => undefined, () => undefined);
         return await queued;
       };
-      const invalidateResidentComparePaint = () => {
-        if (!ransSet) return;
-        compareGpuRenderNowRef.current?.("invalidate");
-        // A non-compare sum may change the authoritative support too. The next
-        // compare must re-establish its mask rather than skip an old equal pose.
-        compareIncrementalRef.current = null;
-      };
-      const displayRoiBuffer = (engine: GPUColormapEngine, slot: number, buffer: GPUBuffer) => {
-        // Source112 retains these reusable buffers across panel selection/reorder.
-        // A display slot may release its own resources without destroying the source.
-        if (ransSet instanceof Source112ResidentSet) engine.borrowBuffer(slot, buffer, scanCols, scanRows);
-        else engine.adoptBuffer(slot, buffer, scanCols, scanRows);
-      };
       const computeRoiBufferImage = (
         backend: DetectorCompute,
         mask: Uint32Array,
       ): boolean => {
         const engine = ensureViGpuColormap(backend);
-        const maybeVi = backend as unknown as {
-          maskedSumBuffer?: (mask: Uint32Array) => { buffer: GPUBuffer; n: number };
-        };
-        if (!engine || typeof maybeVi.maskedSumBuffer !== "function") {
-          return false;
-        }
-        invalidateResidentComparePaint();
-        const t0 = performance.now();
-        const { buffer, n } = maybeVi.maskedSumBuffer(mask);
+        const { buffer, n } = backend.maskedSumBuffer(mask);
         if (n === 0) {
           buffer.destroy();
           return false;
         }
-        displayRoiBuffer(engine, VI_GPU_SLOT, buffer);
+        engine.adoptBuffer(VI_GPU_SLOT, buffer, scanCols, scanRows);
         viGpuImageRef.current = {
           source: "roi",
           slot: VI_GPU_SLOT,
@@ -5034,17 +3353,7 @@ function Show4DSTEM() {
           rangeMode: "gpu",
           rawVersionAfter: rawVirtualImageVersionRef.current + 1,
         };
-        setViGpuVersion(v => v + 1);
-        publishShow4DSTEMViDisplay({
-          source: "roi",
-          gpuBufferToDisplay: true,
-          rendered: false,
-          pixels: scanRows * scanCols,
-          maskPixels: n,
-          slot: VI_GPU_SLOT,
-          rangeMode: "gpu",
-          submitMs: performance.now() - t0,
-        });
+        setViGpuVersion(version => version + 1);
         return true;
       };
       const readGpuFloatBuffer = async (
@@ -5066,15 +3375,14 @@ function Show4DSTEM() {
         return out;
       };
       const h5ProductFirstSourceUrl = (): string | null => {
-        const candidates = h5Urls.length ? h5Urls : h5Url ? [h5Url] : [];
-        if (candidates.length !== 1) return null;
-        const sourceUrl = candidates[0];
+        if (h5Urls.length !== 1) return null;
+        const sourceUrl = h5Urls[0];
         return /_master\.h5(?:[?#].*)?$/.test(sourceUrl) ? sourceUrl : null;
       };
       const computeH5ProductFirstRoi = async (
         mask: Uint32Array,
         generation: number,
-      ): Promise<{ data: Float32Array; displayed: boolean; profile: unknown } | null> => {
+      ): Promise<{ data: Float32Array; displayed: boolean } | null> => {
         const sourceUrl = h5ProductFirstSourceUrl();
         if (!sourceUrl || !show4DSTEMHasLocalFiles()) return null;
         const productBatch = show4DSTEMOptionalGlobalInt("__QT_H5_PRODUCT_BATCH", 1, 16);
@@ -5104,78 +3412,26 @@ function Show4DSTEM() {
             rangeMode: "gpu",
             rawVersionAfter: rawVirtualImageVersionRef.current + 1,
           };
-          setViGpuVersion(v => v + 1);
-          publishShow4DSTEMViDisplay({
-            source: "roi",
-            gpuBufferToDisplay: true,
-            rendered: false,
-            pixels: product.scanRows * product.scanCols,
-            slot: VI_GPU_SLOT,
-            rangeMode: "gpu",
-            productFirstH5: true,
-            profile: product.profile,
-          });
+          setViGpuVersion(version => version + 1);
           displayed = true;
         }
         const data = await readGpuFloatBuffer(product.device, product.buffer, product.scanRows * product.scanCols);
         if (!displayed) product.buffer.destroy();
-        return { data, displayed, profile: product.profile };
+        return { data, displayed };
       };
       let viRecomputeGen = 0;
-      const recordViProfile = (
-        source: string,
-        kind: string,
-        startedAt: number,
-        generation: number,
-      ) => {
-        try {
-          const profile = {
-            source,
-            kind,
-            generation,
-            ms: Math.round((performance.now() - startedAt) * 10) / 10,
-            roiMode: String(model.get("roi_mode") || ""),
-            roiRadius: Number(model.get("roi_radius") || 0),
-            roiRadiusInner: Number(model.get("roi_radius_inner") || 0),
-            timestamp: Math.round(performance.now()),
-          };
-          const win = window as unknown as {
-            __sh4dViProfile?: unknown;
-            __sh4dViHistory?: unknown[];
-          };
-          const history = Array.isArray(win.__sh4dViHistory) ? win.__sh4dViHistory : [];
-          history.push(profile);
-          if (history.length > 80) history.splice(0, history.length - 80);
-          win.__sh4dViProfile = profile;
-          win.__sh4dViHistory = history;
-        } catch {
-          // Diagnostics must not affect interaction.
-        }
-      };
       const recomputeVI = async () => {
         const generation = ++viRecomputeGen;
-        const startedAt = performance.now();
         const source = normaliseViSource(model.get("vi_source"));
         const product = viProductFrameView(model, scanRows, scanCols, source);
         if (product) {
           if (disposed || generation !== viRecomputeGen) return;
           clearViGpuDisplay();
           publishVirtualImageBytes(product);
-          recordViProfile(source, "product", startedAt, generation);
           return;
         }
-        if (source === "roi") {
-          const preset = viPresetFrameView(model, scanRows, scanCols);
-          if (preset) {
-            if (disposed || generation !== viRecomputeGen) return;
-            clearViGpuDisplay();
-            publishVirtualImageBytes(preset);
-            recordViProfile(source, "preset_product", startedAt, generation);
-            return;
-          }
-        }
         if (isDpcGpuSource(source)) {
-          if (serveWarmCacheEntry(dpcWarmCacheKey(source), source, startedAt, generation)) {
+          if (serveWarmCacheEntry(dpcWarmCacheKey(source), source)) {
             return;
           }
           if (!compute) return;
@@ -5184,17 +3440,13 @@ function Show4DSTEM() {
           if (!displayed) {
             clearViGpuDisplay();
           } else {
-            recordViProfile(source, "dpc_gpu_display", startedAt, generation);
             void (async () => {
               const dpc = await computeDpcImage(compute!, source);
               if (disposed || generation !== viRecomputeGen || !dpc) return;
               setWarmCacheEntry({
                 source,
-                label: viSourceLabel(source),
                 data: dpc,
                 key: dpcWarmCacheKey(source),
-                kind: "dpc_gpu_display_warm_cache",
-                computedMs: Math.round((performance.now() - startedAt) * 10) / 10,
               });
               publishVirtualImageBytes(new DataView(dpc.buffer));
             })();
@@ -5205,23 +3457,17 @@ function Show4DSTEM() {
           if (dpc) {
             setWarmCacheEntry({
               source,
-              label: viSourceLabel(source),
               data: dpc,
               key: dpcWarmCacheKey(source),
-              kind: displayed ? "dpc_gpu_display_warm_cache" : "dpc_warm_cache",
-              computedMs: Math.round((performance.now() - startedAt) * 10) / 10,
             });
             publishVirtualImageBytes(new DataView(dpc.buffer));
-            recordViProfile(source, displayed ? "dpc_gpu_display" : "dpc", startedAt, generation);
             return;
           }
           return;
         }
-        const mask = sourceDetectorMask(model, detR, detC);
+        const mask = buildDetectorMask(model, detectorRows, detectorCols);
         const roiKey = roiWarmCacheKey(currentRoiGeometry());
-        // A resident source already owns the exact image; keep its direct GPU
-        // display on view switches instead of reviving a CPU snapshot layer.
-        if (!(ransSet instanceof Source112ResidentSet) && serveWarmCacheEntry(roiKey, "roi", startedAt, generation)) {
+        if (serveWarmCacheEntry(roiKey, "roi")) {
           return;
         }
         const preferH5ProductFirst = (globalThis as { __QT_H5_PRODUCT_FIRST_VI?: unknown }).__QT_H5_PRODUCT_FIRST_VI === true;
@@ -5231,14 +3477,10 @@ function Show4DSTEM() {
           if (h5Product) {
             setWarmCacheEntry({
               source: "roi",
-              label: String(model.get("roi_mode") || "ROI"),
               data: h5Product.data,
               key: roiKey,
-              kind: h5Product.displayed ? "h5_product_first_gpu_display_warm_cache" : "h5_product_first_warm_cache",
-              computedMs: Math.round((performance.now() - startedAt) * 10) / 10,
             });
             publishVirtualImageBytes(new DataView(h5Product.data.buffer));
-            recordViProfile(source, h5Product.displayed ? "h5_product_first_gpu_display" : "h5_product_first", startedAt, generation);
             return;
           }
         }
@@ -5249,94 +3491,66 @@ function Show4DSTEM() {
         }
         if (disposed || generation !== viRecomputeGen) return;
         if (displayed && dpRoiInteractiveRef.current) {
-          recordViProfile(source, "masked_sum_gpu_display_interactive", startedAt, generation);
           return;
         }
-        invalidateResidentComparePaint();
-        const vi = await compute!.maskedSum(mask);
+        const virtualImage = await compute!.maskedSum(mask);
         if (disposed || generation !== viRecomputeGen) return;
         setWarmCacheEntry({
           source: "roi",
-          label: String(model.get("roi_mode") || "ROI"),
-          data: vi,
+          data: virtualImage,
           key: roiKey,
-          kind: displayed ? "masked_sum_gpu_display_warm_cache" : "masked_sum_warm_cache",
-          computedMs: Math.round((performance.now() - startedAt) * 10) / 10,
         });
-        publishVirtualImageBytes(new DataView(vi.buffer));
-        recordViProfile(source, displayed ? "masked_sum_gpu_display" : "masked_sum", startedAt, generation);
+        publishVirtualImageBytes(new DataView(virtualImage.buffer));
       };
       const warmStandardViCache = async () => {
-        if (viWarmupStarted || disposed || !compute || ransSet) {
-          return warmCacheSummary();
+        if (viWarmupStarted || disposed || !compute) {
+          return;
         }
         viWarmupStarted = true;
-        viWarmupStatus = "warming";
         const warmGeneration = ++viWarmupGeneration;
-        const startedAt = performance.now();
-        publishWarmCacheSummary({ status: "warming" });
         try {
           for (const preset of ["bf", "abf", "adf"] as WarmRoiPresetName[]) {
             if (disposed || warmGeneration !== viWarmupGeneration || !compute) {
-              return warmCacheSummary();
+              return;
             }
             const geometry = presetRoiGeometry(preset);
             const key = roiWarmCacheKey(geometry);
             if (viWarmCache.has(key)) continue;
-            const t0 = performance.now();
             const data = await compute.maskedSum(maskForRoiGeometry(geometry));
             if (disposed || warmGeneration !== viWarmupGeneration) {
-              return warmCacheSummary();
+              return;
             }
             setWarmCacheEntry({
               source: "roi",
-              label: preset.toUpperCase(),
               data,
               key,
-              kind: "launch_warm_cache",
-              computedMs: Math.round((performance.now() - t0) * 10) / 10,
             });
           }
           for (const source of ["DPC_row", "DPC_col"] as DpcGpuSource[]) {
             if (disposed || warmGeneration !== viWarmupGeneration || !compute) {
-              return warmCacheSummary();
+              return;
             }
             const key = dpcWarmCacheKey(source);
             if (viWarmCache.has(key)) continue;
-            const t0 = performance.now();
             const data = await computeDpcImage(compute, source);
             if (!data || disposed || warmGeneration !== viWarmupGeneration) {
               continue;
             }
             setWarmCacheEntry({
               source,
-              label: viSourceLabel(source),
               data,
               key,
-              kind: "launch_warm_cache",
-              computedMs: Math.round((performance.now() - t0) * 10) / 10,
             });
           }
-          publishWarmCacheSummary({
-            status: "ready",
-            warmMs: Math.round((performance.now() - startedAt) * 10) / 10,
-          });
-          viWarmupStatus = "ready";
         } catch (error) {
-          viWarmupStatus = "failed";
-          publishWarmCacheSummary({
-            status: "failed",
-            error: error instanceof Error ? error.message : String(error),
-          });
+          // the cache only pre-computes the presets; without it they are computed when picked
+          console.warn("Show4DSTEM could not pre-compute the BF, ABF, ADF and DPC images", error);
         }
-        return warmCacheSummary();
       };
-      const resetWarmViCache = (reason: string) => {
+      const resetWarmViCache = () => {
         viWarmupGeneration += 1;
         viWarmupStarted = false;
-        viWarmupStatus = "idle";
         viWarmCache.clear();
-        publishWarmCacheSummary({ status: "idle", reason });
       };
       const scheduleWarmStandardViCache = () => {
         if (viWarmupStarted || disposed) return;
@@ -5389,9 +3603,6 @@ function Show4DSTEM() {
         const state = comparePageState();
         return String(model.get("compare_group_mode") || "paged") === "all" ? state.visible : state.page;
       };
-      const compareAverageDpIndices = () => {
-        return comparePageState().page;
-      };
       // Interactive drags must never PAGE a volume: with more panels than the
       // resident LRU, recomputing every panel per drag step forces a full-volume
       // decode + eviction each time (seconds per step, permanent thrash). During
@@ -5399,8 +3610,6 @@ function Show4DSTEM() {
       // image (persistent stack) and catch up on the mouseup finalize.
       let comparePersistentStack: Float32Array | null = null;
       let compareLastInteractiveMs = 0;
-      // Fresh settled bytes supersede the drag-time GPU slots: clear them so the
-      // grid falls back to the exact (bad-px-corrected, mask-normalised) images.
       // Coalesce GPU-slot version bumps to one React commit per animation frame:
       // mouse moves arrive faster than paints, and each bump re-renders the grid.
       let compareGpuRafHandle = 0;
@@ -5408,15 +3617,17 @@ function Show4DSTEM() {
         if (compareGpuRafHandle) return;
         compareGpuRafHandle = requestAnimationFrame(() => {
           compareGpuRafHandle = 0;
-          setCompareGpuVersion(v => v + 1);
+          setCompareGpuVersion(version => version + 1);
         });
       };
+      // Fresh settled bytes supersede the drag-time GPU slots: clear them so the
+      // grid falls back to the exact (bad-px-corrected, mask-normalised) images.
       const settleCompareGpuSlots = () => {
         compareIncrementalRef.current = null;
         if (compareGpuSlotsRef.current.size) {
           compareGpuSlotsRef.current.clear();
           compareGpuRangesRef.current.clear();
-          setCompareGpuVersion(v => v + 1);
+          setCompareGpuVersion(version => version + 1);
         }
       };
       const volIsResident = (idx: number): boolean =>
@@ -5426,15 +3637,13 @@ function Show4DSTEM() {
         count: number,
         indices: number[],
       ) => {
-        progressiveCompareGenerationRef.current = null;
-        setProgressiveComparePage(null);
         model.set("compare_virtual_image_bytes", bytes);
         model.set("compare_panel_count", count);
         model.set("compare_panel_indices", indices);
       };
       const recomputeCompareVI = async () => {
         if (disposed) return;
-        const gen = ++compareViGen;
+        const generation = ++compareViGen;
         const indices = compareVisibleIndices();
         if (!indices.length) return;
         const source = normaliseViSource(model.get("vi_source"));
@@ -5444,13 +3653,9 @@ function Show4DSTEM() {
         // full exact masked sum; subsequent geometry changes use exact deltas.
         const updateRoiCompareGpuSlots = async (): Promise<boolean> => {
           if (source !== "roi") return false;
-          const engine0 = compute ? ensureViGpuColormap(compute) : null;
-          if (!engine0) return false;
-          const computeStartedAt = performance.now();
-          const liveCenter = interactiveDrag && ransSet ? roiCenterPendingRef.current : null;
-          const mask0 = sourceDetectorMask(liveRoiGeometry(model, liveCenter,
-            interactiveDrag && ransSet ? roiRadiusPendingRef.current : null,
-            interactiveDrag && ransSet ? roiRadiusInnerPendingRef.current : null), detR, detC);
+          const engine = compute ? ensureViGpuColormap(compute) : null;
+          if (!engine) return false;
+          const detectorMask = buildDetectorMask(model, detectorRows, detectorCols);
           let slotCursor = 0;
           const batchComputes: DetectorCompute[] = [];
           const batchSlots: number[] = [];
@@ -5466,162 +3671,80 @@ function Show4DSTEM() {
             // touch volumes that are already resident.
             if (interactiveDrag && getVol && !volIsResident(idx)) continue;
             const panelCompute = getVol ? await getVol(idx) : compute;
-            if (disposed || gen !== compareViGen) return false;
-            if (!panelCompute || (!(panelCompute instanceof DetectorCompute) && !isRansBatch([panelCompute]))) continue;
+            if (disposed || generation !== compareViGen) return false;
+            if (!panelCompute || !(panelCompute instanceof DetectorCompute)) continue;
             batchComputes.push(panelCompute);
             batchSlots.push(slot);
             batchFrames.push(idx);
             compareGpuSlotsRef.current.set(idx, slot);
           }
           let adopted = 0;
-          let rangeReadbackBytes = 0;
           if (batchComputes.length) {
             const indicesKey = batchFrames.join(",");
             const previous = compareIncrementalRef.current;
             let buffers: GPUBuffer[];
-            let path: string;
             let addedPixels = 0;
             let removedPixels = 0;
-            let normalizedSource112Delta = false;
-            let directPaintQueued = false;
             if (
               interactiveDrag
               && previous
               && previous.indicesKey === indicesKey
-              && previous.mask.length === mask0.length
+              && previous.mask.length === detectorMask.length
               && batchFrames.every((frame) => previous.buffers.has(frame))
             ) {
-              const nativeCounts = ransSet instanceof Source112ResidentSet;
-              // Source112 computes its own ranked deltas. Only an exact support
-              // comparison is needed here to preserve the no-change fast path.
-              const addedMask = nativeCounts ? null : new Uint32Array(mask0.length);
-              const removedMask = nativeCounts ? null : new Uint32Array(mask0.length);
-              let unchanged = nativeCounts && sameDetectorMaskSupport(mask0, previous.mask);
-              if (addedMask && removedMask) {
-                for (let i = 0; i < mask0.length; i++) {
-                  const next = mask0[i] !== 0;
-                  const prev = previous.mask[i] !== 0;
-                  if (next && !prev) { addedMask[i] = 1; addedPixels++; }
-                  else if (!next && prev) { removedMask[i] = 1; removedPixels++; }
-                }
-                unchanged = addedPixels === 0 && removedPixels === 0;
+              const addedMask = new Uint32Array(detectorMask.length);
+              const removedMask = new Uint32Array(detectorMask.length);
+              for (let i = 0; i < detectorMask.length; i++) {
+                const next = detectorMask[i] !== 0;
+                const prev = previous.mask[i] !== 0;
+                if (next && !prev) { addedMask[i] = 1; addedPixels++; }
+                else if (!next && prev) { removedMask[i] = 1; removedPixels++; }
               }
-              if (unchanged) {
-                publishLiveCompareViStats("delta-skip", {
-                  ms: performance.now() - computeStartedAt,
-                  adoptedPanels: 0,
-                  requestedPanels: indices.length,
-                });
-                return true;
-              }
+              if (addedPixels === 0 && removedPixels === 0) return true;
               const prevBuffers = batchFrames.map((frame) => previous.buffers.get(frame)!);
-              // Native source112 owns exact counts separately from these display
-              // copies; render exact means directly when the shared canvas is ready.
-              normalizedSource112Delta = ransSet instanceof Source112ResidentSet;
-              const delta = ransSet instanceof Source112ResidentSet
-                ? source112MeanDelta(ransSet, mask0, prevBuffers, area => {
-                    const resident = ransSet;
-                    const views = resident.imageViewsU32(batchFrames, area);
-                    const accepted = compareGpuRenderNowRef.current?.({
-                      images: new Map(batchFrames.map((frame, i) => [frame, views[i]])),
-                      isCurrent: () => !disposed && ransSet === resident,
-                      refreshFloat: () => { if (!disposed && ransSet === resident) resident.normalizeDisplayBuffers(prevBuffers, area); },
-                    }, true) ?? 0;
-                    directPaintQueued = accepted === batchFrames.length;
-                    return directPaintQueued;
-                  })
-                : DetectorCompute.maskedSumDeltaBuffersBatch(batchComputes, prevBuffers, addedMask!, removedMask!);
-              buffers = delta.buffers;
-              path = delta.path;
-              addedPixels = delta.addedPixels;
-              removedPixels = delta.removedPixels;
+              buffers = DetectorCompute.maskedSumDeltaBuffersBatch(batchComputes, prevBuffers, addedMask, removedMask).buffers;
             } else {
-              const full = DetectorCompute.maskedSumBuffersBatch(batchComputes, mask0);
-              buffers = full.buffers;
-              path = full.path;
+              buffers = DetectorCompute.maskedSumBuffersBatch(batchComputes, detectorMask).buffers;
             }
-            if (ransSet && !normalizedSource112Delta) {
-              const area = Math.max(1, mask0.reduce((n, value) => n + (value ? 1 : 0), 0));
-              ransSet.normalizeDisplayBuffers(buffers, area);
-            }
-            if (!directPaintQueued) compareGpuRenderNowRef.current?.(null);
             const nextBuffers = new Map<number, GPUBuffer>();
             for (let i = 0; i < buffers.length; i++) {
-              displayRoiBuffer(engine0, batchSlots[i], buffers[i]);
+              engine.adoptBuffer(batchSlots[i], buffers[i], scanCols, scanRows);
               nextBuffers.set(batchFrames[i], buffers[i]);
               adopted++;
             }
             const rangesReady = batchFrames.every((frame) => compareGpuRangesRef.current.has(frame));
-            if (!ransSet && (!interactiveDrag || !rangesReady)) {
-              const ranges = await engine0.computeRangeBatch(batchSlots);
-              rangeReadbackBytes = batchSlots.length * Math.ceil((scanRows * scanCols) / 256) * 2 * 4;
+            if (!interactiveDrag || !rangesReady) {
+              const ranges = await engine.computeRangeBatch(batchSlots);
               ranges.forEach((range, index) => {
                 const frame = batchFrames[index];
                 if (frame !== undefined) compareGpuRangesRef.current.set(frame, range);
               });
             }
             compareIncrementalRef.current = {
-              // mask0 belongs to this update; source112 copies it internally.
-              mask: normalizedSource112Delta ? mask0 : new Uint32Array(mask0),
+              mask: new Uint32Array(detectorMask),
               buffers: nextBuffers,
               indicesKey,
             };
-            // A queued RAF is not a paint. Fresh science completions remain
-            // independent; the canvas reports actual paints via onGpuPaint.
-            const paintedNow = !directPaintQueued && interactiveDrag ? (compareGpuRenderNowRef.current?.() ?? 0) : 0;
-            compareGpuCompletion = engine0.getDevice().queue.onSubmittedWorkDone();
-            if (interactiveDrag && !ransSet) await compareGpuCompletion;
-            if (disposed || gen !== compareViGen) return false;
-            const completed = () => {
-              if (disposed) return;
-              publishLiveCompareViStats(path, {
-                ms: performance.now() - computeStartedAt,
-                adoptedPanels: adopted,
-                requestedPanels: indices.length,
-                addedPixels,
-                removedPixels,
-                paintedPanels: paintedNow,
-                rangeReadbackBytes,
-              });
-            };
-            if (ransSet && interactiveDrag) {
-              void compareGpuCompletion.then(completed, error => {
-                if (!disposed) setOfflineBackendError(String(error));
-              });
-            } else completed();
+            if (interactiveDrag) compareGpuRenderNowRef.current?.();
+            compareGpuCompletion = engine.getDevice().queue.onSubmittedWorkDone();
+            if (interactiveDrag) await compareGpuCompletion;
+            if (disposed || generation !== compareViGen) return false;
           }
           if (adopted && !interactiveDrag) {
             // A quick release alone does not make float slots current. Their
             // settled normalization must be queued before histograms resume.
-            if (!disposed && gen === compareViGen && !dpRoiInteractiveRef.current)
+            if (!disposed && generation === compareViGen && !dpRoiInteractiveRef.current)
               compareHistogramPendingSettleRef.current = false;
             bumpCompareGpuVersion();
           }
           if (batchFrames.length && !interactiveDrag) {
-            progressiveCompareGenerationRef.current = null;
-            setProgressiveComparePage(null);
             model.set("compare_panel_count", indices.length);
             model.set("compare_panel_indices", indices);
           }
           return adopted > 0 || interactiveDrag;
         };
-        if (await updateRoiCompareGpuSlots()) {
-          if (ransSet && !interactiveDrag && gen === compareViGen && !disposed
-              && (!(ransSet instanceof Source112ResidentSet) || ransSet.loadedAcquisitions === ransSet.acquisitionCount)) {
-            const mask = sourceDetectorMask(model, detR, detC);
-            const area = Math.max(1, mask.reduce((n, value) => n + (value ? 1 : 0), 0));
-            const pixels = scanRows * scanCols;
-            const settled = new Float32Array(indices.length * pixels);
-            for (let slot = 0; slot < indices.length; slot++) {
-              const counts = await ransSet.readImage(indices[slot]);
-              if (disposed || gen !== compareViGen || dpRoiInteractiveRef.current) return;
-              for (let p = 0; p < pixels; p++) settled[slot * pixels + p] = counts[p] / area;
-            }
-            publishDirectCompareStack(new DataView(settled.buffer), indices.length, indices);
-          }
-          return;
-        }
-        if (disposed || gen !== compareViGen) return;
+        if (await updateRoiCompareGpuSlots()) return;
+        if (disposed || generation !== compareViGen) return;
         if (interactiveDrag) {
           // No engine (CPU compute fallback): keep the old throttled bytes path.
           const now = performance.now();
@@ -5632,14 +3755,6 @@ function Show4DSTEM() {
         if (productStack) {
           settleCompareGpuSlots();
           publishDirectCompareStack(productStack, indices.length, indices);
-          return;
-        }
-        const presetStack = source === "roi"
-          ? viPresetStackForIndices(model, indices, scanRows, scanCols)
-          : null;
-        if (presetStack) {
-          settleCompareGpuSlots();
-          publishDirectCompareStack(presetStack, indices.length, indices);
           return;
         }
         const panelPixels = scanRows * scanCols;
@@ -5653,9 +3768,9 @@ function Show4DSTEM() {
             const idx = indices[slot];
             if (interactiveDrag && !volIsResident(idx)) continue;   // keep previous pixels
             const panelCompute = getVol ? await getVol(idx) : compute;
-            if (disposed || gen !== compareViGen || !panelCompute) return;
+            if (disposed || generation !== compareViGen || !panelCompute) return;
             const dpc = await computeDpcImage(panelCompute, source);
-            if (disposed || gen !== compareViGen || !dpc) return;
+            if (disposed || generation !== compareViGen || !dpc) return;
             stack.set(dpc, slot * panelPixels);
           }
           settleCompareGpuSlots();
@@ -5664,7 +3779,7 @@ function Show4DSTEM() {
           publishDirectCompareStack(new DataView(stack.slice().buffer), indices.length, indices);
           return;
         }
-        const mask = sourceDetectorMask(model, detR, detC);
+        const mask = buildDetectorMask(model, detectorRows, detectorCols);
         let maskArea = 0;
         for (let i = 0; i < mask.length; i++) maskArea += mask[i] ? 1 : 0;
         maskArea = Math.max(1, maskArea);
@@ -5672,12 +3787,11 @@ function Show4DSTEM() {
           const idx = indices[slot];
           if (interactiveDrag && !volIsResident(idx)) continue;   // keep previous pixels
           const panelCompute = getVol ? await getVol(idx) : compute;
-          if (disposed || gen !== compareViGen || !panelCompute) return;
-          invalidateResidentComparePaint();
-          const vi = await panelCompute.maskedSum(mask);
-          if (disposed || gen !== compareViGen) return;
-          for (let p = 0; p < panelPixels; p++) {
-            stack[slot * panelPixels + p] = vi[p] / maskArea;
+          if (disposed || generation !== compareViGen || !panelCompute) return;
+          const virtualImage = await panelCompute.maskedSum(mask);
+          if (disposed || generation !== compareViGen) return;
+          for (let pixel = 0; pixel < panelPixels; pixel++) {
+            stack[slot * panelPixels + pixel] = virtualImage[pixel] / maskArea;
           }
         }
         settleCompareGpuSlots();
@@ -5693,585 +3807,6 @@ function Show4DSTEM() {
         }
         await recomputeVI();
       };
-      (window as unknown as { __sh4d: unknown }).__sh4d = { model, recomputeVI, recomputeCompareVI,
-        residentSource: () => ransSet,
-        detMask: () => sourceDetectorMask(model, detR, detC),
-        deriveOnly: async () => { invalidateResidentComparePaint(); const vi = await compute!.maskedSum(sourceDetectorMask(model, detR, detC)); return vi.length; },
-        rawChecksums: async (scanIndices: number[] = [0, Math.floor((scanRows * scanCols) / 2), scanRows * scanCols - 1]) => {
-          const checksum = (compute as unknown as { checksumFrames?: (indices: number[]) => Promise<unknown> })?.checksumFrames;
-          if (typeof checksum !== "function") return null;
-          const result = await checksum.call(compute, scanIndices);
-          (window as unknown as { __sh4dRawChecksums?: unknown }).__sh4dRawChecksums = result;
-          return result;
-        },
-        warmStandardViCache,
-        warmCache: () => warmCacheSummary(),
-        prepareDetectorMajor: async (options?: { maxVolumes?: number }) => {
-          const indices = compareVisibleIndices();
-          const maxVolumes = Math.max(1, Math.min(indices.length, Math.round(Number(options?.maxVolumes ?? indices.length))));
-          const loaded = [] as DetectorCompute[];
-          for (const idx of indices) {
-            if (loaded.length >= maxVolumes) break;
-            const panelCompute = getVol ? await getVol(idx) : compute;
-            if (panelCompute instanceof DetectorCompute) loaded.push(panelCompute);
-          }
-          const device = loaded[0]?.getDevice();
-          if (!device || !loaded.length) return { available: false, reason: "no loaded WebGPU volumes" };
-          const startedAt = performance.now();
-          const result = DetectorCompute.prepareU8WordMajorBatch(loaded);
-          await device.queue.onSubmittedWorkDone().catch(() => {});
-          return {
-            ...result,
-            loaded: loaded.length,
-            elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-          };
-        },
-        compareGpuBench: async (options?: {
-          mode?: string;
-          centerRow?: number;
-          centerCol?: number;
-          radius?: number;
-          innerRadius?: number;
-          iterations?: number;
-          render?: boolean;
-          logScale?: boolean;
-        }) => {
-          const indices = compareVisibleIndices();
-          const engine = compute ? ensureViGpuColormap(compute) : null;
-          const device = engine?.getDevice();
-          if (!engine || !device || !indices.length) {
-            return { available: false, reason: "compare GPU engine or visible indices unavailable" };
-          }
-          const mode = String(options?.mode ?? model.get("roi_mode") ?? "circle");
-          const centerRow = Number(options?.centerRow ?? model.get("roi_center_row") ?? detR / 2);
-          const centerCol = Number(options?.centerCol ?? model.get("roi_center_col") ?? detC / 2);
-          const radius = Number(options?.radius ?? model.get("roi_radius") ?? 1);
-          const innerRadius = Number(options?.innerRadius ?? model.get("roi_radius_inner") ?? 0);
-          const iterations = Math.max(1, Math.min(20, Math.round(Number(options?.iterations ?? 3))));
-          const render = options?.render !== false;
-          const logScale = options?.logScale ?? String(model.get("vi_scale_mode") || "linear") === "log";
-          model.set("vi_source", "roi");
-          model.set("roi_active", true);
-          model.set("roi_mode", mode);
-          model.set("roi_center_row", centerRow);
-          model.set("roi_center_col", centerCol);
-          model.set("roi_center", [centerRow, centerCol]);
-          model.set("roi_radius", radius);
-          model.set("roi_radius_inner", innerRadius);
-          model.set("compare_max_panels", Math.max(indices.length, Number(model.get("compare_max_panels") || 0)));
-          model.set("compare_group_mode", "all");
-          model.set("vi_scale_mode", logScale ? "log" : "linear");
-          model.save_changes();
-
-          const mask = sourceDetectorMask(model, detR, detC);
-          let maskPixels = 0;
-          for (let i = 0; i < mask.length; i++) if (mask[i]) maskPixels++;
-          const prepStartedAt = performance.now();
-          const loaded = [] as DetectorCompute[];
-          for (const idx of indices) {
-            const panelCompute = getVol ? await getVol(idx) : compute;
-            if (panelCompute instanceof DetectorCompute) loaded.push(panelCompute);
-          }
-          await device.queue.onSubmittedWorkDone().catch(() => {});
-          const prepMs = performance.now() - prepStartedAt;
-
-          const lut = COLORMAPS[String(model.get("vi_colormap") || "inferno")] || COLORMAPS.inferno;
-          engine.uploadLUT(String(model.get("vi_colormap") || "inferno"), lut);
-          const benchWindow = window as unknown as {
-            __sh4dBenchCanvases?: HTMLCanvasElement[];
-            __sh4dBenchContexts?: (GPUCanvasContext | null)[];
-          };
-          if (render && (!benchWindow.__sh4dBenchCanvases || benchWindow.__sh4dBenchCanvases.length < loaded.length)) {
-            benchWindow.__sh4dBenchCanvases = Array.from({ length: loaded.length }, () => {
-              const canvas = document.createElement("canvas");
-              canvas.style.position = "fixed";
-              canvas.style.left = "-10000px";
-              canvas.style.top = "0";
-              canvas.style.width = "32px";
-              canvas.style.height = "32px";
-              canvas.width = scanCols;
-              canvas.height = scanRows;
-              document.body.appendChild(canvas);
-              return canvas;
-            });
-            benchWindow.__sh4dBenchContexts = benchWindow.__sh4dBenchCanvases.map((canvas) =>
-              engine.configureCanvas(canvas, scanCols, scanRows),
-            );
-          }
-
-          const results = [] as Record<string, unknown>[];
-          for (let iter = 0; iter < iterations; iter++) {
-            const slots = [] as number[];
-            const computeSubmitStartedAt = performance.now();
-            let adopted = 0;
-            const { buffers, path } = DetectorCompute.maskedSumBuffersBatch(loaded, mask);
-            for (let i = 0; i < buffers.length; i++) {
-              const slot = COMPARE_GPU_SLOT_BASE + i;
-              displayRoiBuffer(engine, slot, buffers[i]);
-              slots.push(slot);
-              adopted++;
-            }
-            const computeSubmitMs = performance.now() - computeSubmitStartedAt;
-            const computeWaitStartedAt = performance.now();
-            await device.queue.onSubmittedWorkDone().catch(() => {});
-            const computeGpuDoneMs = performance.now() - computeWaitStartedAt;
-            const computeTotalMs = performance.now() - computeSubmitStartedAt;
-
-            let renderSubmitMs = 0;
-            let renderGpuDoneMs = 0;
-            let rendered = 0;
-            if (render && slots.length) {
-              const renderSubmitStartedAt = performance.now();
-              const contexts = benchWindow.__sh4dBenchContexts || [];
-              for (let i = 0; i < slots.length; i++) {
-                const ctx = contexts[i];
-                if (!ctx) continue;
-                const ok = engine.renderSlotDirectWithGpuRangeToCanvas(
-                  slots[i],
-                  Number(model.get("vi_vmin_pct") ?? 0),
-                  Number(model.get("vi_vmax_pct") ?? 100),
-                  logScale,
-                  ctx,
-                  {
-                    width: scanCols,
-                    height: scanRows,
-                    bgRgb: 0,
-                    transform: { zoom: 1, panX: 0, panY: 0 },
-                    smooth: Boolean(model.get("vi_smooth")),
-                  },
-                );
-                if (ok) rendered++;
-              }
-              renderSubmitMs = performance.now() - renderSubmitStartedAt;
-              const renderWaitStartedAt = performance.now();
-              await device.queue.onSubmittedWorkDone().catch(() => {});
-              renderGpuDoneMs = performance.now() - renderWaitStartedAt;
-            }
-            results.push({
-              iter,
-              adopted,
-              rendered,
-              path,
-              computeSubmitMs: Math.round(computeSubmitMs * 10) / 10,
-              computeGpuDoneMs: Math.round(computeGpuDoneMs * 10) / 10,
-              computeTotalMs: Math.round(computeTotalMs * 10) / 10,
-              renderSubmitMs: Math.round(renderSubmitMs * 10) / 10,
-              renderGpuDoneMs: Math.round(renderGpuDoneMs * 10) / 10,
-            });
-          }
-          const payload = {
-            available: true,
-            indices,
-            loaded: loaded.length,
-            maskPixels,
-            mode,
-            centerRow,
-            centerCol,
-            radius,
-            innerRadius,
-            logScale,
-            render,
-            batch: true,
-            maxStorageBuffersPerShaderStage: device.limits.maxStorageBuffersPerShaderStage,
-            prepMs: Math.round(prepMs * 10) / 10,
-            results,
-            adapterInfo: getGPUInfo(),
-            softwareAdapter: isSoftwareGPUAdapter(),
-          };
-          (window as unknown as { __sh4dCompareGpuBench?: unknown }).__sh4dCompareGpuBench = payload;
-          return payload;
-        },
-        compareIncrementalBench: async (options?: {
-          mode?: string;
-          centerRow?: number;
-          centerCol?: number;
-          radius?: number;
-          innerRadius?: number;
-          steps?: Array<[number, number]>;
-          render?: boolean;
-          logScale?: boolean;
-        }) => {
-          const indices = compareVisibleIndices();
-          const engine = compute ? ensureViGpuColormap(compute) : null;
-          const device = engine?.getDevice();
-          if (!engine || !device || !indices.length) {
-            return { available: false, reason: "compare GPU engine or visible indices unavailable" };
-          }
-          const mode = String(options?.mode ?? model.get("roi_mode") ?? "annular");
-          const centerRow = Number(options?.centerRow ?? model.get("roi_center_row") ?? detR / 2);
-          const centerCol = Number(options?.centerCol ?? model.get("roi_center_col") ?? detC / 2);
-          const radius = Number(options?.radius ?? model.get("roi_radius") ?? 1);
-          const innerRadius = Number(options?.innerRadius ?? model.get("roi_radius_inner") ?? 0);
-          const render = options?.render !== false;
-          const logScale = options?.logScale ?? String(model.get("vi_scale_mode") || "linear") === "log";
-          const centers = options?.steps?.length
-            ? options.steps
-            : Array.from({ length: 8 }, (_, i): [number, number] => [centerRow + (i > 3 ? 1 : 0), centerCol + i]);
-          const waitForFrame = () => new Promise<void>((resolve) => {
-            requestAnimationFrame(() => resolve());
-          });
-
-          const previousInteractive = dpRoiInteractiveRef.current;
-          compareIncrementalRef.current = null;
-          suppressViTraitRecompute = true;
-          try {
-            model.set("vi_source", "roi");
-            model.set("roi_active", true);
-            model.set("roi_mode", mode);
-            model.set("roi_radius", radius);
-            model.set("roi_radius_inner", innerRadius);
-            model.set("compare_max_panels", Math.max(indices.length, Number(model.get("compare_max_panels") || 0)));
-            model.set("compare_group_mode", "all");
-            model.set("vi_scale_mode", logScale ? "log" : "linear");
-            model.save_changes();
-          } finally {
-            suppressViTraitRecompute = false;
-          }
-          await device.queue.onSubmittedWorkDone().catch(() => {});
-
-          const results = [] as Record<string, unknown>[];
-          try {
-            beginDpRoiInteraction();
-            for (let iter = 0; iter < centers.length; iter++) {
-              const [row, col] = centers[iter];
-              const startedAt = performance.now();
-              suppressViTraitRecompute = true;
-              try {
-                writeRoiCenterModel(row, col);
-                await recomputeCompareVI();
-              } finally {
-                suppressViTraitRecompute = false;
-              }
-              const computeSubmittedMs = performance.now() - startedAt;
-              const waitStartedAt = performance.now();
-              await device.queue.onSubmittedWorkDone().catch(() => {});
-              const computeGpuDoneMs = performance.now() - waitStartedAt;
-              const computeStats = ((window as unknown as {
-                __sh4dLiveCompareStats?: Record<string, unknown>;
-              }).__sh4dLiveCompareStats) || {};
-              let paintStats = null as Record<string, unknown> | null;
-              if (render) {
-                await waitForFrame();
-                await waitForFrame();
-                await device.queue.onSubmittedWorkDone().catch(() => {});
-                paintStats = ((window as unknown as {
-                  __sh4dLiveCompareStats?: Record<string, unknown>;
-                }).__sh4dLiveCompareStats) || null;
-              }
-              const totalMs = performance.now() - startedAt;
-              results.push({
-                iter,
-                row,
-                col,
-                event: computeStats.event,
-                addedPixels: computeStats.addedPixels,
-                removedPixels: computeStats.removedPixels,
-                computeSubmitMs: Math.round(computeSubmittedMs * 10) / 10,
-                computeGpuDoneMs: Math.round(computeGpuDoneMs * 10) / 10,
-                totalMs: Math.round(totalMs * 10) / 10,
-                fps: totalMs > 0 ? Math.round((1000 / totalMs) * 10) / 10 : null,
-                liveComputeFps: computeStats.computeFps,
-                livePaintFps: paintStats?.paintFps ?? computeStats.paintFps,
-                paintedPanels: paintStats?.lastPaintedPanels ?? computeStats.lastPaintedPanels,
-              });
-            }
-          } finally {
-            dpRoiInteractiveRef.current = previousInteractive;
-          }
-          const deltaResults = results.filter((result) => String(result.event || "").startsWith("delta"));
-          const deltaTotalMs = deltaResults.map((result) => Number(result.totalMs)).filter(Number.isFinite);
-          const meanDeltaMs = deltaTotalMs.length
-            ? deltaTotalMs.reduce((sum, ms) => sum + ms, 0) / deltaTotalMs.length
-            : null;
-          const payload = {
-            available: true,
-            indices,
-            loaded: indices.length,
-            mode,
-            radius,
-            innerRadius,
-            logScale,
-            render,
-            centers,
-            firstFullMs: results.length ? results[0].totalMs : null,
-            meanDeltaMs: meanDeltaMs == null ? null : Math.round(meanDeltaMs * 10) / 10,
-            meanDeltaFps: meanDeltaMs && meanDeltaMs > 0 ? Math.round((1000 / meanDeltaMs) * 10) / 10 : null,
-            results,
-            adapterInfo: getGPUInfo(),
-            softwareAdapter: isSoftwareGPUAdapter(),
-          };
-          (window as unknown as { __sh4dCompareIncrementalBench?: unknown }).__sh4dCompareIncrementalBench = payload;
-          return payload;
-        },
-        compareIncrementalKernelBench: async (options?: {
-          mode?: string;
-          centerRow?: number;
-          centerCol?: number;
-          radius?: number;
-          innerRadius?: number;
-          steps?: Array<[number, number]>;
-          render?: boolean;
-          logScale?: boolean;
-        }) => {
-          const indices = compareVisibleIndices();
-          const engine = compute ? ensureViGpuColormap(compute) : null;
-          const device = engine?.getDevice();
-          if (!engine || !device || !indices.length) {
-            return { available: false, reason: "compare GPU engine or visible indices unavailable" };
-          }
-          const mode = String(options?.mode ?? model.get("roi_mode") ?? "annular");
-          const centerRow = Number(options?.centerRow ?? model.get("roi_center_row") ?? detR / 2);
-          const centerCol = Number(options?.centerCol ?? model.get("roi_center_col") ?? detC / 2);
-          const radius = Number(options?.radius ?? model.get("roi_radius") ?? 1);
-          const innerRadius = Number(options?.innerRadius ?? model.get("roi_radius_inner") ?? 0);
-          const render = options?.render !== false;
-          const logScale = options?.logScale ?? String(model.get("vi_scale_mode") || "linear") === "log";
-          const centers = options?.steps?.length
-            ? options.steps
-            : Array.from({ length: 8 }, (_, i): [number, number] => [centerRow + (i > 3 ? 1 : 0), centerCol + i]);
-          const loaded = [] as DetectorCompute[];
-          const loadedIndices = [] as number[];
-          for (const idx of indices) {
-            const panelCompute = getVol ? await getVol(idx) : compute;
-            if (panelCompute && (panelCompute instanceof DetectorCompute || isRansBatch([panelCompute]))) {
-              loaded.push(panelCompute);
-              loadedIndices.push(idx);
-            }
-          }
-          await device.queue.onSubmittedWorkDone().catch(() => {});
-          const lut = COLORMAPS[String(model.get("vi_colormap") || "inferno")] || COLORMAPS.inferno;
-          engine.uploadLUT(String(model.get("vi_colormap") || "inferno"), lut);
-          const benchWindow = window as unknown as {
-            __sh4dKernelBenchCanvases?: HTMLCanvasElement[];
-            __sh4dKernelBenchContexts?: (GPUCanvasContext | null)[];
-          };
-          if (render && (!benchWindow.__sh4dKernelBenchCanvases || benchWindow.__sh4dKernelBenchCanvases.length < loaded.length)) {
-            benchWindow.__sh4dKernelBenchCanvases = Array.from({ length: loaded.length }, () => {
-              const canvas = document.createElement("canvas");
-              canvas.style.position = "fixed";
-              canvas.style.left = "-10000px";
-              canvas.style.top = "40px";
-              canvas.style.width = "32px";
-              canvas.style.height = "32px";
-              canvas.width = scanCols;
-              canvas.height = scanRows;
-              document.body.appendChild(canvas);
-              return canvas;
-            });
-            benchWindow.__sh4dKernelBenchContexts = benchWindow.__sh4dKernelBenchCanvases.map((canvas) =>
-              engine.configureCanvas(canvas, scanCols, scanRows),
-            );
-          }
-          const maskForCenter = (row: number, col: number) => sourceDetectorMask({
-            get: (name: string) => {
-              if (name === "roi_mode") return mode;
-              if (name === "roi_center_row") return row;
-              if (name === "roi_center_col") return col;
-              if (name === "roi_radius") return radius;
-              if (name === "roi_radius_inner") return innerRadius;
-              if (name === "roi_width" || name === "roi_height") return 0;
-              return model.get(name);
-            },
-          }, detR, detC);
-          let previousMask: Uint32Array | null = null;
-          let previousBuffers: GPUBuffer[] | null = null;
-          const results = [] as Record<string, unknown>[];
-          for (let iter = 0; iter < centers.length; iter++) {
-            const [row, col] = centers[iter];
-            const mask = maskForCenter(row, col);
-            let addedPixels = 0;
-            let removedPixels = 0;
-            let buffers: GPUBuffer[];
-            let path = "full";
-            const startedAt = performance.now();
-            if (previousMask && previousBuffers) {
-              const addedMask = new Uint32Array(mask.length);
-              const removedMask = new Uint32Array(mask.length);
-              for (let i = 0; i < mask.length; i++) {
-                const next = mask[i] !== 0;
-                const prev = previousMask[i] !== 0;
-                if (next && !prev) { addedMask[i] = 1; addedPixels++; }
-                else if (!next && prev) { removedMask[i] = 1; removedPixels++; }
-              }
-              const delta = DetectorCompute.maskedSumDeltaBuffersBatch(loaded, previousBuffers, addedMask, removedMask);
-              buffers = delta.buffers;
-              path = delta.path;
-              addedPixels = delta.addedPixels;
-              removedPixels = delta.removedPixels;
-            } else {
-              const full = DetectorCompute.maskedSumBuffersBatch(loaded, mask);
-              buffers = full.buffers;
-              path = full.path;
-            }
-            const submitMs = performance.now() - startedAt;
-            const waitStartedAt = performance.now();
-            await device.queue.onSubmittedWorkDone().catch(() => {});
-            const computeGpuDoneMs = performance.now() - waitStartedAt;
-            let renderSubmitMs = 0;
-            let renderGpuDoneMs = 0;
-            let rendered = 0;
-            if (render) {
-              const contexts = benchWindow.__sh4dKernelBenchContexts || [];
-              const renderStartedAt = performance.now();
-              for (let i = 0; i < buffers.length; i++) {
-                const slot = COMPARE_GPU_SLOT_BASE + 128 + i;
-                displayRoiBuffer(engine, slot, buffers[i]);
-                const ctx = contexts[i];
-                if (!ctx) continue;
-                const ok = engine.renderSlotDirectWithGpuRangeToCanvas(
-                  slot,
-                  Number(model.get("vi_vmin_pct") ?? 0),
-                  Number(model.get("vi_vmax_pct") ?? 100),
-                  logScale,
-                  ctx,
-                  {
-                    width: scanCols,
-                    height: scanRows,
-                    bgRgb: 0,
-                    transform: { zoom: 1, panX: 0, panY: 0 },
-                    smooth: Boolean(model.get("vi_smooth")),
-                  },
-                );
-                if (ok) rendered++;
-              }
-              renderSubmitMs = performance.now() - renderStartedAt;
-              const renderWaitStartedAt = performance.now();
-              await device.queue.onSubmittedWorkDone().catch(() => {});
-              renderGpuDoneMs = performance.now() - renderWaitStartedAt;
-            }
-            previousMask = new Uint32Array(mask);
-            previousBuffers = buffers;
-            const totalMs = performance.now() - startedAt;
-            results.push({
-              iter,
-              row,
-              col,
-              path,
-              addedPixels,
-              removedPixels,
-              submitMs: Math.round(submitMs * 10) / 10,
-              computeGpuDoneMs: Math.round(computeGpuDoneMs * 10) / 10,
-              renderSubmitMs: Math.round(renderSubmitMs * 10) / 10,
-              renderGpuDoneMs: Math.round(renderGpuDoneMs * 10) / 10,
-              rendered,
-              totalMs: Math.round(totalMs * 10) / 10,
-              fps: totalMs > 0 ? Math.round((1000 / totalMs) * 10) / 10 : null,
-            });
-          }
-          const deltaMs = results.slice(1).map((result) => Number(result.totalMs)).filter(Number.isFinite);
-          const meanDeltaMs = deltaMs.length ? deltaMs.reduce((sum, ms) => sum + ms, 0) / deltaMs.length : null;
-          const payload = {
-            available: true,
-            indices: loadedIndices,
-            loaded: loaded.length,
-            mode,
-            radius,
-            innerRadius,
-            logScale,
-            render,
-            firstFullMs: results.length ? results[0].totalMs : null,
-            meanDeltaMs: meanDeltaMs == null ? null : Math.round(meanDeltaMs * 10) / 10,
-            meanDeltaFps: meanDeltaMs && meanDeltaMs > 0 ? Math.round((1000 / meanDeltaMs) * 10) / 10 : null,
-            results,
-            adapterInfo: getGPUInfo(),
-            softwareAdapter: isSoftwareGPUAdapter(),
-          };
-          (window as unknown as { __sh4dCompareIncrementalKernelBench?: unknown }).__sh4dCompareIncrementalKernelBench = payload;
-          return payload;
-        },
-        roiBufferOnly: async () => {
-          const mask = sourceDetectorMask(model, detR, detC);
-          const t0 = performance.now();
-          const displayed = computeRoiBufferImage(compute!, mask);
-          await ensureViGpuColormap(compute!)?.getDevice().queue.onSubmittedWorkDone().catch(() => {});
-          return {
-            available: displayed,
-            displayed: Boolean(viGpuImageRef.current && viGpuImageRef.current.source === "roi"),
-            length: scanRows * scanCols,
-            elapsedMs: performance.now() - t0,
-            detail: (window as unknown as { __sh4dViDisplay?: Record<string, unknown> }).__sh4dViDisplay || {},
-          };
-        },
-        h5ProductFirstRoi: async () => {
-          const mask = sourceDetectorMask(model, detR, detC);
-          const generation = ++viRecomputeGen;
-          const t0 = performance.now();
-          const result = await computeH5ProductFirstRoi(mask, generation);
-          if (!result) return { available: false, elapsedMs: performance.now() - t0 };
-          publishVirtualImageBytes(new DataView(result.data.buffer));
-          return {
-            available: true,
-            displayed: result.displayed,
-            length: result.data.length,
-            elapsedMs: performance.now() - t0,
-            profile: result.profile,
-            detail: (window as unknown as { __sh4dViDisplay?: Record<string, unknown> }).__sh4dViDisplay || {},
-          };
-        },
-        dpcOnly: async (source: DpcGpuSource = "DPC_row") => {
-          const normalSource = isDpcGpuSource(source) ? source : "DPC_row";
-          const dpc = await computeDpcImage(compute!, normalSource);
-          let sum = 0;
-          if (dpc) for (let i = 0; i < dpc.length; i++) sum += dpc[i];
-          return { source: normalSource, length: dpc?.length ?? 0, sum };
-        },
-        dpcCompareReference: async (source: DpcGpuSource = "DPC_row", referenceUrl: string) => {
-          const normalSource = isDpcGpuSource(source) ? source : "DPC_row";
-          const dpc = await computeDpcImage(compute!, normalSource);
-          if (!dpc) return { source: normalSource, available: false, error: "DPC source unavailable" };
-          const response = await fetch(referenceUrl);
-          if (!response.ok) return { source: normalSource, available: false, error: `reference fetch failed ${response.status}` };
-          const ref = new Float32Array(await response.arrayBuffer());
-          if (ref.length !== dpc.length) {
-            return { source: normalSource, available: false, error: `reference length ${ref.length} != ${dpc.length}` };
-          }
-          let maxAbsErr = 0;
-          let sumAbsErr = 0;
-          let sumSqErr = 0;
-          let maxAbsRef = 0;
-          for (let i = 0; i < dpc.length; i++) {
-            const err = Math.abs(dpc[i] - ref[i]);
-            if (err > maxAbsErr) maxAbsErr = err;
-            sumAbsErr += err;
-            sumSqErr += err * err;
-            const refAbs = Math.abs(ref[i]);
-            if (refAbs > maxAbsRef) maxAbsRef = refAbs;
-          }
-          return {
-            source: normalSource,
-            available: true,
-            length: dpc.length,
-            maxAbsErr,
-            meanAbsErr: sumAbsErr / Math.max(1, dpc.length),
-            rmsErr: Math.sqrt(sumSqErr / Math.max(1, dpc.length)),
-            maxAbsRef,
-          };
-        },
-        dpcBufferOnly: async (source: DpcGpuSource = "DPC_row") => {
-          const normalSource = isDpcGpuSource(source) ? source : "DPC_row";
-          const displayed = await computeDpcBufferImage(compute!, normalSource);
-          return {
-            source: normalSource,
-            available: displayed,
-            displayed: Boolean(viGpuImageRef.current),
-            length: scanRows * scanCols,
-            detail: (window as unknown as { __sh4dDpcDisplay?: Record<string, unknown> }).__sh4dDpcDisplay || {},
-          };
-        },
-        dpcDisplayOnly: async (source: DpcGpuSource = "DPC_row") => {
-          const normalSource = isDpcGpuSource(source) ? source : "DPC_row";
-          const displayed = await computeDpcBufferImage(compute!, normalSource);
-          return {
-            source: normalSource,
-            available: displayed,
-            displayed: Boolean(viGpuImageRef.current),
-            length: scanRows * scanCols,
-            detail: (window as unknown as { __sh4dDpcDisplay?: Record<string, unknown> }).__sh4dDpcDisplay || {},
-          };
-        },
-        comLen: () => { const c = compute as unknown as { com?: Float32Array | null }; return c && c.com ? c.com.length : -1; },
-        rd: () => ({ mode: model.get("roi_mode"), r: model.get("roi_radius"), ri: model.get("roi_radius_inner"),
-          cr: model.get("roi_center_row"), cc: model.get("roi_center_col"), active: model.get("roi_active") }) };
       requestCompareViLiveRef.current = () => {
         if (compareViLiveInFlightRef.current || compareGpuInFlight >= 2) {
           compareViLivePendingRef.current = true;
@@ -6283,24 +3818,7 @@ function Show4DSTEM() {
         flushRoiRadius(false);
         compareViLiveInFlightRef.current = true;
         void (async () => {
-          if (ransSet && compareVisibleIndices().length && normaliseViSource(model.get("vi_source")) === "roi") {
-            // The visible grid owns this detector update. Updating the hidden
-            // single view first splits the common mask history into two jobs.
-            compareGpuInFlight++;
-            try {
-              await recomputeCompareVI();
-            } catch (error) {
-              compareGpuInFlight--;
-              throw error;
-            }
-            const completion = compareGpuCompletion;
-            void completion.finally(() => {
-              compareGpuInFlight--;
-              if (compareViLivePendingRef.current && dpRoiInteractiveRef.current && !disposed) requestCompareViLive();
-            }).catch(error => { if (!disposed) setOfflineBackendError(String(error)); });
-          } else {
-            await recomputeVisibleVirtualImages();
-          }
+          await recomputeVisibleVirtualImages();
         })().catch(error => {
           if (!disposed) setOfflineBackendError(String(error));
         }).finally(() => {
@@ -6331,46 +3849,16 @@ function Show4DSTEM() {
       // Pointing at a scan position normally asks the kernel for that position's raw
       // diffraction pattern (frame_bytes). With no kernel we slice it straight out of
       // the offline stack, so the DP follows the probe offline too.
-      const detSize = detR * detC;
-      const sample = (gp: number) => compute!.mode === 1 ? cpuStack![gp] : (cpuStack![gp * 2] | (cpuStack![gp * 2 + 1] << 8));
+      const detSize = detectorRows * detectorCols;
+      const sample = (pixelIndex: number) => compute!.mode === 1 ? cpuStack![pixelIndex] : (cpuStack![pixelIndex * 2] | (cpuStack![pixelIndex * 2 + 1] << 8));
       const computeFrame = async (isCurrent: () => boolean) => {
-        const pr = Math.max(0, Math.min(scanRows - 1, model.get("pos_row") | 0));
-        const pc = Math.max(0, Math.min(scanCols - 1, model.get("pos_col") | 0));
-        const scanIdx = pr * scanCols + pc;
+        const scanRow = Math.max(0, Math.min(scanRows - 1, model.get("pos_row") | 0));
+        const scanCol = Math.max(0, Math.min(scanCols - 1, model.get("pos_col") | 0));
+        const scanIdx = scanRow * scanCols + scanCol;
         const mode = String(model.get("view_mode") || "single");
         const dpMode = String(model.get("compare_dp_mode") || "average");
-        if (ransSet instanceof Source112ResidentSet && dpGpuCanvasRef.current && dpGpuOptionsRef.current
-            && (!model.get("vi_roi_mode") || model.get("vi_roi_mode") === "off")) {
-          const average = (mode === "multiple" || mode === "compare") && dpMode !== "selected";
-          let indices = average ? compareAverageDpIndices() : [Math.max(0, Math.min(ransSet.acquisitionCount - 1, model.get("frame_idx") | 0))];
-          if (average && !h5VolumePreloadDone) {
-            indices = latestResidentVolumeIndex != null && volIsResident(latestResidentVolumeIndex)
-              ? [latestResidentVolumeIndex] : indices.filter(idx => volIsResident(idx));
-          }
-          if (indices.length && indices.every(idx => volIsResident(idx))) {
-            const sources = indices.map(idx => ransSet!.computes[idx]) as unknown as ResidentPatternSource[];
-            const device = sources[0].getDevice();
-            let display = dpGpuDisplayRef.current;
-            if (!display || display.device !== device) {
-              clearDpGpuDisplay();
-              display = new ResidentDpDisplay(dpGpuCanvasRef.current, device, dpGpuOptionsRef.current,
-                setDpGpuPending, error => { if (!disposed) setOfflineBackendError(String(error)); });
-              dpGpuDisplayRef.current = display;
-            }
-            liveScanDisplayRef.current = mode === "multiple" || mode === "compare";
-            display.show(sources, scanIdx, frame => {
-              if (!isCurrent() || model.get("pos_row") !== pr || model.get("pos_col") !== pc) return;
-              model.set("frame_bytes", new DataView(frame.buffer));
-              model.save_changes();
-            });
-            setDpGpuReady(true);
-            return;
-          }
-        }
-        if (dpGpuDisplayRef.current) clearDpGpuDisplay();
-
         if ((mode === "multiple" || mode === "compare") && dpMode !== "selected" && getVol) {
-          const indices = compareAverageDpIndices();
+          const indices = comparePageState().page;
           if (indices.length) {
             const latestLoaded = latestResidentVolumeIndex != null && volIsResident(latestResidentVolumeIndex)
               ? latestResidentVolumeIndex
@@ -6393,13 +3881,6 @@ function Show4DSTEM() {
               for (let k = 0; k < detSize; k++) averaged[k] /= count;
               if (!isCurrent()) return;
               model.set("frame_bytes", new DataView(averaged.buffer));
-              (window as unknown as { __show4dstemLatestDp?: unknown }).__show4dstemLatestDp = {
-                scanIdx,
-                source: h5VolumePreloadDone ? "average-loaded" : "latest-resident",
-                indices: averageIndices,
-                count,
-                updatedAt: Math.round(performance.now()),
-              };
               model.save_changes();
               return;
             }
@@ -6407,11 +3888,11 @@ function Show4DSTEM() {
         }
         // bslz4 / chunked stacks have no CPU copy -> extract the frame on the GPU.
         if (!compute) return;
-        const frameIndex = Math.max(0, Math.min((volumeCount || volMetas.length || 1) - 1, model.get("frame_idx") | 0));
+        const frameIndex = Math.max(0, Math.min((volumeCount || 1) - 1, model.get("frame_idx") | 0));
         const frameSource = getVol ? await getVol(frameIndex) : compute;
         if (!frameSource || !isCurrent()) return;
         const frame = cpuStack
-          ? (() => { const f = new Float32Array(detSize); const base = scanIdx * detSize; for (let k = 0; k < detSize; k++) f[k] = sample(base + k); return f; })()
+          ? (() => { const values = new Float32Array(detSize); const base = scanIdx * detSize; for (let k = 0; k < detSize; k++) values[k] = sample(base + k); return values; })()
           : await frameSource.frameAt(scanIdx);
         if (!isCurrent()) return;
         model.set("frame_bytes", new DataView(frame.buffer)); model.save_changes();
@@ -6449,24 +3930,24 @@ function Show4DSTEM() {
         void recomputeFrame();
       };
       const onPos = () => { void recomputeFrame(); };
-      const onCompareFrameSource = () => { dpGpuDisplayRef.current?.invalidate(); frameQueue.invalidate(); void recomputeFrame(); };
-      const onCompareGridSource = () => { dpGpuDisplayRef.current?.invalidate(); frameQueue.invalidate(); void recomputeCompareVI(); void recomputeFrame(); };
+      const onCompareFrameSource = () => { frameQueue.invalidate(); void recomputeFrame(); };
+      const onCompareGridSource = () => { frameQueue.invalidate(); void recomputeCompareVI(); void recomputeFrame(); };
       const activateCurrentVolume = async () => {
         if (!getVol) return true;
-        const nVolumes = volumeCount || volMetas.length || 1;
-        const v = Math.max(0, Math.min(nVolumes - 1, model.get("frame_idx") | 0));
-        const cc = await getVol(v);
-        if (!cc) return false;
-        compute = cc;
-        publishComputeDpcReady(cc);
+        const nVolumes = volumeCount || 1;
+        const volumeIndex = Math.max(0, Math.min(nVolumes - 1, model.get("frame_idx") | 0));
+        const volume = await getVol(volumeIndex);
+        if (!volume) return false;
+        compute = volume;
+        setWebgpuDpcReady(true);
         return true;
       };
       if (initialVolumeLoad) {
-        void initialVolumeLoad.then((cc) => {
-          if (!cc || disposed) return;
+        void initialVolumeLoad.then((volume) => {
+          if (!volume || disposed) return;
           frameQueue.invalidate();
-          compute = cc;
-          publishComputeDpcReady(cc);
+          compute = volume;
+          setWebgpuDpcReady(true);
           void (async () => {
             if (!disposed) setOfflineBackendStatus("Rendering first diffraction pattern and virtual image");
             await recomputeFrame();
@@ -6487,7 +3968,6 @@ function Show4DSTEM() {
         });
       }
       const recomputeActiveView = async () => {
-        dpGpuDisplayRef.current?.invalidate();
         frameQueue.invalidate();
         const ready = await activateCurrentVolume();
         if (!ready || disposed) return;
@@ -6499,12 +3979,11 @@ function Show4DSTEM() {
       // 5D multi-volume: the slider picks the active dataset; decode-on-scrub (LRU).
       let frameGen = 0;
       const onFrame = async () => {
-        dpGpuDisplayRef.current?.invalidate();
         frameQueue.invalidate();
-        const gen = ++frameGen;                  // ignore a stale decode if the user keeps scrubbing
+        const generation = ++frameGen;                  // ignore a stale decode if the user keeps scrubbing
         const ready = await activateCurrentVolume();
-        if (gen !== frameGen || !ready) return;   // a newer scroll superseded this one
-        resetWarmViCache("frame");
+        if (generation !== frameGen || !ready) return;   // a newer scroll superseded this one
+        resetWarmViCache();
         void recomputeVI(); void recomputeCompareVI(); void recomputeDP(); void recomputeFrame();
         scheduleWarmStandardViCache();
       };
@@ -6517,17 +3996,17 @@ function Show4DSTEM() {
       const onPreset = () => {
         const name = String(model.get("_preset_request") || "").toLowerCase();
         if (!name) return;
-        const bf = model.get("bf_radius") || 1;
+        const bfRadius = model.get("bf_radius") || 1;
         suppressViTraitRecompute = true;
         try {
           model.set("roi_active", true);
           model.set("vi_source", "roi");
           model.set("roi_center_row", model.get("center_row"));
           model.set("roi_center_col", model.get("center_col"));
-          if (name === "bf") { model.set("roi_mode", "circle"); model.set("roi_radius_inner", 0); model.set("roi_radius", Math.max(1, bf)); }
-          else if (name === "abf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", Math.max(0.5, bf * 0.5)); model.set("roi_radius", Math.max(1, bf)); }
-          else if (name === "adf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bf); model.set("roi_radius", bf * 2); }
-          else if (name === "haadf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bf * 2); model.set("roi_radius", bf * 4); }
+          if (name === "bf") { model.set("roi_mode", "circle"); model.set("roi_radius_inner", 0); model.set("roi_radius", Math.max(1, bfRadius)); }
+          else if (name === "abf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", Math.max(0.5, bfRadius * 0.5)); model.set("roi_radius", Math.max(1, bfRadius)); }
+          else if (name === "adf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bfRadius); model.set("roi_radius", bfRadius * 2); }
+          else if (name === "haadf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bfRadius * 2); model.set("roi_radius", bfRadius * 4); }
           model.set("_preset_request", "");  // consume so the same preset can fire again
         } finally {
           suppressViTraitRecompute = false;
@@ -6540,12 +4019,12 @@ function Show4DSTEM() {
       // which write the scalars directly, would move the detector). Same for the
       // real-space vi_roi_center drag.
       const onRoiCenter = () => {
-        const rc = model.get("roi_center");
-        if (Array.isArray(rc) && rc.length === 2) {
+        const center = model.get("roi_center");
+        if (Array.isArray(center) && center.length === 2) {
           splittingRoiCenter = true;
           try {
-            model.set("roi_center_row", rc[0]);
-            model.set("roi_center_col", rc[1]);
+            model.set("roi_center_row", center[0]);
+            model.set("roi_center_col", center[1]);
           } finally {
             splittingRoiCenter = false;
           }
@@ -6558,12 +4037,12 @@ function Show4DSTEM() {
         void recomputeVI(); void recomputeCompareVI();
       };
       const onViCenter = () => {
-        const rc = model.get("vi_roi_center");
-        if (Array.isArray(rc) && rc.length === 2) {
+        const center = model.get("vi_roi_center");
+        if (Array.isArray(center) && center.length === 2) {
           splittingViCenter = true;
           try {
-            model.set("vi_roi_center_row", rc[0]);
-            model.set("vi_roi_center_col", rc[1]);
+            model.set("vi_roi_center_row", center[0]);
+            model.set("vi_roi_center_col", center[1]);
           } finally {
             splittingViCenter = false;
           }
@@ -6572,8 +4051,8 @@ function Show4DSTEM() {
       };
       const viTraits = ["roi_center_row", "roi_center_col", "roi_radius", "roi_radius_inner", "roi_mode", "roi_width", "roi_height"];
       const dpTraits = ["vi_roi_center_row", "vi_roi_center_col", "vi_roi_radius", "vi_roi_mode", "vi_roi_width", "vi_roi_height", "vi_roi_reduce"];
-      viTraits.forEach((t) => model.on("change:" + t, onVI));
-      dpTraits.forEach((t) => model.on("change:" + t, onDP));
+      viTraits.forEach((trait) => model.on("change:" + trait, onVI));
+      dpTraits.forEach((trait) => model.on("change:" + trait, onDP));
       model.on("change:vi_source", onVI);
       model.on("change:roi_center", onRoiCenter);
       model.on("change:vi_roi_center", onViCenter);
@@ -6587,14 +4066,13 @@ function Show4DSTEM() {
       model.on("change:compare_panel_order", onCompareGridSource);
       model.on("change:compare_hidden_panels", onCompareGridSource);
       detach = () => {
-        viTraits.forEach((t) => model.off("change:" + t, onVI));
-        dpTraits.forEach((t) => model.off("change:" + t, onDP));
+        viTraits.forEach((trait) => model.off("change:" + trait, onVI));
+        dpTraits.forEach((trait) => model.off("change:" + trait, onDP));
         model.off("change:vi_source", onVI);
         model.off("change:roi_center", onRoiCenter);
         model.off("change:vi_roi_center", onViCenter);
         model.off("change:_preset_request", onPreset);
         frameQueue.close();
-        clearDpGpuDisplay();
         model.off("change:pos_row", onPos);
         model.off("change:pos_col", onPos);
         model.off("change:compare_dp_mode", onCompareFrameSource);
@@ -6605,19 +4083,13 @@ function Show4DSTEM() {
         model.off("change:compare_hidden_panels", onCompareGridSource);
         model.off("change:frame_idx", onFrame);
         model.off("change:view_mode", recomputeActiveView);
-        computes.forEach((c) => c.dispose());          // single / non-lazy resident set
-      ransSet?.dispose();
-        volCache.forEach((c) => c.dispose()); volCache.clear();  // every cached lazy volume
-        inlineVolCache.forEach((c) => c.dispose()); inlineVolCache.clear();
-      };
-      refreshResidentProgress = () => {
-        if (model.get("compare_dp_mode") !== "selected") frameQueue.invalidate();
-        void recomputeVI(); void recomputeCompareVI(); recomputeFrame();
+        volCache.forEach((volume) => volume.dispose()); volCache.clear();  // every cached lazy volume
+        inlineVolCache.forEach((volume) => volume.dispose()); inlineVolCache.clear();
       };
       await recomputeVI();  // initial virtual image, no interaction needed
       await recomputeCompareVI();
       if (!initialVolumeLoad && !disposed) {
-        if (!(ransSet instanceof Source112ResidentSet)) setOfflineBackendStatus("");
+        setOfflineBackendStatus("");
         setOfflineBackendLoading(false);
       }
       // Fit the BF disk from the mean diffraction pattern before the presets warm.
@@ -6630,7 +4102,7 @@ function Show4DSTEM() {
         if (!compute || disposed) return;
         // Only override the ratio guess; an explicit user bf_radius must win.
         const current = Number(model.get("bf_radius") || 0);
-        const ratioGuess = Math.min(detR, detC) * 0.125;
+        const ratioGuess = Math.min(detectorRows, detectorCols) * 0.125;
         if (Math.abs(current - ratioGuess) > 0.51) return;
         // A few thousand scan positions fix the disk edge; reducing all of them would
         // read the whole stack and delay first paint for no extra accuracy.
@@ -6639,17 +4111,17 @@ function Show4DSTEM() {
         const scanMask = new Uint32Array(scanCount);
         for (let i = 0; i < scanCount; i += stride) scanMask[i] = 1;
         const dp = await compute.reduceFrames(scanMask, true);
-        if (disposed || !dp || dp.length !== detR * detC) return;
+        if (disposed || !dp || dp.length !== detectorRows * detectorCols) return;
         let peak = -Infinity;
         for (let i = 0; i < dp.length; i++) if (dp[i] > peak) peak = dp[i];
         const median = Float32Array.from(dp).sort()[dp.length >> 1];
         const threshold = 0.5 * (peak + median);
-        // Intensity-weighted centroid of the disk interior gives a sub-pixel centre;
-        // the beam is not exactly on the detector centre (measured 94.4, 96.6).
+        // Intensity-weighted centroid of the disk interior gives a sub-pixel center;
+        // the beam is not exactly on the detector center (measured 94.4, 96.6).
         let weight = 0, rowSum = 0, colSum = 0;
-        for (let row = 0; row < detR; row++) {
-          for (let col = 0; col < detC; col++) {
-            const value = dp[row * detC + col];
+        for (let row = 0; row < detectorRows; row++) {
+          for (let col = 0; col < detectorCols; col++) {
+            const value = dp[row * detectorCols + col];
             if (value >= threshold) { weight += value; rowSum += row * value; colSum += col * value; }
           }
         }
@@ -6658,19 +4130,19 @@ function Show4DSTEM() {
         // Radial profile, then the half-max crossing: the disk is flat inside and
         // falls off a cliff at the edge, so half-max is stable against hot pixels.
         const maxRadius = Math.ceil(Math.hypot(
-          Math.max(centerRow, detR - centerRow), Math.max(centerCol, detC - centerCol)));
+          Math.max(centerRow, detectorRows - centerRow), Math.max(centerCol, detectorCols - centerCol)));
         const radialSum = new Float64Array(maxRadius + 1);
         const radialCount = new Float64Array(maxRadius + 1);
-        for (let row = 0; row < detR; row++) {
-          for (let col = 0; col < detC; col++) {
+        for (let row = 0; row < detectorRows; row++) {
+          for (let col = 0; col < detectorCols; col++) {
             const radius = Math.round(Math.hypot(row - centerRow, col - centerCol));
-            if (radius <= maxRadius) { radialSum[radius] += dp[row * detC + col]; radialCount[radius] += 1; }
+            if (radius <= maxRadius) { radialSum[radius] += dp[row * detectorCols + col]; radialCount[radius] += 1; }
           }
         }
         const profile = new Float64Array(maxRadius + 1);
         for (let i = 0; i <= maxRadius; i++) profile[i] = radialCount[i] ? radialSum[i] / radialCount[i] : 0;
         // Only radii that actually contain detector pixels carry a profile value. A
-        // sub-pixel centre usually leaves the radius-0 bin empty, and an empty bin
+        // sub-pixel center usually leaves the radius-0 bin empty, and an empty bin
         // reads as zero, which would otherwise look like the disk edge at r=0.
         const filled: number[] = [];
         for (let i = 0; i <= maxRadius; i++) if (radialCount[i] > 0) filled.push(i);
@@ -6717,15 +4189,12 @@ function Show4DSTEM() {
       disposed = true;
       compareGpuHistogramGenRef.current++;
       compareHistogramPendingSettleRef.current = true;
-      compareGpuRenderNowRef.current?.(null);
       if (roiRadiusRafRef.current !== null) cancelAnimationFrame(roiRadiusRafRef.current);
       roiRadiusRafRef.current = null;
       roiRadiusPendingRef.current = null;
       roiRadiusInnerPendingRef.current = null;
-      sourceLoadAbort.abort();
       requestViFinalizeRef.current = null;
       requestCompareViLiveRef.current = null;
-      compareViLiveMicrotaskRef.current = null;
       compareViLiveInFlightRef.current = false;
       compareViLivePendingRef.current = false;
       if (compareViLiveRafRef.current !== null) {
@@ -6740,9 +4209,7 @@ function Show4DSTEM() {
       clearViGpuDisplay();
       detach?.();
     };
-  }, [beginDpRoiInteraction, clearViGpuDisplay, qemSource, source112Source, ensureViGpuColormap, h5LocalFilesGranted, h5SourceAvailable, offline, ransLocalDirectory, ransLocalFiles, requestCompareViLive, requestDpFrameLive, requireLocalH5Files]);
-  // dp_stats are computed in JS from frameBytes (Python side no longer
-  // syncs a dp_stats trait — saves 4 trait sync round-trips per click).
+  }, [beginDpRoiInteraction, clearViGpuDisplay, ensureViGpuColormap, h5LocalFilesGranted, h5SourceAvailable, offline, requestCompareViLive, requestDpFrameLive, requireLocalH5Files]);
   const [viStats, setViStats] = React.useState<number[]>([0, 0, 0, 0]);
   const [viDataMin, setViDataMin] = React.useState<number>(0);
   const [viDataMax, setViDataMax] = React.useState<number>(1);
@@ -6750,10 +4217,8 @@ function Show4DSTEM() {
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed] = useModelState<boolean>("controls_collapsed");
-  const [debug] = useModelState<boolean>("debug");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
-  const debugFps = useDebugFps(Boolean(debug));
   const [showStats] = useModelState<boolean>("show_stats");
   const [showScaleBar] = useModelState<boolean>("show_scale_bar");
   const [mobileDpOptionsOpen, setMobileDpOptionsOpen] = React.useState(false);
@@ -6768,7 +4233,6 @@ function Show4DSTEM() {
   const compareGridResizeCleanupRef = React.useRef<(() => void) | null>(null);
   const [compareHiddenMenuAnchor, setCompareHiddenMenuAnchor] = React.useState<HTMLElement | null>(null);
 
-  const effectiveShowFft = showFft;
   const displayViewMode = viewMode === "compare" ? "multiple" : viewMode === "temporal" ? "single" : (viewMode || "single");
   const compareMode = (displayViewMode === "multiple" || viewMode === "compare") && nFrames > 1;
   const viProductSourceOptions = React.useMemo(() => {
@@ -6878,7 +4342,6 @@ function Show4DSTEM() {
     });
     return items;
   }, [activeComparePageCount, activeComparePageIdx]);
-  const frameSliderLabel = frameDimLabel;
   const frameSliderAriaLabel = `Show4DSTEM ${frameDimLabel.toLowerCase()}`;
   const compareGridWidth = compareGridPreviewWidth ?? (compareGridWidthPx > 0 ? compareGridWidthPx : COMPARE_GRID_DEFAULT_WIDTH);
   React.useEffect(() => {
@@ -6909,11 +4372,7 @@ function Show4DSTEM() {
     return [...order];
   }, [comparePanelOrder, nFrames]);
   const visibleCompareHistogramFrames = React.useMemo(() => {
-    const source = progressiveComparePage?.expectedIndices?.length
-      ? progressiveComparePage.expectedIndices
-      : Array.isArray(comparePanelIndices)
-        ? comparePanelIndices
-        : [];
+    const source = Array.isArray(comparePanelIndices) ? comparePanelIndices : [];
     if (!source.length) return [] as number[];
     const available = new Set(source);
     const hidden = new Set(
@@ -6931,40 +4390,12 @@ function Show4DSTEM() {
       if (!hidden.has(idx) && !seen.has(idx)) ordered.push(idx);
     });
     return ordered;
-  }, [compareHiddenPanels, comparePanelIndices, normalizedCompareOrder, progressiveComparePage]);
+  }, [compareHiddenPanels, comparePanelIndices, normalizedCompareOrder]);
   const requestComparePage = React.useCallback((page: number) => {
     const next = Math.max(0, Math.min(activeComparePageCount - 1, Math.round(Number(page) || 0)));
     if (next === activeComparePageIdx) return;
-    const hidden = new Set(
-      (compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames),
-    );
-    const ordered = normalizedCompareOrder();
-    const pageSize = Math.max(1, Math.round(Number(compareMaxPanels || ordered.length || 1)));
-    const pendingGeneration = comparePageProgressiveEnabled
-      ? `pending:${++progressiveComparePendingGenerationRef.current}`
-      : "";
-    const pending = beginPendingProgressiveComparePage(
-      Boolean(comparePageProgressiveEnabled),
-      pendingGeneration,
-      next,
-      ordered,
-      [...hidden],
-      pageSize,
-    );
-    progressiveCompareGenerationRef.current = pending?.generation ?? null;
-    setProgressiveComparePage(pending);
-    if (pending) recordComparePageClick(next);
     setComparePageIdx(next);
-  }, [
-    activeComparePageCount,
-    activeComparePageIdx,
-    compareHiddenPanels,
-    compareMaxPanels,
-    comparePageProgressiveEnabled,
-    nFrames,
-    normalizedCompareOrder,
-    setComparePageIdx,
-  ]);
+  }, [activeComparePageCount, activeComparePageIdx, setComparePageIdx]);
   const comparePanelLabel = React.useCallback((idx: number) => {
     return frameLabels && frameLabels.length > idx && frameLabels[idx]
       ? frameLabels[idx]
@@ -7023,7 +4454,7 @@ function Show4DSTEM() {
 
   // ROI FFT state (VI ROI crops virtual image for FFT)
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
-  const roiFftActive = effectiveShowFft && viRoiMode !== "off";
+  const roiFftActive = showFft && viRoiMode !== "off";
 
   // Canvas resize state
   const initialCanvasSize = panelWidthPx > 0 ? panelWidthPx : CANVAS_SIZE;
@@ -7070,7 +4501,6 @@ function Show4DSTEM() {
     rotationDeg?: number;
   }) => {
     const nTrials = Math.max(0, Math.round(Number(ssbComputeNTrials ?? 200)));
-    const bfSubsample = Math.max(0.01, Math.min(1, Number(ssbComputeBfSubsample ?? 1)));
     const manualAberrations = Boolean(options?.manualAberrations);
     const c10Nm = Number(options?.c10Nm ?? ssbComputeC10Nm ?? 0);
     const c12Nm = Number(options?.c12Nm ?? ssbComputeC12Nm ?? 0);
@@ -7081,7 +4511,6 @@ function Show4DSTEM() {
       action: "compute_ssb",
       n_trials: nTrials,
       refine: Boolean(ssbComputeRefine),
-      bf_subsample: bfSubsample,
       lock_c10: Boolean(ssbComputeLockC10),
       lock_c12: Boolean(ssbComputeLockC12),
       manual_aberrations: manualAberrations,
@@ -7100,7 +4529,6 @@ function Show4DSTEM() {
   }, [
     model,
     setSsbComputeRequest,
-    ssbComputeBfSubsample,
     ssbComputeC10Nm,
     ssbComputeC12Nm,
     ssbComputeLockC10,
@@ -7146,27 +4574,16 @@ function Show4DSTEM() {
     return unhidden;
   }, [compareHiddenPanels, compareMaxPanels, comparePageIdx, comparePanelCount, compareStarredPanels, nFrames, normalizedCompareOrder]);
 
-  const estimateHtmlExportSize = React.useCallback((
-    exportKind: HtmlExportKind,
-    dtype: string,
-    detBin: number,
-    scanBin: number,
-    datasetScope: HtmlDatasetScope = "unhidden",
-  ) => {
+  // A static report embeds one RGB image per preset (BF, ABF, ADF, HAADF) per
+  // dataset at the binned scan size; the interactive menu sizes its presets itself.
+  const estimateReportHtmlSize = React.useCallback((scanBin: number, datasetScope: HtmlDatasetScope) => {
     const binnedScanRows = Math.max(1, Math.floor(shapeRows / scanBin));
     const binnedScanCols = Math.max(1, Math.floor(shapeCols / scanBin));
-    if (exportKind === "report") {
-      const datasetCount = reportDatasetCount(datasetScope);
-      const presetCount = 4;
-      const rgbBytes = datasetCount * presetCount * binnedScanRows * binnedScanCols * 3;
-      return formatEstimatedHtmlSize(rgbBytes);
-    }
-    const binnedRows = Math.max(1, Math.floor(detRows / detBin));
-    const binnedCols = Math.max(1, Math.floor(detCols / detBin));
-    const bytesPerPixel = dtype === "uint16" ? 2 : 1;
-    const payloadBytes = Math.max(0, nFrames) * binnedScanRows * binnedScanCols * binnedRows * binnedCols * bytesPerPixel;
-    return formatEstimatedHtmlSize(payloadBytes);
-  }, [detCols, detRows, nFrames, reportDatasetCount, shapeCols, shapeRows]);
+    const datasetCount = reportDatasetCount(datasetScope);
+    const presetCount = 4;
+    const rgbBytes = datasetCount * presetCount * binnedScanRows * binnedScanCols * 3;
+    return formatEstimatedHtmlSize(rgbBytes);
+  }, [reportDatasetCount, shapeCols, shapeRows]);
 
   const handleHtmlExportSelect = async (
     exportKind: HtmlExportKind,
@@ -7203,14 +4620,14 @@ function Show4DSTEM() {
           suggestedName: filename,
           types: [{ description: "Standalone HTML", accept: { "text/html": [".html"] } }],
         });
-      } catch (err) {
-        if (isAbortLikeError(err)) {
+      } catch (error) {
+        if (isAbortLikeError(error)) {
           setHtmlExportBusy(false);
           setLocalHtmlExportStatus("Export canceled");
           return;
         }
         setHtmlExportBusy(false);
-        setLocalHtmlExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        setLocalHtmlExportStatus(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
     }
@@ -7338,11 +4755,11 @@ function Show4DSTEM() {
         setHtmlExportBusy(false);
         setLocalHtmlExportStatus(`Saved ${filename} (${formatSavedBytes(bytes.byteLength)})`);
         setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
-      } catch (err) {
+      } catch (error) {
         if (canceled) return;
         pendingHtmlExportRef.current = null;
         setHtmlExportBusy(false);
-        setLocalHtmlExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        setLocalHtmlExportStatus(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
         setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
       }
     };
@@ -7351,7 +4768,7 @@ function Show4DSTEM() {
   }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Cursor readout state
-  const [cursorInfo, commitCursorInfo] = React.useState<{ row: number; col: number; value: number; panel: string; exact?: boolean } | null>(null);
+  const [cursorInfo, commitCursorInfo] = React.useState<{ row: number; col: number; value: number; panel: string } | null>(null);
   const pendingCursorInfoRef = React.useRef<typeof cursorInfo>(null);
   const cursorRafRef = React.useRef<number | null>(null);
   const setCursorInfo = React.useCallback((next: React.SetStateAction<typeof cursorInfo>) => {
@@ -7377,7 +4794,7 @@ function Show4DSTEM() {
   const profileResizeStart = React.useRef<{ startY: number; startHeight: number } | null>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileBaseImageRef = React.useRef<ImageData | null>(null);
-  const profileLayoutRef = React.useRef<{ padLeft: number; plotW: number; padTop: number; plotH: number; gMin: number; gMax: number; totalDist: number; xUnit: string } | null>(null);
+  const profileLayoutRef = React.useRef<ProfileLayout | null>(null);
   const profilePoints = profileLine || [];
   const rawDpDataRef = React.useRef<Float32Array | null>(null);
   const dpClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
@@ -7385,7 +4802,7 @@ function Show4DSTEM() {
   const [isDraggingDpProfileLine, setIsDraggingDpProfileLine] = React.useState(false);
   const [hoveredDpProfileEndpoint, setHoveredDpProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isHoveringDpProfileLine, setIsHoveringDpProfileLine] = React.useState(false);
-  const dpProfileDragStartRef = React.useRef<{ row: number; col: number; p0: { row: number; col: number }; p1: { row: number; col: number } } | null>(null);
+  const dpProfileDragStartRef = React.useRef<ProfileLineDrag | null>(null);
   const dpDragOffsetRef = React.useRef<{ dRow: number; dCol: number }>({ dRow: 0, dCol: 0 });
 
   // VI Line profile state
@@ -7397,23 +4814,15 @@ function Show4DSTEM() {
   const viProfileResizeStart = React.useRef<{ startY: number; startHeight: number } | null>(null);
   const viProfileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const viProfileBaseImageRef = React.useRef<ImageData | null>(null);
-  const viProfileLayoutRef = React.useRef<{ padLeft: number; plotW: number; padTop: number; plotH: number; gMin: number; gMax: number; totalDist: number; xUnit: string } | null>(null);
+  const viProfileLayoutRef = React.useRef<ProfileLayout | null>(null);
   const rawViDataRef = React.useRef<Float32Array | null>(null);
-  const residentSelectedRawRef = React.useRef<ResidentValues | null>(null);
-  const residentSelectedRaw = React.useMemo(() => {
-    if (!residentBatchInfo?.request_id || !compareVirtualImageBytes || residentScalarType(residentBatchInfo) === "<f4") return null;
-    const source = residentRawValues(compareVirtualImageBytes,residentBatchInfo);
-    const slot = (comparePanelIndices ?? []).indexOf(frameIdx);
-    return slot >= 0 ? source.subarray(slot*shapeRows*shapeCols,(slot+1)*shapeRows*shapeCols) : null;
-  }, [residentBatchInfo,compareVirtualImageBytes,comparePanelIndices,frameIdx,shapeRows,shapeCols]);
-  residentSelectedRawRef.current = residentSelectedRaw;
 
   const viClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const [draggingViProfileEndpoint, setDraggingViProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingViProfileLine, setIsDraggingViProfileLine] = React.useState(false);
   const [hoveredViProfileEndpoint, setHoveredViProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isHoveringViProfileLine, setIsHoveringViProfileLine] = React.useState(false);
-  const viProfileDragStartRef = React.useRef<{ row: number; col: number; p0: { row: number; col: number }; p1: { row: number; col: number } } | null>(null);
+  const viProfileDragStartRef = React.useRef<ProfileLineDrag | null>(null);
   const viRoiDragOffsetRef = React.useRef<{ dRow: number; dCol: number }>({ dRow: 0, dCol: 0 });
 
   // Theme detection
@@ -7421,8 +4830,8 @@ function Show4DSTEM() {
   const roiColors = themeInfo.theme === "dark" ? DARK_ROI_COLORS : LIGHT_ROI_COLORS;
   const accentGreen = themeInfo.theme === "dark" ? "#0f0" : "#1a7a1a";
 
-  // Themed typography — applies theme colors to module-level font sizes
-  const typo = React.useMemo(() => ({
+  // Themed typography: module-level font sizes in theme colors
+  const themedTypography = React.useMemo(() => ({
     label: { ...typography.label, color: themeColors.textMuted },
     labelSmall: { ...typography.labelSmall, color: themeColors.textMuted },
     value: { ...typography.value, color: themeColors.textMuted },
@@ -7433,25 +4842,10 @@ function Show4DSTEM() {
   const viCanvasWidth = shapeRows > shapeCols ? Math.round(canvasSize * (shapeCols / shapeRows)) : canvasSize;
   const viCanvasHeight = shapeCols > shapeRows ? Math.round(canvasSize * (shapeRows / shapeCols)) : canvasSize;
 
-  // Histogram data - use state to ensure re-renders (both are Float32Array now)
+  // Histogram inputs live in state so a new array re-renders the Histogram
   const [dpHistogramData, setDpHistogramData] = React.useState<Float32Array | null>(null);
   const [viHistogramData, setViHistogramData] = React.useState<Float32Array | null>(null);
   const [viHistogramBins, setViHistogramBins] = React.useState<Float32Array | null>(null);
-  const viSummaryRefs = React.useRef<(HTMLElement | null)[]>([]);
-  const [viSummaryVisible, setViSummaryVisible] = React.useState(false);
-  const [viSummaryBytes, setViSummaryBytes] = React.useState<DataView | null>(null);
-  const viSummaryPending = Boolean(residentBatchInfo && compareMode && viSummaryBytes !== displayedCompareVirtualImageBytes);
-  React.useEffect(() => {
-    if (!residentBatchInfo || !compareMode) return;
-    if (typeof IntersectionObserver === "undefined") { setViSummaryVisible(true); return; }
-    const visible = new Map<Element, boolean>();
-    const observer = new IntersectionObserver(entries => {
-      entries.forEach(entry => visible.set(entry.target, entry.isIntersecting));
-      setViSummaryVisible(Array.from(visible.values()).some(Boolean));
-    });
-    viSummaryRefs.current.forEach(node => { if (node) observer.observe(node); });
-    return () => observer.disconnect();
-  }, [Boolean(residentBatchInfo),compareMode,showStats,controlsVisible]);
 
 
   // DP stats computed JS-side from frame_bytes (was Python trait pre-refactor;
@@ -7465,16 +4859,14 @@ function Show4DSTEM() {
   // DP panel shows the ROI-reduced DP, so its stats must use the same bytes.
   React.useEffect(() => {
     if (!displayedDpBytes) return;
-    // Parse as Float32Array since Python now sends raw float32
     const rawData = new Float32Array(displayedDpBytes.buffer, displayedDpBytes.byteOffset, displayedDpBytes.byteLength / 4);
     // Store raw data for profile sampling
     if (!rawDpDataRef.current || rawDpDataRef.current.length !== rawData.length) {
       rawDpDataRef.current = new Float32Array(rawData.length);
     }
     rawDpDataRef.current.set(rawData);
-    // Compute stats JS-side (replaces removed Python dp_stats trait)
-    const s = computeStats(rawData);
-    setDpStats([s.mean, s.min, s.max, s.std]);
+    const stats = computeStats(rawData);
+    setDpStats([stats.mean, stats.min, stats.max, stats.std]);
     // Apply scale transformation for histogram display
     const scaledData = new Float32Array(rawData.length);
     if (dpScaleMode === "log") {
@@ -7488,35 +4880,8 @@ function Show4DSTEM() {
   }, [displayedDpBytes, dpScaleMode]);
 
   // GPU FFT state
-  const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
+  const gpuFFTRef = React.useRef<DisplayFFT | null>(null);
   const [gpuReady, setGpuReady] = React.useState(false);
-
-  // Path animation timer
-  React.useEffect(() => {
-    if (compareMode) {
-      if (pathPlaying) setPathPlaying(false);
-      return;
-    }
-    if (!pathPlaying || pathLength === 0) return;
-
-    const timer = setInterval(() => {
-      setPathIndex((prev: number) => {
-        const next = prev + 1;
-        if (next >= pathLength) {
-          if (pathLoop) {
-            return 0;  // Loop back to start
-          } else {
-            setPathPlaying(false);  // Stop at end
-            return prev;
-          }
-        }
-        return next;
-      });
-    }, pathIntervalMs);
-
-    return () => clearInterval(timer);
-  }, [compareMode, pathPlaying, pathLength, pathIntervalMs, pathLoop, setPathIndex, setPathPlaying]);
-
   // Frame animation timer (5D time/tilt series)
   const frameBounceDir = React.useRef(1);
   React.useEffect(() => {
@@ -7561,7 +4926,7 @@ function Show4DSTEM() {
 
   // Initialize WebGPU FFT on mount
   React.useEffect(() => {
-    getWebGPUFFT().then(fft => {
+    getDisplayFFT().then(fft => {
       if (fft) {
         gpuFFTRef.current = fft;
         setGpuReady(true);
@@ -7590,9 +4955,9 @@ function Show4DSTEM() {
   const dpViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
   const viViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
   const fftViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
-  React.useEffect(() => { const r = dpViewRef.current; r.zoom = dpZoom; r.panX = dpPanX; r.panY = dpPanY; }, [dpZoom, dpPanX, dpPanY]);
-  React.useEffect(() => { const r = viViewRef.current; r.zoom = viZoom; r.panX = viPanX; r.panY = viPanY; }, [viZoom, viPanX, viPanY]);
-  React.useEffect(() => { const r = fftViewRef.current; r.zoom = fftZoom; r.panX = fftPanX; r.panY = fftPanY; }, [fftZoom, fftPanX, fftPanY]);
+  React.useEffect(() => { const view = dpViewRef.current; view.zoom = dpZoom; view.panX = dpPanX; view.panY = dpPanY; }, [dpZoom, dpPanX, dpPanY]);
+  React.useEffect(() => { const view = viViewRef.current; view.zoom = viZoom; view.panX = viPanX; view.panY = viPanY; }, [viZoom, viPanX, viPanY]);
+  React.useEffect(() => { const view = fftViewRef.current; view.zoom = fftZoom; view.panX = fftPanX; view.panY = fftPanY; }, [fftZoom, fftPanX, fftPanY]);
   const [fftScaleMode, setFftScaleMode] = useModelState<"linear" | "log">("fft_scale_mode");
   const [fftColormap, setFftColormap] = useModelState<string>("fft_colormap");
   const [fftAuto, setFftAuto] = useModelState<boolean>("fft_auto");
@@ -7606,8 +4971,8 @@ function Show4DSTEM() {
     if (on) {
       fftPreAutoPctRef.current = [fftVminPct, fftVmaxPct];
     } else if (fftPreAutoPctRef.current) {
-      const [vmn, vmx] = fftPreAutoPctRef.current;
-      setFftVminPct(vmn); setFftVmaxPct(vmx);
+      const [savedVminPct, savedVmaxPct] = fftPreAutoPctRef.current;
+      setFftVminPct(savedVminPct); setFftVmaxPct(savedVmaxPct);
       fftPreAutoPctRef.current = null;
     }
     setFftAuto(on);
@@ -7628,18 +4993,18 @@ function Show4DSTEM() {
     return target.closest("input, textarea, select, [role='textbox'], [contenteditable='true']") !== null;
   }, []);
 
-  const handleRootMouseDownCapture = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement | null;
+  const handleRootMouseDownCapture = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
     if (target?.closest("canvas")) rootRef.current?.focus({ preventScroll: true });
   }, []);
 
-  const handleKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (isTypingTarget(e.target)) return;
+  const handleKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isTypingTarget(event.target)) return;
 
-    const step = e.shiftKey ? 10 : 1;
+    const step = event.shiftKey ? 10 : 1;
     let handled = false;
 
-    switch (e.key) {
+    switch (event.key) {
         case "ArrowUp":
           setPosRow(Math.max(0, posRow - step));
           handled = true;
@@ -7655,12 +5020,6 @@ function Show4DSTEM() {
         case "ArrowRight":
           setPosCol(Math.min(shapeCols - 1, posCol + step));
           handled = true;
-          break;
-        case " ": // Space bar
-          if (!compareMode && pathLength > 0) {
-            setPathPlaying(!pathPlaying);
-            handled = true;
-          }
           break;
         case "r":
         case "R":
@@ -7688,12 +5047,12 @@ function Show4DSTEM() {
     }
 
     if (handled) {
-      e.preventDefault();
-      e.stopPropagation();
+      event.preventDefault();
+      event.stopPropagation();
     }
   }, [
-    compareMode, frameIdx, isTypingTarget, nFrames, pathLength,
-    pathPlaying, posCol, posRow, setFrameIdx, setPathPlaying, setPosCol, setPosRow, shapeCols, shapeRows,
+    compareMode, frameIdx, isTypingTarget, nFrames,
+    posCol, posRow, setFrameIdx, setPosCol, setPosRow, shapeCols, shapeRows,
   ]);
 
   // Sync local state
@@ -7732,13 +5091,6 @@ function Show4DSTEM() {
   const dpUiRef = React.useRef<HTMLCanvasElement>(null);  // High-DPI UI overlay for scale bar
   const dpOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const dpImageDataRef = React.useRef<ImageData | null>(null);
-  dpGpuOptionsRef.current = {width: detCols, height: detRows, colormap: dpColormap,
-    log: dpScaleMode === "log", minPct: dpVminPct, maxPct: dpVmaxPct,
-    min: traitDpVmin, max: traitDpVmax, zoom: dpZoom, panX: dpPanX, panY: dpPanY};
-  React.useLayoutEffect(() => {
-    if (dpGpuOptionsRef.current) dpGpuDisplayRef.current?.updateOptions(dpGpuOptionsRef.current);
-  }, [detRows, detCols, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, traitDpVmin, traitDpVmax, dpZoom, dpPanX, dpPanY]);
-
   const virtualGpuCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const virtualGpuCaptureRef = React.useRef<(() => Promise<HTMLCanvasElement>) | null>(null);
   const virtualGpuContextRef = React.useRef<{ engine: GPUColormapEngine; context: GPUCanvasContext } | null>(null);
@@ -7776,12 +5128,12 @@ function Show4DSTEM() {
   const touchTransformRef = React.useRef<TouchTransformState | null>(null);
   const lastTapRef = React.useRef<{ kind: TouchPanelKind; time: number } | null>(null);
 
-  // Offscreen version counters — bump when colormap/data changes, cheap draw effects depend on these
+  // Offscreen version counters: bumped when colormap/data change, the cheap draw effects depend on them
   const [dpOffscreenVersion, setDpOffscreenVersion] = React.useState(0);
   const [viOffscreenVersion, setViOffscreenVersion] = React.useState(0);
   const [fftOffscreenVersion, setFftOffscreenVersion] = React.useState(0);
 
-  // Cached colorbar vmin/vmax — computed in expensive DP effect, reused in UI overlay without recomputing
+  // Cached colorbar vmin/vmax: computed in the expensive DP effect, reused by the UI overlay without recomputing
   const dpColorbarVminRef = React.useRef(0);
   const dpColorbarVmaxRef = React.useRef(1);
 
@@ -7793,13 +5145,13 @@ function Show4DSTEM() {
   // ─────────────────────────────────────────────────────────────────────────
 
   // Prevent page scroll when scrolling on canvases
-  // Re-run when showFft changes since FFT canvas is conditionally rendered
+  // Re-run when showFft or the compare grid changes: both remount the overlays
   React.useEffect(() => {
-    const preventDefault = (e: WheelEvent) => e.preventDefault();
+    const preventDefault = (event: WheelEvent) => event.preventDefault();
     const overlays = [dpOverlayRef.current, virtualOverlayRef.current, fftOverlayRef.current];
     overlays.forEach(el => el?.addEventListener("wheel", preventDefault, { passive: false }));
     return () => overlays.forEach(el => el?.removeEventListener("wheel", preventDefault));
-  }, [effectiveShowFft]);
+  }, [showFft, compareMode]);
 
   // Store raw data for filtering/FFT
   const rawVirtualImageRef = React.useRef<Float32Array | null>(null);
@@ -7811,7 +5163,6 @@ function Show4DSTEM() {
   // switching reuses the static map payload instead of asking Python to resend it.
   React.useEffect(() => {
     if (!displayedVirtualImageBytes) return;
-    // Parse as Float32Array
     const numFloats = displayedVirtualImageBytes.byteLength / 4;
     const rawData = new Float32Array(displayedVirtualImageBytes.buffer, displayedVirtualImageBytes.byteOffset, numFloats);
 
@@ -7835,15 +5186,15 @@ function Show4DSTEM() {
     // preset clicks: bytes from click N could arrive with min/max from click N-1, normalizing
     // the colormap to the wrong range and producing a uniform-color VI flash.
     if (!compareMode) {
-      const s = computeStats(rawData);
-      setViStats([s.mean, s.min, s.max, s.std]);
-      if (viSourceUsesSymmetricRange(activeViSource)) {
-        const span = Math.max(Math.abs(s.min), Math.abs(s.max), 1e-12);
+      const stats = computeStats(rawData);
+      setViStats([stats.mean, stats.min, stats.max, stats.std]);
+      if (isDpcGpuSource(activeViSource)) {
+        const span = Math.max(Math.abs(stats.min), Math.abs(stats.max), 1e-12);
         setViDataMin(-span);
         setViDataMax(span);
       } else {
-        setViDataMin(s.min);
-        setViDataMax(s.max);
+        setViDataMin(stats.min);
+        setViDataMax(stats.max);
       }
     }
 
@@ -7864,25 +5215,24 @@ function Show4DSTEM() {
 
   React.useEffect(() => {
     if (!compareMode) return;
-    // The complete native image batch is drawn independently. Its offscreen
-    // summary must not scan/copy every scientific value on each drag frame.
-    // When a summary becomes visible, compute it exactly from the latest batch.
-    if (residentBatchInfo && !viSummaryVisible) return;
     const expectedFloats = Math.max(0, (comparePanelCount || 0) * shapeRows * shapeCols);
-    if (!displayedCompareVirtualImageBytes || expectedFloats === 0 || displayedCompareVirtualImageBytes.byteLength < expectedFloats * (residentBatchInfo?.dtype === "<u2" && activeViSource === "roi" ? 2 : 4)) {
+    if (!displayedCompareVirtualImageBytes || expectedFloats === 0 || displayedCompareVirtualImageBytes.byteLength < expectedFloats * 4) {
       return;
     }
-    const rawData = residentDisplayValues(displayedCompareVirtualImageBytes,
-      activeViSource === "roi" ? residentBatchInfo : undefined);
-    const s = computeStats(rawData);
-    setViStats([s.mean, s.min, s.max, s.std]);
-    if (viSourceUsesSymmetricRange(activeViSource)) {
-      const span = Math.max(Math.abs(s.min), Math.abs(s.max), 1e-12);
+    const rawData = new Float32Array(
+      displayedCompareVirtualImageBytes.buffer,
+      displayedCompareVirtualImageBytes.byteOffset,
+      expectedFloats,
+    );
+    const stats = computeStats(rawData);
+    setViStats([stats.mean, stats.min, stats.max, stats.std]);
+    if (isDpcGpuSource(activeViSource)) {
+      const span = Math.max(Math.abs(stats.min), Math.abs(stats.max), 1e-12);
       setViDataMin(-span);
       setViDataMax(span);
     } else {
-      setViDataMin(s.min);
-      setViDataMax(s.max);
+      setViDataMin(stats.min);
+      setViDataMax(stats.max);
     }
 
     const scaledData = new Float32Array(expectedFloats);
@@ -7895,8 +5245,7 @@ function Show4DSTEM() {
     }
     setViHistogramBins(null);
     setViHistogramData(scaledData);
-    setViSummaryBytes(displayedCompareVirtualImageBytes);
-  }, [residentBatchInfo,viSummaryVisible,activeViSource, compareMode, comparePanelCount, displayedCompareVirtualImageBytes, shapeCols, shapeRows, viScaleMode]);
+  }, [activeViSource, compareMode, comparePanelCount, displayedCompareVirtualImageBytes, shapeCols, shapeRows, viScaleMode]);
 
   React.useEffect(() => {
     if (!compareMode || activeViSource !== "roi") return;
@@ -7995,10 +5344,10 @@ function Show4DSTEM() {
     // Cache colorbar range for the UI overlay (avoids recomputing findDataRange on every zoom/pan)
     dpColorbarVminRef.current = vmin;
     dpColorbarVmaxRef.current = vmax;
-    setDpOffscreenVersion(v => v + 1);
+    setDpOffscreenVersion(version => version + 1);
   }, [displayedDpBytes, detRows, detCols, dpColormap, dpVminPct, dpVmaxPct, dpScaleMode, traitDpVmin, traitDpVmax]);
 
-  // Cheap: zoom/pan redraw — just drawImage from cached offscreen
+  // Cheap: zoom/pan redraw is one drawImage from the cached offscreen canvas.
   // useLayoutEffect prevents black flash when canvas dimensions change (resize)
   React.useLayoutEffect(() => {
     const offscreen = dpOffscreenRef.current;
@@ -8022,14 +5371,14 @@ function Show4DSTEM() {
     }
   }, [dpOffscreenVersion, dpZoom, dpPanX, dpPanY]);
 
-  // Render DP overlay - just clear (ROI shapes now drawn on high-DPI UI canvas)
+  // The DP overlay canvas only takes pointer events: crosshair, ROI shapes and
+  // scale bar draw on the HiDPI dpUiRef canvas for crisp rendering.
   React.useEffect(() => {
     if (!dpOverlayRef.current) return;
     const canvas = dpOverlayRef.current;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // All visual overlays (crosshair, ROI shapes, scale bar) are now on dpUiRef for crisp rendering
   }, [localKCol, localKRow, isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner, dpZoom, dpPanX, dpPanY, roiMode, roiRadius, roiRadiusInner, roiWidth, roiHeight, detRows, detCols]);
 
   // Expensive: VI colormap + data processing → cached offscreen canvas
@@ -8061,11 +5410,11 @@ function Show4DSTEM() {
     // to apply the WRONG normalization range and produce a uniform white/black
     // VI panel until comm catches up. findDataRange on a scan-shape buffer
     // (~64K-256K floats) is sub-millisecond.
-    const r = findDataRange(scaled);
-    let dataMin = r.min;
-    let dataMax = r.max;
-    if (viSourceUsesSymmetricRange(activeViSource)) {
-      const span = Math.max(Math.abs(r.min), Math.abs(r.max), 1e-12);
+    const range = findDataRange(scaled);
+    let dataMin = range.min;
+    let dataMax = range.max;
+    if (isDpcGpuSource(activeViSource)) {
+      const span = Math.max(Math.abs(range.min), Math.abs(range.max), 1e-12);
       dataMin = -span;
       dataMax = span;
     }
@@ -8115,7 +5464,7 @@ function Show4DSTEM() {
     }
     applyColormap(scaled, imageData.data, lut, vmin, vmax);
     offCtx.putImageData(imageData, 0, 0);
-    setViOffscreenVersion(v => v + 1);
+    setViOffscreenVersion(version => version + 1);
   }, [activeViSource, compareMode, displayedVirtualImageBytes, shapeRows, shapeCols, viGpuVersion, viColormap, viVminPct, viVmaxPct, viScaleMode, traitViVmin, traitViVmax, viAutoContrast]);
 
   // Present resident reductions directly, including while the pointer is held.
@@ -8153,11 +5502,11 @@ function Show4DSTEM() {
         }
       }
 
-      const r = findDataRange(scaled);
-      let dataMin = r.min;
-      let dataMax = r.max;
-      if (viSourceUsesSymmetricRange(gpuImage.source)) {
-        const span = Math.max(Math.abs(r.min), Math.abs(r.max), 1e-12);
+      const range = findDataRange(scaled);
+      let dataMin = range.min;
+      let dataMax = range.max;
+      if (isDpcGpuSource(gpuImage.source)) {
+        const span = Math.max(Math.abs(range.min), Math.abs(range.max), 1e-12);
         dataMin = -span;
         dataMax = span;
       }
@@ -8189,8 +5538,6 @@ function Show4DSTEM() {
 
     const lut = COLORMAPS[viColormap] || COLORMAPS.inferno;
     engine.uploadLUT(viColormap, lut);
-    const renderStart = performance.now();
-    let displayRange = "cpu";
     const canvas = virtualGpuCanvasRef.current;
     if (!canvas) return;
     let target = virtualGpuContextRef.current;
@@ -8213,7 +5560,6 @@ function Show4DSTEM() {
             transforms: [{ zoom: viZoom, panX: viPanX, panY: viPanY }], smooth: viSmooth },
         );
       } else if (gpuImage.rangeMode === "gpu") {
-        displayRange = "gpu";
         rendered = engine.renderSlotDirectWithGpuRangeToCanvas(
           gpuImage.slot, viVminPct, viVmaxPct, viScaleMode === "log", target.context,
           { width: shapeCols, height: shapeRows, bgRgb: 0,
@@ -8226,19 +5572,6 @@ function Show4DSTEM() {
     const rendered = render();
     setViGpuRetainedReady(rendered);
     if (rendered) {
-      publishShow4DSTEMViDisplay({
-        source: gpuImage.source,
-        gpuBufferToDisplay: true,
-        rendered: true,
-        width: shapeCols,
-        height: shapeRows,
-        slot: gpuImage.slot,
-        rangeMode: displayRange,
-        rawReady,
-        rawVersion: rawVirtualImageVersionRef.current,
-        rawVersionAfter: gpuImage.rawVersionAfter,
-        renderSubmitMs: performance.now() - renderStart,
-      });
     }
   }, [
     activeViSource,
@@ -8263,7 +5596,7 @@ function Show4DSTEM() {
     setViVmaxPct,
   ]);
 
-  // Cheap: VI zoom/pan redraw — just drawImage from cached offscreen
+  // Cheap: VI zoom/pan redraw is one drawImage from the cached offscreen canvas
   React.useLayoutEffect(() => {
     const offscreen = viOffscreenRef.current;
     if (!offscreen || !virtualCanvasRef.current) return;
@@ -8280,24 +5613,24 @@ function Show4DSTEM() {
     ctx.restore();
   }, [compareMode, viOffscreenVersion, viZoom, viPanX, viPanY, viSmooth]);
 
-  // Render virtual image overlay (just clear - crosshair drawn on high-DPI UI canvas)
+  // The VI overlay canvas only takes pointer events: crosshair and scale bar
+  // draw on the HiDPI viUiRef canvas.
   React.useEffect(() => {
     if (!virtualOverlayRef.current) return;
     const canvas = virtualOverlayRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Crosshair and scale bar now drawn on high-DPI UI canvas (viUiRef)
   }, [localPosRow, localPosCol, isDraggingVI, viZoom, viPanX, viPanY, pixelSize, shapeRows, shapeCols]);
 
-  // Compute FFT (expensive, async — only re-run on data/GPU changes)
+  // Compute FFT (expensive and async: only re-run on data/GPU changes)
   const fftRealRef = React.useRef<Float32Array | null>(null);
   const fftImagRef = React.useRef<Float32Array | null>(null);
   const fftRunSeqRef = React.useRef(0);
   const [fftVersion, setFftVersion] = React.useState(0);
 
   React.useEffect(() => {
-    if (!rawVirtualImageRef.current || !effectiveShowFft) { setFftCropDims(null); return; }
+    if (!rawVirtualImageRef.current || !showFft) { setFftCropDims(null); return; }
     const runSeq = ++fftRunSeqRef.current;
     let cancelled = false;
     let width = shapeCols;
@@ -8310,9 +5643,9 @@ function Show4DSTEM() {
     // model traits, which lag by one comm roundtrip after a compound trait write.
     // Without this, FFT visibly stalls during rapid VI ROI drag.
     if (roiFftActive) {
-      const cRow = localViRoiCenterRow ?? viRoiCenterRow;
-      const cCol = localViRoiCenterCol ?? viRoiCenterCol;
-      const crop = cropSingleROI(sourceData, shapeCols, shapeRows, viRoiMode, cRow, cCol, viRoiRadius, viRoiWidth, viRoiHeight);
+      const cropCenterRow = localViRoiCenterRow ?? viRoiCenterRow;
+      const cropCenterCol = localViRoiCenterCol ?? viRoiCenterCol;
+      const crop = cropSingleROI(sourceData, shapeCols, shapeRows, viRoiMode, cropCenterRow, cropCenterCol, viRoiRadius, viRoiWidth, viRoiHeight);
       if (crop) {
         origCropW = crop.cropW;
         origCropH = crop.cropH;
@@ -8320,13 +5653,7 @@ function Show4DSTEM() {
         if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
         const padW = nextPow2(crop.cropW);
         const padH = nextPow2(crop.cropH);
-        const padded = new Float32Array(padW * padH);
-        for (let y = 0; y < crop.cropH; y++) {
-          for (let x = 0; x < crop.cropW; x++) {
-            padded[y * padW + x] = crop.cropped[y * crop.cropW + x];
-          }
-        }
-        sourceData = padded;
+        sourceData = zeroPadImage(crop.cropped, crop.cropH, crop.cropW, padH, padW);
         width = padW;
         height = padH;
       }
@@ -8337,25 +5664,14 @@ function Show4DSTEM() {
       const padW = nextPow2(width);
       const padH = nextPow2(height);
       if (padW !== width || padH !== height) {
-        const padded = new Float32Array(padW * padH);
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            padded[y * padW + x] = sourceData[y * width + x];
-          }
-        }
-        sourceData = padded;
+        sourceData = zeroPadImage(sourceData, height, width, padH, padW);
         width = padW;
         height = padH;
       }
     }
 
     const fftW = width, fftH = height;
-    const commitFft = (
-      real: Float32Array,
-      imag: Float32Array,
-      startedAt: number,
-      mode: "webgpu" | "worker",
-    ) => {
+    const commitFft = (real: Float32Array, imag: Float32Array) => {
       if (cancelled || runSeq !== fftRunSeqRef.current) return;
       fftRealRef.current = real;
       fftImagRef.current = imag;
@@ -8366,44 +5682,26 @@ function Show4DSTEM() {
       } else {
         setFftCropDims(null);
       }
-      const profile = {
-        mode,
-        width: fftW,
-        height: fftH,
-        ms: Math.round(performance.now() - startedAt),
-        seq: runSeq,
-      };
-      const win = window as unknown as {
-        __show4dstemFftProfile?: unknown;
-        __show4dstemFftHistory?: unknown[];
-      };
-      const history = Array.isArray(win.__show4dstemFftHistory) ? win.__show4dstemFftHistory : [];
-      history.push(profile);
-      if (history.length > 60) history.splice(0, history.length - 60);
-      win.__show4dstemFftProfile = profile;
-      win.__show4dstemFftHistory = history;
-      setFftVersion(v => v + 1);
+      setFftVersion(version => version + 1);
     };
     const timer = window.setTimeout(() => {
       if (gpuFFTRef.current && gpuReady) {
         const runGpuFFT = async () => {
-          const startedAt = performance.now();
           const real = sourceData.slice();
           const imag = new Float32Array(real.length);
-          const { real: fReal, imag: fImag } = await gpuFFTRef.current!.fft2D(real, imag, fftW, fftH, false);
+          const { real: spectrumReal, imag: spectrumImag } = await gpuFFTRef.current!.fft2D(real, imag, fftW, fftH, false);
           if (cancelled || runSeq !== fftRunSeqRef.current) return;
-          fftshift(fReal, fftW, fftH);
-          fftshift(fImag, fftW, fftH);
-          commitFft(fReal, fImag, startedAt, "webgpu");
+          fftshift(spectrumReal, fftW, fftH);
+          fftshift(spectrumImag, fftW, fftH);
+          commitFft(spectrumReal, spectrumImag);
         };
         runGpuFFT();
       } else {
         const runWorkerFFT = async () => {
-          const startedAt = performance.now();
           const real = sourceData.slice();
           const imag = new Float32Array(real.length);
           const result = await fft2dAsync(real, imag, fftW, fftH, false);
-          commitFft(result.real, result.imag, startedAt, "worker");
+          commitFft(result.real, result.imag);
         };
         runWorkerFFT();
       }
@@ -8412,12 +5710,12 @@ function Show4DSTEM() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [displayedVirtualImageBytes, shapeRows, shapeCols, gpuReady, effectiveShowFft, roiFftActive, viRoiMode, viRoiCenterRow, viRoiCenterCol, localViRoiCenterRow, localViRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight, fftWindow]);
+  }, [displayedVirtualImageBytes, shapeRows, shapeCols, gpuReady, showFft, roiFftActive, viRoiMode, viRoiCenterRow, viRoiCenterCol, localViRoiCenterRow, localViRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight, fftWindow]);
 
   // Expensive: FFT magnitude + histogram + colormap → cached offscreen canvas
   React.useEffect(() => {
     if (!fftRealRef.current || !fftImagRef.current) return;
-    if (!effectiveShowFft) return;
+    if (!showFft) return;
 
     const width = fftCropDims?.fftWidth ?? shapeCols;
     const height = fftCropDims?.fftHeight ?? shapeRows;
@@ -8468,32 +5766,32 @@ function Show4DSTEM() {
     const { vmin, vmax } = sliderRange(displayMin, displayMax, fftVminPct, fftVmaxPct);
     applyColormap(magnitude, imgData.data, lut, vmin, vmax);
     offCtx.putImageData(imgData, 0, 0);
-    setFftOffscreenVersion(v => v + 1);
-  }, [effectiveShowFft, fftVersion, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, fftColormap, shapeRows, shapeCols, fftCropDims]);
+    setFftOffscreenVersion(version => version + 1);
+  }, [showFft, fftVersion, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, fftColormap, shapeRows, shapeCols, fftCropDims]);
 
-  // Cheap: FFT zoom/pan redraw — just drawImage from cached offscreen
+  // Cheap: FFT zoom/pan redraw is one drawImage from the cached offscreen canvas
   React.useLayoutEffect(() => {
     if (!fftCanvasRef.current) return;
     const canvas = fftCanvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const offscreen = fftOffscreenRef.current;
-    if (!offscreen || !effectiveShowFft) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
+    if (!offscreen || !showFft) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
     const fftW = offscreen.width;
     const fftH = offscreen.height;
     const canvasW = canvas.width;
     const canvasH = canvas.height;
-    // Use bilinear smoothing when FFT dims differ from canvas (non-pow2 padding or ROI crop).
     // Stretch offscreen to fill canvas via the 9-arg drawImage form: ROI FFT crops produce a
     // small offscreen (e.g. 64×64) that would otherwise blit at native size in the corner.
-    ctx.imageSmoothingEnabled = fftW !== canvasW || fftH !== canvasH;
+    // Nearest neighbour keeps each FFT pixel a sharp block, as the pixelated canvas style does.
+    ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
     ctx.translate(fftPanX, fftPanY);
     ctx.scale(fftZoom, fftZoom);
     ctx.drawImage(offscreen, 0, 0, fftW, fftH, 0, 0, canvasW, canvasH);
     ctx.restore();
-  }, [fftOffscreenVersion, fftZoom, fftPanX, fftPanY, effectiveShowFft]);
+  }, [fftOffscreenVersion, fftZoom, fftPanX, fftPanY, showFft]);
 
   // Render FFT overlay with d-spacing crosshair marker
   React.useEffect(() => {
@@ -8504,7 +5802,7 @@ function Show4DSTEM() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // D-spacing crosshair marker
-    if (fftClickInfo && effectiveShowFft) {
+    if (fftClickInfo && showFft) {
       const fftW = fftCropDims?.fftWidth ?? shapeCols;
       const fftH = fftCropDims?.fftHeight ?? shapeRows;
       ctx.save();
@@ -8516,31 +5814,31 @@ function Show4DSTEM() {
       ctx.shadowBlur = 2;
       ctx.lineWidth = 1.5;
       // Scale crosshair size relative to canvas (not zoom-dependent)
-      const r = 8 * Math.max(fftW, fftH) / 450;
+      const armLength = 8 * Math.max(fftW, fftH) / 450;
       const gap = 3 * Math.max(fftW, fftH) / 450;
-      const dotR = 4 * Math.max(fftW, fftH) / 450;
+      const dotRadius = 4 * Math.max(fftW, fftH) / 450;
       ctx.beginPath();
-      ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - gap, screenY);
-      ctx.moveTo(screenX + gap, screenY); ctx.lineTo(screenX + r, screenY);
-      ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - gap);
-      ctx.moveTo(screenX, screenY + gap); ctx.lineTo(screenX, screenY + r);
+      ctx.moveTo(screenX - armLength, screenY); ctx.lineTo(screenX - gap, screenY);
+      ctx.moveTo(screenX + gap, screenY); ctx.lineTo(screenX + armLength, screenY);
+      ctx.moveTo(screenX, screenY - armLength); ctx.lineTo(screenX, screenY - gap);
+      ctx.moveTo(screenX, screenY + gap); ctx.lineTo(screenX, screenY + armLength);
       ctx.stroke();
       ctx.beginPath();
-      ctx.arc(screenX, screenY, dotR, 0, Math.PI * 2);
+      ctx.arc(screenX, screenY, dotRadius, 0, Math.PI * 2);
       ctx.stroke();
       if (fftClickInfo.dSpacing != null) {
-        const d = fftClickInfo.dSpacing;
-        const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} \u00C5`;
+        const dSpacing = fftClickInfo.dSpacing;
+        const label = dSpacing >= 10 ? `d = ${(dSpacing / 10).toFixed(2)} nm` : `d = ${dSpacing.toFixed(2)} \u00C5`;
         const fontSize = Math.max(10, Math.round(11 * Math.max(fftW, fftH) / 450));
         ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
         ctx.fillStyle = "white";
         ctx.textAlign = "left";
         ctx.textBaseline = "bottom";
-        ctx.fillText(label, screenX + r + 4, screenY - gap);
+        ctx.fillText(label, screenX + armLength + 4, screenY - gap);
       }
       ctx.restore();
     }
-  }, [fftZoom, fftPanX, fftPanY, effectiveShowFft, fftClickInfo, shapeCols, shapeRows, fftCropDims]);
+  }, [fftZoom, fftPanX, fftPanY, showFft, fftClickInfo, shapeCols, shapeRows, fftCropDims]);
 
   // Clear FFT click info when virtual image changes (scan position, VI ROI, etc.)
   React.useEffect(() => {
@@ -8592,10 +5890,10 @@ function Show4DSTEM() {
         const cssH = canvas.height / DPR;
         const scaleX = cssW / detCols;
         const scaleY = cssH / detRows;
-        const toScreenX = (col: number) => col * dpZoom * scaleX + dpPanX * scaleX;
-        const toScreenY = (row: number) => row * dpZoom * scaleY + dpPanY * scaleY;
+        // profile points center pixel i at i (the sampler's convention); draw them on that pixel's center
+        const toScreenX = (col: number) => maskToCanvas(col, dpZoom, dpPanX) * scaleX;
+        const toScreenY = (row: number) => maskToCanvas(row, dpZoom, dpPanY) * scaleY;
 
-        // Draw point A
         const ax = toScreenX(profilePoints[0].col);
         const ay = toScreenY(profilePoints[0].row);
         ctx.fillStyle = themeColors.accent;
@@ -8607,24 +5905,24 @@ function Show4DSTEM() {
           const bx = toScreenX(profilePoints[1].col);
           const by = toScreenY(profilePoints[1].row);
 
-          // Draw band when profile width > 1
+          // A profile wider than one pixel averages a band; outline the averaged area.
           if (profileWidth > 1) {
-            const dc = profilePoints[1].col - profilePoints[0].col;
-            const dr = profilePoints[1].row - profilePoints[0].row;
-            const lineLen = Math.sqrt(dc * dc + dr * dr);
-            if (lineLen > 0) {
-              const halfW = (profileWidth - 1) / 2;
-              const perpR = -dc / lineLen * halfW;
-              const perpC = dr / lineLen * halfW;
+            const colDelta = profilePoints[1].col - profilePoints[0].col;
+            const rowDelta = profilePoints[1].row - profilePoints[0].row;
+            const lineLength = Math.sqrt(colDelta * colDelta + rowDelta * rowDelta);
+            if (lineLength > 0) {
+              const halfWidth = (profileWidth - 1) / 2;
+              const perpRow = -colDelta / lineLength * halfWidth;
+              const perpCol = rowDelta / lineLength * halfWidth;
               ctx.fillStyle = themeColors.accent + "20";
               ctx.strokeStyle = themeColors.accent;
               ctx.lineWidth = 1;
               ctx.setLineDash([3, 3]);
               ctx.beginPath();
-              ctx.moveTo(toScreenX(profilePoints[0].col + perpC), toScreenY(profilePoints[0].row + perpR));
-              ctx.lineTo(toScreenX(profilePoints[1].col + perpC), toScreenY(profilePoints[1].row + perpR));
-              ctx.lineTo(toScreenX(profilePoints[1].col - perpC), toScreenY(profilePoints[1].row - perpR));
-              ctx.lineTo(toScreenX(profilePoints[0].col - perpC), toScreenY(profilePoints[0].row - perpR));
+              ctx.moveTo(toScreenX(profilePoints[0].col + perpCol), toScreenY(profilePoints[0].row + perpRow));
+              ctx.lineTo(toScreenX(profilePoints[1].col + perpCol), toScreenY(profilePoints[1].row + perpRow));
+              ctx.lineTo(toScreenX(profilePoints[1].col - perpCol), toScreenY(profilePoints[1].row - perpRow));
+              ctx.lineTo(toScreenX(profilePoints[0].col - perpCol), toScreenY(profilePoints[0].row - perpRow));
               ctx.closePath();
               ctx.fill();
               ctx.stroke();
@@ -8632,7 +5930,6 @@ function Show4DSTEM() {
             }
           }
 
-          // Draw line A->B
           ctx.strokeStyle = themeColors.accent;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
@@ -8640,7 +5937,6 @@ function Show4DSTEM() {
           ctx.lineTo(bx, by);
           ctx.stroke();
 
-          // Draw point B
           ctx.fillStyle = themeColors.accent;
           ctx.beginPath();
           ctx.arc(bx, by, 4, 0, Math.PI * 2);
@@ -8650,7 +5946,7 @@ function Show4DSTEM() {
       }
     }
 
-    // Colorbar overlay — uses cached vmin/vmax from the expensive DP offscreen effect
+    // Colorbar overlay: uses cached vmin/vmax from the expensive DP offscreen effect
     if (showDpColorbar) {
       const ctx = canvas.getContext("2d");
       if (ctx) {
@@ -8665,7 +5961,6 @@ function Show4DSTEM() {
     }
   }, [roiVirtualDetectorActive, dpZoom, dpPanX, dpPanY, kPixelSize, kPixelUnit, kCalibrated, detRows, detCols, roiMode, roiRadius, roiRadiusInner, roiWidth, roiHeight, localKCol, localKRow, isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner,
       profileActive, profilePoints, profileWidth, themeColors, showDpColorbar, showScaleBar, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, canvasSize, roiColors]);
-  drawDpLiveRef.current = drawDpUi;
   React.useEffect(() => drawDpUi(), [drawDpUi]);
   
   // VI scale bar + crosshair + ROI + profile lines (high-DPI)
@@ -8680,7 +5975,6 @@ function Show4DSTEM() {
     if (!viRoiMode || viRoiMode === "off") {
       drawViPositionMarker(viUiRef.current, DPR, localPosRow, localPosCol, viZoom, viPanX, viPanY, shapeCols, shapeRows, isDraggingVI);
     } else {
-      // Draw VI ROI instead of crosshair
       drawViRoiOverlayHiDPI(
         viUiRef.current, DPR, viRoiMode,
         localViRoiCenterRow, localViRoiCenterCol, viRoiRadius || 5, viRoiWidth || 10, viRoiHeight || 10,
@@ -8705,8 +5999,8 @@ function Show4DSTEM() {
         ctx.shadowBlur = 2;
         if (viProfilePoints.length >= 1) {
           const p0 = viProfilePoints[0];
-          const x0 = p0.col * viZoom * scaleX + viPanX * scaleX;
-          const y0 = p0.row * viZoom * scaleY + viPanY * scaleY;
+          const x0 = maskToCanvas(p0.col, viZoom, viPanX) * scaleX;
+          const y0 = maskToCanvas(p0.row, viZoom, viPanY) * scaleY;
           ctx.beginPath();
           ctx.arc(x0, y0, 4, 0, Math.PI * 2);
           ctx.fill();
@@ -8715,10 +6009,10 @@ function Show4DSTEM() {
         }
         if (viProfilePoints.length === 2) {
           const p0 = viProfilePoints[0], p1 = viProfilePoints[1];
-          const x0 = p0.col * viZoom * scaleX + viPanX * scaleX;
-          const y0 = p0.row * viZoom * scaleY + viPanY * scaleY;
-          const x1 = p1.col * viZoom * scaleX + viPanX * scaleX;
-          const y1 = p1.row * viZoom * scaleY + viPanY * scaleY;
+          const x0 = maskToCanvas(p0.col, viZoom, viPanX) * scaleX;
+          const y0 = maskToCanvas(p0.row, viZoom, viPanY) * scaleY;
+          const x1 = maskToCanvas(p1.col, viZoom, viPanX) * scaleX;
+          const y1 = maskToCanvas(p1.row, viZoom, viPanY) * scaleY;
           ctx.beginPath();
           ctx.moveTo(x0, y0);
           ctx.lineTo(x1, y1);
@@ -8740,7 +6034,7 @@ function Show4DSTEM() {
   React.useEffect(() => {
     if (profilePoints.length === 2 && rawDpDataRef.current) {
       const p0 = profilePoints[0], p1 = profilePoints[1];
-      void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, p1.row, p1.col, profileWidth)
+      void sampleLineProfileBrowser(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, p1.row, p1.col, profileWidth)
         .then(setProfileData)
         .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
       if (!profileActive) setProfileActive(true);
@@ -8753,7 +6047,7 @@ function Show4DSTEM() {
   React.useEffect(() => {
     if (viProfilePoints.length === 2 && rawViDataRef.current && shapeCols > 0 && shapeRows > 0) {
       const p0 = viProfilePoints[0], p1 = viProfilePoints[1];
-      void sampleLineProfileWebGPU(rawViDataRef.current, shapeCols, shapeRows, p0.row, p0.col, p1.row, p1.col, 1)
+      void sampleLineProfileBrowser(rawViDataRef.current, shapeCols, shapeRows, p0.row, p0.col, p1.row, p1.col, 1)
         .then(setViProfileData)
         .catch(error => console.error("[Show4DSTEM] WebGPU VI profile failed", error));
     } else {
@@ -8767,193 +6061,43 @@ function Show4DSTEM() {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvasSize;
-    const cssH = profileHeight;
-    canvas.width = cssW * dpr;
-    canvas.height = cssH * dpr;
-    ctx.scale(dpr, dpr);
-
-    const isDark = themeInfo.theme === "dark";
-    ctx.fillStyle = isDark ? "#1a1a1a" : "#f0f0f0";
-    ctx.fillRect(0, 0, cssW, cssH);
-
-    if (!profileData || profileData.length < 2) {
-      ctx.font = "10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      ctx.fillStyle = isDark ? "#555" : "#999";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("Click two points on the DP to draw a profile", cssW / 2, cssH / 2);
-      profileBaseImageRef.current = null;
-      profileLayoutRef.current = null;
-      return;
-    }
-
-    const padLeft = 40;
-    const padRight = 8;
-    const padTop = 6;
-    const padBottom = 18;
-    const plotW = cssW - padLeft - padRight;
-    const plotH = cssH - padTop - padBottom;
-
-    let gMin = Infinity, gMax = -Infinity;
-    for (let i = 0; i < profileData.length; i++) {
-      if (profileData[i] < gMin) gMin = profileData[i];
-      if (profileData[i] > gMax) gMax = profileData[i];
-    }
-    const range = gMax - gMin || 1;
-
-    // X-axis: calibrated distance
-    let totalDist = profileData.length - 1;
-    let xUnit = "px";
+    let distance: { total: number; unit: string } | null = null;
     if (profilePoints.length === 2) {
-      const dx = profilePoints[1].col - profilePoints[0].col;
-      const dy = profilePoints[1].row - profilePoints[0].row;
-      const distPx = Math.sqrt(dx * dx + dy * dy);
-      if (kCalibrated && kPixelSize > 0) {
-        totalDist = distPx * kPixelSize;
-        xUnit = kPixelUnit;
-      } else {
-        totalDist = distPx;
-      }
+      const colDelta = profilePoints[1].col - profilePoints[0].col;
+      const rowDelta = profilePoints[1].row - profilePoints[0].row;
+      const lengthPx = Math.sqrt(colDelta * colDelta + rowDelta * rowDelta);
+      distance = kCalibrated && kPixelSize > 0
+        ? { total: lengthPx * kPixelSize, unit: kPixelUnit }
+        : { total: lengthPx, unit: "px" };
     }
-
-    // Draw axes
-    ctx.strokeStyle = isDark ? "#555" : "#bbb";
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    ctx.moveTo(padLeft, padTop);
-    ctx.lineTo(padLeft, padTop + plotH);
-    ctx.lineTo(padLeft + plotW, padTop + plotH);
-    ctx.stroke();
-
-    // Draw profile curve
-    ctx.strokeStyle = themeColors.accent;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let i = 0; i < profileData.length; i++) {
-      const x = padLeft + (i / (profileData.length - 1)) * plotW;
-      const y = padTop + plotH - ((profileData[i] - gMin) / range) * plotH;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Draw x-axis ticks
-    const tickY = padTop + plotH;
-    ctx.strokeStyle = isDark ? "#555" : "#bbb";
-    ctx.lineWidth = 0.5;
-    const idealTicks = Math.max(2, Math.floor(plotW / 70));
-    const tickStep = roundToNiceValue(totalDist / idealTicks);
-    ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillStyle = isDark ? "#888" : "#666";
-    ctx.textBaseline = "top";
-    const ticks: number[] = [];
-    for (let v = 0; v <= totalDist + tickStep * 0.01; v += tickStep) {
-      if (v > totalDist * 1.001) break;
-      ticks.push(v);
-    }
-    for (let i = 0; i < ticks.length; i++) {
-      const v = ticks[i];
-      const frac = totalDist > 0 ? v / totalDist : 0;
-      const x = padLeft + frac * plotW;
-      ctx.beginPath(); ctx.moveTo(x, tickY); ctx.lineTo(x, tickY + 3); ctx.stroke();
-      ctx.textAlign = frac < 0.05 ? "left" : frac > 0.95 ? "right" : "center";
-      const label = v % 1 === 0 ? v.toFixed(0) : v.toFixed(1);
-      ctx.fillText(i === ticks.length - 1 ? `${label} ${xUnit}` : label, x, tickY + 4);
-    }
-
-    // Y-axis min/max labels (left margin)
-    ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillStyle = isDark ? "#888" : "#666";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(formatNumber(gMax), 2, padTop);
-    ctx.textBaseline = "bottom";
-    ctx.fillText(formatNumber(gMin), 2, padTop + plotH);
-
-    // Save base image and layout for hover
-    profileBaseImageRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    profileLayoutRef.current = { padLeft, plotW, padTop, plotH, gMin, gMax, totalDist, xUnit };
+    const painted = drawProfileSparkline(canvas, ctx, canvasSize, profileHeight, profileData, distance,
+      "Click two points on the DP to draw a profile", themeInfo.theme === "dark", themeColors.accent);
+    profileBaseImageRef.current = painted?.base ?? null;
+    profileLayoutRef.current = painted?.layout ?? null;
   }, [profileData, profilePoints, kPixelSize, kCalibrated, themeInfo.theme, themeColors.accent, canvasSize, profileHeight]);
 
   // DP Profile hover handlers
-  const handleProfileMouseMove = React.useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleProfileMouseMove = React.useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = profileCanvasRef.current;
     const base = profileBaseImageRef.current;
     const layout = profileLayoutRef.current;
     if (!canvas || !base || !layout || !profileData) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const { padLeft, plotW, padTop, plotH, gMin, gMax, totalDist, xUnit } = layout;
-    const range = gMax - gMin || 1;
-
-    // Restore base image
-    ctx.putImageData(base, 0, 0);
-
-    if (cssX < padLeft || cssX > padLeft + plotW) return;
-    const frac = (cssX - padLeft) / plotW;
-
-    const dpr = window.devicePixelRatio || 1;
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    // Vertical crosshair
-    const isDark = themeInfo.theme === "dark";
-    ctx.strokeStyle = isDark ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 2]);
-    ctx.beginPath();
-    ctx.moveTo(cssX, padTop);
-    ctx.lineTo(cssX, padTop + plotH);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Dot on curve + value
-    const dataIdx = Math.min(profileData.length - 1, Math.max(0, Math.round(frac * (profileData.length - 1))));
-    const val = profileData[dataIdx];
-    const y = padTop + plotH - ((val - gMin) / range) * plotH;
-    ctx.fillStyle = themeColors.accent;
-    ctx.beginPath();
-    ctx.arc(cssX, y, 3, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Value readout label
-    const dist = frac * totalDist;
-    const label = `${formatNumber(val)}  @  ${dist.toFixed(1)} ${xUnit}`;
-    ctx.font = "bold 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    const textW = ctx.measureText(label).width;
-    const labelX = Math.min(cssX + 6, padLeft + plotW - textW - 2);
-    const labelY = padTop + 2;
-    ctx.fillStyle = isDark ? "rgba(0,0,0,0.7)" : "rgba(255,255,255,0.8)";
-    ctx.fillRect(labelX - 2, labelY - 1, textW + 4, 11);
-    ctx.fillStyle = isDark ? "#fff" : "#000";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(label, labelX, labelY);
-
-    ctx.restore();
+    drawProfileHover(ctx, base, layout, profileData, event.clientX - canvas.getBoundingClientRect().left,
+      themeInfo.theme === "dark", themeColors.accent);
   }, [profileData, themeInfo.theme, themeColors.accent]);
 
   const handleProfileMouseLeave = React.useCallback(() => {
-    const canvas = profileCanvasRef.current;
-    const base = profileBaseImageRef.current;
-    if (!canvas || !base) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.putImageData(base, 0, 0);
+    restoreProfileBase(profileCanvasRef.current, profileBaseImageRef.current);
   }, []);
 
   // DP Profile resize handlers
   React.useEffect(() => {
     if (!isResizingProfile) return;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (event: MouseEvent) => {
       if (!profileResizeStart.current) return;
-      const deltaY = e.clientY - profileResizeStart.current.startY;
+      const deltaY = event.clientY - profileResizeStart.current.startY;
       const newHeight = Math.max(40, Math.min(300, profileResizeStart.current.startHeight + deltaY));
       setProfileHeight(newHeight);
     };
@@ -8975,189 +6119,41 @@ function Show4DSTEM() {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = viCanvasWidth;
-    const cssH = viProfileHeight;
-    canvas.width = cssW * dpr;
-    canvas.height = cssH * dpr;
-    ctx.scale(dpr, dpr);
-
-    const isDark = themeInfo.theme === "dark";
-    ctx.fillStyle = isDark ? "#1a1a1a" : "#f0f0f0";
-    ctx.fillRect(0, 0, cssW, cssH);
-
-    if (!viProfileData || viProfileData.length < 2) {
-      ctx.font = "10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      ctx.fillStyle = isDark ? "#555" : "#999";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("Click two points on the VI to draw a profile", cssW / 2, cssH / 2);
-      viProfileBaseImageRef.current = null;
-      viProfileLayoutRef.current = null;
-      return;
-    }
-
-    const padLeft = 40;
-    const padRight = 8;
-    const padTop = 6;
-    const padBottom = 18;
-    const plotW = cssW - padLeft - padRight;
-    const plotH = cssH - padTop - padBottom;
-
-    let gMin = Infinity, gMax = -Infinity;
-    for (let i = 0; i < viProfileData.length; i++) {
-      if (viProfileData[i] < gMin) gMin = viProfileData[i];
-      if (viProfileData[i] > gMax) gMax = viProfileData[i];
-    }
-    const range = gMax - gMin || 1;
-
-    // X-axis: calibrated distance
-    let totalDist = viProfileData.length - 1;
-    let xUnit = "px";
+    let distance: { total: number; unit: string } | null = null;
     if (viProfilePoints.length === 2 && pixelSize > 0) {
-      const dx = viProfilePoints[1].col - viProfilePoints[0].col;
-      const dy = viProfilePoints[1].row - viProfilePoints[0].row;
-      const distPx = Math.sqrt(dx * dx + dy * dy);
-      totalDist = distPx * pixelSize;
-      xUnit = pixelUnit;
+      const colDelta = viProfilePoints[1].col - viProfilePoints[0].col;
+      const rowDelta = viProfilePoints[1].row - viProfilePoints[0].row;
+      const lengthPx = Math.sqrt(colDelta * colDelta + rowDelta * rowDelta);
+      distance = { total: lengthPx * pixelSize, unit: pixelUnit };
     }
-
-    // Draw axes
-    ctx.strokeStyle = isDark ? "#555" : "#bbb";
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    ctx.moveTo(padLeft, padTop);
-    ctx.lineTo(padLeft, padTop + plotH);
-    ctx.lineTo(padLeft + plotW, padTop + plotH);
-    ctx.stroke();
-
-    // Draw profile curve
-    ctx.strokeStyle = themeColors.accent;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let i = 0; i < viProfileData.length; i++) {
-      const x = padLeft + (i / (viProfileData.length - 1)) * plotW;
-      const y = padTop + plotH - ((viProfileData[i] - gMin) / range) * plotH;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Draw x-axis ticks
-    const tickY = padTop + plotH;
-    ctx.strokeStyle = isDark ? "#555" : "#bbb";
-    ctx.lineWidth = 0.5;
-    const idealTicks = Math.max(2, Math.floor(plotW / 70));
-    const tickStep = roundToNiceValue(totalDist / idealTicks);
-    ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillStyle = isDark ? "#888" : "#666";
-    ctx.textBaseline = "top";
-    const ticks: number[] = [];
-    for (let v = 0; v <= totalDist + tickStep * 0.01; v += tickStep) {
-      if (v > totalDist * 1.001) break;
-      ticks.push(v);
-    }
-    for (let i = 0; i < ticks.length; i++) {
-      const v = ticks[i];
-      const frac = totalDist > 0 ? v / totalDist : 0;
-      const x = padLeft + frac * plotW;
-      ctx.beginPath(); ctx.moveTo(x, tickY); ctx.lineTo(x, tickY + 3); ctx.stroke();
-      ctx.textAlign = frac < 0.05 ? "left" : frac > 0.95 ? "right" : "center";
-      const label = v % 1 === 0 ? v.toFixed(0) : v.toFixed(1);
-      ctx.fillText(i === ticks.length - 1 ? `${label} ${xUnit}` : label, x, tickY + 4);
-    }
-
-    // Y-axis min/max labels (left margin)
-    ctx.font = "9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillStyle = isDark ? "#888" : "#666";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(formatNumber(gMax), 2, padTop);
-    ctx.textBaseline = "bottom";
-    ctx.fillText(formatNumber(gMin), 2, padTop + plotH);
-
-    // Save base image and layout for hover
-    viProfileBaseImageRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    viProfileLayoutRef.current = { padLeft, plotW, padTop, plotH, gMin, gMax, totalDist, xUnit };
+    const painted = drawProfileSparkline(canvas, ctx, viCanvasWidth, viProfileHeight, viProfileData, distance,
+      "Click two points on the VI to draw a profile", themeInfo.theme === "dark", themeColors.accent);
+    viProfileBaseImageRef.current = painted?.base ?? null;
+    viProfileLayoutRef.current = painted?.layout ?? null;
   }, [viProfileData, viProfilePoints, pixelSize, themeInfo.theme, themeColors.accent, viCanvasWidth, viProfileHeight]);
 
   // VI Profile hover handlers
-  const handleViProfileMouseMove = React.useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleViProfileMouseMove = React.useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = viProfileCanvasRef.current;
     const base = viProfileBaseImageRef.current;
     const layout = viProfileLayoutRef.current;
     if (!canvas || !base || !layout || !viProfileData) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const { padLeft, plotW, padTop, plotH, gMin, gMax, totalDist, xUnit } = layout;
-    const range = gMax - gMin || 1;
-
-    // Restore base image
-    ctx.putImageData(base, 0, 0);
-
-    if (cssX < padLeft || cssX > padLeft + plotW) return;
-    const frac = (cssX - padLeft) / plotW;
-
-    const dpr = window.devicePixelRatio || 1;
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    // Vertical crosshair
-    const isDark = themeInfo.theme === "dark";
-    ctx.strokeStyle = isDark ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 2]);
-    ctx.beginPath();
-    ctx.moveTo(cssX, padTop);
-    ctx.lineTo(cssX, padTop + plotH);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Dot on curve + value
-    const dataIdx = Math.min(viProfileData.length - 1, Math.max(0, Math.round(frac * (viProfileData.length - 1))));
-    const val = viProfileData[dataIdx];
-    const y = padTop + plotH - ((val - gMin) / range) * plotH;
-    ctx.fillStyle = themeColors.accent;
-    ctx.beginPath();
-    ctx.arc(cssX, y, 3, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Value readout label
-    const dist = frac * totalDist;
-    const label = `${formatNumber(val)}  @  ${dist.toFixed(1)} ${xUnit}`;
-    ctx.font = "bold 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    const textW = ctx.measureText(label).width;
-    const labelX = Math.min(cssX + 6, padLeft + plotW - textW - 2);
-    const labelY = padTop + 2;
-    ctx.fillStyle = isDark ? "rgba(0,0,0,0.7)" : "rgba(255,255,255,0.8)";
-    ctx.fillRect(labelX - 2, labelY - 1, textW + 4, 11);
-    ctx.fillStyle = isDark ? "#fff" : "#000";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(label, labelX, labelY);
-
-    ctx.restore();
+    drawProfileHover(ctx, base, layout, viProfileData, event.clientX - canvas.getBoundingClientRect().left,
+      themeInfo.theme === "dark", themeColors.accent);
   }, [viProfileData, themeInfo.theme, themeColors.accent]);
 
   const handleViProfileMouseLeave = React.useCallback(() => {
-    const canvas = viProfileCanvasRef.current;
-    const base = viProfileBaseImageRef.current;
-    if (!canvas || !base) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.putImageData(base, 0, 0);
+    restoreProfileBase(viProfileCanvasRef.current, viProfileBaseImageRef.current);
   }, []);
 
   // VI Profile resize handlers
   React.useEffect(() => {
     if (!isResizingViProfile) return;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (event: MouseEvent) => {
       if (!viProfileResizeStart.current) return;
-      const deltaY = e.clientY - viProfileResizeStart.current.startY;
+      const deltaY = event.clientY - viProfileResizeStart.current.startY;
       const newHeight = Math.max(40, Math.min(300, viProfileResizeStart.current.startHeight + deltaY));
       setViProfileHeight(newHeight);
     };
@@ -9180,26 +6176,26 @@ function Show4DSTEM() {
     setPanY: React.Dispatch<React.SetStateAction<number>>,
     viewRef: React.RefObject<{ zoom: number; panX: number; panY: number; raf: number }>,
     canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  ) => (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.stopPropagation();
+  ) => (event: React.WheelEvent<HTMLCanvasElement>) => {
+    event.stopPropagation();
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const v = viewRef.current;
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, v.zoom * zoomFactor));
-    const zoomRatio = newZoom / v.zoom;
+    const mouseX = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const mouseY = (event.clientY - rect.top) * (canvas.height / rect.height);
+    const view = viewRef.current;
+    const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, view.zoom * zoomFactor));
+    const zoomRatio = newZoom / view.zoom;
     // Accumulate synchronously against the live ref (handles a burst of trackpad
     // wheel events within one frame correctly), flush to React state once per rAF.
-    v.zoom = newZoom;
-    v.panX = mouseX - (mouseX - v.panX) * zoomRatio;
-    v.panY = mouseY - (mouseY - v.panY) * zoomRatio;
-    if (v.raf === 0) {
-      v.raf = requestAnimationFrame(() => {
-        v.raf = 0;
-        setZoom(v.zoom); setPanX(v.panX); setPanY(v.panY);
+    view.zoom = newZoom;
+    view.panX = mouseX - (mouseX - view.panX) * zoomRatio;
+    view.panY = mouseY - (mouseY - view.panY) * zoomRatio;
+    if (view.raf === 0) {
+      view.raf = requestAnimationFrame(() => {
+        view.raf = 0;
+        setZoom(view.zoom); setPanX(view.panX); setPanY(view.panY);
       });
     }
   };
@@ -9214,144 +6210,79 @@ function Show4DSTEM() {
   const activeRoiCenterCol = Number.isFinite(localKCol) ? localKCol : roiCenterCol;
   const activeRoiCenterRow = Number.isFinite(localKRow) ? localKRow : roiCenterRow;
 
-  const isInResizableRadiusBand = (distance: number, radius: number, innerRadius: number = 0): boolean => {
-    if (!Number.isFinite(distance) || !Number.isFinite(radius) || radius <= 0) return false;
-    const ringWidth = Math.max(radius - innerRadius, 1);
-    const edgePad = Math.max(dpHitRadius, Math.min(radius * 0.35, 8), ringWidth * 0.35);
-    if (innerRadius > 0) {
-      return distance >= Math.max(0, innerRadius - edgePad) && distance <= radius + edgePad;
-    }
-    return distance >= Math.max(0, radius * 0.45 - edgePad) && distance <= radius + edgePad;
-  };
-
-  // Helper: check if point is near the outer resize handle.
-  // The drawn handle is a tiny 6px dot - too small to grab by hand, especially
-  // on a binned detector where the whole pattern is ~48px. So we accept a click
-  // anywhere on the ROI's EDGE (circle perimeter / square border), not just the
-  // 45-deg handle dot. Dragging the edge is the natural "resize" gesture.
-  const isNearResizeHandle = (imgX: number, imgY: number): boolean => {
-    if (!roiVirtualDetectorActive) return false;
-    if (roiMode === "rect") {
-      const handleX = activeRoiCenterCol + roiWidth / 2;
-      const handleY = activeRoiCenterRow + roiHeight / 2;
-      if (Math.sqrt((imgX - handleX) ** 2 + (imgY - handleY) ** 2) < dpHitRadius) return true;
-      const dx = Math.abs(imgX - activeRoiCenterCol), dy = Math.abs(imgY - activeRoiCenterRow);
-      const onVert = Math.abs(dx - roiWidth / 2) < dpHitRadius && dy <= roiHeight / 2 + dpHitRadius;
-      const onHorz = Math.abs(dy - roiHeight / 2) < dpHitRadius && dx <= roiWidth / 2 + dpHitRadius;
-      return onVert || onHorz;
-    }
-    if ((roiMode !== "circle" && roiMode !== "square" && roiMode !== "annular") || !roiRadius) return false;
-    const offset = roiMode === "square" ? roiRadius : roiRadius * CIRCLE_HANDLE_ANGLE;
-    const handleX = activeRoiCenterCol + offset;
-    const handleY = activeRoiCenterRow + offset;
-    if (Math.sqrt((imgX - handleX) ** 2 + (imgY - handleY) ** 2) < dpHitRadius) return true;
-    const dx = imgX - activeRoiCenterCol, dy = imgY - activeRoiCenterRow;
-    // GENEROUS grab: a hand can't hit a thin ring. Treat the OUTER HALF of the
-    // ROI (and just outside it) as the resize zone; the inner half is the move
-    // zone. So grabbing anywhere near the rim resizes - no pixel precision needed.
-    if (roiMode === "square") {
-      const cheb = Math.max(Math.abs(dx), Math.abs(dy));
-      return isInResizableRadiusBand(cheb, roiRadius);
-    }
-    const distFromCenter = Math.sqrt(dx ** 2 + dy ** 2);
-    if (roiMode === "annular") {
-      return isInResizableRadiusBand(distFromCenter, roiRadius, roiRadiusInner || 0);
-    }
-    return isInResizableRadiusBand(distFromCenter, roiRadius);
-  };
+  // What a press grabs on the detector ROI: the inner half moves it, the outer
+  // half and a hit margin past the edge resize it (grabDetector). The drawn
+  // handle is a 6 px dot, too small to catch by hand on a binned detector.
+  const grabDpRoi = (col: number, row: number): DetectorGrab => grabDetector({
+    mode: roiMode as DetectorRoiMode,
+    centerRow: activeRoiCenterRow,
+    centerCol: activeRoiCenterCol,
+    pointerRow: row,
+    pointerCol: col,
+    radius: Number(roiRadius) || 0,
+    radiusInner: Number(roiRadiusInner) || 0,
+    width: Number(roiWidth) || 0,
+    height: Number(roiHeight) || 0,
+    hitMargin: dpHitRadius,
+  });
+  const isNearResizeHandle = (col: number, row: number): boolean =>
+    roiVirtualDetectorActive && grabDpRoi(col, row).action === "resize";
 
   // Helper: check if point is near the inner resize handle (annular mode only)
-  const isNearResizeHandleInner = (imgX: number, imgY: number): boolean => {
+  const isNearResizeHandleInner = (col: number, row: number): boolean => {
     if (!roiVirtualDetectorActive) return false;
     if (roiMode !== "annular" || !roiRadiusInner) return false;
     const offset = roiRadiusInner * CIRCLE_HANDLE_ANGLE;
-    const handleX = activeRoiCenterCol + offset;
-    const handleY = activeRoiCenterRow + offset;
-    const dist = Math.sqrt((imgX - handleX) ** 2 + (imgY - handleY) ** 2);
-    return dist < dpHitRadius;
+    const handleCol = activeRoiCenterCol + offset;
+    const handleRow = activeRoiCenterRow + offset;
+    const distance = Math.sqrt((col - handleCol) ** 2 + (row - handleRow) ** 2);
+    return distance < dpHitRadius;
   };
 
-  // Helper: check if point is near VI ROI resize handle (same logic as DP)
-  // Hit area is capped to avoid overlap with center for small ROIs
+  // What a press grabs on the scan ROI, with the detector's rules (grabDetector): the
+  // inner half moves it, the outer half and a hit margin past the edge resize it.
   const viHitRadius = RESIZE_HIT_AREA_PX * Math.max(shapeRows, shapeCols) / canvasSize / viZoom;
-  const isNearViRoiResizeHandle = (imgX: number, imgY: number): boolean => {
-    if (!viRoiMode || viRoiMode === "off") return false;
-    if (viRoiMode === "rect") {
-      const halfH = (viRoiHeight || 10) / 2;
-      const halfW = (viRoiWidth || 10) / 2;
-      const handleX = localViRoiCenterRow + halfH;
-      const handleY = localViRoiCenterCol + halfW;
-      const dist = Math.sqrt((imgX - handleX) ** 2 + (imgY - handleY) ** 2);
-      const cornerDist = Math.sqrt(halfW ** 2 + halfH ** 2);
-      const hitArea = Math.min(viHitRadius, cornerDist * 0.5);
-      return dist < hitArea;
-    }
-    if (viRoiMode === "circle" || viRoiMode === "square") {
-      const radius = viRoiRadius || 5;
-      const offset = viRoiMode === "square" ? radius : radius * CIRCLE_HANDLE_ANGLE;
-      const handleX = localViRoiCenterRow + offset;
-      const handleY = localViRoiCenterCol + offset;
-      const hitArea = Math.min(viHitRadius, radius * 0.5);
-      if (Math.sqrt((imgX - handleX) ** 2 + (imgY - handleY) ** 2) < hitArea) return true;
-      // GENEROUS grab: outer half of the ROI (and just outside) resizes; inner
-      // half moves. No pixel precision needed to grab the rim by hand.
-      const dx = imgX - localViRoiCenterRow, dy = imgY - localViRoiCenterCol;
-      if (viRoiMode === "square") {
-        const cheb = Math.max(Math.abs(dx), Math.abs(dy));
-        return cheb >= radius * 0.5 && cheb <= radius * 1.8 + viHitRadius;
-      }
-      return Math.sqrt(dx ** 2 + dy ** 2) >= radius * 0.5 && Math.sqrt(dx ** 2 + dy ** 2) <= radius * 1.8 + viHitRadius;
-    }
-    return false;
-  };
+  const grabViRoi = (row: number, col: number): DetectorGrab => grabDetector({
+    mode: (viRoiMode || "off") as DetectorRoiMode,
+    centerRow: localViRoiCenterRow,
+    centerCol: localViRoiCenterCol,
+    pointerRow: row,
+    pointerCol: col,
+    radius: viRoiRadius || 5,
+    radiusInner: 0,
+    width: viRoiWidth || 10,
+    height: viRoiHeight || 10,
+    hitMargin: viHitRadius,
+  });
 
-  // Helper: check if point is inside the DP ROI area
-  const isInsideDpRoi = (imgX: number, imgY: number): boolean => {
-    if (!roiVirtualDetectorActive) return false;
-    if (roiMode === "point") return false;
-    const dx = imgX - activeRoiCenterCol;
-    const dy = imgY - activeRoiCenterRow;
-    if (roiMode === "circle") return Math.sqrt(dx * dx + dy * dy) <= (roiRadius || 5);
-    if (roiMode === "square") return Math.abs(dx) <= (roiRadius || 5) && Math.abs(dy) <= (roiRadius || 5);
-    if (roiMode === "annular") { const d = Math.sqrt(dx * dx + dy * dy); return d <= (roiRadius || 20) && d >= (roiRadiusInner || 5); }
-    if (roiMode === "rect") return Math.abs(dx) <= (roiWidth || 10) / 2 && Math.abs(dy) <= (roiHeight || 10) / 2;
-    return false;
-  };
-
-  // Helper: check if point is inside the VI ROI area
-  const isInsideViRoi = (imgX: number, imgY: number): boolean => {
-    if (!viRoiMode || viRoiMode === "off") return false;
-    const dx = imgY - localViRoiCenterCol;
-    const dy = imgX - localViRoiCenterRow;
-    if (viRoiMode === "circle") return Math.sqrt(dx * dx + dy * dy) <= (viRoiRadius || 5);
-    if (viRoiMode === "square") return Math.abs(dx) <= (viRoiRadius || 5) && Math.abs(dy) <= (viRoiRadius || 5);
-    if (viRoiMode === "rect") return Math.abs(dx) <= (viRoiWidth || 10) / 2 && Math.abs(dy) <= (viRoiHeight || 10) / 2;
-    return false;
-  };
-
-  // Mouse handlers
-  const getDpImageCoordsFromClient = React.useCallback((clientX: number, clientY: number): { imgX: number; imgY: number } | null => {
+  // Mouse handlers. imageCol/imageRow are image coordinates where pixel i spans [i, i + 1)
+  // (value readout); maskCol/maskRow are the detector mask's, where pixel i is
+  // centered at i (ROIs and profile points, which the bilinear sampler reads with
+  // the same convention), so a ROI or profile point dropped on a pixel centers on it.
+  const getDpImageCoordsFromClient = React.useCallback((clientX: number, clientY: number): { imageCol: number; imageRow: number; maskCol: number; maskRow: number } | null => {
     const canvas = dpOverlayRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const screenX = (clientX - rect.left) * (canvas.width / rect.width);
     const screenY = (clientY - rect.top) * (canvas.height / rect.height);
     return {
-      imgX: (screenX - dpPanX) / dpZoom,
-      imgY: (screenY - dpPanY) / dpZoom,
+      imageCol: (screenX - dpPanX) / dpZoom,
+      imageRow: (screenY - dpPanY) / dpZoom,
+      maskCol: canvasToMask(screenX, dpZoom, dpPanX),
+      maskRow: canvasToMask(screenY, dpZoom, dpPanY),
     };
   }, [dpPanX, dpPanY, dpZoom]);
 
-  const resizeDpRoiFromImagePoint = React.useCallback((imgX: number, imgY: number, shiftKey: boolean = false): boolean => {
-    if (isDraggingResizeInner) {
+  const resizeDpRoiFromImagePoint = React.useCallback((col: number, row: number, shiftKey: boolean = false): boolean => {
+    const start = resizeStartRef.current;
+    if (isDraggingResizeInner && start) {
       const geometry = resizeDetectorFromPointer({
         mode: roiMode as DetectorRoiMode,
         centerRow: activeRoiCenterRow,
         centerCol: activeRoiCenterCol,
-        pointerRow: imgY,
-        pointerCol: imgX,
-        radius: roiRadiusPendingRef.current ?? Number(model.get("roi_radius")),
-        radiusInner: roiRadiusInnerPendingRef.current ?? Number(model.get("roi_radius_inner") || 0),
+        pointerRow: row,
+        pointerCol: col,
+        start,
         resizeInner: true,
       });
       if (geometry?.radiusInner === undefined) return false;
@@ -9360,16 +6291,14 @@ function Show4DSTEM() {
       return true;
     }
 
-    if (isDraggingResize) {
+    if (isDraggingResize && start) {
       const geometry = resizeDetectorFromPointer({
         mode: roiMode as DetectorRoiMode,
         centerRow: activeRoiCenterRow,
         centerCol: activeRoiCenterCol,
-        pointerRow: imgY,
-        pointerCol: imgX,
-        radius: roiRadiusPendingRef.current ?? Number(model.get("roi_radius")),
-        radiusInner: roiRadiusInnerPendingRef.current ?? Number(model.get("roi_radius_inner") || 0),
-        aspectRatio: resizeAspectRef.current,
+        pointerRow: row,
+        pointerCol: col,
+        start,
         preserveAspect: shiftKey,
       });
       if (!geometry) return false;
@@ -9389,23 +6318,17 @@ function Show4DSTEM() {
     model, requestCompareViLive, roiMode, sendRoiRadius, setRoiHeight, setRoiWidth
   ]);
 
-  const handleDpMouseDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const coords = getDpImageCoordsFromClient(e.clientX, e.clientY);
-    if (!coords || !dpPointerOwner.start(e)) return;
-    const { imgX, imgY } = coords;
+  const handleDpMouseDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const coords = getDpImageCoordsFromClient(event.clientX, event.clientY);
+    if (!coords || !dpPointerOwner.start(event)) return;
+    const { maskCol, maskRow } = coords;
     // Capture the pointer so a fast edge-drag resize keeps receiving move/up
     // events even when the cursor leaves the canvas (#751). Without capture the
     // window listener can miss events and the radius never updates.
-    if ("pointerId" in e) {
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    if ("pointerId" in event) {
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
     }
-    if (residentBatchInfo) {
-      const gesture = { phase: "start", epoch_ms: performance.timeOrigin + performance.now(),
-        pointer_id: "pointerId" in e ? e.pointerId : null, client: [e.clientX, e.clientY] };
-      e.currentTarget.dataset.residentGesture = JSON.stringify(gesture);
-      model.send({ type: "resident_detector_gesture", ...gesture });
-    }
-    dpClickStartRef.current = { x: e.clientX, y: e.clientY };
+    dpClickStartRef.current = { x: event.clientX, y: event.clientY };
 
     // When profile mode is active, use profile interactions only
     if (profileActive) {
@@ -9413,18 +6336,18 @@ function Show4DSTEM() {
         const p0 = profilePoints[0];
         const p1 = profilePoints[1];
         const hitRadius = 10 / dpZoom;
-        const d0 = Math.sqrt((imgX - p0.col) ** 2 + (imgY - p0.row) ** 2);
-        const d1 = Math.sqrt((imgX - p1.col) ** 2 + (imgY - p1.row) ** 2);
+        const d0 = Math.sqrt((maskCol - p0.col) ** 2 + (maskRow - p0.row) ** 2);
+        const d1 = Math.sqrt((maskCol - p1.col) ** 2 + (maskRow - p1.row) ** 2);
         if (d0 <= hitRadius || d1 <= hitRadius) {
           setDraggingDpProfileEndpoint(d0 <= d1 ? 0 : 1);
           setIsDraggingDP(false);
           return;
         }
-        if (pointToSegmentDistance(imgX, imgY, p0.col, p0.row, p1.col, p1.row) <= hitRadius) {
+        if (pointToSegmentDistance(maskCol, maskRow, p0.col, p0.row, p1.col, p1.row) <= hitRadius) {
           setIsDraggingDpProfileLine(true);
           dpProfileDragStartRef.current = {
-            row: imgY,
-            col: imgX,
+            row: maskRow,
+            col: maskCol,
             p0: { row: p0.row, col: p0.col },
             p1: { row: p1.row, col: p1.col },
           };
@@ -9447,31 +6370,42 @@ function Show4DSTEM() {
 
     beginDpRoiInteraction();
 
-    // Check if clicking on resize handle (inner first, then outer)
-    if (isNearResizeHandleInner(imgX, imgY)) {
+    // Inner handle first, then the outer resize band. A resize remembers the
+    // press so the edge follows the pointer from where it was grabbed.
+    const pressed = {
+      pointerRow: maskRow,
+      pointerCol: maskCol,
+      radius: roiRadiusPendingRef.current ?? Number(model.get("roi_radius")),
+      radiusInner: roiRadiusInnerPendingRef.current ?? Number(model.get("roi_radius_inner") || 0),
+      width: Number(roiWidth) || 0,
+      height: Number(roiHeight) || 0,
+    };
+    if (isNearResizeHandleInner(maskCol, maskRow)) {
+      resizeStartRef.current = { ...pressed, rows: true, cols: true };
       setIsDraggingResizeInner(true);
       return;
     }
-    if (isNearResizeHandle(imgX, imgY)) {
-      e.preventDefault();
-      resizeAspectRef.current = roiMode === "rect" && roiWidth > 0 && roiHeight > 0 ? roiWidth / roiHeight : null;
+    const grab = grabDpRoi(maskCol, maskRow);
+    if (grab.action === "resize") {
+      event.preventDefault();
+      resizeStartRef.current = { ...pressed, rows: grab.rows, cols: grab.cols };
       setIsDraggingResize(true);
       return;
     }
 
     setIsDraggingDP(true);
-    // If clicking inside the ROI, drag with offset (grab-and-drag)
-    if (roiMode !== "off" && roiMode !== "point" && isInsideDpRoi(imgX, imgY)) {
-      dpDragOffsetRef.current = { dRow: imgY - activeRoiCenterRow, dCol: imgX - activeRoiCenterCol };
+    // If clicking inside the ROI's move zone, drag with offset (grab-and-drag)
+    if (grab.action === "move") {
+      dpDragOffsetRef.current = { dRow: maskRow - activeRoiCenterRow, dCol: maskCol - activeRoiCenterCol };
       return;
     }
-    // Clicking outside ROI — teleport center to click position
+    // Clicking outside the ROI teleports its center to the click position
     dpDragOffsetRef.current = { dRow: 0, dCol: 0 };
-    setLocalKCol(imgX); setLocalKRow(imgY);
+    setLocalKCol(maskCol); setLocalKRow(maskRow);
     // Use compound roi_center trait [row, col] - single observer fires in Python
     const { row: newRow, col: newCol } = clampDetectorCenter(
-      imgY,
-      imgX,
+      maskRow,
+      maskCol,
       detRows,
       detCols,
     );
@@ -9480,24 +6414,24 @@ function Show4DSTEM() {
     requestCompareViLive();
   };
 
-  const handleDpMouseMove = (e: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
-    const pointerMove = dpPointerOwner.move(e);
+  const handleDpMouseMove = (event: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
+    const pointerMove = dpPointerOwner.move(event);
     if (pointerMove === "ignore") return;
-    if (pointerMove === "release") { handleDpMouseUp(e); return; }
-    const coords = getDpImageCoordsFromClient(e.clientX, e.clientY);
+    if (pointerMove === "release") { handleDpMouseUp(event); return; }
+    const coords = getDpImageCoordsFromClient(event.clientX, event.clientY);
     if (!coords) return;
-    const { imgX, imgY } = coords;
+    const { imageCol, imageRow, maskCol, maskRow } = coords;
 
-    // Fast path: skip cursor readout during any active drag — avoids setCursorInfo re-renders
+    // Fast path: skip cursor readout during any active drag, which avoids setCursorInfo re-renders
     const anyDrag = isDraggingDP || isDraggingResize || isDraggingResizeInner
       || draggingDpProfileEndpoint !== null || isDraggingDpProfileLine;
     if (anyDrag && pointerMove !== "drag") return;
 
     // Cursor readout: look up raw DP value at pixel position
     if (!anyDrag) {
-      const pxCol = Math.floor(imgX);
-      const pxRow = Math.floor(imgY);
-      if (pxCol >= 0 && pxCol < detCols && pxRow >= 0 && pxRow < detRows && frameBytes && !dpGpuPending) {
+      const pxCol = Math.floor(imageCol);
+      const pxRow = Math.floor(imageRow);
+      if (pxCol >= 0 && pxCol < detCols && pxRow >= 0 && pxRow < detRows && frameBytes) {
         const usesViRoiDp = viRoiMode && viRoiMode !== "off" && viRoiDpBytes && viRoiDpBytes.byteLength > 0;
         const sourceBytes = usesViRoiDp ? viRoiDpBytes : frameBytes;
         const raw = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
@@ -9511,47 +6445,33 @@ function Show4DSTEM() {
       const p0 = profilePoints[0];
       const p1 = profilePoints[1];
       const hitRadius = 10 / dpZoom;
-      const d0 = Math.sqrt((imgX - p0.col) ** 2 + (imgY - p0.row) ** 2);
-      const d1 = Math.sqrt((imgX - p1.col) ** 2 + (imgY - p1.row) ** 2);
+      const d0 = Math.sqrt((maskCol - p0.col) ** 2 + (maskRow - p0.row) ** 2);
+      const d1 = Math.sqrt((maskCol - p1.col) ** 2 + (maskRow - p1.row) ** 2);
       if (draggingDpProfileEndpoint !== null) {
         if (!rawDpDataRef.current) return;
-        const clampedRow = Math.max(0, Math.min(detRows - 1, imgY));
-        const clampedCol = Math.max(0, Math.min(detCols - 1, imgX));
+        const clampedRow = Math.max(0, Math.min(detRows - 1, maskRow));
+        const clampedCol = Math.max(0, Math.min(detCols - 1, maskCol));
         const next = [
           draggingDpProfileEndpoint === 0 ? { row: clampedRow, col: clampedCol } : profilePoints[0],
           draggingDpProfileEndpoint === 1 ? { row: clampedRow, col: clampedCol } : profilePoints[1],
         ];
         setProfileLine(next);
-        void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
+        void sampleLineProfileBrowser(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
           .then(setProfileData)
           .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
         return;
       }
       if (isDraggingDpProfileLine && dpProfileDragStartRef.current) {
         if (!rawDpDataRef.current) return;
-        const drag = dpProfileDragStartRef.current;
-        let deltaRow = imgY - drag.row;
-        let deltaCol = imgX - drag.col;
-        const minRow = Math.min(drag.p0.row, drag.p1.row);
-        const maxRow = Math.max(drag.p0.row, drag.p1.row);
-        const minCol = Math.min(drag.p0.col, drag.p1.col);
-        const maxCol = Math.max(drag.p0.col, drag.p1.col);
-        deltaRow = Math.max(deltaRow, -minRow);
-        deltaRow = Math.min(deltaRow, (detRows - 1) - maxRow);
-        deltaCol = Math.max(deltaCol, -minCol);
-        deltaCol = Math.min(deltaCol, (detCols - 1) - maxCol);
-        const next = [
-          { row: drag.p0.row + deltaRow, col: drag.p0.col + deltaCol },
-          { row: drag.p1.row + deltaRow, col: drag.p1.col + deltaCol },
-        ];
+        const next = dragProfileLine(dpProfileDragStartRef.current, maskRow, maskCol, detRows, detCols);
         setProfileLine(next);
-        void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
+        void sampleLineProfileBrowser(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
           .then(setProfileData)
           .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
         return;
       }
       const nextHoveredEndpoint: 0 | 1 | null = d0 <= hitRadius ? 0 : d1 <= hitRadius ? 1 : null;
-      const nextHoverLine = nextHoveredEndpoint === null && pointToSegmentDistance(imgX, imgY, p0.col, p0.row, p1.col, p1.row) <= hitRadius;
+      const nextHoverLine = nextHoveredEndpoint === null && pointToSegmentDistance(maskCol, maskRow, p0.col, p0.row, p1.col, p1.row) <= hitRadius;
       setHoveredDpProfileEndpoint(nextHoveredEndpoint);
       setIsHoveringDpProfileLine(nextHoverLine);
       return;
@@ -9561,7 +6481,7 @@ function Show4DSTEM() {
     }
 
     // Handle inner resize dragging (annular mode)
-    if (roiVirtualDetectorActive && resizeDpRoiFromImagePoint(imgX, imgY, e.shiftKey)) {
+    if (roiVirtualDetectorActive && resizeDpRoiFromImagePoint(maskCol, maskRow, event.shiftKey)) {
       return;
     }
 
@@ -9573,17 +6493,15 @@ function Show4DSTEM() {
 
     // Check hover state for resize handles
     if (!isDraggingDP) {
-      setIsHoveringResizeInner(isNearResizeHandleInner(imgX, imgY));
-      setIsHoveringResize(isNearResizeHandle(imgX, imgY));
+      setIsHoveringResizeInner(isNearResizeHandleInner(maskCol, maskRow));
+      setIsHoveringResize(isNearResizeHandle(maskCol, maskRow));
       return;
     }
 
-    const centerCol = imgX - dpDragOffsetRef.current.dCol;
-    const centerRow = imgY - dpDragOffsetRef.current.dRow;
-    if (!isResidentCompareDrag()) {
-      setLocalKCol(centerCol); setLocalKRow(centerRow);
-    }
-    // rAF-coalesced — sends only the latest roi_center per frame.
+    const centerCol = maskCol - dpDragOffsetRef.current.dCol;
+    const centerRow = maskRow - dpDragOffsetRef.current.dRow;
+    setLocalKCol(centerCol); setLocalKRow(centerRow);
+    // rAF-coalesced: sends only the latest roi_center per frame.
     const boundedCol = Math.max(0, Math.min(detCols - 1, centerCol));
     const boundedRow = Math.max(0, Math.min(detRows - 1, centerRow));
     // Area detectors retain subpixel centers; point detectors select one pixel.
@@ -9593,15 +6511,8 @@ function Show4DSTEM() {
     requestCompareViLive();
   };
 
-  const handleDpMouseUp = (e: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
-    if (!dpPointerOwner.release(e)) return;
-    if (residentBatchInfo) {
-      const gesture = { phase: e.type === "pointercancel" ? "cancel" : "end",
-        epoch_ms: performance.timeOrigin + performance.now(),
-        pointer_id: "pointerId" in e ? e.pointerId : null, client: [e.clientX, e.clientY] };
-      if (dpOverlayRef.current) dpOverlayRef.current.dataset.residentGesture = JSON.stringify(gesture);
-      model.send({ type: "resident_detector_gesture", ...gesture });
-    }
+  const handleDpMouseUp = (event: PointerEvent | React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dpPointerOwner.release(event)) return;
     finishDpRoiInteraction();
     if (draggingDpProfileEndpoint !== null || isDraggingDpProfileLine) {
       setDraggingDpProfileEndpoint(null);
@@ -9617,26 +6528,30 @@ function Show4DSTEM() {
     }
 
     // Profile click capture
-    if (e.type === "pointerup" && profileActive && dpClickStartRef.current) {
-      const dx = e.clientX - dpClickStartRef.current.x;
-      const dy = e.clientY - dpClickStartRef.current.y;
+    if (event.type === "pointerup" && profileActive && dpClickStartRef.current) {
+      const dx = event.clientX - dpClickStartRef.current.x;
+      const dy = event.clientY - dpClickStartRef.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < 3) {
         const canvas = dpOverlayRef.current;
         if (canvas && rawDpDataRef.current) {
           const rect = canvas.getBoundingClientRect();
-          const screenX = (e.clientX - rect.left) * (canvas.width / rect.width);
-          const screenY = (e.clientY - rect.top) * (canvas.height / rect.height);
+          const screenX = (event.clientX - rect.left) * (canvas.width / rect.width);
+          const screenY = (event.clientY - rect.top) * (canvas.height / rect.height);
           const imgCol = (screenX - dpPanX) / dpZoom;
           const imgRow = (screenY - dpPanY) / dpZoom;
           if (imgCol >= 0 && imgCol < detCols && imgRow >= 0 && imgRow < detRows) {
-            const pt = { row: imgRow, col: imgCol };
+            // profile points use the mask convention the sampler reads: a click on a pixel center is that pixel's index
+            const point = {
+              row: Math.max(0, Math.min(detRows - 1, canvasToMask(screenY, dpZoom, dpPanY))),
+              col: Math.max(0, Math.min(detCols - 1, canvasToMask(screenX, dpZoom, dpPanX))),
+            };
             if (profilePoints.length === 0 || profilePoints.length === 2) {
-              setProfileLine([pt]);
+              setProfileLine([point]);
               setProfileData(null);
             } else {
               const p0 = profilePoints[0];
-              setProfileLine([p0, pt]);
-              void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, pt.row, pt.col, profileWidth)
+              setProfileLine([p0, point]);
+              void sampleLineProfileBrowser(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, point.row, point.col, profileWidth)
                 .then(setProfileData)
                 .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
             }
@@ -9693,29 +6608,42 @@ function Show4DSTEM() {
     };
   }, [dpPointerOwner]);
 
-  const handleDpDoubleClick = () => {
-    dpViewRef.current.zoom = 1;
-    dpViewRef.current.panX = 0;
-    dpViewRef.current.panY = 0;
-    setDpZoom(1);
-    setDpPanX(0);
-    setDpPanY(0);
+  // Set a panel's zoom/pan in its live view ref (read by wheel and touch gestures) and in React state.
+  const setPanelView = (
+    viewRef: React.RefObject<{ zoom: number; panX: number; panY: number; raf: number }>,
+    setZoom: React.Dispatch<React.SetStateAction<number>>,
+    setPanX: React.Dispatch<React.SetStateAction<number>>,
+    setPanY: React.Dispatch<React.SetStateAction<number>>,
+    zoom: number,
+    panX: number,
+    panY: number,
+  ) => {
+    const view = viewRef.current;
+    view.zoom = zoom;
+    view.panX = panX;
+    view.panY = panY;
+    setZoom(zoom);
+    setPanX(panX);
+    setPanY(panY);
   };
 
-  const handleViMouseDown = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleDpDoubleClick = () => setPanelView(dpViewRef, setDpZoom, setDpPanX, setDpPanY, 1, 0, 0);
+
+  const handleViMouseDown = (event: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     // Capture the pointer so a touch/mouse probe-drag keeps receiving move/up
     // events even when the finger leaves the small canvas. Needed for mobile
     // parity: touchscreens deliver these as pointer events (mirrors DP #751).
-    if ("pointerId" in e) {
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    if ("pointerId" in event) {
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
     }
     const canvas = virtualOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const screenX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const screenY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const imgX = (screenY - viPanY) / viZoom;
-    const imgY = (screenX - viPanX) / viZoom;
+    const screenX = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const screenY = (event.clientY - rect.top) * (canvas.height / rect.height);
+    // scan_indices and pos_row/pos_col center scan pixel i at i (the image draws it over [i, i + 1))
+    const maskRow = canvasToMask(screenY, viZoom, viPanY);
+    const maskCol = canvasToMask(screenX, viZoom, viPanX);
 
     // VI Profile mode - click to set points
     if (viProfileActive) {
@@ -9724,18 +6652,18 @@ function Show4DSTEM() {
         const p0 = viProfilePoints[0];
         const p1 = viProfilePoints[1];
         const hitRadius = 10 / viZoom;
-        const d0 = Math.sqrt((imgY - p0.col) ** 2 + (imgX - p0.row) ** 2);
-        const d1 = Math.sqrt((imgY - p1.col) ** 2 + (imgX - p1.row) ** 2);
+        const d0 = Math.sqrt((maskCol - p0.col) ** 2 + (maskRow - p0.row) ** 2);
+        const d1 = Math.sqrt((maskCol - p1.col) ** 2 + (maskRow - p1.row) ** 2);
         if (d0 <= hitRadius || d1 <= hitRadius) {
           setDraggingViProfileEndpoint(d0 <= d1 ? 0 : 1);
           setIsDraggingVI(false);
           return;
         }
-        if (pointToSegmentDistance(imgY, imgX, p0.col, p0.row, p1.col, p1.row) <= hitRadius) {
+        if (pointToSegmentDistance(maskCol, maskRow, p0.col, p0.row, p1.col, p1.row) <= hitRadius) {
           setIsDraggingViProfileLine(true);
           viProfileDragStartRef.current = {
-            row: imgX,
-            col: imgY,
+            row: maskRow,
+            col: maskCol,
             p0: { row: p0.row, col: p0.col },
             p1: { row: p1.row, col: p1.col },
           };
@@ -9746,59 +6674,68 @@ function Show4DSTEM() {
       return;
     }
 
-    // Check if VI ROI mode is active - same logic as DP
+    // Scan ROI active: resize from its edge, move from inside, otherwise teleport.
+    // A resize remembers the press so the edge follows the pointer from where it was grabbed.
     if (viRoiMode && viRoiMode !== "off") {
-      // Check if clicking on resize handle
-      if (isNearViRoiResizeHandle(imgX, imgY)) {
+      const grab = grabViRoi(maskRow, maskCol);
+      if (grab.action === "resize") {
+        viResizeStartRef.current = {
+          pointerRow: maskRow,
+          pointerCol: maskCol,
+          radius: viRoiRadius || 5,
+          radiusInner: 0,
+          width: viRoiWidth || 10,
+          height: viRoiHeight || 10,
+          rows: grab.rows,
+          cols: grab.cols,
+        };
         setIsDraggingViRoiResize(true);
         return;
       }
-
-      // Grab-and-drag if clicking inside VI ROI, otherwise teleport
       setIsDraggingViRoi(true);
-      if (isInsideViRoi(imgX, imgY)) {
-        viRoiDragOffsetRef.current = { dRow: imgX - localViRoiCenterRow, dCol: imgY - localViRoiCenterCol };
+      if (grab.action === "move") {
+        viRoiDragOffsetRef.current = { dRow: maskRow - localViRoiCenterRow, dCol: maskCol - localViRoiCenterCol };
       } else {
         viRoiDragOffsetRef.current = { dRow: 0, dCol: 0 };
-        setLocalViRoiCenterRow(imgX);
-        setLocalViRoiCenterCol(imgY);
-        setViRoiCenterRow(Math.round(Math.max(0, Math.min(shapeRows - 1, imgX))));
-        setViRoiCenterCol(Math.round(Math.max(0, Math.min(shapeCols - 1, imgY))));
+        setLocalViRoiCenterRow(maskRow);
+        setLocalViRoiCenterCol(maskCol);
+        setViRoiCenterRow(Math.round(Math.max(0, Math.min(shapeRows - 1, maskRow))));
+        setViRoiCenterCol(Math.round(Math.max(0, Math.min(shapeCols - 1, maskCol))));
       }
       return;
     }
 
     // Regular position selection (when ROI is off)
     setIsDraggingVI(true);
-    // Snap to the integer scan index so the crosshair marks the exact pixel the
-    // CBED is sampled from (not the fractional cursor position).
-    const newX = Math.round(Math.max(0, Math.min(shapeRows - 1, imgX)));
-    const newY = Math.round(Math.max(0, Math.min(shapeCols - 1, imgY)));
-    updateScanPosition(newX, newY);
+    // Snap to the scan pixel under the pointer so the crosshair marks the exact
+    // pixel the CBED is sampled from (not the fractional cursor position).
+    const scanRow = Math.round(Math.max(0, Math.min(shapeRows - 1, maskRow)));
+    const scanCol = Math.round(Math.max(0, Math.min(shapeCols - 1, maskCol)));
+    updateScanPosition(scanRow, scanCol);
   };
 
-  const handleViMouseMove = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleViMouseMove = (event: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = virtualOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const screenX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const screenY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const imgX = (screenY - viPanY) / viZoom;
-    const imgY = (screenX - viPanX) / viZoom;
+    const screenX = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const screenY = (event.clientY - rect.top) * (canvas.height / rect.height);
+    const imageRow = (screenY - viPanY) / viZoom;
+    const imageCol = (screenX - viPanX) / viZoom;
+    const maskRow = canvasToMask(screenY, viZoom, viPanY);
+    const maskCol = canvasToMask(screenX, viZoom, viPanX);
 
-    // Fast path: skip cursor readout during any active drag — avoids setCursorInfo re-renders
+    // Fast path: skip cursor readout during any active drag, which avoids setCursorInfo re-renders
     const anyViDrag = isDraggingVI || isDraggingViRoi || isDraggingViRoiResize
       || draggingViProfileEndpoint !== null || isDraggingViProfileLine;
 
     // Cursor readout: look up raw VI value at pixel position
-    // imgX = row, imgY = col (swapped coordinate convention)
     if (!anyViDrag) {
-      const pxRow = Math.floor(imgX);
-      const pxCol = Math.floor(imgY);
+      const pxRow = Math.floor(imageRow);
+      const pxCol = Math.floor(imageCol);
       if (pxRow >= 0 && pxRow < shapeRows && pxCol >= 0 && pxCol < shapeCols && rawVirtualImageRef.current) {
-        const exact = residentSelectedRawRef.current;
-        const raw = exact ?? rawVirtualImageRef.current;
-        setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * shapeCols + pxCol], panel: "VI", exact:exact !== null });
+        const raw = rawVirtualImageRef.current;
+        setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * shapeCols + pxCol], panel: "VI" });
       } else {
         setCursorInfo(prev => prev?.panel === "VI" ? null : prev);
       }
@@ -9808,11 +6745,11 @@ function Show4DSTEM() {
       const p0 = viProfilePoints[0];
       const p1 = viProfilePoints[1];
       const hitRadius = 10 / viZoom;
-      const d0 = Math.sqrt((imgY - p0.col) ** 2 + (imgX - p0.row) ** 2);
-      const d1 = Math.sqrt((imgY - p1.col) ** 2 + (imgX - p1.row) ** 2);
+      const d0 = Math.sqrt((maskCol - p0.col) ** 2 + (maskRow - p0.row) ** 2);
+      const d1 = Math.sqrt((maskCol - p1.col) ** 2 + (maskRow - p1.row) ** 2);
       if (draggingViProfileEndpoint !== null) {
-        const clampedRow = Math.max(0, Math.min(shapeRows - 1, imgX));
-        const clampedCol = Math.max(0, Math.min(shapeCols - 1, imgY));
+        const clampedRow = Math.max(0, Math.min(shapeRows - 1, maskRow));
+        const clampedCol = Math.max(0, Math.min(shapeCols - 1, maskCol));
         const next = [
           draggingViProfileEndpoint === 0 ? { row: clampedRow, col: clampedCol } : viProfilePoints[0],
           draggingViProfileEndpoint === 1 ? { row: clampedRow, col: clampedCol } : viProfilePoints[1],
@@ -9821,26 +6758,12 @@ function Show4DSTEM() {
         return;
       }
       if (isDraggingViProfileLine && viProfileDragStartRef.current) {
-        const drag = viProfileDragStartRef.current;
-        let deltaRow = imgX - drag.row;
-        let deltaCol = imgY - drag.col;
-        const minRow = Math.min(drag.p0.row, drag.p1.row);
-        const maxRow = Math.max(drag.p0.row, drag.p1.row);
-        const minCol = Math.min(drag.p0.col, drag.p1.col);
-        const maxCol = Math.max(drag.p0.col, drag.p1.col);
-        deltaRow = Math.max(deltaRow, -minRow);
-        deltaRow = Math.min(deltaRow, (shapeRows - 1) - maxRow);
-        deltaCol = Math.max(deltaCol, -minCol);
-        deltaCol = Math.min(deltaCol, (shapeCols - 1) - maxCol);
-        const next = [
-          { row: drag.p0.row + deltaRow, col: drag.p0.col + deltaCol },
-          { row: drag.p1.row + deltaRow, col: drag.p1.col + deltaCol },
-        ];
+        const next = dragProfileLine(viProfileDragStartRef.current, maskRow, maskCol, shapeRows, shapeCols);
         setViProfilePoints(next);
         return;
       }
       const nextHoveredEndpoint: 0 | 1 | null = d0 <= hitRadius ? 0 : d1 <= hitRadius ? 1 : null;
-      const nextHoverLine = nextHoveredEndpoint === null && pointToSegmentDistance(imgY, imgX, p0.col, p0.row, p1.col, p1.row) <= hitRadius;
+      const nextHoverLine = nextHoveredEndpoint === null && pointToSegmentDistance(maskCol, maskRow, p0.col, p0.row, p1.col, p1.row) <= hitRadius;
       setHoveredViProfileEndpoint(nextHoveredEndpoint);
       setIsHoveringViProfileLine(nextHoverLine);
       return;
@@ -9849,55 +6772,57 @@ function Show4DSTEM() {
       if (isHoveringViProfileLine) setIsHoveringViProfileLine(false);
     }
 
-    // Handle VI ROI resize dragging (same pattern as DP)
-    if (isDraggingViRoiResize) {
-      const dx = Math.abs(imgX - localViRoiCenterRow);
-      const dy = Math.abs(imgY - localViRoiCenterCol);
-      if (viRoiMode === "rect") {
-        setViRoiWidth(Math.max(2, Math.round(dy * 2)));
-        setViRoiHeight(Math.max(2, Math.round(dx * 2)));
-      } else if (viRoiMode === "square") {
-        const newHalfSize = Math.max(dx, dy);
-        setViRoiRadius(Math.max(1, Math.round(newHalfSize)));
-      } else {
-        // circle
-        const newRadius = Math.sqrt(dx ** 2 + dy ** 2);
-        setViRoiRadius(Math.max(1, Math.round(newRadius)));
+    // Scan ROI resize: the edge follows the pointer from the press (resizeDetectorFromPointer), in whole scan pixels
+    if (isDraggingViRoiResize && viResizeStartRef.current) {
+      const geometry = resizeDetectorFromPointer({
+        mode: viRoiMode as DetectorRoiMode,
+        centerRow: localViRoiCenterRow,
+        centerCol: localViRoiCenterCol,
+        pointerRow: maskRow,
+        pointerCol: maskCol,
+        start: viResizeStartRef.current,
+        preserveAspect: event.shiftKey,
+      });
+      if (geometry?.width !== undefined && geometry.height !== undefined) {
+        setViRoiWidth(Math.max(2, Math.round(geometry.width)));
+        setViRoiHeight(Math.max(2, Math.round(geometry.height)));
+      } else if (geometry?.radius !== undefined) {
+        setViRoiRadius(Math.max(1, Math.round(geometry.radius)));
       }
       return;
     }
 
     // Check hover state for resize handles (same as DP)
     if (!isDraggingViRoi) {
-      setIsHoveringViRoiResize(isNearViRoiResizeHandle(imgX, imgY));
+      setIsHoveringViRoiResize(grabViRoi(maskRow, maskCol).action === "resize");
       if (viRoiMode && viRoiMode !== "off") return;  // Don't update position when ROI active
     }
 
-    // Handle VI ROI center dragging (same as DP — with offset)
+    // VI ROI center drag keeps the press offset, as the DP ROI drag does
     if (isDraggingViRoi) {
-      const centerRow = imgX - viRoiDragOffsetRef.current.dRow;
-      const centerCol = imgY - viRoiDragOffsetRef.current.dCol;
+      const centerRow = maskRow - viRoiDragOffsetRef.current.dRow;
+      const centerCol = maskCol - viRoiDragOffsetRef.current.dCol;
       setLocalViRoiCenterRow(centerRow);
       setLocalViRoiCenterCol(centerCol);
-      // Compound trait update — single observer fires Python-side; reduced DP is
+      // Compound trait update: a single observer fires Python-side, so the reduced DP is
       // never computed against split-trait state (old col + new row, or vice versa).
-      const newViX = Math.round(Math.max(0, Math.min(shapeRows - 1, centerRow)));
-      const newViY = Math.round(Math.max(0, Math.min(shapeCols - 1, centerCol)));
-      model.set("vi_roi_center", [newViX, newViY]);
+      const roiRow = Math.round(Math.max(0, Math.min(shapeRows - 1, centerRow)));
+      const roiCol = Math.round(Math.max(0, Math.min(shapeCols - 1, centerCol)));
+      model.set("vi_roi_center", [roiRow, roiCol]);
       model.save_changes();
       return;
     }
 
     // Handle regular position dragging (when ROI is off)
     if (!isDraggingVI) return;
-    // Snap to the integer scan index so the crosshair tracks discrete sampled
-    // positions, matching the CBED actually shown.
-    const newX = Math.round(Math.max(0, Math.min(shapeRows - 1, imgX)));
-    const newY = Math.round(Math.max(0, Math.min(shapeCols - 1, imgY)));
-    updateScanPosition(newX, newY);
+    // Snap to the scan pixel under the pointer so the crosshair tracks discrete
+    // sampled positions, matching the CBED actually shown.
+    const scanRow = Math.round(Math.max(0, Math.min(shapeRows - 1, maskRow)));
+    const scanCol = Math.round(Math.max(0, Math.min(shapeCols - 1, maskCol)));
+    updateScanPosition(scanRow, scanCol);
   };
 
-  const handleViMouseUp = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+  const handleViMouseUp = (event: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     flushScanPosition();
     if (draggingViProfileEndpoint !== null || isDraggingViProfileLine) {
       setDraggingViProfileEndpoint(null);
@@ -9917,21 +6842,22 @@ function Show4DSTEM() {
       const canvas = virtualOverlayRef.current;
       if (canvas) {
         const rect = canvas.getBoundingClientRect();
-        const endX = (e.clientX - rect.left) * (canvas.width / rect.width);
-        const endY = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const endX = (event.clientX - rect.left) * (canvas.width / rect.width);
+        const endY = (event.clientY - rect.top) * (canvas.height / rect.height);
         const dx = endX - viClickStartRef.current.x;
         const dy = endY - viClickStartRef.current.y;
         const wasDrag = Math.sqrt(dx * dx + dy * dy) > 3;
 
         if (!wasDrag) {
-          // Click to add point
-          const imgX = (endY - viPanY) / viZoom;
-          const imgY = (endX - viPanX) / viZoom;
-          const pt = { row: Math.round(Math.max(0, Math.min(shapeRows - 1, imgX))), col: Math.round(Math.max(0, Math.min(shapeCols - 1, imgY))) };
+          // Click to add a point on the scan pixel under the pointer (pixel i centered at i, as the sampler reads it)
+          const point = {
+            row: Math.round(Math.max(0, Math.min(shapeRows - 1, canvasToMask(endY, viZoom, viPanY)))),
+            col: Math.round(Math.max(0, Math.min(shapeCols - 1, canvasToMask(endX, viZoom, viPanX)))),
+          };
           if (viProfilePoints.length < 2) {
-            setViProfilePoints([...viProfilePoints, pt]);
+            setViProfilePoints([...viProfilePoints, point]);
           } else {
-            setViProfilePoints([pt]);
+            setViProfilePoints([point]);
           }
         }
       }
@@ -9961,30 +6887,18 @@ function Show4DSTEM() {
     setIsHoveringViRoiResize(false);
     setCursorInfo(prev => prev?.panel === "VI" ? null : prev);
   };
-  const handleViDoubleClick = () => {
-    viViewRef.current.zoom = 1;
-    viViewRef.current.panX = 0;
-    viViewRef.current.panY = 0;
-    setViZoom(1);
-    setViPanX(0);
-    setViPanY(0);
-  };
+  const handleViDoubleClick = () => setPanelView(viViewRef, setViZoom, setViPanX, setViPanY, 1, 0, 0);
   const handleFftDoubleClick = () => {
-    fftViewRef.current.zoom = 1;
-    fftViewRef.current.panX = 0;
-    fftViewRef.current.panY = 0;
-    setFftZoom(1);
-    setFftPanX(0);
-    setFftPanY(0);
+    setPanelView(fftViewRef, setFftZoom, setFftPanX, setFftPanY, 1, 0, 0);
     setFftClickInfo(null);
   };
 
-  const touchDistance = (a: React.Touch, b: React.Touch): number => {
-    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const touchDistance = (first: React.Touch, second: React.Touch): number => {
+    return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
   };
 
-  const touchMidpoint = (a: React.Touch, b: React.Touch): { x: number; y: number } => {
-    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  const touchMidpoint = (first: React.Touch, second: React.Touch): { x: number; y: number } => {
+    return { x: (first.clientX + second.clientX) / 2, y: (first.clientY + second.clientY) / 2 };
   };
 
   const canvasPointFromClient = (
@@ -10031,35 +6945,17 @@ function Show4DSTEM() {
     };
   };
 
-  const setTouchView = (
-    viewRef: React.RefObject<{ zoom: number; panX: number; panY: number; raf: number }>,
-    setZoom: React.Dispatch<React.SetStateAction<number>>,
-    setPanX: React.Dispatch<React.SetStateAction<number>>,
-    setPanY: React.Dispatch<React.SetStateAction<number>>,
-    zoom: number,
-    panX: number,
-    panY: number,
-  ) => {
-    const view = viewRef.current;
-    view.zoom = zoom;
-    view.panX = panX;
-    view.panY = panY;
-    setZoom(zoom);
-    setPanX(panX);
-    setPanY(panY);
-  };
-
-  const handlePanelTouchStart = (kind: TouchPanelKind) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+  const handlePanelTouchStart = (kind: TouchPanelKind) => (event: React.TouchEvent<HTMLCanvasElement>) => {
     const refs = getTouchPanelRefs(kind);
     const canvas = refs.canvasRef.current;
     if (!canvas) return;
 
-    if (e.touches.length === 1) {
+    if (event.touches.length === 1) {
       const now = window.performance.now();
       const previousTap = lastTapRef.current;
       lastTapRef.current = { kind, time: now };
       if (previousTap && previousTap.kind === kind && now - previousTap.time < 320) {
-        e.preventDefault();
+        event.preventDefault();
         refs.reset();
         touchTransformRef.current = null;
         return;
@@ -10070,7 +6966,7 @@ function Show4DSTEM() {
         return;
       }
 
-      const touch = e.touches[0];
+      const touch = event.touches[0];
       touchTransformRef.current = {
         kind,
         mode: "pan",
@@ -10083,13 +6979,13 @@ function Show4DSTEM() {
         startPanX: refs.viewRef.current.panX,
         startPanY: refs.viewRef.current.panY,
       };
-      e.preventDefault();
+      event.preventDefault();
       return;
     }
 
-    if (e.touches.length >= 2) {
-      const first = e.touches[0];
-      const second = e.touches[1];
+    if (event.touches.length >= 2) {
+      const first = event.touches[0];
+      const second = event.touches[1];
       const midpoint = touchMidpoint(first, second);
       touchTransformRef.current = {
         kind,
@@ -10103,23 +6999,23 @@ function Show4DSTEM() {
         startPanX: refs.viewRef.current.panX,
         startPanY: refs.viewRef.current.panY,
       };
-      e.preventDefault();
+      event.preventDefault();
     }
   };
 
-  const handlePanelTouchMove = (kind: TouchPanelKind) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+  const handlePanelTouchMove = (kind: TouchPanelKind) => (event: React.TouchEvent<HTMLCanvasElement>) => {
     const state = touchTransformRef.current;
     if (!state || state.kind !== kind) return;
     const refs = getTouchPanelRefs(kind);
     const canvas = refs.canvasRef.current;
     if (!canvas) return;
 
-    if (state.mode === "pan" && e.touches.length === 1) {
-      const touch = e.touches[0];
+    if (state.mode === "pan" && event.touches.length === 1) {
+      const touch = event.touches[0];
       const rect = canvas.getBoundingClientRect();
       const dx = (touch.clientX - state.startX) * (canvas.width / rect.width);
       const dy = (touch.clientY - state.startY) * (canvas.height / rect.height);
-      setTouchView(
+      setPanelView(
         refs.viewRef,
         refs.setZoom,
         refs.setPanX,
@@ -10128,13 +7024,13 @@ function Show4DSTEM() {
         state.startPanX + dx,
         state.startPanY + dy,
       );
-      e.preventDefault();
+      event.preventDefault();
       return;
     }
 
-    if (state.mode === "pinch" && e.touches.length >= 2) {
-      const first = e.touches[0];
-      const second = e.touches[1];
+    if (state.mode === "pinch" && event.touches.length >= 2) {
+      const first = event.touches[0];
+      const second = event.touches[1];
       const midpoint = touchMidpoint(first, second);
       const startCanvasPoint = canvasPointFromClient(canvas, state.startMidX, state.startMidY);
       const currentCanvasPoint = canvasPointFromClient(canvas, midpoint.x, midpoint.y);
@@ -10142,7 +7038,7 @@ function Show4DSTEM() {
       const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.startZoom * ratio));
       const imageX = (startCanvasPoint.x - state.startPanX) / state.startZoom;
       const imageY = (startCanvasPoint.y - state.startPanY) / state.startZoom;
-      setTouchView(
+      setPanelView(
         refs.viewRef,
         refs.setZoom,
         refs.setPanX,
@@ -10151,41 +7047,41 @@ function Show4DSTEM() {
         currentCanvasPoint.x - imageX * newZoom,
         currentCanvasPoint.y - imageY * newZoom,
       );
-      e.preventDefault();
+      event.preventDefault();
     }
   };
 
-  const handlePanelTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (e.touches.length === 0) {
+  const handlePanelTouchEnd = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    if (event.touches.length === 0) {
       touchTransformRef.current = null;
     }
   };
 
   // FFT drag-to-pan handlers
-  const handleFftMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    fftClickStartRef.current = { x: e.clientX, y: e.clientY };
+  const handleFftMouseDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    fftClickStartRef.current = { x: event.clientX, y: event.clientY };
     setIsDraggingFFT(true);
-    setFftDragStart({ x: e.clientX, y: e.clientY, panX: fftPanX, panY: fftPanY });
+    setFftDragStart({ x: event.clientX, y: event.clientY, panX: fftPanX, panY: fftPanY });
   };
 
-  const handleFftMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleFftMouseMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDraggingFFT || !fftDragStart) return;
     const canvas = fftOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const dx = (e.clientX - fftDragStart.x) * scaleX;
-    const dy = (e.clientY - fftDragStart.y) * scaleY;
+    const dx = (event.clientX - fftDragStart.x) * scaleX;
+    const dy = (event.clientY - fftDragStart.y) * scaleY;
     setFftPanX(fftDragStart.panX + dx);
     setFftPanY(fftDragStart.panY + dy);
   };
 
-  const handleFftMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleFftMouseUp = async (event: React.MouseEvent<HTMLCanvasElement>) => {
     // Click detection for d-spacing measurement
     if (fftClickStartRef.current) {
-      const dx = e.clientX - fftClickStartRef.current.x;
-      const dy = e.clientY - fftClickStartRef.current.y;
+      const dx = event.clientX - fftClickStartRef.current.x;
+      const dy = event.clientY - fftClickStartRef.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < 3) {
         // Convert screen coords to FFT image coords
         const canvas = fftOverlayRef.current;
@@ -10193,8 +7089,8 @@ function Show4DSTEM() {
           const rect = canvas.getBoundingClientRect();
           const scaleX = canvas.width / rect.width;
           const scaleY = canvas.height / rect.height;
-          const canvasX = (e.clientX - rect.left) * scaleX;
-          const canvasY = (e.clientY - rect.top) * scaleY;
+          const canvasX = (event.clientX - rect.left) * scaleX;
+          const canvasY = (event.clientY - rect.top) * scaleY;
           const fftW = fftCropDims?.fftWidth ?? shapeCols;
           const fftH = fftCropDims?.fftHeight ?? shapeRows;
           // Reverse the render transform: canvas coords -> image coords.
@@ -10208,7 +7104,7 @@ function Show4DSTEM() {
             if (fftMagCacheRef.current) {
               let snapped: { row: number; col: number };
               try {
-                snapped = await findFFTPeakWebGPU(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+                snapped = await findFFTPeakBrowser(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
               } catch (error) {
                 console.error("[Show4DSTEM] WebGPU FFT peak refinement failed", error);
                 return;
@@ -10251,22 +7147,21 @@ function Show4DSTEM() {
   const handleFftMouseLeave = () => { fftClickStartRef.current = null; setIsDraggingFFT(false); setFftDragStart(null); };
 
   // ── Canvas resize handlers ──
-  const handleCanvasResizeStart = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
+  const handleCanvasResizeStart = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
     setIsResizingCanvas(true);
-    setResizeCanvasStart({ x: e.clientX, y: e.clientY, size: canvasSize });
+    setResizeCanvasStart({ x: event.clientX, y: event.clientY, size: canvasSize });
   };
 
   React.useEffect(() => {
     if (!isResizingCanvas) return;
     let rafId = 0;
     let latestSize = resizeCanvasStart ? resizeCanvasStart.size : canvasSize;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (event: MouseEvent) => {
       if (!resizeCanvasStart) return;
-      const delta = Math.max(e.clientX - resizeCanvasStart.x, e.clientY - resizeCanvasStart.y);
-      const minCanvasSize = MIN_CANVAS_SIZE;
-      latestSize = Math.max(minCanvasSize, resizeCanvasStart.size + delta);
+      const delta = Math.max(event.clientX - resizeCanvasStart.x, event.clientY - resizeCanvasStart.y);
+      latestSize = Math.max(MIN_CANVAS_SIZE, resizeCanvasStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -10290,19 +7185,19 @@ function Show4DSTEM() {
     };
   }, [isResizingCanvas, resizeCanvasStart, panelWidthPx, setPanelWidthPx]);
 
-  const handleCompareGridResizeStart = React.useCallback((e: React.PointerEvent<HTMLElement>, panelScale = 1) => {
-    e.stopPropagation();
-    e.preventDefault();
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  const handleCompareGridResizeStart = React.useCallback((event: React.PointerEvent<HTMLElement>, panelScale = 1) => {
+    event.stopPropagation();
+    event.preventDefault();
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
     compareGridResizeCleanupRef.current?.();
-    const startX = e.clientX;
-    const startY = e.clientY;
+    const startX = event.clientX;
+    const startY = event.clientY;
     const startWidth = compareGridWidth;
     const resizeScale = Math.max(1, Number.isFinite(panelScale) ? panelScale : 1);
     let rafId = 0;
     let latestWidth = startWidth;
-    const handlePointerMove = (e: PointerEvent) => {
-      const delta = Math.max(e.clientX - startX, e.clientY - startY);
+    const handlePointerMove = (event: PointerEvent) => {
+      const delta = Math.max(event.clientX - startX, event.clientY - startY);
       latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, startWidth + delta * resizeScale);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
@@ -10310,7 +7205,7 @@ function Show4DSTEM() {
           setCompareGridPreviewWidth(latestWidth);
         });
       }
-      e.preventDefault();
+      event.preventDefault();
     };
     const handlePointerUp = () => {
       cancelAnimationFrame(rafId);
@@ -10330,13 +7225,7 @@ function Show4DSTEM() {
   const selectCompareFrame = React.useCallback((idx: number) => {
     setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
   }, [nFrames, setFrameIdx]);
-  const recordCompareGpuPaint = React.useCallback((panelCount: number) => {
-    publishLiveCompareViStats("paint", { paintedPanels: panelCount });
-  }, [publishLiveCompareViStats]);
-  const reportCompareGpuRenderError = React.useCallback((error: unknown) => {
-    setOfflineBackendError(error instanceof Error ? error.message : String(error));
-  }, []);
-  const setCompareGpuRenderer = React.useCallback((renderNow: CompareGpuRenderer | null) => {
+  const setCompareGpuRenderer = React.useCallback((renderNow: (() => number) | null) => {
     compareGpuRenderNowRef.current = renderNow;
   }, []);
 
@@ -10409,25 +7298,6 @@ function Show4DSTEM() {
     };
   };
   const statsValueSx = { color: themeColors.accent };
-  const memoryWarningSx = {
-    mb: `${SPACING.SM}px`,
-    px: 1,
-    py: 0.75,
-    border: `1px solid ${themeColors.border}`,
-    borderLeft: `3px solid ${themeColors.accent}`,
-    bgcolor: themeInfo.theme === "dark" ? "rgba(245, 158, 11, 0.14)" : "rgba(245, 158, 11, 0.12)",
-    color: themeColors.text,
-    fontSize: 11,
-    lineHeight: 1.35,
-    maxWidth: "100%",
-    boxSizing: "border-box",
-    "@media (max-width: 700px)": {
-      mb: "2px",
-      px: 0.75,
-      py: 0.5,
-      fontSize: 10,
-    },
-  };
 
   const keyboardShortcutItems: [string, string][] = [
     ["↑ / ↓", "Move scan row"],
@@ -10470,7 +7340,6 @@ function Show4DSTEM() {
   const hideBetweenPanelsOnMobileSx = mobileTightLayout
     ? { "@media (max-width: 700px)": { display: "none" } }
     : {};
-  const mainStackDirection = compareMode && compareLayout === "top" ? "column" : "row";
   const optionLabel = (value: string | undefined | null): string => {
     if (!value) return "";
     return value.charAt(0).toUpperCase() + value.slice(1);
@@ -10533,15 +7402,13 @@ function Show4DSTEM() {
   const dpOptionSummary = `${optionLabel(roiMode)}${roiMode === "annular" ? ` ${Math.round(roiRadiusInner)}-${Math.round(roiRadius)}px` : roiMode !== "point" ? ` ${Math.round(roiRadius)}px` : ""} | ${optionLabel(dpColormap)} | ${dpScaleMode === "log" ? "Log" : "Lin"}`;
   const viOptionSummary = `${viSourceLabel(activeViSource)} | ${viRoiMode === "off" ? "ROI off" : `${optionLabel(viRoiMode)} ${Math.round(viRoiRadius || 5)}px`} | ${optionLabel(viColormap)} | ${viScaleMode === "log" ? "Log" : "Lin"}`;
   const fftOptionSummary = `${fftScaleMode === "log" ? "Log" : "Lin"} | ${optionLabel(fftColormap)}${fftAuto ? " | Auto" : ""}`;
-  const activeSsbBfSubsample = Math.max(0.01, Math.min(1, Number(ssbComputeBfSubsample ?? 1)));
   const ssbBfCountText = Number(ssbComputeBfPixels || 0) > 0
-    ? `${Math.max(0, Math.round(Number(ssbComputeBfSelectedPixels || 0)))} / ${Math.max(0, Math.round(Number(ssbComputeBfPixels || 0)))} BF px`
+    ? `${Math.max(0, Math.round(Number(ssbComputeBfPixels || 0)))} BF px`
     : "BF count appears after first run";
   const hasSsbCalibrationDownload = String(ssbComputeCalibrationJson || "").trim().length > 0;
   const ssbProgressText = String(ssbComputeStatus || "").trim()
     || (ssbComputeBusy ? "Running SSB..." : "");
-  const ssbDisplayStatus = ssbProgressText;
-  const ssbStatusIsFailure = ssbDisplayStatus.startsWith("SSB failed");
+  const ssbStatusIsFailure = ssbProgressText.startsWith("SSB failed");
   const hasSsbProductMap = viProductSourceOptions.includes("SSB");
   const showSsbCalibrationPanel = controlsVisible
     && ssbComputeEnabled
@@ -10666,11 +7533,15 @@ function Show4DSTEM() {
     fontWeight: 600,
     letterSpacing: 0,
   }), [themeColors.textMuted, themeInfo.theme]);
+  // Without WebGPU the saved export views stay readable: the chip sits on top
+  // of them instead of a frosted cover.
   const renderPanelLoadingOverlay = React.useCallback((label: string, detail = "") => (
     <Box
       data-show4dstem-panel-loading="true"
       data-quantem-load-error={/\bfailed\b/i.test(label) ? "true" : undefined}
-      sx={panelLoadingOverlaySx}
+      sx={label === "Needs WebGPU"
+        ? { ...panelLoadingOverlaySx, bgcolor: "transparent", backdropFilter: "none", alignItems: "flex-start", pt: 1 }
+        : panelLoadingOverlaySx}
     >
       <Typography sx={panelLoadingTextSx}>
         {label}
@@ -10678,18 +7549,18 @@ function Show4DSTEM() {
       </Typography>
     </Box>
   ), [panelLoadingOverlaySx, panelLoadingTextSx]);
-  const dpPanelReady = dpGpuReady || Boolean(displayedDpBytes && displayedDpBytes.byteLength >= detRows * detCols * 4);
+  const dpPanelReady = Boolean(displayedDpBytes && displayedDpBytes.byteLength >= detRows * detCols * 4);
   const viPanelReady = Boolean(
     viGpuVisible
     || (displayedVirtualImageBytes && displayedVirtualImageBytes.byteLength >= shapeRows * shapeCols * 4),
   );
   const dpPanelLoading = offlineBackendLoading && !dpPanelReady;
   const viPanelLoading = offlineBackendLoading && !compareMode && !viPanelReady;
-  const fftPanelLoading = offlineBackendLoading && effectiveShowFft;
+  const fftPanelLoading = offlineBackendLoading && showFft;
   const offlineStatusText = offlineBackendError || offlineBackendStatus;
   const offlineStatusIsError = Boolean(offlineBackendError);
   const offlineStatusIsReady = !offlineStatusIsError && /\bready\b/i.test(offlineStatusText);
-  const showOfflineStatus = offline && Boolean(offlineStatusText) && (!offlineStatusIsReady || residentSeriesLoading || source112Source);
+  const showOfflineStatus = offline && Boolean(offlineStatusText) && !offlineStatusIsReady;
   const showLocalH5GrantBanner = offline && h5SourceAvailable && requireLocalH5Files && !h5LocalFilesGranted;
 
   return (
@@ -10710,19 +7581,16 @@ function Show4DSTEM() {
         ref={h5LocalInputRef}
         type="file"
         multiple
-        accept={qemSource ? ".qem" : ransSourceAvailable ? undefined : ".h5,.hdf5"}
+        accept=".h5,.hdf5"
         onChange={onH5LocalInput}
         style={{ display: "none" }}
-        {...(qemSource ? {} : { webkitdirectory: "", directory: "" })}
+        {...{ webkitdirectory: "", directory: "" }}
       />
       {/* HEADER */}
-      {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
+      {showTitle && <Typography variant="h6" sx={{ ...themedTypography.title, mb: `${SPACING.SM}px` }}>
         {title || "4D-STEM Explorer"}
+        <RenderPathBadge colors={themeColors} />
         {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameDimLabel} ${frameIdx + 1}/${nFrames}`})</span>}
-        {gpuMemoryLabel && <span style={{ fontWeight: 500, fontSize: 11, marginLeft: 10, opacity: 0.66 }} title="Current Python GPU memory">
-          {gpuMemoryLabel}
-        </span>}
-        {debug && <DebugPerfBadge widget="Show4DSTEM" fps={debugFps} themeColors={themeColors} />}
         {panelChromeVisible && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           <MetadataSection rows={[
             ["Scan", `${shapeRows} x ${shapeCols}`],
@@ -10749,11 +7617,6 @@ function Show4DSTEM() {
           <KeyboardShortcuts items={keyboardShortcutItems} />
         </Box>} theme={themeInfo.theme} />}
       </Typography>}
-      {memoryWarning && (
-        <Box role="status" data-testid="show4dstem-memory-warning" sx={memoryWarningSx}>
-          {memoryWarning}
-        </Box>
-      )}
       {showOfflineStatus && (
         <Box
           role="status"
@@ -10765,7 +7628,7 @@ function Show4DSTEM() {
             py: 0.25,
             border: `1px solid ${offlineStatusIsError ? "#d32f2f" : themeColors.border}`,
             bgcolor: themeColors.controlBg,
-            ...typo.label,
+            ...themedTypography.label,
             color: offlineStatusIsError ? "#d32f2f" : themeColors.textMuted,
             width: "fit-content",
             maxWidth: "100%",
@@ -10773,7 +7636,7 @@ function Show4DSTEM() {
             overflowWrap: "anywhere",
           }}
         >
-          {offlineStatusIsError ? `Show4DSTEM load failed: ${offlineStatusText}` : offlineStatusText}
+          {offlineBackendError === OFFLINE_NEEDS_WEBGPU ? offlineStatusText : offlineStatusIsError ? `Show4DSTEM load failed: ${offlineStatusText}` : offlineStatusText}
         </Box>
       )}
       {showLocalH5GrantBanner && (
@@ -10795,17 +7658,17 @@ function Show4DSTEM() {
             boxSizing: "border-box",
           }}
         >
-          <Typography sx={{ ...typo.label, color: themeColors.text }}>
+          <Typography sx={{ ...themedTypography.label, color: themeColors.text }}>
             {localH5FolderName
               ? `No server needed - click Open data folder, then select "${localH5FolderName}".`
               : "No server needed - grant this page access to its exported HDF5 folder."}
           </Typography>
           {h5LocalSourceStatus && (
-            <Typography sx={{ ...typo.label, color: h5LocalSourceStatus.includes("No ") ? "#d32f2f" : themeColors.textMuted }}>
+            <Typography sx={{ ...themedTypography.label, color: h5LocalSourceStatus.includes("No ") ? "#d32f2f" : themeColors.textMuted }}>
               {h5LocalSourceStatus}
             </Typography>
           )}
-          <Typography sx={{ ...typo.label, color: themeColors.textMuted, fontSize: 11 }}>
+          <Typography sx={{ ...themedTypography.label, color: themeColors.textMuted, fontSize: 11 }}>
             Alternative: double-click Show4DSTEM.command.
           </Typography>
           <Button
@@ -10821,7 +7684,7 @@ function Show4DSTEM() {
       )}
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
       <Stack
-        direction={mainStackDirection}
+        direction="row"
         sx={{
           gap: `${SPACING.LG}px`,
           flexWrap: "wrap",
@@ -10843,8 +7706,8 @@ function Show4DSTEM() {
         <Box sx={{ width: squarePanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* DP Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
-            <Typography variant="caption" sx={{ ...typo.label }}>
-              <span ref={dpPositionLabelRef}>DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})</span>
+            <Typography variant="caption" sx={{ ...themedTypography.label }}>
+              DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
             </Typography>
             {controlsVisible && <Stack
@@ -10854,9 +7717,9 @@ function Show4DSTEM() {
               justifyContent="flex-end"
               sx={{ flexWrap: "wrap", rowGap: 0.5 }}
             >
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
-              <Switch checked={profileActive} onChange={(e) => {
-                const on = e.target.checked;
+              <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Profile</Typography>
+              <Switch checked={profileActive} onChange={(event) => {
+                const on = event.target.checked;
                 setProfileActive(on);
                 if (!on) {
                   setProfileLine([]);
@@ -10867,10 +7730,9 @@ function Show4DSTEM() {
               }} size="small" sx={switchStyles.small} />
               <Button size="small" sx={compactButton} disabled={dpZoom === 1 && dpPanX === 0 && dpPanY === 0 && roiCenterCol === centerCol && roiCenterRow === centerRow} onClick={() => { setDpZoom(1); setDpPanX(0); setDpPanY(0); setRoiCenterCol(centerCol); setRoiCenterRow(centerRow); }}>Reset</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={async () => {
-                if (!dpCanvasRef.current) return;
+                const canvas = dpCanvasRef.current;
+                if (!canvas) return;
                 try {
-                  const canvas = dpGpuReady && !usesViRoiDp && dpGpuDisplayRef.current
-                    ? await dpGpuDisplayRef.current.capture() : dpCanvasRef.current;
                   const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
                   if (!blob) return;
                   try { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); }
@@ -10879,18 +7741,18 @@ function Show4DSTEM() {
                   setOfflineBackendError(`Could not copy the DP image: ${String(error)}`);
                 }
               }}>Copy</Button>
-              {offline && (h5SourceAvailable || ransSourceAvailable) && <Button
+              {offline && h5SourceAvailable && <Button
                 size="small"
                 sx={{ ...compactButton, color: h5LocalFilesGranted ? themeColors.accent : themeColors.textMuted }}
                 onClick={grantH5LocalFiles}
-                title={h5LocalSourceStatus || (ransSourceAvailable ? "Open the local lossless data folder" : "Grant local HDF5 master/data files for browser WebGPU load")}
+                title={h5LocalSourceStatus || "Grant local HDF5 master/data files for browser WebGPU load"}
               >
-                {qemSource ? "Open QEM files" : ransSourceAvailable ? "Open data folder" : "Local H5"}
+                Local H5
               </Button>}
               {exportEnabled && <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
-                onClick={(e) => setDpExportAnchor(e.currentTarget)}
+                onClick={(event) => setDpExportAnchor(event.currentTarget)}
                 disabled={htmlExportBusy}
                 title={localHtmlExportStatus || exportStatus || "Export standalone HTML"}
               >
@@ -10901,16 +7763,16 @@ function Show4DSTEM() {
                   HTML report: static PNG, no raw 4D
                 </Box>
                 <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, reportScanBin, "unhidden")} sx={{ fontSize: 12 }}>
-                    Unhidden · rbin {reportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, reportScanBin, "unhidden")})
+                    Unhidden · rbin {reportScanBin} · DP kbin {reportDetBin} ({estimateReportHtmlSize(reportScanBin, "unhidden")})
                 </MenuItem>
                 {currentPageReportCount > 0 && (
                   <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, detailedReportScanBin, "current_page")} sx={{ fontSize: 12 }}>
-                    Current page · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, detailedReportScanBin, "current_page")})
+                    Current page · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateReportHtmlSize(detailedReportScanBin, "current_page")})
                   </MenuItem>
                 )}
                 {starredReportCount > 0 && (
                   <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, detailedReportScanBin, "starred")} sx={{ fontSize: 12 }}>
-                    Starred · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, detailedReportScanBin, "starred")})
+                    Starred · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateReportHtmlSize(detailedReportScanBin, "starred")})
                   </MenuItem>
                 )}
                 <Box sx={{ px: 1.5, pt: 1, pb: 0.25, fontSize: 11, color: themeColors.textMuted, fontWeight: 700 }}>
@@ -10929,7 +7791,7 @@ function Show4DSTEM() {
               {ssbComputeEnabled && <Button
                 size="small"
                 sx={compactButton}
-                onClick={(e) => setDpMoreAnchor(e.currentTarget)}
+                onClick={(event) => setDpMoreAnchor(event.currentTarget)}
                 title="More actions"
               >
                 More
@@ -10945,7 +7807,7 @@ function Show4DSTEM() {
               >
                 <Box sx={{ px: 1.5, py: 1, width: 242, boxSizing: "border-box" }}>
                   <Stack direction="row" alignItems="center" sx={{ mb: 0.75, gap: 0.25 }}>
-                    <Typography sx={{ ...typo.label, color: themeColors.text }}>
+                    <Typography sx={{ ...themedTypography.label, color: themeColors.text }}>
                       SSB
                     </Typography>
                     <InfoTooltip
@@ -10959,17 +7821,17 @@ function Show4DSTEM() {
                             Trials controls the aberration search; Refine runs a final local fit. Lock C10 or C12 to pin a coefficient at its slider value during the search.
                           </Typography>
                           <Typography sx={{ fontSize: 11, lineHeight: 1.35 }}>
-                            BF ratio uses a uniform subset of detected BF pixels for optimize/refine. Calibration sliders appear below the image after the phase is ready.
+                            Calibration sliders appear below the image after the phase is ready.
                           </Typography>
                         </Box>
                       }
                     />
                   </Stack>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.75, gap: 1 }}>
-                    <Typography sx={typo.label}>Trials</Typography>
+                    <Typography sx={themedTypography.label}>Trials</Typography>
                     <Select
                       value={Math.max(0, Math.round(Number(ssbComputeNTrials ?? 200)))}
-                      onChange={(e) => setSsbComputeNTrials(Number(e.target.value))}
+                      onChange={(event) => setSsbComputeNTrials(Number(event.target.value))}
                       size="small"
                       disabled={ssbComputeBusy}
                       sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
@@ -10983,62 +7845,47 @@ function Show4DSTEM() {
                     </Select>
                   </Stack>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5, gap: 1 }}>
-                    <Typography sx={typo.label}>Refine</Typography>
+                    <Typography sx={themedTypography.label}>Refine</Typography>
                     <Switch
                       checked={Boolean(ssbComputeRefine)}
-                      onChange={(e) => setSsbComputeRefine(e.target.checked)}
+                      onChange={(event) => setSsbComputeRefine(event.target.checked)}
                       disabled={ssbComputeBusy}
                       size="small"
                       sx={switchStyles.small}
                     />
                   </Stack>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5, gap: 1 }}>
-                    <Typography sx={typo.label}>BF ratio</Typography>
-                    <Select
-                      value={activeSsbBfSubsample}
-                      onChange={(e) => setSsbComputeBfSubsample(Number(e.target.value))}
-                      size="small"
-                      disabled={ssbComputeBusy}
-                      sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
-                      MenuProps={themedMenuProps}
-                    >
-                      <MenuItem value={0.3}>0.3</MenuItem>
-                      <MenuItem value={0.5}>0.5</MenuItem>
-                      <MenuItem value={1}>1.0</MenuItem>
-                    </Select>
-                  </Stack>
-                  <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5, gap: 1 }}>
-                    <Typography sx={typo.label} title="Pin C10 at its slider value during the aberration search">
+                    <Typography sx={themedTypography.label} title="Pin C10 at its slider value during the aberration search">
                       Lock C10 <Box component="span" sx={{ color: themeColors.textMuted }}>{Number(ssbComputeC10Nm ?? 0).toFixed(0)} nm</Box>
                     </Typography>
                     <Switch
                       checked={Boolean(ssbComputeLockC10)}
-                      onChange={(e) => setSsbComputeLockC10(e.target.checked)}
+                      onChange={(event) => setSsbComputeLockC10(event.target.checked)}
                       disabled={ssbComputeBusy}
                       size="small"
                       sx={switchStyles.small}
                     />
                   </Stack>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5, gap: 1 }}>
-                    <Typography sx={typo.label} title="Pin C12 and φ12 at their slider values during the aberration search">
+                    <Typography sx={themedTypography.label} title="Pin C12 and φ12 at their slider values during the aberration search">
                       Lock C12 <Box component="span" sx={{ color: themeColors.textMuted }}>{Number(ssbComputeC12Nm ?? 0).toFixed(0)} nm</Box>
                     </Typography>
                     <Switch
                       checked={Boolean(ssbComputeLockC12)}
-                      onChange={(e) => setSsbComputeLockC12(e.target.checked)}
+                      onChange={(event) => setSsbComputeLockC12(event.target.checked)}
                       disabled={ssbComputeBusy}
                       size="small"
                       sx={switchStyles.small}
                     />
                   </Stack>
-                  <Typography sx={{ ...typo.label, color: themeColors.textMuted, whiteSpace: "normal", lineHeight: 1.35, mb: 0.75 }}>
+                  <Typography sx={{ ...themedTypography.label, color: themeColors.textMuted, whiteSpace: "normal", lineHeight: 1.35, mb: 0.75 }}>
                     {ssbBfCountText}
                   </Typography>
                   {ssbProgressText && (
                     <Typography
                       role="status"
                       sx={{
-                        ...typo.label,
+                        ...themedTypography.label,
                         color: ssbStatusIsFailure
                           ? "#d32f2f"
                           : ssbComputeBusy
@@ -11049,11 +7896,11 @@ function Show4DSTEM() {
                         mb: 0.75,
                       }}
                     >
-                      {ssbDisplayStatus}
+                      {ssbProgressText}
                     </Typography>
                   )}
-                  <Typography sx={{ ...typo.label, color: themeColors.textMuted, whiteSpace: "normal", lineHeight: 1.35 }}>
-                    Default is 200 trials, refine on, BF ratio 1.0. Full 512 scans can take seconds to about a minute.
+                  <Typography sx={{ ...themedTypography.label, color: themeColors.textMuted, whiteSpace: "normal", lineHeight: 1.35 }}>
+                    Default is 200 trials with refinement on every detected BF pixel. Full 512 scans can take seconds to about a minute.
                   </Typography>
                 </Box>
                 <MenuItem onClick={() => requestSsbCompute()} disabled={ssbComputeBusy} sx={{ fontSize: 12 }}>
@@ -11068,7 +7915,7 @@ function Show4DSTEM() {
               {exportEnabled && (localHtmlExportStatus || exportStatus) && (
                 <Typography
                   sx={{
-                    ...typo.label,
+                    ...themedTypography.label,
                     maxWidth: 120,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -11083,7 +7930,7 @@ function Show4DSTEM() {
               {h5LocalSourceStatus && (
                 <Typography
                   sx={{
-                    ...typo.label,
+                    ...themedTypography.label,
                     maxWidth: 140,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -11100,7 +7947,7 @@ function Show4DSTEM() {
               {(ssbComputeStatus || ssbComputeBusy) && (
                 <Typography
                   sx={{
-                    ...typo.label,
+                    ...themedTypography.label,
                     maxWidth: 140,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -11111,9 +7958,9 @@ function Show4DSTEM() {
                         ? themeColors.accent
                         : themeColors.textMuted,
                   }}
-                  title={ssbDisplayStatus || "Running SSB..."}
+                  title={ssbProgressText || "Running SSB..."}
                 >
-                  {ssbDisplayStatus || "Running SSB..."}
+                  {ssbProgressText || "Running SSB..."}
                 </Typography>
               )}
             </Stack>}
@@ -11121,11 +7968,7 @@ function Show4DSTEM() {
 
           {/* DP Canvas */}
           <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
-            <canvas data-quantem-scientific-output={dpGpuReady && !usesViRoiDp ? undefined : "show4dstem-diffraction-pattern"} data-resident-detector={residentBatchInfo ? JSON.stringify({center:[activeRoiCenterRow,activeRoiCenterCol],inner:roiRadiusInner,outer:roiRadius,zoom:dpZoom,pan:[dpPanY,dpPanX]}) : undefined} ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", opacity: dpGpuReady && !usesViRoiDp ? 0 : 1, imageRendering: "pixelated" }} />
-            <canvas ref={dpGpuCanvasRef} width={detCols} height={detRows}
-              data-quantem-scientific-output={dpGpuReady && !usesViRoiDp ? "show4dstem-diffraction-pattern" : undefined}
-              style={{position: "absolute", width: "100%", height: "100%", pointerEvents: "none",
-                opacity: dpGpuReady && !usesViRoiDp ? 1 : 0, imageRendering: "pixelated"}} />
+            <canvas data-quantem-scientific-output="show4dstem-diffraction-pattern" ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
               onPointerDown={handleDpMouseDown} onPointerMove={handleDpMouseMove}
@@ -11152,12 +7995,12 @@ function Show4DSTEM() {
             />
             <canvas ref={dpUiRef} width={canvasSize * DPR} height={canvasSize * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
             {(dpPanelLoading || offlineBackendError) && renderPanelLoadingOverlay(
-              offlineBackendError ? "Show4DSTEM load failed" : "Loading DP",
+              offlineBackendError === OFFLINE_NEEDS_WEBGPU ? "Needs WebGPU" : offlineBackendError ? "Show4DSTEM load failed" : "Loading DP",
             )}
-            {panelChromeVisible && !dpGpuPending && cursorInfo && cursorInfo.panel === "DP" && (
+            {panelChromeVisible && cursorInfo && cursorInfo.panel === "DP" && (
               <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                 <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                  ({cursorInfo.row}, {cursorInfo.col}) {cursorInfo.exact ? String(cursorInfo.value) : formatNumber(cursorInfo.value)}
+                  ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
                 </Typography>
               </Box>
             )}
@@ -11167,10 +8010,10 @@ function Show4DSTEM() {
           {/* DP Stats Bar */}
           {showStats && !dpPanelLoading && dpStats && dpStats.length === 4 && (
             <Box sx={{ ...statsBarSx, ...hideBetweenPanelsOnMobileSx }}>
-              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[0])}</Box></Typography>
-              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[1])}</Box></Typography>
-              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[2])}</Box></Typography>
-              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{dpGpuPending ? "…" : formatStat(dpStats[3])}</Box></Typography>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(dpStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(dpStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(dpStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(dpStats[3])}</Box></Typography>
               {controlsVisible && <>
                 <Box sx={{ flex: 1, minWidth: 4, "@media (max-width: 700px)": { display: "none" } }} />
                 <Typography component="span" onClick={() => requestViPreset("bf")} sx={viSourceButtonSx("bf", activeViSource === "roi")}>BF</Typography>
@@ -11187,7 +8030,7 @@ function Show4DSTEM() {
                       onClick={() => setViSource(source)}
                       sx={viSourceButtonSx(source, active)}
                     >
-                      <ViSourceLabel source={source} />
+                      {viSourceLabel(source)}
                     </Typography>
                   );
                 })}
@@ -11197,7 +8040,7 @@ function Show4DSTEM() {
 
           {/* Profile sparkline */}
           {profileActive && (
-            <Box sx={{ visibility: dpGpuPending ? "hidden" : "visible", mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box", ...mobileImageBoxSx }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box", ...mobileImageBoxSx }}>
               <canvas
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
@@ -11205,9 +8048,9 @@ function Show4DSTEM() {
                 style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
-                onMouseDown={(e) => {
+                onMouseDown={(event) => {
                   setIsResizingProfile(true);
-                  profileResizeStart.current = { startY: e.clientY, startHeight: profileHeight };
+                  profileResizeStart.current = { startY: event.clientY, startHeight: profileHeight };
                 }}
                 sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
@@ -11219,7 +8062,7 @@ function Show4DSTEM() {
             <>
               <Button
                 size="small"
-                onClick={() => setMobileDpOptionsOpen(v => !v)}
+                onClick={() => setMobileDpOptionsOpen(open => !open)}
                 sx={mobileOptionToggleSx}
                 endIcon={mobileDpOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
               >
@@ -11232,8 +8075,8 @@ function Show4DSTEM() {
                   <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                     {/* Row 1: Detector + slider */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector</Typography>
-                      <Select value={roiMode || "point"} onChange={(e) => setRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Detector</Typography>
+                      <Select value={roiMode || "point"} onChange={(event) => setRoiMode(event.target.value)} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="point">Point</MenuItem>
                         <MenuItem value="circle">Circle</MenuItem>
                         <MenuItem value="square">Square</MenuItem>
@@ -11244,14 +8087,14 @@ function Show4DSTEM() {
                         <>
                           <Slider
                             value={roiMode === "annular" ? [roiRadiusInner, roiRadius] : [roiRadius]}
-                            onChange={(_, v) => {
+                            onChange={(_, value) => {
                               beginDpRoiInteraction();
                               if (roiMode === "annular") {
-                                const [inner, outer] = v as number[];
+                                const [inner, outer] = value as number[];
                                 setRoiRadiusInner(Math.min(inner, outer - 1));
                                 setRoiRadius(Math.max(outer, inner + 1));
                               } else {
-                                const next = Array.isArray(v) ? v[0] : v;
+                                const next = Array.isArray(value) ? value[0] : value;
                                 setRoiRadius(next);
                               }
                               requestCompareViLive();
@@ -11262,7 +8105,7 @@ function Show4DSTEM() {
                             size="small"
                             sx={{ ...sliderStyles.small, width: roiMode === "annular" ? 67 : 47, mx: 1 }}
                           />
-                          <Typography sx={{ ...typo.label, fontSize: 10 }}>
+                          <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>
                             {roiMode === "annular" ? `${Math.round(roiRadiusInner)}-${Math.round(roiRadius)}px` : `${Math.round(roiRadius)}px`}
                           </Typography>
                         </>
@@ -11270,8 +8113,8 @@ function Show4DSTEM() {
                     </Box>
                     {/* Row 2: Color + Scale + Colorbar */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
-                      <Select value={dpColormap} onChange={(e) => setDpColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Color</Typography>
+                      <Select value={dpColormap} onChange={(event) => setDpColormap(String(event.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="inferno">Inferno</MenuItem>
                         <MenuItem value="viridis">Viridis</MenuItem>
                         <MenuItem value="plasma">Plasma</MenuItem>
@@ -11281,19 +8124,19 @@ function Show4DSTEM() {
                         <MenuItem value="twilight_shifted">Twilight</MenuItem>
                         <MenuItem value="gray">Gray</MenuItem>
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
-                      <Select value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Scale</Typography>
+                      <Select value={dpScaleMode} onChange={(event) => setDpScaleMode(event.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
 
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Colorbar</Typography>
-                      <Switch checked={showDpColorbar} onChange={(e) => setShowDpColorbar(e.target.checked)} size="small" sx={switchStyles.small} />
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Colorbar</Typography>
+                      <Switch checked={showDpColorbar} onChange={(event) => setShowDpColorbar(event.target.checked)} size="small" sx={switchStyles.small} />
                     </Box>
                   </Box>
                   {/* Right: Histogram spanning both rows */}
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                    <Histogram data={dpGpuPending ? null : dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
+                    <Histogram data={dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} sliderInset={6} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
                   </Box>
                 </Box>
               </Box>
@@ -11306,12 +8149,12 @@ function Show4DSTEM() {
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ ...panelHeaderSx, ...hideBetweenPanelsOnMobileSx }}>
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ minWidth: 0, flexWrap: "wrap", rowGap: 0.5 }}>
-              <Typography sx={{ ...typo.label, color: themeColors.textMuted, flexShrink: 0 }}>
-                {compareMode ? "Multiple " : ""}<ViSourceLabel source={activeViSource} />{compareMode ? ` | ${shapeRows}×${shapeCols}` : ` | ${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
+              <Typography sx={{ ...themedTypography.label, color: themeColors.textMuted, flexShrink: 0 }}>
+                {compareMode ? "Multiple " : ""}{viSourceLabel(activeViSource)}{compareMode ? ` | ${shapeRows}×${shapeCols}` : ` | ${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
               </Typography>
               {controlsVisible && compareMode && activeComparePageCount > 1 && (
                 <Box sx={{ display: "flex", alignItems: "center", gap: 0.35, flexShrink: 0 }}>
-                  <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>Group</Typography>
+                  <Typography sx={{ ...themedTypography.label, fontSize: 10, flexShrink: 0 }}>Group</Typography>
                   <Box
                     role="group"
                     aria-label="Show4DSTEM multiple group mode"
@@ -11383,7 +8226,7 @@ function Show4DSTEM() {
                         return (
                           <Typography
                             key={`gap-${idx}`}
-                            sx={{ ...typo.value, width: 16, textAlign: "center", color: themeColors.textMuted, lineHeight: "20px" }}
+                            sx={{ ...themedTypography.value, width: 16, textAlign: "center", color: themeColors.textMuted, lineHeight: "20px" }}
                           >
                             …
                           </Typography>
@@ -11427,7 +8270,7 @@ function Show4DSTEM() {
                     <FastForwardIcon sx={{ fontSize: 15 }} />
                   </IconButton>
                   </>}
-                  <Typography sx={{ ...typo.value, minWidth: compareAllGroups ? 58 : activeComparePageCount > 99 ? 52 : 34, textAlign: "left", flexShrink: 0 }}>{comparePageStatus}</Typography>
+                  <Typography sx={{ ...themedTypography.value, minWidth: compareAllGroups ? 58 : activeComparePageCount > 99 ? 52 : 34, textAlign: "left", flexShrink: 0 }}>{comparePageStatus}</Typography>
                 </Box>
               )}
             </Stack>
@@ -11439,10 +8282,10 @@ function Show4DSTEM() {
               sx={{ flexWrap: "wrap", rowGap: 0.5 }}
             >
               {compareMode && <>
-                <Typography sx={{ ...typo.label, fontSize: 10 }}>Cols</Typography>
+                <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Cols</Typography>
                 <Select
                   value={compareCols || 0}
-                  onChange={(e) => setCompareCols(Number(e.target.value))}
+                  onChange={(event) => setCompareCols(Number(event.target.value))}
                   size="small"
                   inputProps={{ "aria-label": "Show4DSTEM multiple columns" }}
                   sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }}
@@ -11505,12 +8348,12 @@ function Show4DSTEM() {
                   )}
                 </Menu>
               </>}
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
-              <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
+              <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>FFT</Typography>
+              <Switch checked={showFft} onChange={(event) => setShowFft(event.target.checked)} size="small" sx={switchStyles.small} />
               {!compareMode && <>
-                <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
-                <Switch checked={viProfileActive} onChange={(e) => {
-                  const on = e.target.checked;
+                <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Profile</Typography>
+                <Switch checked={viProfileActive} onChange={(event) => {
+                  const on = event.target.checked;
                   setViProfileActive(on);
                   if (!on) {
                     setViProfilePoints([]);
@@ -11529,7 +8372,7 @@ function Show4DSTEM() {
                     if (!blob) return;
                     await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
                   } catch {
-                    canvas?.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
+                    canvas?.toBlob((blob) => { if (blob) downloadBlob(blob, "show4dstem_vi.png"); }, "image/png");
                   }
                 }}>Copy</Button>
               </>}
@@ -11555,7 +8398,7 @@ function Show4DSTEM() {
               panelOrder={comparePanelOrder || []} hidden={compareHiddenPanels || []}
               starred={compareStarredPanels || []} reorderMode={compareReorderMode}
               draggingFrame={compareDraggingFrame} pendingMoveFrame={comparePendingMoveFrame}
-              maxWidthPx={compareGridWidth} panelGapPx={comparePanelGapPx}
+              maxWidthPx={compareGridWidth} panelGapPx={0}
               onResizeStart={handleCompareGridResizeStart} onSelect={setFrameIdx}
               onToggleStar={toggleCompareStar} onHide={hideCompareFrame}
               onReorderFrame={moveCompareFrame} onDragFrameChange={setCompareDraggingFrame}
@@ -11580,7 +8423,6 @@ function Show4DSTEM() {
             <CompareVirtualGrid
               scanRegion={{mode:viRoiMode, row:localViRoiCenterRow, col:localViRoiCenterCol,
                 radius:viRoiRadius || 5, width:viRoiWidth || 10, height:viRoiHeight || 10}}
-              batchInfo={activeViSource === "roi" ? residentBatchInfo : undefined}
               bytes={displayedCompareVirtualImageBytes}
               count={comparePanelCount || 0}
               indices={comparePanelIndices || []}
@@ -11588,8 +8430,6 @@ function Show4DSTEM() {
               gpuRanges={compareGpuRangesRef.current}
               gpuVersion={compareGpuVersion}
               gpuEngine={viGpuColormapRef.current}
-              progressivePage={progressiveComparePage}
-              sourceLoading={residentSeriesLoading}
               labels={frameLabels || []}
               activeIdx={frameIdx}
               shapeRows={shapeRows}
@@ -11616,7 +8456,7 @@ function Show4DSTEM() {
               draggingFrame={compareDraggingFrame}
               pendingMoveFrame={comparePendingMoveFrame}
               maxWidthPx={compareGridWidth}
-              panelGapPx={comparePanelGapPx}
+              panelGapPx={0}
               onResizeStart={handleCompareGridResizeStart}
               onSelect={selectCompareFrame}
               onToggleStar={toggleCompareStar}
@@ -11630,9 +8470,6 @@ function Show4DSTEM() {
                 if (offline) {model.set("vi_roi_center", [row, col]);model.save_changes();}
                 else regionRequests.request(row, col);
               }}
-              onFreshVisiblePaint={acknowledgeFreshComparePagePaint}
-              onGpuPaint={recordCompareGpuPaint}
-              onGpuRenderError={reportCompareGpuRenderError}
               onGpuRendererReady={setCompareGpuRenderer}
             />
           ) : (
@@ -11680,12 +8517,12 @@ function Show4DSTEM() {
               />
               <canvas ref={viUiRef} width={viCanvasWidth * DPR} height={viCanvasHeight * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
               {(viPanelLoading || offlineBackendError) && renderPanelLoadingOverlay(
-                offlineBackendError ? "Show4DSTEM load failed" : "Loading virtual image",
+                offlineBackendError === OFFLINE_NEEDS_WEBGPU ? "Needs WebGPU" : offlineBackendError ? "Show4DSTEM load failed" : "Loading virtual image",
               )}
               {panelChromeVisible && cursorInfo && cursorInfo.panel === "VI" && (
                 <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                    ({cursorInfo.row}, {cursorInfo.col}) {cursorInfo.exact ? String(cursorInfo.value) : formatNumber(cursorInfo.value)}
+                    ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
                   </Typography>
                 </Box>
               )}
@@ -11693,18 +8530,18 @@ function Show4DSTEM() {
             </Box>
           )}
 
-          {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
+          {/* VI Stats Bar: stats on left, Auto/Smooth toggles on right edge */}
           {showStats && !viPanelLoading && viStats && viStats.length === 4 && (
-            <Box ref={(node: HTMLElement | null) => { viSummaryRefs.current[0] = node; }} data-resident-summary="statistics" aria-busy={viSummaryPending} sx={statsBarSx}>
-              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[0])}</Box></Typography>
-              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[1])}</Box></Typography>
-              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[2])}</Box></Typography>
-              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{viSummaryPending ? "…" : formatStat(viStats[3])}</Box></Typography>
+            <Box sx={statsBarSx}>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(viStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(viStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(viStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(viStats[3])}</Box></Typography>
               {controlsVisible && <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
-                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto</Typography>
-                <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
-                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth</Typography>
-                <Switch checked={viSmooth} onChange={(e) => setViSmooth(e.target.checked)} size="small" sx={switchStyles.small} />
+                <Typography sx={{ ...themedTypography.label, fontSize: 10, lineHeight: "20px" }}>Auto</Typography>
+                <Switch checked={viAutoContrast} onChange={(event) => toggleViAutoContrast(event.target.checked)} size="small" sx={switchStyles.small} />
+                <Typography sx={{ ...themedTypography.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth</Typography>
+                <Switch checked={viSmooth} onChange={(event) => setViSmooth(event.target.checked)} size="small" sx={switchStyles.small} />
               </Box>}
             </Box>
           )}
@@ -11719,9 +8556,9 @@ function Show4DSTEM() {
                 style={{ width: "100%", height: viProfileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
-                onMouseDown={(e) => {
+                onMouseDown={(event) => {
                   setIsResizingViProfile(true);
-                  viProfileResizeStart.current = { startY: e.clientY, startHeight: viProfileHeight };
+                  viProfileResizeStart.current = { startY: event.clientY, startHeight: viProfileHeight };
                 }}
                 sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
@@ -11733,7 +8570,7 @@ function Show4DSTEM() {
             <>
               <Button
                 size="small"
-                onClick={() => setMobileViOptionsOpen(v => !v)}
+                onClick={() => setMobileViOptionsOpen(open => !open)}
                 sx={mobileOptionToggleSx}
                 endIcon={mobileViOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
               >
@@ -11746,8 +8583,8 @@ function Show4DSTEM() {
                   <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                     {/* Row 1: ROI selector */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI</Typography>
-                      <Select inputProps={{"aria-label":"Scan region"}} value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>ROI</Typography>
+                      <Select inputProps={{"aria-label":"Scan region"}} value={viRoiMode || "off"} onChange={(event) => setViRoiMode(event.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="off">Off</MenuItem>
                         <MenuItem value="circle">Circle</MenuItem>
                         <MenuItem value="square">Square</MenuItem>
@@ -11759,18 +8596,18 @@ function Show4DSTEM() {
                             <>
                               <Slider
                                 value={viRoiRadius || 5}
-                                onChange={(_, v) => setViRoiRadius(v as number)}
+                                onChange={(_, value) => setViRoiRadius(value as number)}
                                 min={1}
                                 max={Math.min(shapeRows, shapeCols) / 2}
                                 size="small"
                                 sx={{ ...sliderStyles.small, width: 53, mx: 1 }}
                               />
-                              <Typography sx={{ ...typo.value, fontSize: 10, minWidth: 30 }}>
+                              <Typography sx={{ ...themedTypography.value, fontSize: 10, minWidth: 30 }}>
                                 {Math.round(viRoiRadius || 5)}px
                               </Typography>
                             </>
                           )}
-                          <Select inputProps={{"aria-label":"Scan region reduction"}} value={viRoiReduce || "mean"} onChange={(e) => setViRoiReduce(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                          <Select inputProps={{"aria-label":"Scan region reduction"}} value={viRoiReduce || "mean"} onChange={(event) => setViRoiReduce(event.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
                             <MenuItem value="mean">Mean</MenuItem>
                             <MenuItem value="sum">Sum</MenuItem>
                             <MenuItem value="max">Max</MenuItem>
@@ -11780,8 +8617,8 @@ function Show4DSTEM() {
                     </Box>
                     {/* Row 2: Color + Scale */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
-                      <Select value={viColormap} onChange={(e) => setViColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Color</Typography>
+                      <Select value={viColormap} onChange={(event) => setViColormap(String(event.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="inferno">Inferno</MenuItem>
                         <MenuItem value="viridis">Viridis</MenuItem>
                         <MenuItem value="plasma">Plasma</MenuItem>
@@ -11791,16 +8628,16 @@ function Show4DSTEM() {
                         <MenuItem value="twilight_shifted">Twilight</MenuItem>
                         <MenuItem value="gray">Gray</MenuItem>
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
-                      <Select value={viScaleMode} onChange={(e) => setViScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                      <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Scale</Typography>
+                      <Select value={viScaleMode} onChange={(event) => setViScaleMode(event.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
                       </Select>
                     </Box>
                   </Box>
                   {/* Right: Histogram spanning both rows */}
-                  <Box ref={(node: HTMLElement | null) => { viSummaryRefs.current[1] = node; }} data-resident-summary="histogram" aria-busy={viSummaryPending} sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                    <Histogram data={viSummaryPending ? null : viHistogramData} bins={viSummaryPending ? null : viHistogramBins} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
+                    <Histogram data={viHistogramData} bins={viHistogramBins} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} sliderInset={6} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
                   </Box>
                 </Box>
               </Box>
@@ -11831,11 +8668,11 @@ function Show4DSTEM() {
                     }}
                   >
                   <Stack direction="row" alignItems="center" sx={{ gap: 0.75, flexWrap: "wrap" }}>
-                    {ssbDisplayStatus && (
+                    {ssbProgressText && (
                       <Typography
                         role="status"
                         sx={{
-                          ...typo.label,
+                          ...themedTypography.label,
                           color: ssbStatusIsFailure
                             ? "#d32f2f"
                             : ssbComputeBusy
@@ -11847,9 +8684,9 @@ function Show4DSTEM() {
                           textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
                         }}
-                        title={ssbDisplayStatus}
+                        title={ssbProgressText}
                       >
-                        {ssbDisplayStatus}
+                        {ssbProgressText}
                       </Typography>
                     )}
                     {hasSsbCalibrationDownload && (
@@ -11930,28 +8767,28 @@ function Show4DSTEM() {
                         commit: (value: number) => commitSsbTuneNow({ rotationDeg: value }),
                         title: "Scan-detector rotation angle. Release the slider to reconstruct.",
                       },
-                    ] as const).map((cfg) => (
-                      <Box key={cfg.key} sx={{ minWidth: 0 }}>
-                        <Tooltip title={cfg.title} placement="top" arrow>
-                          <Typography sx={{ ...typo.label, color: themeColors.textMuted, cursor: "help", mb: -0.5 }}>
-                            {cfg.label} <Box component="span" sx={{ color: themeColors.accent }}>{cfg.value.toFixed(cfg.precision)}</Box> {cfg.unit}
+                    ] as const).map((control) => (
+                      <Box key={control.key} sx={{ minWidth: 0 }}>
+                        <Tooltip title={control.title} placement="top" arrow>
+                          <Typography sx={{ ...themedTypography.label, color: themeColors.textMuted, cursor: "help", mb: -0.5 }}>
+                            {control.label} <Box component="span" sx={{ color: themeColors.accent }}>{control.value.toFixed(control.precision)}</Box> {control.unit}
                           </Typography>
                         </Tooltip>
                         <Slider
-                          value={cfg.value}
-                          min={cfg.min}
-                          max={cfg.max}
-                          step={cfg.step}
+                          value={control.value}
+                          min={control.min}
+                          max={control.max}
+                          step={control.step}
                           disabled={ssbComputeBusy}
                           onChange={(_, value) => {
                             const next = Number(Array.isArray(value) ? value[0] : value);
-                            cfg.setValue(next);
-                            cfg.schedule(next);
+                            control.setValue(next);
+                            control.schedule(next);
                           }}
-                          onChangeCommitted={(_, value) => cfg.commit(Number(Array.isArray(value) ? value[0] : value))}
+                          onChangeCommitted={(_, value) => control.commit(Number(Array.isArray(value) ? value[0] : value))}
                           size="small"
                           valueLabelDisplay="auto"
-                          valueLabelFormat={(value) => `${Number(value).toFixed(cfg.precision)} ${cfg.unit}`}
+                          valueLabelFormat={(value) => `${Number(value).toFixed(control.precision)} ${control.unit}`}
                           sx={ssbTuneSliderSx}
                         />
                       </Box>
@@ -11966,11 +8803,11 @@ function Show4DSTEM() {
         </Box>
 
         {/* THIRD COLUMN: FFT Panel (conditionally shown) */}
-        {effectiveShowFft && (
+        {showFft && (
           <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
             {/* FFT Header */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
-              <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
+              <Typography variant="caption" sx={{ ...themedTypography.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
               {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
                 <Button size="small" sx={compactButton} disabled={fftZoom === 1 && fftPanX === 0 && fftPanY === 0} onClick={() => { setFftZoom(1); setFftPanX(0); setFftPanY(0); }}>Reset</Button>
               </Stack>}
@@ -12032,7 +8869,7 @@ function Show4DSTEM() {
               <>
                 <Button
                   size="small"
-                  onClick={() => setMobileFftOptionsOpen(v => !v)}
+                  onClick={() => setMobileFftOptionsOpen(open => !open)}
                   sx={mobileOptionToggleSx}
                   endIcon={mobileFftOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
                 >
@@ -12045,25 +8882,25 @@ function Show4DSTEM() {
                     <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                       {/* Row 1: Scale + Clip */}
                       <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
-                        <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Scale</Typography>
+                        <Select value={fftScaleMode} onChange={(event) => setFftScaleMode(event.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                           <MenuItem value="linear">Lin</MenuItem>
                           <MenuItem value="log">Log</MenuItem>
 
                         </Select>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto</Typography>
-                        <Switch checked={fftAuto} onChange={(e) => toggleFftAuto(e.target.checked)} size="small" sx={switchStyles.small} />
+                        <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Auto</Typography>
+                        <Switch checked={fftAuto} onChange={(event) => toggleFftAuto(event.target.checked)} size="small" sx={switchStyles.small} />
                         {fftCropDims && (
                           <>
-                            <Typography sx={{ ...typo.label, fontSize: 10 }}>Win</Typography>
-                            <Switch checked={fftWindow} onChange={(e) => setFftWindow(e.target.checked)} size="small" sx={switchStyles.small} />
+                            <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Win</Typography>
+                            <Switch checked={fftWindow} onChange={(event) => setFftWindow(event.target.checked)} size="small" sx={switchStyles.small} />
                           </>
                         )}
                       </Box>
                       {/* Row 2: Color */}
                       <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
-                        <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <Typography sx={{ ...themedTypography.label, fontSize: 10 }}>Color</Typography>
+                        <Select value={fftColormap} onChange={(event) => setFftColormap(String(event.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                           <MenuItem value="inferno">Inferno</MenuItem>
                           <MenuItem value="viridis">Viridis</MenuItem>
                           <MenuItem value="plasma">Plasma</MenuItem>
@@ -12076,7 +8913,7 @@ function Show4DSTEM() {
                     {/* Right: Histogram spanning both rows */}
                     <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
                       {fftHistogramData && (
-                        <Histogram data={fftHistogramData} vminPct={fftVminPct} vmaxPct={fftVmaxPct} onRangeChange={(min, max) => { setFftVminPct(min); setFftVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={fftDataMin} dataMax={fftDataMax} />
+                        <Histogram data={fftHistogramData} vminPct={fftVminPct} vmaxPct={fftVmaxPct} onRangeChange={(min, max) => { setFftVminPct(min); setFftVmaxPct(max); }} width={110} height={58} sliderInset={6} theme={themeInfo.theme} dataMin={fftDataMin} dataMax={fftDataMax} />
                       )}
                     </Box>
                   </Box>
@@ -12089,13 +8926,13 @@ function Show4DSTEM() {
 
       {/* BOTTOM CONTROLS */}
 
-      {/* Frame controls (5D time/tilt series) — matches Show3D playback */}
+      {/* Frame controls (5D time/tilt series): matches Show3D playback */}
       {controlsVisible && nFrames > 1 && (<>
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-          <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>View</Typography>
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, flexShrink: 0 }}>View</Typography>
           <Select
             value={displayViewMode}
-            onChange={(e) => setViewMode(String(e.target.value))}
+            onChange={(event) => setViewMode(String(event.target.value))}
             size="small"
             inputProps={{ "aria-label": "Show4DSTEM view mode" }}
             sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
@@ -12106,10 +8943,10 @@ function Show4DSTEM() {
           </Select>
           {compareMode && (
             <>
-              <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>DP</Typography>
+              <Typography sx={{ ...themedTypography.label, fontSize: 10, flexShrink: 0 }}>DP</Typography>
               <Select
                 value={compareDpMode || "average"}
-                onChange={(e) => setCompareDpMode(String(e.target.value))}
+                onChange={(event) => setCompareDpMode(String(event.target.value))}
                 size="small"
                 inputProps={{ "aria-label": "Show4DSTEM multiple DP source" }}
                 sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
@@ -12153,7 +8990,7 @@ function Show4DSTEM() {
             </>
           )}
           {!compareMode && <>
-          <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameSliderLabel}:</Typography>
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, flexShrink: 0 }}>{frameDimLabel}:</Typography>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" aria-label="Show4DSTEM play frames backward" onClick={() => { setFrameReverse(true); setFramePlaying(true); }} sx={{ color: frameReverse && framePlaying ? themeColors.accent : themeColors.textMuted, p: 0.25 }}>
               <FastRewindIcon sx={{ fontSize: 18 }} />
@@ -12168,38 +9005,20 @@ function Show4DSTEM() {
               <StopIcon sx={{ fontSize: 16 }} />
             </IconButton>
           </Stack>
-          <Slider value={frameIdx} onChange={(_, v) => { setFramePlaying(false); setFrameIdx(v as number); }} min={0} max={Math.max(0, nFrames - 1)} size="small" aria-label={frameSliderAriaLabel} sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
-          <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameIdx + 1}/${nFrames}`}</Typography>
+          <Slider value={frameIdx} onChange={(_, value) => { setFramePlaying(false); setFrameIdx(value as number); }} min={0} max={Math.max(0, nFrames - 1)} size="small" aria-label={frameSliderAriaLabel} sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
+          <Typography sx={{ ...themedTypography.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameIdx + 1}/${nFrames}`}</Typography>
           </>}
         </Box>
         {!compareMode && <Box sx={{ ...controlRow, mt: `${SPACING.XS}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-          <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
-          <Slider value={frameFps} min={1} max={30} step={1} onChange={(_, v) => setFrameFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: 35, flexShrink: 0 }} />
-          <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, minWidth: 14, flexShrink: 0 }}>{Math.round(frameFps)}</Typography>
-          <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Loop</Typography>
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
+          <Slider value={frameFps} min={1} max={30} step={1} onChange={(_, value) => setFrameFps(value as number)} size="small" sx={{ ...sliderStyles.small, width: 35, flexShrink: 0 }} />
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 14, flexShrink: 0 }}>{Math.round(frameFps)}</Typography>
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Loop</Typography>
           <Switch size="small" checked={frameLoop} onChange={() => setFrameLoop(!frameLoop)} sx={{ ...switchStyles.small, flexShrink: 0 }} />
-          <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Bounce</Typography>
+          <Typography sx={{ ...themedTypography.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Bounce</Typography>
           <Switch size="small" checked={frameBoomerang} onChange={() => setFrameBoomerang(!frameBoomerang)} sx={{ ...switchStyles.small, flexShrink: 0 }} />
         </Box>}
       </>)}
-
-      {/* Path animation slider */}
-      {controlsVisible && !compareMode && pathLength > 0 && (
-        <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-          <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
-            <IconButton size="small" onClick={() => setPathPlaying(!pathPlaying)} sx={{ color: themeColors.accent, p: 0.25 }}>
-              {pathPlaying ? <PauseIcon sx={{ fontSize: 18 }} /> : <PlayArrowIcon sx={{ fontSize: 18 }} />}
-            </IconButton>
-            <IconButton size="small" onClick={() => { setPathPlaying(false); setPathIndex(0); }} sx={{ color: themeColors.textMuted, p: 0.25 }}>
-              <StopIcon sx={{ fontSize: 16 }} />
-            </IconButton>
-          </Stack>
-          <Slider value={pathIndex} onChange={(_, v) => { setPathPlaying(false); setPathIndex(v as number); }} min={0} max={Math.max(0, pathLength - 1)} size="small" sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
-          <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{pathIndex + 1}/{pathLength}</Typography>
-          <Typography sx={{ ...typo.label, fontSize: 10 }}>Loop</Typography>
-          <Switch checked={pathLoop} onChange={(_, v) => { model.set("path_loop", v); model.save_changes(); }} size="small" sx={switchStyles.small} />
-        </Box>
-      )}
     </Box>
   );
 }

@@ -23,17 +23,17 @@ export function roundToNiceValue(value: number): number {
  * strings pass through unchanged. Case-insensitive on the spelled-out forms.
  */
 export function unitSymbol(unit: string): string {
-  const u = (unit || "").trim();
-  const lc = u.toLowerCase();
-  if (lc === "micron" || lc === "microns" || lc === "um" || u === "μm" || u === "µm") return "µm";
-  if (lc === "angstrom" || lc === "angstroms" || lc === "ang" || u === "Å" || lc === "a") return "Å";
-  if (lc === "nanometer" || lc === "nanometers" || lc === "nm") return "nm";
-  if (lc === "picometer" || lc === "picometers" || lc === "pm") return "pm";
-  if (lc === "millimeter" || lc === "millimeters" || lc === "mm") return "mm";
-  if (lc === "picosecond" || lc === "picoseconds" || lc === "ps") return "ps";
-  if (lc === "femtosecond" || lc === "femtoseconds" || lc === "fs") return "fs";
-  if (lc === "nanosecond" || lc === "nanoseconds" || lc === "ns") return "ns";
-  return u;
+  const trimmed = (unit || "").trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "micron" || lower === "microns" || lower === "um" || trimmed === "μm" || trimmed === "µm") return "µm";
+  if (lower === "angstrom" || lower === "angstroms" || lower === "ang" || trimmed === "Å" || lower === "a") return "Å";
+  if (lower === "nanometer" || lower === "nanometers" || lower === "nm") return "nm";
+  if (lower === "picometer" || lower === "picometers" || lower === "pm") return "pm";
+  if (lower === "millimeter" || lower === "millimeters" || lower === "mm") return "mm";
+  if (lower === "picosecond" || lower === "picoseconds" || lower === "ps") return "ps";
+  if (lower === "femtosecond" || lower === "femtoseconds" || lower === "fs") return "fs";
+  if (lower === "nanosecond" || lower === "nanoseconds" || lower === "ns") return "ns";
+  return trimmed;
 }
 
 // Length-unit ladder for the scale bar, each as its size in nm. Lets a sub-1 value
@@ -63,7 +63,7 @@ export function formatScaleLabel(value: number, unit: string): string {
   }
   const valueNm = nice * baseNm;
   // largest ladder unit where the value is >= 1 -> the cleanest (fewest-digit) integer
-  const pick = LENGTH_UNITS_NM.find((u) => valueNm / u.nm >= 1) ?? LENGTH_UNITS_NM[LENGTH_UNITS_NM.length - 1];
+  const pick = LENGTH_UNITS_NM.find((ladderUnit) => valueNm / ladderUnit.nm >= 1) ?? LENGTH_UNITS_NM[LENGTH_UNITS_NM.length - 1];
   return `${Math.round(valueNm / pick.nm)} ${pick.sym}`;
 }
 
@@ -72,6 +72,194 @@ const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 /** Format a zoom multiplier consistently across image and FFT overlays. */
 export function formatZoomLabel(zoom: number): string {
   return `${zoom.toFixed(1)}×`;
+}
+
+type ScaleBarRegion = { x: number; y: number; width: number; height: number };
+
+/** How the label (and zoom indicator) is lifted off the image: a soft canvas
+ *  shadow, or a hard copy drawn 1 px down-right in the shadow color. */
+type ScaleBarTextShadow = { kind: "blur" | "offset"; color: string };
+
+export interface ScaleBarOptions {
+  position?: "bottom-right" | "bottom-left";
+  showZoomIndicator?: boolean;
+  /** Bar length the eye reads easily, before rounding to a nice physical value. */
+  targetBarPx?: number;
+  /** Caps the target at this fraction of the region width so small panels keep a bar that fits. */
+  maxBarFraction?: number;
+  /** Explicit bar length in `unit`; skips the nice rounding. */
+  physicalLength?: number | null;
+  /** Explicit label text in place of the formatted physical length. */
+  label?: string | null;
+  barThickness?: number;
+  margin?: number;
+  /** Gap between the bar top and the label baseline. */
+  labelGap?: number;
+  /** Shift applied to the bar and its label, not to the zoom indicator. */
+  offset?: [number, number];
+  font?: string;
+  color?: string;
+  textShadow?: ScaleBarTextShadow;
+  /** Half-transparent copy of the bar drawn 1 px down-right; off by default. */
+  barShadowColor?: string | null;
+  /** Stroke drawn behind the label instead of the text shadow. */
+  outline?: { color: string; width: number } | null;
+  /** Distance from the region bottom to the zoom indicator baseline; defaults to margin - barThickness. */
+  zoomIndicatorGap?: number;
+}
+
+const DEFAULT_TEXT_SHADOW: ScaleBarTextShadow = { kind: "blur", color: "rgba(0, 0, 0, 0.5)" };
+
+/**
+ * Bar placement in CSS pixels inside `region`. `effectiveZoom` is screen pixels
+ * per image pixel. Returns null when the inputs cannot produce a finite bar.
+ */
+export function scaleBarGeometry(
+  region: ScaleBarRegion,
+  effectiveZoom: number,
+  pixelSize: number,
+  unit: string,
+  options: ScaleBarOptions = {},
+): { barX: number; barY: number; barPx: number; barHeight: number; label: string; scaleLeft: boolean } | null {
+  if (region.width <= 0 || region.height <= 0 || pixelSize <= 0 || !(effectiveZoom > 0) || !Number.isFinite(effectiveZoom)) return null;
+  const margin = options.margin ?? 12;
+  const targetBarPx = options.maxBarFraction != null
+    ? Math.min(options.targetBarPx ?? 60, region.width * options.maxBarFraction)
+    : (options.targetBarPx ?? 60);
+  const explicitPhysical = Number(options.physicalLength);
+  const nicePhysical = Number.isFinite(explicitPhysical) && explicitPhysical > 0
+    ? explicitPhysical
+    : roundToNiceValue((targetBarPx / effectiveZoom) * pixelSize);
+  const barPx = (nicePhysical / pixelSize) * effectiveZoom;
+  const scaleLeft = (options.position || "bottom-right") === "bottom-left";
+  const [offsetX, offsetY] = options.offset ?? [0, 0];
+  return {
+    barX: region.x + (scaleLeft ? margin : region.width - barPx - margin) + offsetX,
+    barY: region.y + region.height - margin + offsetY,
+    barPx,
+    barHeight: options.barThickness ?? 5,
+    label: options.label && options.label.trim() ? options.label : formatScaleLabel(nicePhysical, unit),
+    scaleLeft,
+  };
+}
+
+function applyTextShadow(ctx: CanvasRenderingContext2D, shadow: ScaleBarTextShadow): void {
+  if (shadow.kind !== "blur") return;
+  ctx.shadowColor = shadow.color;
+  ctx.shadowBlur = 2;
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+}
+
+function clearShadow(ctx: CanvasRenderingContext2D): void {
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+}
+
+/** Zoom multiplier in the corner opposite the scale bar, on the bar's baseline. */
+export function drawZoomIndicatorInRegion(
+  ctx: CanvasRenderingContext2D,
+  region: ScaleBarRegion,
+  zoom: number,
+  options: ScaleBarOptions = {},
+): void {
+  const margin = options.margin ?? 12;
+  const barThickness = options.barThickness ?? 5;
+  const scaleLeft = (options.position || "bottom-right") === "bottom-left";
+  const textShadow = options.textShadow ?? DEFAULT_TEXT_SHADOW;
+  const color = options.color ?? "white";
+  const zoomX = region.x + (scaleLeft ? region.width - margin : margin);
+  const zoomY = region.y + region.height - (options.zoomIndicatorGap ?? (margin - barThickness));
+  ctx.save();
+  ctx.font = options.font ?? `16px ${FONT}`;
+  ctx.textAlign = scaleLeft ? "right" : "left";
+  ctx.textBaseline = "bottom";
+  applyTextShadow(ctx, textShadow);
+  const text = formatZoomLabel(zoom);
+  if (textShadow.kind === "offset") {
+    ctx.fillStyle = textShadow.color;
+    ctx.fillText(text, zoomX + 1, zoomY + 1);
+  }
+  ctx.fillStyle = color;
+  ctx.fillText(text, zoomX, zoomY);
+  ctx.restore();
+}
+
+/**
+ * Draw the scale bar (and optional zoom indicator) inside a CSS-pixel region of
+ * an already DPR-scaled context. Every widget panel, export frame and overlay
+ * canvas goes through here so the bar looks the same everywhere.
+ */
+export function drawScaleBarInRegion(
+  ctx: CanvasRenderingContext2D,
+  region: ScaleBarRegion,
+  zoom: number,
+  effectiveZoom: number,
+  pixelSize: number,
+  unit: string,
+  options: ScaleBarOptions = {},
+): void {
+  const geom = scaleBarGeometry(region, effectiveZoom, pixelSize, unit, options);
+  if (geom) {
+    const color = options.color ?? "white";
+    const textShadow = options.textShadow ?? DEFAULT_TEXT_SHADOW;
+    const labelGap = options.labelGap ?? 4;
+    ctx.save();
+    clearShadow(ctx);
+    if (options.barShadowColor) {
+      ctx.fillStyle = options.barShadowColor;
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(geom.barX + 1, geom.barY + 1, geom.barPx, geom.barHeight);
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = color;
+    ctx.fillRect(geom.barX, geom.barY, geom.barPx, geom.barHeight);
+    applyTextShadow(ctx, textShadow);
+    ctx.font = options.font ?? `16px ${FONT}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    const labelX = geom.barX + geom.barPx / 2;
+    const labelY = geom.barY - labelGap;
+    if (options.outline && options.outline.width > 0) {
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = options.outline.color;
+      ctx.lineWidth = options.outline.width;
+      ctx.strokeText(geom.label, labelX, labelY);
+    } else if (textShadow.kind === "offset") {
+      ctx.fillStyle = textShadow.color;
+      ctx.fillText(geom.label, labelX + 1, labelY + 1);
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(geom.label, labelX, labelY);
+    ctx.restore();
+  }
+  if (options.showZoomIndicator === true) drawZoomIndicatorInRegion(ctx, region, zoom, options);
+}
+
+/**
+ * Draw the scale bar across a whole DPR-scaled canvas, in CSS pixels. `zoom`
+ * multiplies the fit-to-width scale cssWidth / imageWidth to give screen pixels
+ * per image pixel.
+ */
+function drawScaleBarOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  dpr: number,
+  zoom: number,
+  pixelSize: number,
+  unit: string,
+  imageWidth: number,
+  options: ScaleBarOptions,
+): void {
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const cssWidth = canvas.width / dpr;
+  const cssHeight = canvas.height / dpr;
+  const effectiveZoom = zoom * (cssWidth / imageWidth);
+  drawScaleBarInRegion(ctx, { x: 0, y: 0, width: cssWidth, height: cssHeight }, zoom, effectiveZoom, pixelSize, unit, options);
+  ctx.restore();
 }
 
 /**
@@ -92,52 +280,8 @@ export function drawScaleBarHiDPI(
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.save();
-  ctx.scale(dpr, dpr);
-
-  const cssWidth = canvas.width / dpr;
-  const cssHeight = canvas.height / dpr;
-  const scaleX = cssWidth / imageWidth;
-  const effectiveZoom = zoom * scaleX;
-
-  const targetBarPx = 60;
-  const barThickness = 5;
-  const fontSize = 16;
-  const margin = 12;
-
-  const targetPhysical = (targetBarPx / effectiveZoom) * pixelSize;
-  const nicePhysical = roundToNiceValue(targetPhysical);
-  const barPx = (nicePhysical / pixelSize) * effectiveZoom;
-
-  const barY = cssHeight - margin;
-  const position = options.position || "bottom-right";
-  const barX = position === "bottom-left" ? margin : cssWidth - barPx - margin;
-
-  ctx.fillStyle = "white";
-  ctx.fillRect(barX, barY, barPx, barThickness);
-
-  ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-  ctx.shadowBlur = 2;
-  ctx.shadowOffsetX = 1;
-  ctx.shadowOffsetY = 1;
-
-  const label = formatScaleLabel(nicePhysical, unit);
-  ctx.font = `${fontSize}px ${FONT}`;
-  ctx.fillStyle = "white";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(label, barX + barPx / 2, barY - 4);
-
-  if (options.showZoomIndicator === true) {
-    const zoomX = position === "bottom-left" ? cssWidth - margin : margin;
-    ctx.textAlign = position === "bottom-left" ? "right" : "left";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(formatZoomLabel(zoom), zoomX, cssHeight - margin + barThickness);
-  }
-
-  ctx.restore();
+  drawScaleBarOnCanvas(ctx, canvas, dpr, zoom, pixelSize, unit, imageWidth, options);
 }
 
 /**
@@ -155,49 +299,7 @@ export function drawFFTScaleBarHiDPI(
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx || fftPixelSize <= 0) return;
-
-  ctx.save();
-  ctx.scale(dpr, dpr);
-
-  const cssWidth = canvas.width / dpr;
-  const cssHeight = canvas.height / dpr;
-  const scaleX = cssWidth / imageWidth;
-  const effectiveZoom = fftZoom * scaleX;
-
-  const targetBarPx = 60;
-  const barThickness = 5;
-  const fontSize = 16;
-  const margin = 12;
-
-  const targetPhysical = (targetBarPx / effectiveZoom) * fftPixelSize;
-  const nicePhysical = roundToNiceValue(targetPhysical);
-  const barPx = (nicePhysical / fftPixelSize) * effectiveZoom;
-
-  const barY = cssHeight - margin;
-  const barX = cssWidth - barPx - margin;
-
-  ctx.fillStyle = "white";
-  ctx.fillRect(barX, barY, barPx, barThickness);
-
-  ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-  ctx.shadowBlur = 2;
-  ctx.shadowOffsetX = 1;
-  ctx.shadowOffsetY = 1;
-
-  const label = formatScaleLabel(nicePhysical, unit);
-  ctx.font = `${fontSize}px ${FONT}`;
-  ctx.fillStyle = "white";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(label, barX + barPx / 2, barY - 4);
-
-  if (showZoomIndicator) {
-    ctx.textAlign = "left";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(formatZoomLabel(fftZoom), margin, cssHeight - margin + barThickness);
-  }
-
-  ctx.restore();
+  drawScaleBarOnCanvas(ctx, canvas, dpr, fftZoom, fftPixelSize, unit, imageWidth, { showZoomIndicator: showZoomIndicator === true });
 }
 
 /**
@@ -220,21 +322,15 @@ export function drawColorbar(
 
   // Gradient strip (bottom=vmin, top=vmax)
   for (let row = 0; row < barH; row++) {
-    const t = 1 - row / (barH - 1);
-    const lutIdx = Math.round(t * 255);
-    const r = lut[lutIdx * 3];
-    const g = lut[lutIdx * 3 + 1];
-    const b = lut[lutIdx * 3 + 2];
-    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    const fraction = 1 - row / (barH - 1);
+    const entry = Math.round(fraction * 255) * 3;
+    ctx.fillStyle = `rgb(${lut[entry]},${lut[entry + 1]},${lut[entry + 2]})`;
     ctx.fillRect(barX, barY + row, barW, 1);
   }
-
-  // Border
   ctx.strokeStyle = "rgba(255,255,255,0.5)";
   ctx.lineWidth = 1;
   ctx.strokeRect(barX, barY, barW, barH);
-
-  // Labels with drop shadow
+  // The drop shadow keeps the labels readable over any image.
   ctx.shadowColor = "rgba(0, 0, 0, 0.7)";
   ctx.shadowBlur = 2;
   ctx.shadowOffsetX = 1;

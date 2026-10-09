@@ -1,9 +1,9 @@
-"""dataset.yaml schema helpers — single source of truth per session.
+"""dataset.yaml schema helpers: single source of truth per session.
 
 A session lives at ``<data-root>/<source>/<YYYYMMDD_sample>/`` and
 owns ONE ``dataset.yaml`` file. Multi-condition sessions (e.g. light
 on/off, dose-series, dark references) encode their tagging inside that
-single yaml — never split into per-condition yamls.
+single yaml, never split into per-condition yamls.
 
 Schema (additive, schema_version=1):
 
@@ -37,16 +37,16 @@ This module is the canonical reader. All acquisition and reconstruction callers
 go through ``resolve_condition()`` so a
 single yaml change updates every downstream surface.
 """
-from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-import yaml
+logger = logging.getLogger(__name__)
 
-from quantem.widget.io.schema import check_schema_version
+#: Highest ``schema_version`` this reader knows; a newer file still parses with a warning.
+SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -56,7 +56,7 @@ class ConditionInfo:
     description: str = ""
     skip: bool = False
     folder: str | None = None              # which folder it came from, if folder-derived
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
     source: str = "none"                   # "files" | "folders" | "none"
 
 
@@ -64,15 +64,22 @@ def load_dataset_yaml(session_dir: Path) -> dict:
     """Read ``<session_dir>/dataset.yaml`` and return parsed dict.
 
     Returns ``{}`` if the file does not exist (caller decides whether
-    that is fatal). Schema version is checked but not enforced — a
+    that is fatal). Schema version is checked but not enforced: a
     higher version still parses, just emits a warning.
     """
     path = Path(session_dir) / "dataset.yaml"
     if not path.is_file():
         return {}
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
-    check_schema_version(data, str(path))
+    try:
+        import yaml  # only session tooling (quantem.live) reads dataset.yaml; the widgets never do
+    except ImportError as exc:
+        raise ImportError("Reading dataset.yaml needs PyYAML: pip install pyyaml") from exc
+    with open(path) as handle:
+        data = yaml.safe_load(handle) or {}
+    if "schema_version" not in data:
+        raise ValueError(f"{path} missing schema_version")
+    if int(data["schema_version"]) > SCHEMA_VERSION:
+        logger.warning("%s schema_version=%s is newer than this reader knows (max=%d)", path, data["schema_version"], SCHEMA_VERSION)
     return data
 
 
@@ -82,8 +89,8 @@ def _file_num_from_master(master_path: Path) -> int | None:
     Matches the trailing ``_NNNN_master.h5`` convention that Arina writes.
     Returns None if the filename does not follow the convention.
     """
-    m = re.search(r"_(\d+)_master\.h5$", master_path.name)
-    return int(m.group(1)) if m else None
+    match = re.search(r"_(\d+)_master\.h5$", master_path.name)
+    return int(match.group(1)) if match else None
 
 
 def _files_entry_for(files_block: dict, file_num: int) -> dict | None:
@@ -94,19 +101,19 @@ def _files_entry_for(files_block: dict, file_num: int) -> dict | None:
     """
     exact_hit = None
     range_hit = None
-    for key, val in (files_block or {}).items():
-        s = str(key).strip()
-        if "-" in s:
+    for key, entry in (files_block or {}).items():
+        key_text = str(key).strip()
+        if "-" in key_text:
             try:
-                lo, hi = s.split("-", 1)
-                if int(lo) <= file_num <= int(hi):
-                    range_hit = val or {}
+                first, last = key_text.split("-", 1)
+                if int(first) <= file_num <= int(last):
+                    range_hit = entry or {}
             except ValueError:
                 continue
         else:
             try:
-                if int(s) == file_num:
-                    exact_hit = val or {}
+                if int(key_text) == file_num:
+                    exact_hit = entry or {}
                     break
             except ValueError:
                 continue
@@ -121,10 +128,10 @@ def _folder_for_master(master_path: Path, session_dir: Path) -> str | None:
     in the session root returns None.
     """
     try:
-        rel = Path(master_path).resolve().relative_to(Path(session_dir).resolve())
+        relative = Path(master_path).resolve().relative_to(Path(session_dir).resolve())
     except (ValueError, OSError):
         return None
-    parts = rel.parts
+    parts = relative.parts
     return parts[0] if len(parts) >= 2 else None
 
 
@@ -139,51 +146,38 @@ def resolve_condition(
     ConditionInfo (never raises for missing config); ``label=None`` and
     ``source="none"`` indicates no condition was specified.
     """
-    conditions = (dataset_yaml.get("conditions") or {}) if dataset_yaml else {}
-    folders = (dataset_yaml.get("folders") or {}) if dataset_yaml else {}
-    files_block = (dataset_yaml.get("files") or {}) if dataset_yaml else {}
+    dataset_yaml = dataset_yaml or {}
+    conditions = dataset_yaml.get("conditions") or {}
+    folders = dataset_yaml.get("folders") or {}
+    files_block = dataset_yaml.get("files") or {}
 
     file_num = _file_num_from_master(Path(master_path))
     file_entry = _files_entry_for(files_block, file_num) if file_num is not None else None
     if file_entry and "condition" in file_entry:
-        label = file_entry["condition"]
-        cond_meta = conditions.get(label, {}) or {}
-        return ConditionInfo(
-            label=label,
-            description=cond_meta.get("description", ""),
-            skip=bool(file_entry.get("skip", cond_meta.get("skip", False))),
-            metadata=cond_meta,
-            source="files",
-        )
+        return _tagged_condition(file_entry, conditions, source="files")
 
     folder = _folder_for_master(Path(master_path), Path(session_dir))
     folder_entry = folders.get(folder) if folder else None
     if folder_entry and "condition" in folder_entry:
-        label = folder_entry["condition"]
-        cond_meta = conditions.get(label, {}) or {}
-        return ConditionInfo(
-            label=label,
-            description=cond_meta.get("description", ""),
-            skip=bool(folder_entry.get("skip", cond_meta.get("skip", False))),
-            folder=folder,
-            metadata=cond_meta,
-            source="folders",
-        )
+        return _tagged_condition(folder_entry, conditions, source="folders", folder=folder)
 
     return ConditionInfo(folder=folder, source="none")
 
 
-def list_conditions(dataset_yaml: dict) -> list[dict]:
-    """Return condition labels + descriptions as a list of dicts.
+def _tagged_condition(entry: dict, conditions: dict, *, source: str, folder: str | None = None) -> ConditionInfo:
+    """The ``ConditionInfo`` of a ``files:`` or ``folders:`` entry that names a condition.
 
-    Used by the dashboard to render a condition legend / chip filter.
+    The description and metadata come from the ``conditions:`` block; the
+    entry's own ``skip`` wins over the condition's, so one folder of a
+    condition can be skipped without skipping the rest.
     """
-    out = []
-    for label, meta in (dataset_yaml.get("conditions") or {}).items():
-        meta = meta or {}
-        out.append({
-            "label": str(label),
-            "description": meta.get("description", ""),
-            **{k: v for k, v in meta.items() if k != "description"},
-        })
-    return out
+    label = entry["condition"]
+    condition = conditions.get(label, {}) or {}
+    return ConditionInfo(
+        label=label,
+        description=condition.get("description", ""),
+        skip=bool(entry.get("skip", condition.get("skip", False))),
+        folder=folder,
+        metadata=condition,
+        source=source,
+    )

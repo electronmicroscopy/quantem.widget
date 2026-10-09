@@ -1,5 +1,5 @@
 /** WebGPU accumulation of abTEM radial atomic projections, in V Å. */
-import { GPUColormapEngine, COLORMAPS } from "../colormaps";
+import { GPUColormapEngine, COLORMAPS } from "../display/colormaps";
 import { type V3 } from "./geometry";
 export type PotentialGeometry = {
   right: V3;
@@ -121,13 +121,13 @@ export class PotentialGPU {
     readonly pixels: number,
   ) {
     const buffer = (data: Float32Array | number, usage: number) => {
-      const b = device.createBuffer({
+      const created = device.createBuffer({
         size: typeof data === "number" ? data : data.byteLength,
         usage,
       });
       if (typeof data !== "number")
-        device.queue.writeBuffer(b, 0, data as Float32Array<ArrayBuffer>);
-      return b;
+        device.queue.writeBuffer(created, 0, data as Float32Array<ArrayBuffer>);
+      return created;
     };
     this.colorLut = buffer(
       256 * 16,
@@ -204,7 +204,7 @@ export class PotentialGPU {
         this.visible,
         this.volume,
         this.uniform,
-      ].map((b, i) => ({ binding: i, resource: { buffer: b } })),
+      ].map((buffer, i) => ({ binding: i, resource: { buffer: buffer } })),
     });
     const draw = device.createShaderModule({ code: drawShader });
     this.renderPipeline = device.createRenderPipeline({
@@ -218,46 +218,46 @@ export class PotentialGPU {
       primitive: { topology: "triangle-list" },
     });
   }
-  compute(g: PotentialGeometry, atomsPerCell: number) {
-    if (g.repeats.reduce((a, b) => a * b, atomsPerCell) > 8192)
+  compute(geometry: PotentialGeometry, atomsPerCell: number) {
+    if (geometry.repeats.reduce((product, count) => product * count, atomsPerCell) > 8192)
       throw Error(
         "Potential preview supports 8,192 atoms. Reduce Unit Cells; the atom viewer supports larger structures.",
       );
-    const u = new ArrayBuffer(160);
-    const f = new Float32Array(u),
-      i = new Uint32Array(u);
-    f.set([
-      ...g.right,
-      g.span,
-      ...g.up,
+    const params = new ArrayBuffer(160);
+    const floats = new Float32Array(params),
+      uints = new Uint32Array(params);
+    floats.set([
+      ...geometry.right,
+      geometry.span,
+      ...geometry.up,
       0,
-      ...g.beam,
+      ...geometry.beam,
       0,
-      ...g.center,
+      ...geometry.center,
       0,
-      ...g.unit.flatMap((v) => [...v, 0]),
+      ...geometry.unit.flatMap((vector) => [...vector, 0]),
     ]);
-    i.set([...g.repeats, atomsPerCell], 28);
-    const start = ((g.limits[0] - g.zmin) / (g.zmax - g.zmin)) * g.slices;
-    const end = ((g.limits[1] - g.zmin) / (g.zmax - g.zmin)) * g.slices;
+    uints.set([...geometry.repeats, atomsPerCell], 28);
+    const start = ((geometry.limits[0] - geometry.zmin) / (geometry.zmax - geometry.zmin)) * geometry.slices;
+    const end = ((geometry.limits[1] - geometry.zmin) / (geometry.zmax - geometry.zmin)) * geometry.slices;
     const exactSlice =
       Math.abs(start - Math.round(start)) < 1e-7 &&
       Math.abs(end - start - 1) < 1e-7;
-    i.set(
+    uints.set(
       [
         this.pixels,
-        g.slices,
-        g.repeats.reduce((a, b) => a * b, atomsPerCell),
+        geometry.slices,
+        geometry.repeats.reduce((product, count) => product * count, atomsPerCell),
         exactSlice ? Math.round(start) + 1 : 0,
       ],
       32,
     );
-    f.set([g.zmin, g.zmax, ...g.limits], 36);
-    this.device.queue.writeBuffer(this.uniform, 0, u);
+    floats.set([geometry.zmin, geometry.zmax, ...geometry.limits], 36);
+    this.device.queue.writeBuffer(this.uniform, 0, params);
     this.device.queue.writeBuffer(
       this.visible,
       0,
-      new Uint32Array(g.visible.map(Number)),
+      new Uint32Array(geometry.visible.map(Number)),
     );
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -273,9 +273,9 @@ export class PotentialGPU {
   /** Separable Gaussian display filter; the physical volume remains immutable. */
   filter(sigmaPixels: number, planes: number) {
     this.averageKey = "";
-    const enc = this.device.createCommandEncoder();
+    const encoder = this.device.createCommandEncoder();
     if (sigmaPixels <= 0) {
-      enc.copyBufferToBuffer(
+      encoder.copyBufferToBuffer(
         this.volume,
         0,
         this.filtered,
@@ -294,7 +294,7 @@ export class PotentialGPU {
         ]);
         new Float32Array(data)[4] = sigma;
         this.device.queue.writeBuffer(this.filterUniforms[axis], 0, data);
-        const pass = enc.beginComputePass();
+        const pass = encoder.beginComputePass();
         pass.setPipeline(this.filterPipeline);
         pass.setBindGroup(0, this.filterBindings[axis]);
         pass.dispatchWorkgroups(
@@ -305,7 +305,7 @@ export class PotentialGPU {
         pass.end();
       }
     }
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([encoder.finish()]);
   }
   /** Arithmetic mean via Show3D's resident GPU engine. No image readback. */
   average(indices: number[], slices: number) {
@@ -422,12 +422,12 @@ export class PotentialGPU {
     }
     canvas.width = this.pixels;
     canvas.height = this.pixels;
-    const u = new ArrayBuffer(32);
-    new Uint32Array(u).set([this.pixels, slot, 0, 0]);
-    new Float32Array(u).set([multiplier, max, 0, 0], 4);
-    this.device.queue.writeBuffer(view.uniform, 0, u);
-    const enc = this.device.createCommandEncoder();
-    const p = enc.beginRenderPass({
+    const params = new ArrayBuffer(32);
+    new Uint32Array(params).set([this.pixels, slot, 0, 0]);
+    new Float32Array(params).set([multiplier, max, 0, 0], 4);
+    this.device.queue.writeBuffer(view.uniform, 0, params);
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
           view: view.context.getCurrentTexture().createView(),
@@ -437,38 +437,38 @@ export class PotentialGPU {
         },
       ],
     });
-    p.setPipeline(this.renderPipeline);
-    p.setBindGroup(0, view.bind);
-    p.draw(3);
-    p.end();
-    this.device.queue.submit([enc.finish()]);
+    pass.setPipeline(this.renderPipeline);
+    pass.setBindGroup(0, view.bind);
+    pass.draw(3);
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
   }
   /** Explicit numerical readback for exports/tests, never the interactive render path. */
   async readback(slices: number, filtered = false): Promise<Float32Array> {
     const bytes = (slices + 2) * this.pixels * this.pixels * 4;
-    const b = this.device.createBuffer({
+    const staging = this.device.createBuffer({
       size: bytes,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
-    const e = this.device.createCommandEncoder();
-    e.copyBufferToBuffer(
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(
       filtered ? this.filtered : this.volume,
       0,
-      b,
+      staging,
       0,
       bytes,
     );
-    this.device.queue.submit([e.finish()]);
-    await b.mapAsync(GPUMapMode.READ);
-    const result = new Float32Array(b.getMappedRange().slice(0));
-    b.unmap();
-    b.destroy();
+    this.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    staging.destroy();
     return result;
   }
   clearViews() {
-    for (const v of this.views.values()) {
-      v.context.unconfigure();
-      v.uniform.destroy();
+    for (const view of this.views.values()) {
+      view.context.unconfigure();
+      view.uniform.destroy();
     }
     this.views.clear();
   }
@@ -476,8 +476,8 @@ export class PotentialGPU {
     this.clearViews();
     this.averageEngine?.destroy();
     this.averageTarget?.destroy();
-    this.averageSources.forEach((b) => b.destroy());
-    for (const b of [
+    this.averageSources.forEach((buffer) => buffer.destroy());
+    for (const buffer of [
       this.colorLut,
       this.filtered,
       this.intermediate,
@@ -488,6 +488,6 @@ export class PotentialGPU {
       this.volume,
       this.uniform,
     ])
-      b.destroy();
+      buffer.destroy();
   }
 }

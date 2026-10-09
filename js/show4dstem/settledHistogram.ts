@@ -1,4 +1,4 @@
-import type { GPUColormapEngine } from '../colormaps';
+import type { GPUColormapEngine } from '../display/colormaps';
 
 /** Read the settled float image summary, abandoning work when a drag or a newer
  * display generation makes those buffers stale. Never dispatch the next stage

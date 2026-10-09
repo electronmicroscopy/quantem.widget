@@ -1,11 +1,11 @@
 """Shared viewer UI chrome presets."""
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Literal
 
 UiMode = Literal["interactive", "presentation", "report", "minimal"]
 
-UI_MODE_DEFAULTS: dict[str, dict[str, Any]] = {
+UI_MODE_DEFAULTS: dict[str, dict[str, bool]] = {
     "interactive": {},
     "presentation": {
         "controls_collapsed": True,
@@ -39,9 +39,9 @@ UI_MODE_DEFAULTS: dict[str, dict[str, Any]] = {
 def resolve_ui_mode(
     ui_mode: UiMode | str,
     *,
-    defaults: Mapping[str, Any],
-    overrides: Mapping[str, Any],
-) -> dict[str, Any]:
+    defaults: Mapping[str, object],
+    overrides: Mapping[str, object],
+) -> dict[str, object]:
     """Resolve a viewer UI preset with explicit keyword overrides.
 
     ``ui_mode`` applies broad defaults first. Values in ``overrides`` win when

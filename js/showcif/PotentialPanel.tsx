@@ -9,8 +9,12 @@ import { ScaleBar } from "./ScaleBar";
 import { interactionConstant } from "./phase";
 import { Slider } from "@mui/material";
 import { CompactSelect, compactSlider, CifControlTheme } from "./controls";
-import { COLORMAP_NAMES, COLORMAP_POINTS } from "../colormaps";
+import { COLORMAP_NAMES, COLORMAP_POINTS } from "../display/colormaps";
 import { PotentialGPU, type PotentialGeometry } from "./potential";
+
+const ENERGY_PRESETS_KEV = [60, 80, 100, 120, 200, 300];
+// Shown only while something else is going on: the ready state is the normal case, so it stays hidden.
+const READY_STATUS = "WebGPU potential · all visible species · finite inspection patch";
 
 type Props = {
   active: boolean;
@@ -38,11 +42,11 @@ export function PotentialPanel({
   const [fps, setFps] = React.useState(5);
   const [preview, setPreview] = React.useState<number | null>(null);
   const previewFrame = React.useRef(0);
-  const g = { ...geometry, slices: potentialSlices };
-  const selectedIndex = Math.min(g.slices - 1, preview ?? index);
+  const panelGeometry = { ...geometry, slices: potentialSlices };
+  const selectedIndex = Math.min(panelGeometry.slices - 1, preview ?? index);
   const averageFrames = temporalAverageFrameIndices(
     selectedIndex,
-    g.slices,
+    panelGeometry.slices,
     averageWidth,
   );
   const onSlice = (i: number) => {
@@ -63,7 +67,7 @@ export function PotentialPanel({
       last = performance.now();
     const tick = (now: number) => {
       if (now - last >= 1000 / fps) {
-        setIndex((i) => (i + 1) % potentialSlices);
+        setIndex((slice) => (slice + 1) % potentialSlices);
         last = now;
       }
       frame = requestAnimationFrame(tick);
@@ -90,6 +94,8 @@ export function PotentialPanel({
   const [colormap, setColormap] = useModelState<string>("potential_colormap");
   const average = quantity === "average",
     phase = quantity === "phase";
+  // Zero potential and zero phase (vacuum) take the colormap's first entry.
+  const vacuum = device ? COLORMAP_POINTS[colormap][0] : null;
   const interaction = interactionConstant(energy);
   const phaseInvalid = phase && interaction === null;
   const [max, setMax] = React.useState(
@@ -97,7 +103,7 @@ export function PotentialPanel({
     ),
     [status, setStatus] = React.useState("Preparing potential preview…");
   const [ready, setReady] = React.useState(0);
-  const count = g.repeats.reduce((a, b) => a * b, atoms.length / 4),
+  const count = panelGeometry.repeats.reduce((a, b) => a * b, atoms.length / 4),
     blocked = count > 8192;
   React.useEffect(() => {
     if (!active || blocked || phaseInvalid || potentialSlices < 2)
@@ -105,30 +111,30 @@ export function PotentialPanel({
   }, [active, blocked, phaseInvalid, potentialSlices]);
   // All planes are computed once per physical geometry. Scrubbing only reduces
   // already-resident planes with the same averaging engine used by Show3D.
-  const computeGeometry = { ...g, limits: [g.zmin, g.zmax] };
+  const computeGeometry = { ...panelGeometry, limits: [panelGeometry.zmin, panelGeometry.zmax] };
   const signature = JSON.stringify(computeGeometry);
   const averageKey = averageFrames?.join(",") ?? "all";
   const draw = () => {
     if (!active || !gpu.current || blocked) return;
-    if (averageFrames) gpu.current.average(averageFrames, g.slices);
-    canvases.current.forEach((c, i) => {
-      if (!c || (i > 1 && !gallery)) return;
+    if (averageFrames) gpu.current.average(averageFrames, panelGeometry.slices);
+    canvases.current.forEach((canvas, i) => {
+      if (!canvas || (i > 1 && !gallery)) return;
       const slot =
         i === 0
           ? averageFrames
-            ? g.slices + 1
-            : g.slices
+            ? panelGeometry.slices + 1
+            : panelGeometry.slices
           : i === 1
-            ? g.slices
+            ? panelGeometry.slices
             : i - 2;
       const dz =
         i === 0
-          ? (g.zmax - g.zmin) / (averageFrames ? g.slices : 1)
+          ? (panelGeometry.zmax - panelGeometry.zmin) / (averageFrames ? panelGeometry.slices : 1)
           : i === 1
-            ? g.zmax - g.zmin
-            : (g.zmax - g.zmin) / g.slices;
+            ? panelGeometry.zmax - panelGeometry.zmin
+            : (panelGeometry.zmax - panelGeometry.zmin) / panelGeometry.slices;
       gpu.current!.draw(
-        c,
+        canvas,
         slot,
         phase ? (interaction ?? 0) : average ? (dz > 0 ? 1 / dz : 0) : 1,
         max,
@@ -141,7 +147,7 @@ export function PotentialPanel({
     const instance = new PotentialGPU(device, atoms, table, pixels);
     gpu.current = instance;
     computedSignature.current = "";
-    setReady((x) => x + 1);
+    setReady((count) => count + 1);
     return () => {
       instance.destroy();
       gpu.current = undefined;
@@ -161,11 +167,9 @@ export function PotentialPanel({
           gpu.current!.compute(computeGeometry, atoms.length / 4);
           computedSignature.current = signature;
         }
-        gpu.current!.filter(blur / (g.span / pixels), g.slices + 2);
+        gpu.current!.filter(blur / (panelGeometry.span / pixels), panelGeometry.slices + 2);
         draw();
-        setStatus(
-          "WebGPU potential · all visible species · finite inspection patch",
-        );
+        setStatus(READY_STATUS);
       } catch (e) {
         setStatus(String(e));
       }
@@ -176,21 +180,22 @@ export function PotentialPanel({
     const frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
   }, [ready, quantity, colormap, max, energy, averageKey, gallery, active]);
-  React.useEffect(() => () => gpu.current?.clearViews(), [g.slices]);
+  React.useEffect(() => () => gpu.current?.clearViews(), [panelGeometry.slices]);
   if (!table.length) return null;
   const units = phase ? "rad" : average ? "V" : "V Å";
+  const energyIsCustom = customEnergy || !ENERGY_PRESETS_KEV.includes(energy);
   return (
     <section className="potential-panel" hidden={!active}>
       <div className="row" aria-label="Potential slice playback">
         <PlayPauseButton
           playing={playing}
           color={colors.accent}
-          disabled={g.slices < 2 || blocked || phaseInvalid}
+          disabled={panelGeometry.slices < 2 || blocked || phaseInvalid}
           label={playing ? "Pause potential slices" : "Play potential slices"}
           onToggle={() => {
             cancelAnimationFrame(previewFrame.current);
             setPreview(null);
-            setPlaying((v) => !v);
+            setPlaying((wasPlaying) => !wasPlaying);
           }}
         />
         <span>Depth</span>
@@ -198,38 +203,38 @@ export function PotentialPanel({
           size="small"
           aria-label="Potential depth slice"
           min={0}
-          max={Math.max(1, g.slices - 1)}
+          max={Math.max(1, panelGeometry.slices - 1)}
           step={1}
-          disabled={g.slices < 2}
+          disabled={panelGeometry.slices < 2}
           value={selectedIndex}
-          onChange={(_, v) => onSlice(v as number)}
+          onChange={(_, slice) => onSlice(slice as number)}
           sx={{ ...compactSlider, flex: 1, maxWidth: 260, mx: 1 }}
         />
         <output>
-          {selectedIndex} / {g.slices - 1}
+          {selectedIndex} / {panelGeometry.slices - 1}
         </output>
         <label>
           Avg{" "}
           <CompactSelect
             label="Potential moving average slices"
-            value={Math.min(g.slices, averageWidth)}
+            value={Math.min(panelGeometry.slices, averageWidth)}
             options={Array.from(
-              { length: Math.min(15, g.slices) },
+              { length: Math.min(15, panelGeometry.slices) },
               (_, i) => [i + 1, String(i + 1)] as const,
             )}
-            onChange={(v) => setAverageWidth(normalizedAverageWindow(v))}
+            onChange={(value) => setAverageWidth(normalizedAverageWindow(value))}
           />
         </label>
         <span className="hint">
           {averageFrames[0]}–{averageFrames[averageFrames.length - 1]} ·{" "}
-          {((averageFrames[0] / g.slices) * (g.zmax - g.zmin) + g.zmin).toFixed(
+          {((averageFrames[0] / panelGeometry.slices) * (panelGeometry.zmax - panelGeometry.zmin) + panelGeometry.zmin).toFixed(
             2,
           )}
           –
           {(
-            ((averageFrames[averageFrames.length - 1] + 1) / g.slices) *
-              (g.zmax - g.zmin) +
-            g.zmin
+            ((averageFrames[averageFrames.length - 1] + 1) / panelGeometry.slices) *
+              (panelGeometry.zmax - panelGeometry.zmin) +
+            panelGeometry.zmin
           ).toFixed(2)}{" "}
           Å
         </span>
@@ -247,23 +252,23 @@ export function PotentialPanel({
               value={potentialSlices}
               style={{ width: 64 }}
               onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isInteger(n) && n >= 1 && n <= 64) {
-                  onSlice(Math.min(index, n - 1));
-                  setPotentialSlices(n);
-                  setAverageWidth(Math.min(averageWidth, n));
+                const count = Number(e.target.value);
+                if (Number.isInteger(count) && count >= 1 && count <= 64) {
+                  onSlice(Math.min(index, count - 1));
+                  setPotentialSlices(count);
+                  setAverageWidth(Math.min(averageWidth, count));
                 }
               }}
             />
           </label>
-          <span>{((g.zmax - g.zmin) / g.slices).toFixed(3)} Å / slice</span>
+          <span>{((panelGeometry.zmax - panelGeometry.zmin) / panelGeometry.slices).toFixed(3)} Å / slice</span>
           <label>
             fps{" "}
             <CompactSelect
               label="Potential playback frames per second"
               value={fps}
-              options={[1, 2, 5, 10, 15].map((n) => [n, String(n)] as const)}
-              onChange={(v) => setFps(Number(v))}
+              options={[1, 2, 5, 10, 15].map((option) => [option, String(option)] as const)}
+              onChange={(value) => setFps(Number(value))}
             />
           </label>
         </div>
@@ -284,9 +289,9 @@ export function PotentialPanel({
             ["average", "Average · V"],
             ["phase", "Phase · rad"],
           ]}
-          onChange={(v) => {
-            setQuantity(v);
-            setMax(v === "phase" ? 1 : v === "average" ? 100 : 1000);
+          onChange={(value) => {
+            setQuantity(value);
+            setMax(value === "phase" ? 1 : value === "average" ? 100 : 1000);
           }}
         />
         <label>
@@ -295,7 +300,7 @@ export function PotentialPanel({
             label="Potential colormap"
             value={colormap}
             options={COLORMAP_NAMES.map(
-              (n) => [n, n.charAt(0).toUpperCase() + n.slice(1)] as const,
+              (name) => [name, name.charAt(0).toUpperCase() + name.slice(1)] as const,
             )}
             onChange={setColormap}
           />
@@ -305,8 +310,8 @@ export function PotentialPanel({
           <CompactSelect
             label="Potential panel columns"
             value={columns}
-            options={[1, 2, 3, 4].map((n) => [n, String(n)] as const)}
-            onChange={(v) => setColumns(Number(v))}
+            options={[1, 2, 3, 4].map((option) => [option, String(option)] as const)}
+            onChange={(value) => setColumns(Number(value))}
           />
         </label>
         {phase && (
@@ -314,42 +319,37 @@ export function PotentialPanel({
             Energy{" "}
             <CompactSelect
               label="Electron energy preset"
-              value={
-                customEnergy || ![60, 80, 100, 120, 200, 300].includes(energy)
-                  ? "custom"
-                  : energy
-              }
+              value={energyIsCustom ? "custom" : energy}
               options={[
-                ...[60, 80, 100, 120, 200, 300].map(
-                  (n) => [n, `${n} keV`] as const,
+                ...ENERGY_PRESETS_KEV.map(
+                  (kev) => [kev, `${kev} keV`] as const,
                 ),
                 ["custom", "Custom…"],
               ]}
-              onChange={(v) => {
-                setCustomEnergy(v === "custom");
-                if (v !== "custom") setEnergy(Number(v));
+              onChange={(value) => {
+                setCustomEnergy(value === "custom");
+                if (value !== "custom") setEnergy(Number(value));
               }}
             />
           </label>
         )}
-        {phase &&
-          (customEnergy || ![60, 80, 100, 120, 200, 300].includes(energy)) && (
-            <label>
-              <input
-                type="number"
-                aria-label="Electron energy in keV"
-                min="0"
-                max="300"
-                value={energy}
-                style={{ width: 72 }}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 0 && v <= 300) setEnergy(v);
-                }}
-              />{" "}
-              keV
-            </label>
-          )}
+        {phase && energyIsCustom && (
+          <label>
+            <input
+              type="number"
+              aria-label="Electron energy in keV"
+              min="0"
+              max="300"
+              value={energy}
+              style={{ width: 72 }}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value >= 0 && value <= 300) setEnergy(value);
+              }}
+            />{" "}
+            keV
+          </label>
+        )}
         <button
           aria-pressed={gallery}
           onClick={() => setGallery(!gallery)}
@@ -369,8 +369,8 @@ export function PotentialPanel({
             value={max}
             style={{ width: 75 }}
             onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v) && v > 0) setMax(v);
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) setMax(value);
             }}
           />{" "}
           {units}
@@ -382,10 +382,10 @@ export function PotentialPanel({
           size="small"
           aria-label="Potential display blur in angstrom"
           min={0}
-          max={Math.min(1, (32 * g.span) / pixels)}
+          max={Math.min(1, (32 * panelGeometry.span) / pixels)}
           step={0.01}
           value={blur}
-          onChange={(_, v) => setBlur(v as number)}
+          onChange={(_, value) => setBlur(value as number)}
           sx={{ ...compactSlider, width: 120 }}
         />
         <output>{blur.toFixed(2)} Å</output>
@@ -419,14 +419,13 @@ export function PotentialPanel({
           {max} {units}
         </span>
       </div>
-      {average && g.limits[1] <= g.limits[0] && (
+      {average && panelGeometry.limits[1] <= panelGeometry.limits[0] && (
         <p className="hint">
           Zero-thickness selection: the average is undefined; an empty map is
           shown.
         </p>
       )}
-      {status !==
-        "WebGPU potential · all visible species · finite inspection patch" && (
+      {status !== READY_STATUS && (
         <p role="status">{status}</p>
       )}
       <div style={{ display: blocked || phaseInvalid ? "none" : undefined }}>
@@ -451,7 +450,7 @@ export function PotentialPanel({
                     canvases.current[i] = el;
                   }}
                 />
-                <ScaleBar span={g.span} />
+                <ScaleBar span={panelGeometry.span} backdrop={vacuum} />
               </div>
             </figure>
           ))}
@@ -466,7 +465,7 @@ export function PotentialPanel({
             } as React.CSSProperties
           }
         >
-          {Array.from({ length: g.slices }, (_, i) => (
+          {Array.from({ length: panelGeometry.slices }, (_, i) => (
             <figure key={i}>
               <button
                 className="slice-image"
@@ -484,12 +483,12 @@ export function PotentialPanel({
                     canvases.current[i + 2] = el;
                   }}
                 />
-                <ScaleBar span={g.span} />
+                <ScaleBar span={panelGeometry.span} backdrop={vacuum} />
               </button>
               <figcaption>
                 #{i} ·{" "}
-                {(g.zmin + (i * (g.zmax - g.zmin)) / g.slices).toFixed(2)}–
-                {(g.zmin + ((i + 1) * (g.zmax - g.zmin)) / g.slices).toFixed(2)}{" "}
+                {(panelGeometry.zmin + (i * (panelGeometry.zmax - panelGeometry.zmin)) / panelGeometry.slices).toFixed(2)}–
+                {(panelGeometry.zmin + ((i + 1) * (panelGeometry.zmax - panelGeometry.zmin)) / panelGeometry.slices).toFixed(2)}{" "}
                 Å
               </figcaption>
             </figure>
@@ -516,12 +515,12 @@ export function PotentialPanel({
         </p>
         <p className="hint">
           Explicit transverse Gaussian preview filter σ {sigma} Å; not a thermal
-          model. {pixels} × {pixels} grid · {(g.span / pixels).toFixed(4)} Å/px
-          · {g.span.toFixed(2)} Å view width · 2 × 2 pixel quadrature · radial
+          model. {pixels} × {pixels} grid · {(panelGeometry.span / pixels).toFixed(4)} Å/px
+          · {panelGeometry.span.toFixed(2)} Å view width · 2 × 2 pixel quadrature · radial
           cutoff 8 Å. Inspection-cell boundaries are open, with no periodic
           atoms added outside the chosen repeats.
         </p>
-        {g.span / pixels > sigma && (
+        {panelGeometry.span / pixels > sigma && (
           <p className="hint">
             Preview pixels exceed the Gaussian width. Use fewer repeats or a
             larger potential_pixels grid for sharper inspection.

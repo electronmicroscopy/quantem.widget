@@ -24,19 +24,13 @@ replacement, so concurrent writers each end up locking different inodes
 and the lock is a no-op. Locking a stable sidecar (``<path>.lock``) keeps
 the lock identity independent of the data file.
 """
-from __future__ import annotations
 
 import fcntl
 import json
-import logging
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TypeVar
-
-logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 def atomic_write_json(path: str | Path, data: object, *, indent: int = 2) -> Path:
@@ -51,21 +45,21 @@ def atomic_write_json(path: str | Path, data: object, *, indent: int = 2) -> Pat
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
+    temporary_fd, temporary_name = tempfile.mkstemp(
         dir=str(path.parent),
         prefix=f".{path.name}.",
         suffix=".tmp",
     )
-    tmp = Path(tmp_str)
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=indent)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        with os.fdopen(temporary_fd, "w") as handle:
+            json.dump(data, handle, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     except (OSError, TypeError, ValueError):
         try:
-            os.unlink(tmp)
+            os.unlink(temporary)
         except OSError:
             pass
         raise
@@ -97,8 +91,7 @@ def locked_json_rmw(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".lock")
-    # Open the lock file (create-if-missing) and hold an exclusive flock
-    # for the whole read-modify-write. Closing the fd releases the lock.
+    # the lock lives until lock_fd closes in the finally below
     lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)

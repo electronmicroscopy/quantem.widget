@@ -31,7 +31,7 @@ export const MEASUREMENT_COLUMNS = [
   "note",
 ] as const;
 
-export type MeasurementRecord = Record<
+type MeasurementRecord = Record<
   (typeof MEASUREMENT_COLUMNS)[number],
   string | number | null
 >;
@@ -75,7 +75,7 @@ interface RingLike {
 }
 
 /** Export row for one spot record. */
-export function spotMeasurementRecord(spot: SpotLike): MeasurementRecord {
+function spotMeasurementRecord(spot: SpotLike): MeasurementRecord {
   return {
     id: spot.id,
     kind: "spot",
@@ -105,7 +105,7 @@ export function spotMeasurementRecord(spot: SpotLike): MeasurementRecord {
 }
 
 /** Export row for one ring record. */
-export function ringMeasurementRecord(ring: RingLike): MeasurementRecord {
+function ringMeasurementRecord(ring: RingLike): MeasurementRecord {
   return {
     id: ring.id,
     kind: "ring",
@@ -141,11 +141,11 @@ export function buildMeasurementRecords(spots: SpotLike[], rings: RingLike[]): M
 
 /** CSV text with the full column schema. */
 export function measurementCsv(records: MeasurementRecord[]): string {
-  const esc = (v: string | number | null) => {
-    const s = v == null ? "" : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const escapeCsv = (value: string | number | null) => {
+    const text = value == null ? "" : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
-  const rows = records.map((record) => MEASUREMENT_COLUMNS.map((c) => esc(record[c])).join(","));
+  const rows = records.map((record) => MEASUREMENT_COLUMNS.map((column) => escapeCsv(record[column])).join(","));
   return [MEASUREMENT_COLUMNS.join(","), ...rows].join("\n");
 }
 

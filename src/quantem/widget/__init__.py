@@ -1,6 +1,6 @@
-import os as _os
-import warnings as _warnings
-from importlib import import_module as _import_module
+import os
+import warnings
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 
 # Silence two noisy-but-harmless warnings at import, BEFORE anything imports cupy
@@ -12,64 +12,32 @@ from importlib.metadata import PackageNotFoundError, version
 #     advisory; the working cupy still loads.
 #   - huggingface_hub "HF_TOKEN secret does not exist": our datasets are PUBLIC,
 #     no token needed. The nudge wrongly implies auth is required.
-_os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
-_warnings.filterwarnings("ignore", message=r"(?s).*multiple CuPy packages.*")
-_warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+warnings.filterwarnings("ignore", message=r"(?s).*multiple CuPy packages.*")
+warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
 
 _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     "ChooseLattice": ("quantem.widget.choose_lattice", "ChooseLattice"),
-    "Mask2D": ("quantem.widget.mask2d", "Mask2D"),
     "ShowCIF": ("quantem.widget.showcif", "ShowCIF"),
-    "PlanPtycho": ("quantem.widget.planptycho", "PlanPtycho"),
     "Show1D": ("quantem.widget.show1d", "Show1D"),
     "Plot2D": ("quantem.widget.plot2d", "Plot2D"),
     "Show2D": ("quantem.widget.show2d", "Show2D"),
     "Show3D": ("quantem.widget.show3d", "Show3D"),
     "Show3DSlices": ("quantem.widget.show3dslices", "Show3DSlices"),
-    "Show4DSTEM": ("quantem.widget.show4dstem_factory", "Show4DSTEM"),
+    "Show4DSTEM": ("quantem.widget.show4dstem", "Show4DSTEM"),
     "ShowDiffraction": ("quantem.widget.showdiffraction", "ShowDiffraction"),
     "Phase": ("quantem.widget.showdiffraction", "Phase"),
     "library_phase": ("quantem.widget.showdiffraction", "library_phase"),
-    "ShowEDS": ("quantem.widget.showeds", "ShowEDS"),
     "ShowPtycho": ("quantem.widget.showptycho", "ShowPtycho"),
-    "PtychoCalibration": ("quantem.widget.showptycho", "PtychoCalibration"),
-    "load_ptycho_calibration": (
-        "quantem.widget.showptycho",
-        "load_ptycho_calibration",
-    ),
-    "SpectrumImage": ("quantem.widget.showeds", "SpectrumImage"),
-    "bin_spectrum_image": ("quantem.widget.showeds", "bin_spectrum_image"),
-    "load_eds": ("quantem.widget.showeds", "load_eds"),
-    "load_emd_spectrum_image": (
-        "quantem.widget.showeds",
-        "load_emd_spectrum_image",
-    ),
-    "read_gif": ("quantem.widget.io.image", "read_gif"),
+    "read_4dstem": ("quantem.widget.show4dstem.reader", "read_4dstem"),
     "read_image": ("quantem.widget.io.image", "read_image"),
     "read_image_stack": ("quantem.widget.io.image", "read_image_stack"),
     "read_images": ("quantem.widget.io.image", "read_images"),
-    "movie": ("quantem.widget.movie", None),
-    "first_existing": ("quantem.widget.paths", "first_existing"),
     "gpu_info": ("quantem.widget.gpu", "gpu_info"),
     "FolderPicker": ("quantem.widget.folder_picker", "FolderPicker"),
     "pick_folder": ("quantem.widget.folder_picker", "pick_folder"),
-    "HTML_EXPORT_TRAITS": ("quantem.widget.export", "HTML_EXPORT_TRAITS"),
-    "SupportsFrontendHtmlExport": (
-        "quantem.widget.export",
-        "SupportsFrontendHtmlExport",
-    ),
-    "SupportsHtmlExport": ("quantem.widget.export", "SupportsHtmlExport"),
-    "supports_html_export": ("quantem.widget.export", "supports_html_export"),
     "device_info": ("quantem.widget.info", "device_info"),
     "profile": ("quantem.widget.info", "profile"),
-    "WidgetProfile": ("quantem.widget._timing", "WidgetProfile"),
-    "format_timing_table": ("quantem.widget._timing", "format_timing_table"),
-    "format_widget_render_timing": (
-        "quantem.widget._timing",
-        "format_widget_render_timing",
-    ),
-    "profile_widget": ("quantem.widget._timing", "profile_widget"),
-    "widget_timing_report": ("quantem.widget._timing", "widget_timing_report"),
 }
 
 
@@ -87,16 +55,21 @@ def __getattr__(name: str):
     if export is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module_name, attribute_name = export
-    module = _import_module(module_name)
+    module = import_module(module_name)
     value = module if attribute_name is None else module.__dict__[attribute_name]
     globals()[name] = value
     return value
 
 
 def __dir__() -> list[str]:
-    """Include explicit lazy exports in interactive discovery."""
+    """Include explicit lazy exports in interactive discovery.
 
-    return sorted(set(globals()) | set(_LAZY_EXPORTS))
+    The stdlib modules this file imports for its own setup (``os``,
+    ``warnings``, ``import_module``) are left out, so tab completion on
+    ``quantem.widget.`` lists quantem names only.
+    """
+
+    return sorted((set(globals()) - {"os", "warnings", "import_module"}) | set(_LAZY_EXPORTS))
 
 
 def free_gpu(verbose: bool = True) -> float:
@@ -115,44 +88,44 @@ def free_gpu(verbose: bool = True) -> float:
     freed 38.6 GB  (40.5 -> 1.8)
     """
     import gc
+
+    import torch
+
     gc.collect()
-    try:
-        import torch
-    except ImportError:
-        if verbose:
-            print("torch not importable - nothing to free")
-        return 0.0
     if torch.cuda.is_available():
-        n = torch.cuda.device_count()
-        used = lambda: sum(total - free for free, total in (torch.cuda.mem_get_info(i) for i in range(n))) / 1e9
-        before = used()
+        device_count = torch.cuda.device_count()
+
+        def used_gb() -> float:
+            """Memory in use on every visible GPU, in GB, as the driver reports it."""
+            return sum(total - free for free, total in map(torch.cuda.mem_get_info, range(device_count))) / 1e9
+
+        before = used_gb()
         try:
             import cupy as cp
         except ImportError:
             cp = None
-        for i in range(n):
-            with torch.cuda.device(i):
+        for index in range(device_count):
+            with torch.cuda.device(index):
                 torch.cuda.empty_cache()
             if cp is not None:
-                cp.cuda.Device(i).use()
+                cp.cuda.Device(index).use()
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
         if cp is not None:
             cp.cuda.Device(0).use()   # leave the default device on GPU0 so the next load lands where it expects
-        after = used()
+        after = used_gb()
         if verbose:
-            for i in range(n):
-                free, total = torch.cuda.mem_get_info(i)
-                print(f"GPU{i}: {(total - free) / 1e9:5.1f} GB used  ({free / 1e9:.0f} GB free)")
+            for index in range(device_count):
+                free, total = torch.cuda.mem_get_info(index)
+                print(f"GPU{index}: {(total - free) / 1e9:5.1f} GB used  ({free / 1e9:.0f} GB free)")
         return before - after
-    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
-    if mps:
-        cur = torch.mps.current_allocated_memory() if hasattr(torch.mps, "current_allocated_memory") else 0
+    if torch.backends.mps.is_available():
+        allocated_before = torch.mps.current_allocated_memory()
         torch.mps.empty_cache()
-        post = torch.mps.current_allocated_memory() if hasattr(torch.mps, "current_allocated_memory") else 0
+        allocated_after = torch.mps.current_allocated_memory()
         if verbose:
-            print(f"freed {(cur - post) / 1e9:.1f} GB (MPS)")
-        return (cur - post) / 1e9
+            print(f"freed {(allocated_before - allocated_after) / 1e9:.1f} GB (MPS)")
+        return (allocated_before - allocated_after) / 1e9
     if verbose:
         print("no GPU - nothing to free")
     return 0.0
@@ -160,33 +133,21 @@ def free_gpu(verbose: bool = True) -> float:
 
 __all__ = [
     "ChooseLattice",
-    "PlanPtycho",
     "Show1D",
     "Plot2D",
     "Show2D",
     "Show3D",
     "Show3DSlices",
     "Show4DSTEM",
+    "ShowCIF",
     "Phase",
     "ShowDiffraction",
     "library_phase",
-    "ShowEDS",
     "ShowPtycho",
-    "PtychoCalibration",
-    "load_ptycho_calibration",
-    "SpectrumImage",
-    "bin_spectrum_image",
-    "load_eds",
-    "load_emd_spectrum_image",
-    "read_gif",
+    "read_4dstem",
     "read_image",
     "read_image_stack",
     "read_images",
-    "movie",
-    "HTML_EXPORT_TRAITS",
-    "SupportsFrontendHtmlExport",
-    "SupportsHtmlExport",
-    "supports_html_export",
     "device_info",
     "profile",
     "free_gpu",

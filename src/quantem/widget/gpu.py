@@ -50,23 +50,16 @@ def gpu_info(device_id: int | None = None) -> None:
         GPU device index. If None, uses the current device.
     """
     import cupy as cp
-    if device_id is not None:
-        dev = cp.cuda.Device(device_id)
-    else:
-        dev = cp.cuda.Device()
 
-    with dev:
-        # Physical VRAM
+    device = cp.cuda.Device(device_id)  # None is the current device
+    with device:
         vram_free, vram_total = cp.cuda.runtime.memGetInfo()
-        # CuPy device memory pool
         pool = cp.get_default_memory_pool()
         pool_total = pool.total_bytes()
         pool_used = pool.used_bytes()
         pool_cached = pool_total - pool_used
-
-        # GPU name
-        props = cp.cuda.runtime.getDeviceProperties(dev.id)
-        gpu_name = props["name"].decode() if isinstance(props["name"], bytes) else props["name"]
+        properties = cp.cuda.runtime.getDeviceProperties(device.id)
+        gpu_name = properties["name"].decode() if isinstance(properties["name"], bytes) else properties["name"]
 
     vram_free_gb = vram_free / (1 << 30)
     vram_total_gb = vram_total / (1 << 30)

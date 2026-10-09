@@ -19,7 +19,6 @@ The launcher is additive: double-clicking ``index.html`` and granting the folder
 still works for users who prefer that. The generated files never contain private
 paths - only the folder is served, from wherever the user placed it.
 """
-from __future__ import annotations
 
 import pathlib
 
@@ -34,6 +33,8 @@ from pathlib import Path
 
 
 class RangeHandler(SimpleHTTPRequestHandler):
+    """Static files with byte ranges, plus writes limited to the viewer's snapshot files."""
+
     def end_headers(self):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -63,8 +64,8 @@ class RangeHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
         size = path.stat().st_size
-        rng = self.headers.get("Range")
-        if not rng:
+        range_header = self.headers.get("Range")
+        if not range_header:
             self.send_response(200)
             self.send_header("Content-Type", self.guess_type(str(path)))
             self.send_header("Content-Length", str(size))
@@ -72,7 +73,7 @@ class RangeHandler(SimpleHTTPRequestHandler):
             with open(path, "rb") as handle:
                 self.wfile.write(handle.read())
             return
-        start_text, _, end_text = rng.replace("bytes=", "").partition("-")
+        start_text, _, end_text = range_header.replace("bytes=", "").partition("-")
         start = int(start_text)
         end = int(end_text) if end_text else size - 1
         end = min(end, size - 1)
@@ -98,29 +99,26 @@ class RangeHandler(SimpleHTTPRequestHandler):
         self._serve()
 
     def _snapshot_write_path(self, *, allow_json):
+        """The file a PUT or DELETE may touch, or None after a 403.
+
+        A viewer saves only its snapshot images and their index, so any other
+        path is refused: the server must never let a page overwrite data.
+        """
         raw = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
-        rel = posixpath.normpath(raw).lstrip("/")
-        parts = Path(rel).parts
-        if len(parts) == 2 and parts[0] == "snapshots":
-            pass
-        elif len(parts) == 3 and parts[1] == "snapshots":
-            pass
-        else:
+        relative = posixpath.normpath(raw).lstrip("/")
+        parts = Path(relative).parts
+        in_snapshots = (len(parts) == 2 and parts[0] == "snapshots") or (len(parts) == 3 and parts[1] == "snapshots")
+        if not in_snapshots:
             self.send_error(403, "writes are restricted to dataset snapshots")
             return None
         name = parts[-1]
-        if allow_json and name == "snapshots.json":
-            pass
-        elif (
-            name.startswith("snapshot_")
-            and (name.endswith(".jpg") or name.endswith(".jpeg"))
-        ):
-            pass
-        else:
+        is_index = allow_json and name == "snapshots.json"
+        is_image = name.startswith("snapshot_") and name.endswith((".jpg", ".jpeg"))
+        if not (is_index or is_image):
             self.send_error(403, "writes are restricted to snapshots")
             return None
         root = Path.cwd().resolve()
-        path = (root / rel).resolve()
+        path = (root / relative).resolve()
         try:
             path.parent.relative_to(root)
         except ValueError:
@@ -147,10 +145,7 @@ class RangeHandler(SimpleHTTPRequestHandler):
         path = self._snapshot_write_path(allow_json=False)
         if path is None:
             return
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        path.unlink(missing_ok=True)
         self.send_response(204)
         self.end_headers()
 
@@ -190,7 +185,7 @@ import urllib.request
 url = "http://127.0.0.1:" + sys.argv[1] + "/__quantem_viewer_root__"
 try:
     print(urllib.request.urlopen(url, timeout=0.5).read().decode("utf-8").strip())
-except Exception:
+except (OSError, ValueError):
     pass
 PY
 )"
@@ -216,7 +211,7 @@ import urllib.request
 url = "http://127.0.0.1:" + sys.argv[1] + "/__quantem_viewer_root__"
 try:
     print(urllib.request.urlopen(url, timeout=0.1).read().decode("utf-8").strip())
-except Exception:
+except (OSError, ValueError):
     pass
 PY
 )"

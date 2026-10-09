@@ -17,7 +17,7 @@ import {
 import { extractFloat32 } from "../format";
 import { ScaleBar } from "./ScaleBar";
 import { PotentialPanel } from "./PotentialPanel";
-import { AtomRenderer } from "./render";
+import { AtomRenderer, SCENE_CLEAR } from "./render";
 import {
   projectionBasis,
   specimenTiltBasis,
@@ -63,8 +63,8 @@ function App() {
   }, [savedTilt]);
   React.useEffect(() => () => cancelAnimationFrame(tiltFrame.current), []);
   const changeTilt = (axis: number, value: number) => {
-    tiltDraft.current = tiltDraft.current.map((v, i) =>
-      i === axis ? value : v,
+    tiltDraft.current = tiltDraft.current.map((angle, index) =>
+      index === axis ? value : angle,
     );
     if (!tiltFrame.current)
       tiltFrame.current = requestAnimationFrame(() => {
@@ -91,6 +91,8 @@ function App() {
   const unitFactor = fovUnit === "nm" ? 10 : 1;
   const hasCalibration = calibration?.length === 2;
   const [gpuDevice, setGpuDevice] = React.useState<GPUDevice>();
+  // Atom sprites are WebGPU-only; without an adapter the panels say so instead of staying blank.
+  const [gpuMissing, setGpuMissing] = React.useState("");
   const potentialTable = React.useMemo(
     () => extractFloat32(potentialBytes) ?? new Float32Array(),
     [potentialBytes],
@@ -106,9 +108,9 @@ function App() {
   const [averageWidth, setAverageWidth] = React.useState(1);
   const [previewSlice, setPreviewSlice] = React.useState<number | null>(null);
   const previewFrame = React.useRef(0);
-  const preview = (i: number | null) => {
+  const preview = (slice: number | null) => {
     cancelAnimationFrame(previewFrame.current);
-    previewFrame.current = requestAnimationFrame(() => setPreviewSlice(i));
+    previewFrame.current = requestAnimationFrame(() => setPreviewSlice(slice));
   };
   React.useEffect(() => () => cancelAnimationFrame(previewFrame.current), []);
   const selectedIndex = Math.min(sliceCount - 1, previewSlice ?? sliceIndex);
@@ -124,13 +126,13 @@ function App() {
     : [0, 1];
   const [radius, setRadius] = React.useState(5),
     [zoom, setZoom] = React.useState(1);
-  const refs = [
+  const canvasRefs = [
     React.useRef<HTMLCanvasElement>(null),
     React.useRef<HTMLCanvasElement>(null),
     React.useRef<HTMLCanvasElement>(null),
     React.useRef<HTMLCanvasElement>(null),
   ];
-  const lines = [
+  const outlineRefs = [
     React.useRef<SVGSVGElement>(null),
     React.useRef<SVGSVGElement>(null),
     React.useRef<SVGSVGElement>(null),
@@ -138,7 +140,7 @@ function App() {
   ];
   const renderers = React.useRef<AtomRenderer[]>([]),
     angles = React.useRef([0.55, 0.35]);
-  const pending = React.useRef(0),
+  const drawFrame = React.useRef(0),
     drawRef = React.useRef(() => {}),
     drag = React.useRef<{
       x: number;
@@ -151,19 +153,19 @@ function App() {
     [bytes],
   );
   const cell = React.useMemo(
-    () => unit.map((v, i) => v.map((x) => x * repeats[i])),
+    () => unit.map((vector, axis) => vector.map((component) => component * repeats[axis])),
     [unit, repeats],
   );
-  const copies = repeats.reduce((n, x) => n * x, 1);
+  const copies = repeats.reduce((product, count) => product * count, 1);
   const atomCount = repeatCount(atoms.length / 4, repeats);
   const species = React.useMemo(
     () =>
-      savedSpecies.map((s, i) => ({
-        ...s,
+      savedSpecies.map((entry, speciesIndex) => ({
+        ...entry,
         count:
-          Array.from({ length: atoms.length / 4 }, (_, k) =>
-            atoms[k * 4 + 3] === i ? 1 : 0,
-          ).reduce((a: number, b: number) => a + b, 0) * copies,
+          Array.from({ length: atoms.length / 4 }, (_, atom) =>
+            atoms[atom * 4 + 3] === speciesIndex ? 1 : 0,
+          ).reduce((total: number, hit: number) => total + hit, 0) * copies,
       })),
     [savedSpecies, atoms, copies],
   );
@@ -177,8 +179,8 @@ function App() {
     const values = draft.map(Number);
     try {
       repeatCount(atoms.length / 4, values);
-    } catch (e) {
-      setRepeatError(String((e as Error).message));
+    } catch (error) {
+      setRepeatError(String((error as Error).message));
       return;
     }
     setRepeatError("");
@@ -193,18 +195,18 @@ function App() {
     [unit, zone, tilt],
   );
   const center = corners[7].map((v) => v / 2) as V3;
-  const depth = corners.map((p) => dot(p, basis.beam));
+  const depth = corners.map((corner) => dot(corner, basis.beam));
   const zmin = Math.min(...depth),
     zmax = Math.max(...depth);
   const lateral =
-    Math.max(...corners.map((p) => dot(p, basis.right))) -
-    Math.min(...corners.map((p) => dot(p, basis.right)));
+    Math.max(...corners.map((corner) => dot(corner, basis.right))) -
+    Math.min(...corners.map((corner) => dot(corner, basis.right)));
   const vertical =
-    Math.max(...corners.map((p) => dot(p, basis.up))) -
-    Math.min(...corners.map((p) => dot(p, basis.up)));
+    Math.max(...corners.map((corner) => dot(corner, basis.up))) -
+    Math.min(...corners.map((corner) => dot(corner, basis.up)));
   const size =
     Math.max(
-      ...corners.map((p) => Math.hypot(...p.map((v, i) => v - center[i]))),
+      ...corners.map((corner) => Math.hypot(...corner.map((v, i) => v - center[i]))),
     ) * 2;
   const spans = [
     (size * 1.15) / zoom,
@@ -224,10 +226,12 @@ function App() {
     zmin + slab[0] * (zmax - zmin),
     zmin + slab[1] * (zmax - zmin),
   ];
+  // Slab clip tolerance of 1e-5 slice, so atoms exactly on a slab boundary survive roundoff.
+  const boundaryEpsilon = ((zmax - zmin) / sliceCount) * 1e-5;
   const schedule = () => {
-    if (!pending.current)
-      pending.current = requestAnimationFrame(() => {
-        pending.current = 0;
+    if (!drawFrame.current)
+      drawFrame.current = requestAnimationFrame(() => {
+        drawFrame.current = 0;
         drawRef.current();
       });
   };
@@ -239,44 +243,44 @@ function App() {
     [],
   );
   drawRef.current = () => {
-    viewBases().forEach((b, i) => {
-      if ((i === 1 && !showProjection) || (i > 1 && !orthogonal)) return;
-      renderers.current[i]?.draw(
+    viewBases().forEach((view, panel) => {
+      if ((panel === 1 && !showProjection) || (panel > 1 && !orthogonal)) return;
+      renderers.current[panel]?.draw(
         atomCount,
-        b,
+        view,
         center,
-        spans[i],
+        spans[panel],
         basis.beam,
         limits,
-        species.map((s) => s.color),
+        species.map((entry) => entry.color),
         visible,
         radius,
         unit,
         repeats,
         atoms.length / 4,
         limits[1] >= zmax,
-        ((zmax - zmin) / sliceCount) * 1e-5,
+        boundaryEpsilon,
       );
-      const box = refs[i].current?.getBoundingClientRect();
+      const box = canvasRefs[panel].current?.getBoundingClientRect();
       if (!box) return;
-      const svg = lines[i].current;
+      const svg = outlineRefs[panel].current;
       if (!svg) return;
-      const pos = corners.map((p) => {
-        const q = p.map((v, j) => v - center[j]);
+      const screen = corners.map((corner) => {
+        const offset = corner.map((coordinate, axis) => coordinate - center[axis]);
         return [
-          50 + (dot(q, b.right) * 100) / spans[i],
-          50 - (((dot(q, b.up) * 100) / spans[i]) * box.width) / box.height,
+          50 + (dot(offset, view.right) * 100) / spans[panel],
+          50 - (((dot(offset, view.up) * 100) / spans[panel]) * box.width) / box.height,
         ];
       });
-      [...svg.querySelectorAll("line")].forEach((line, j) => {
-        const [a, c] = edges[j];
-        for (const [name, v] of Object.entries({
-          x1: pos[a][0],
-          y1: pos[a][1],
-          x2: pos[c][0],
-          y2: pos[c][1],
+      [...svg.querySelectorAll("line")].forEach((line, edge) => {
+        const [from, to] = edges[edge];
+        for (const [name, value] of Object.entries({
+          x1: screen[from][0],
+          y1: screen[from][1],
+          x2: screen[to][0],
+          y2: screen[to][1],
         }))
-          line.setAttribute(name, String(v));
+          line.setAttribute(name, String(value));
       });
     });
   };
@@ -285,39 +289,48 @@ function App() {
     let device: GPUDevice | undefined;
     const observer = new ResizeObserver(schedule);
     (async () => {
-      if (!navigator.gpu)
-        throw Error(
-          "WebGPU unavailable. Open this widget over HTTPS or localhost in a WebGPU browser.",
-        );
+      if (!navigator.gpu) {
+        // Say what the reader can change: only a page that is not a secure context
+        // needs HTTPS or localhost; on a secure page WebGPU is off or unsupported.
+        const reason = window.isSecureContext
+          ? "navigator.gpu is missing, so WebGPU is turned off or not supported in this browser"
+          : "this page is not a secure context, so the browser hides WebGPU; open it over HTTPS or localhost";
+        setGpuMissing(reason);
+        throw Error(reason);
+      }
       const adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) throw Error("No WebGPU adapter available.");
+      if (!adapter) {
+        const reason = "the browser found no WebGPU adapter";
+        setGpuMissing(reason);
+        throw Error(reason);
+      }
       device = await adapter.requestDevice();
       if (cancelled) {
         device.destroy();
         return;
       }
-      device.addEventListener("uncapturederror", (e) =>
-        setStatus("WebGPU error: " + e.error.message),
+      device.addEventListener("uncapturederror", (error) =>
+        setStatus("WebGPU error: " + error.error.message),
       );
-      renderers.current = refs.map(
-        (r) =>
+      renderers.current = canvasRefs.map(
+        (canvasRef) =>
           new AtomRenderer(
-            r.current!,
+            canvasRef.current!,
             device!,
             atoms,
-            species.map((s) => s.color),
+            species.map((entry) => entry.color),
           ),
       );
-      refs.forEach((r) => observer.observe(r.current!));
+      canvasRefs.forEach((canvasRef) => observer.observe(canvasRef.current!));
       setGpuDevice(device);
       setStatus("WebGPU · exact atomic positions · display filters only");
       schedule();
-    })().catch((e) => setStatus(String(e)));
+    })().catch((error) => setStatus(String(error)));
     return () => {
       cancelled = true;
       observer.disconnect();
-      cancelAnimationFrame(pending.current);
-      renderers.current.forEach((r) => r.destroy());
+      cancelAnimationFrame(drawFrame.current);
+      renderers.current.forEach((renderer) => renderer.destroy());
       renderers.current = [];
       setGpuDevice(undefined);
       device?.destroy();
@@ -336,62 +349,64 @@ function App() {
     orthogonal,
     showProjection,
   ]);
-  const selectZone = (v: number[]) => {
+  const selectZone = (uvw: number[]) => {
     if (
-      v.length !== 3 ||
-      !v.some((x) => x !== 0) ||
-      v.some((x) => !Number.isInteger(x))
+      uvw.length !== 3 ||
+      !uvw.some((component) => component !== 0) ||
+      uvw.some((component) => !Number.isInteger(component))
     ) {
       setPick("Enter three integers [u v w], not all zero.");
       return;
     }
-    setZone(v);
-    setDraft(v.join(" "));
+    setZone(uvw);
+    setDraft(uvw.join(" "));
     setPick("Projection direction changed; 3D camera rotation is independent.");
   };
+  // A click hits every visible atom drawn within the sprite radius (+3 px) of it. The slab test
+  // mirrors the atom shader's clip, so the readout only lists atoms the panel shows.
   const inspect = (e: React.PointerEvent<HTMLCanvasElement>, panel: number) => {
     const box = e.currentTarget.getBoundingClientRect(),
-      x = ((e.clientX - box.left - box.width / 2) * spans[panel]) / box.width,
-      y = (-(e.clientY - box.top - box.height / 2) * spans[panel]) / box.width;
-    const b = viewBases()[panel];
+      clickRight = ((e.clientX - box.left - box.width / 2) * spans[panel]) / box.width,
+      clickUp = (-(e.clientY - box.top - box.height / 2) * spans[panel]) / box.width;
+    const view = viewBases()[panel];
     const tolerance = ((radius + 3) * spans[panel]) / box.width;
     const hits: {
       id: number;
-      s: number;
-      z: number;
-      cameraZ: number;
-      pos: number[];
+      species: number;
+      depth: number;
+      cameraDepth: number;
+      position: number[];
     }[] = [];
     for (let i = 0; i < atomCount; i++) {
       const atom = repeatedAtom(atoms, unit, repeats, i);
-      const s = atom[3];
-      if (!visible[s]) continue;
-      const p = atom.slice(0, 3),
-        z = dot(p, basis.beam);
+      const speciesIndex = atom[3];
+      if (!visible[speciesIndex]) continue;
+      const position = atom.slice(0, 3),
+        depth = dot(position, basis.beam);
       if (
-        z < limits[0] - ((zmax - zmin) / sliceCount) * 1e-5 ||
+        depth < limits[0] - boundaryEpsilon ||
         (limits[1] < zmax
-          ? z >= limits[1] - ((zmax - zmin) / sliceCount) * 1e-5
-          : z > limits[1] + ((zmax - zmin) / sliceCount) * 1e-5)
+          ? depth >= limits[1] - boundaryEpsilon
+          : depth > limits[1] + boundaryEpsilon)
       )
         continue;
-      const q = p.map((v, j) => v - center[j]);
-      if (Math.hypot(dot(q, b.right) - x, dot(q, b.up) - y) < tolerance)
-        hits.push({ id: i, s, z, cameraZ: dot(p, b.beam), pos: p });
+      const offset = position.map((coordinate, axis) => coordinate - center[axis]);
+      if (Math.hypot(dot(offset, view.right) - clickRight, dot(offset, view.up) - clickUp) < tolerance)
+        hits.push({ id: i, species: speciesIndex, depth, cameraDepth: dot(position, view.beam), position });
     }
-    hits.sort((a, b) => b.cameraZ - a.cameraZ);
+    hits.sort((a, b) => b.cameraDepth - a.cameraDepth);
     const counts = species
-      .map((s, i) => `${s.symbol}: ${hits.filter((h) => h.s === i).length}`)
+      .map((entry, index) => `${entry.symbol}: ${hits.filter((hit) => hit.species === index).length}`)
       .join(" · ");
     setPick(
       hits.length
-        ? `${hits.length} atoms in selection radius · ${counts}. Beam depths ${hits.reduce((m, h) => Math.min(m, h.z), Infinity).toFixed(2)}–${hits.reduce((m, h) => Math.max(m, h.z), -Infinity).toFixed(2)} Å. Front atom #${hits[0].id}: ${hits[0].pos.map((v) => v.toFixed(3)).join(", ")} Å (Cartesian x,y,z).`
+        ? `${hits.length} atoms in selection radius · ${counts}. Beam depths ${hits.reduce((nearest, hit) => Math.min(nearest, hit.depth), Infinity).toFixed(2)}–${hits.reduce((farthest, hit) => Math.max(farthest, hit.depth), -Infinity).toFixed(2)} Å. Front atom #${hits[0].id}: ${hits[0].position.map((coordinate) => coordinate.toFixed(3)).join(", ")} Å (Cartesian x,y,z).`
         : "No visible atoms at this position.",
     );
   };
-  const chooseSlice = (i: number) => {
+  const chooseSlice = (slice: number) => {
     preview(null);
-    setSliceIndex(i);
+    setSliceIndex(slice);
     setShowSlices(true);
     setSliceSelection(true);
   };
@@ -467,7 +482,7 @@ function App() {
                 <Switch
                   size="small"
                   checked={showProjection}
-                  onChange={(_, v) => setShowProjection(v)}
+                  onChange={(_, checked) => setShowProjection(checked)}
                 />
               }
               label="Column projection"
@@ -478,7 +493,7 @@ function App() {
                 <Switch
                   size="small"
                   checked={orthogonal}
-                  onChange={(_, v) => setOrthogonal(v)}
+                  onChange={(_, checked) => setOrthogonal(checked)}
                 />
               }
               label="Orthogonal projections"
@@ -489,9 +504,9 @@ function App() {
                 <Switch
                   size="small"
                   checked={showSlices}
-                  onChange={(_, v) => {
-                    setShowSlices(v);
-                    if (v) setSliceSelection(true);
+                  onChange={(_, checked) => {
+                    setShowSlices(checked);
+                    if (checked) setSliceSelection(true);
                   }}
                 />
               }
@@ -504,7 +519,7 @@ function App() {
                 <Switch
                   size="small"
                   checked={showPotential}
-                  onChange={(_, v) => setShowPotential(v)}
+                  onChange={(_, checked) => setShowPotential(checked)}
                 />
               }
               label="Potential / phase maps"
@@ -637,13 +652,13 @@ function App() {
                     </label>
                     <button
                       onClick={() => {
-                        const c = [
+                        const reference = [
                           Number(calDraft[0]) * 1e6,
                           Number(calDraft[1]) * 10,
                         ];
                         try {
-                          calibratedFov(c[0], c);
-                          setCalibration(c);
+                          calibratedFov(reference[0], reference);
+                          setCalibration(reference);
                           setCalError("");
                         } catch {
                           setCalError(
@@ -697,29 +712,29 @@ function App() {
             {copies.toLocaleString()} cells · {atomCount.toLocaleString()} atoms
           </output>
           <span className="hint">
-            {cell.map((v) => Math.hypot(...v).toFixed(2)).join(" × ")} Å along
+            {cell.map((vector) => Math.hypot(...vector).toFixed(2)).join(" × ")} Å along
             a, b, c
           </span>
         </div>
         {repeatError && <p role="alert">{repeatError}</p>}
         <div className="row">
           <strong>Show atoms</strong>
-          {species.map((s, i) => (
+          {species.map((entry, speciesIndex) => (
             <button
-              key={s.symbol}
-              aria-pressed={visible[i]}
+              key={entry.symbol}
+              aria-pressed={visible[speciesIndex]}
               onClick={() =>
-                setVisible(visible.map((v, j) => (i === j ? !v : v)))
+                setVisible(visible.map((shown, index) => (speciesIndex === index ? !shown : shown)))
               }
             >
               <span
                 style={{
-                  color: `rgb(${s.color.map((c) => Math.round(c * 255)).join(",")})`,
+                  color: `rgb(${entry.color.map((channel) => Math.round(channel * 255)).join(",")})`,
                 }}
               >
                 ●
               </span>{" "}
-              {s.symbol} ({s.count})
+              {entry.symbol} ({entry.count})
             </button>
           ))}
           <button onClick={() => setVisible(species.map(() => true))}>
@@ -737,7 +752,7 @@ function App() {
                   [1, 0, 0],
                   [1, 1, 0],
                   [1, 1, 1],
-                ].some((v) => v.join() === zone.join())
+                ].some((preset) => preset.join() === zone.join())
                   ? zone.join()
                   : "custom"
               }
@@ -748,8 +763,8 @@ function App() {
                 ["1,1,1", "[111]"],
                 ["custom", "Custom"],
               ]}
-              onChange={(v) => {
-                if (v !== "custom") selectZone(v.split(",").map(Number));
+              onChange={(value) => {
+                if (value !== "custom") selectZone(value.split(",").map(Number));
               }}
             />
           </label>
@@ -797,7 +812,7 @@ function App() {
                 step={0.1}
                 marks={[{ value: 0 }]}
                 value={tilt[axis]}
-                onChange={(_, v) => changeTilt(axis, v as number)}
+                onChange={(_, value) => changeTilt(axis, value as number)}
                 onChangeCommitted={commitTilt}
                 sx={{ ...compactSlider, width: 140, mx: 1 }}
               />
@@ -831,7 +846,7 @@ function App() {
               disabled={sliceCount === 1}
               step={1}
               value={selectedIndex}
-              onChange={(_, v) => chooseSlice(v as number)}
+              onChange={(_, slice) => chooseSlice(slice as number)}
               sx={{ ...compactSlider, flex: 1, maxWidth: 260, mx: 1 }}
             />
             <output>
@@ -846,14 +861,14 @@ function App() {
                   { length: Math.min(15, sliceCount) },
                   (_, i) => [i + 1, String(i + 1)] as const,
                 )}
-                onChange={(v) => setAverageWidth(normalizedAverageWindow(v))}
+                onChange={(value) => setAverageWidth(normalizedAverageWindow(value))}
               />
             </label>
             <span className="hint" role="status">
               {selectedFrames
                 ? `${selectedFrames[0]}–${selectedFrames[selectedFrames.length - 1]}`
                 : "All"}{" "}
-              · {limits.map((v) => v.toFixed(2)).join("–")} Å
+              · {limits.map((limit) => limit.toFixed(2)).join("–")} Å
             </span>
           </div>
           <details className="notes">
@@ -870,12 +885,12 @@ function App() {
                   value={sliceCount}
                   style={{ width: 64 }}
                   onChange={(e) => {
-                    const n = Number(e.target.value);
-                    if (Number.isInteger(n) && n >= 1 && n <= 64) {
+                    const count = Number(e.target.value);
+                    if (Number.isInteger(count) && count >= 1 && count <= 64) {
                       preview(null);
-                      setSliceCount(n);
-                      setSliceIndex(Math.min(sliceIndex, n - 1));
-                      setAverageWidth(Math.min(averageWidth, n));
+                      setSliceCount(count);
+                      setSliceIndex(Math.min(sliceIndex, count - 1));
+                      setAverageWidth(Math.min(averageWidth, count));
                     }
                   }}
                 />
@@ -890,6 +905,16 @@ function App() {
             </p>
           </details>
         </div>
+        {gpuMissing && (
+          <div
+            role="status"
+            data-render-path="none"
+            style={{ margin: "6px 0", padding: "6px 8px", border: "1px solid #c62828", color: "#c62828", fontSize: 12 }}
+          >
+            Atoms and projections need WebGPU, which this browser does not provide: {gpuMissing}. The
+            unit-cell outline is still drawn.
+          </div>
+        )}
         <div
           className="panels"
           style={{
@@ -915,7 +940,7 @@ function App() {
               <figcaption>{label}</figcaption>
               <div className="scene">
                 <canvas
-                  ref={refs[i]}
+                  ref={canvasRefs[i]}
                   aria-label={
                     [
                       "3D atomic structure",
@@ -934,18 +959,18 @@ function App() {
                     };
                   }}
                   onPointerMove={(e) => {
-                    const d = drag.current;
-                    if (i || !d.active) return;
-                    const dx = e.clientX - d.x,
-                      dy = e.clientY - d.y;
-                    d.moved ||= Math.abs(dx) + Math.abs(dy) > 2;
+                    const pointer = drag.current;
+                    if (i || !pointer.active) return;
+                    const dx = e.clientX - pointer.x,
+                      dy = e.clientY - pointer.y;
+                    pointer.moved ||= Math.abs(dx) + Math.abs(dy) > 2;
                     angles.current[0] += dx * 0.008;
                     angles.current[1] = Math.max(
                       -1.5,
                       Math.min(1.5, angles.current[1] + dy * 0.008),
                     );
-                    d.x = e.clientX;
-                    d.y = e.clientY;
+                    pointer.x = e.clientX;
+                    pointer.y = e.clientY;
                     schedule();
                   }}
                   onPointerUp={(e) => {
@@ -957,7 +982,7 @@ function App() {
                   }}
                 />
                 <svg
-                  ref={lines[i]}
+                  ref={outlineRefs[i]}
                   viewBox="0 0 100 100"
                   preserveAspectRatio="none"
                   aria-hidden="true"
@@ -966,7 +991,7 @@ function App() {
                     <line key={j} stroke="#6a839e" strokeWidth=".2" />
                   ))}
                 </svg>
-                <ScaleBar span={spans[i]} />
+                <ScaleBar span={spans[i]} backdrop={gpuDevice ? [SCENE_CLEAR.r * 255, SCENE_CLEAR.g * 255, SCENE_CLEAR.b * 255] : null} />
               </div>
               <figcaption className="hint">
                 {spans[i].toFixed(2)} Å view width ·{" "}
@@ -992,7 +1017,7 @@ function App() {
               max={14}
               step={1}
               value={radius}
-              onChange={(_, v) => setRadius(v as number)}
+              onChange={(_, value) => setRadius(value as number)}
               sx={{ ...compactSlider, width: 100, mx: 1 }}
             />
           </label>
@@ -1005,7 +1030,7 @@ function App() {
               max={5}
               step={0.05}
               value={zoom}
-              onChange={(_, v) => setZoom(v as number)}
+              onChange={(_, value) => setZoom(value as number)}
               sx={{ ...compactSlider, width: 100, mx: 1 }}
             />
           </label>

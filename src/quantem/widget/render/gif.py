@@ -10,10 +10,11 @@ only numpy / matplotlib / PIL.
 """
 import math
 import pathlib
-import subprocess
-import tempfile
 
 import numpy as np
+
+from quantem.widget import colormap
+from quantem.widget.render.figure import format_scale_label, round_to_nice
 
 # Resolution multiplier per quality tier. GIF is a 256-colour palette format
 # regardless, so quality here means spatial resolution (and therefore file size).
@@ -30,45 +31,6 @@ BACKGROUND_COLORS = {
 }
 
 
-def _round_to_nice_value(value: float) -> float:
-    """Port of js/figure.ts roundToNiceValue: snap to 1 / 2 / 5 / 10 x 10^n."""
-    if value <= 0:
-        return 1.0
-    magnitude = 10 ** math.floor(math.log10(value))
-    normalized = value / magnitude
-    if normalized < 1.5:
-        return magnitude
-    if normalized < 3.5:
-        return 2 * magnitude
-    if normalized < 7.5:
-        return 5 * magnitude
-    return 10 * magnitude
-
-
-def _unit_symbol(unit: str) -> str:
-    """Port of js/figure.ts unitSymbol: render the conventional glyph."""
-    u = (unit or "").strip()
-    lc = u.lower()
-    if lc in ("micron", "microns", "um") or u in ("μm", "µm"):
-        return "µm"
-    if lc in ("angstrom", "angstroms", "ang", "a") or u == "Å":
-        return "Å"
-    if lc in ("nanometer", "nanometers", "nm"):
-        return "nm"
-    if lc in ("picometer", "picometers", "pm"):
-        return "pm"
-    if lc in ("millimeter", "millimeters", "mm"):
-        return "mm"
-    return u
-
-
-def _format_scale_label(value: float, unit: str) -> str:
-    """Port of js/figure.ts formatScaleLabel."""
-    nice = _round_to_nice_value(value)
-    sym = _unit_symbol(unit)
-    return f"{round(nice)} {sym}" if nice >= 1 else f"{nice:.2f} {sym}"
-
-
 def _draw_text_shadow(draw, xy: tuple[float, float], text: str, font, *, anchor: str | None = None) -> None:
     """Draw white overlay text with the 1 px shadow used by widget canvases."""
     kwargs = {"fill": (0, 0, 0), "font": font}
@@ -80,7 +42,7 @@ def _draw_text_shadow(draw, xy: tuple[float, float], text: str, font, *, anchor:
 
 
 def _draw_scalebar(
-    img,
+    image,
     pixel_size: float,
     unit: str,
     *,
@@ -94,39 +56,33 @@ def _draw_scalebar(
     5 px bar thickness, at least 12 px text, and at least 12 px margin.  The
     zoom readout is bottom-left when enabled; the scale bar is bottom-right.
     """
-    from PIL import ImageDraw, ImageFont
+    from PIL import ImageDraw
     if pixel_size <= 0:
-        return img
-    width, height = img.size
+        return image
+    width, height = image.size
     target_bar_px = min(60.0, width * 0.25)
     bar_thickness = MIN_SCALE_BAR_THICKNESS
     font_size = max(MIN_SCALE_FONT_SIZE, 16)
     margin = MIN_OVERLAY_MARGIN
     effective_zoom = max(1e-6, float(zoom))
-    nice_phys = _round_to_nice_value((target_bar_px / effective_zoom) * pixel_size)
+    nice_phys = round_to_nice((target_bar_px / effective_zoom) * pixel_size)
     bar_px = (nice_phys / pixel_size) * effective_zoom
     bar_y = height - margin
     bar_x = width - bar_px - margin
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(image)
     draw.rectangle([bar_x, bar_y, bar_x + bar_px, bar_y + bar_thickness], fill=(255, 255, 255))
-    label = _format_scale_label(nice_phys, unit)
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
-    except OSError:
-        font = ImageFont.load_default()
+    label = format_scale_label(nice_phys, unit)
+    font = _font(font_size, bold=True)
     _draw_text_shadow(draw, (bar_x + bar_px / 2, bar_y - 4), label, font, anchor="mb")
     if show_zoom_indicator:
         _draw_text_shadow(draw, (margin, height - margin + bar_thickness), f"{effective_zoom:.1f}x", font, anchor="lb")
-    return img
+    return image
 
 
 def colorize(normalized_uint8: np.ndarray, cmap_name: str):
     """Map a 0-255 normalized frame through a matplotlib colormap to an RGB PIL image."""
-    from matplotlib import colormaps
     from PIL import Image
-    cmap_fn = colormaps.get_cmap(cmap_name)
-    rgb = (cmap_fn(normalized_uint8 / 255.0)[..., :3] * 255).astype(np.uint8)
-    return Image.fromarray(rgb, mode="RGB")
+    return Image.fromarray(colormap.colorize(normalized_uint8 / 255.0, cmap_name), mode="RGB")
 
 
 def animation_output_scale(
@@ -177,7 +133,7 @@ def finalize_frame(
     # Each output pixel spans pixel_size / scale of sample after the downscale.
     return _draw_scalebar(
         img,
-        pixel_size / scale if scale > 0 else pixel_size,
+        pixel_size / scale,
         unit,
         show_zoom_indicator=show_zoom_indicator,
         zoom=zoom,
@@ -200,10 +156,11 @@ def normalize_background(background: str | tuple[int, int, int]) -> tuple[int, i
         )
     if len(background) != 3:
         raise ValueError("background RGB tuple must contain exactly three values")
-    return tuple(max(0, min(255, int(v))) for v in background)
+    return tuple(max(0, min(255, int(value))) for value in background)
 
 
 def _font(size: int, *, bold: bool = False):
+    """DejaVu Sans at ``size`` px (matplotlib ships it), else PIL's bitmap font, so frames render on any machine."""
     from PIL import ImageFont
     names = ["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
     for name in names:
@@ -214,20 +171,15 @@ def _font(size: int, *, bold: bool = False):
     return ImageFont.load_default()
 
 
-def _draw_panel_title(img, text: str, font_size: int) -> None:
+def _draw_panel_title(image, text: str, font_size: int) -> None:
     """Draw a compact centered panel title over the image."""
     if not text:
         return
     from PIL import ImageDraw
-    width, _height = img.size
     font = _font(max(MIN_TITLE_FONT_SIZE, int(font_size)), bold=True)
-    draw = ImageDraw.Draw(img)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    x = max(2, (width - tw) / 2)
-    y = 3
-    draw.text((x + 1, y + 1), text, fill=(0, 0, 0), font=font)
-    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+    draw = ImageDraw.Draw(image)
+    left, _, right, _ = draw.textbbox((0, 0), text, font=font)
+    _draw_text_shadow(draw, (max(2, (image.size[0] - (right - left)) / 2), 3), text, font)
 
 
 def compose_panel_grid(
@@ -252,24 +204,22 @@ def compose_panel_grid(
     n_panels = len(images)
     cols = n_panels if max_cols <= 0 else min(max(1, int(max_cols)), n_panels)
     rows = int(math.ceil(n_panels / cols))
-    widths = [img.size[0] for img in images]
-    heights = [img.size[1] for img in images]
-    cell_w = max(widths)
-    cell_h = max(heights)
+    cell_width = max(image.size[0] for image in images)
+    cell_height = max(image.size[1] for image in images)
     gap = max(0, int(panel_gap))
     outer = max(0, int(outer_border))
     inner = max(0, int(panel_inner_border))
-    bg_rgb = normalize_background(background)
-    outer_rgb = normalize_background(outer_border_color) if outer_border_color is not None else bg_rgb
+    background_rgb = normalize_background(background)
+    outer_rgb = normalize_background(outer_border_color) if outer_border_color is not None else background_rgb
     canvas = Image.new(
         "RGB",
         (
-            cols * cell_w + gap * (cols - 1) + 2 * outer,
-            rows * cell_h + gap * (rows - 1) + 2 * outer,
+            cols * cell_width + gap * (cols - 1) + 2 * outer,
+            rows * cell_height + gap * (rows - 1) + 2 * outer,
         ),
         outer_rgb,
     )
-    if gap > 0 and bg_rgb != outer_rgb:
+    if gap > 0 and background_rgb != outer_rgb:
         draw = ImageDraw.Draw(canvas)
         draw.rectangle(
             [
@@ -278,21 +228,21 @@ def compose_panel_grid(
                 canvas.size[0] - outer,
                 canvas.size[1] - outer,
             ],
-            fill=bg_rgb,
+            fill=background_rgb,
             outline=None,
         )
-    for i, src in enumerate(images):
-        panel = src.convert("RGB").copy()
+    for index, source in enumerate(images):
+        panel = source.convert("RGB").copy()
         if show_panel_titles:
             title_parts: list[str] = []
-            if panel_titles and i < len(panel_titles):
-                title_parts.append(str(panel_titles[i]))
-            if frame_labels and i < len(frame_labels) and frame_labels[i]:
-                title_parts.append(str(frame_labels[i]))
+            if panel_titles and index < len(panel_titles):
+                title_parts.append(str(panel_titles[index]))
+            if frame_labels and index < len(frame_labels) and frame_labels[index]:
+                title_parts.append(str(frame_labels[index]))
             _draw_panel_title(panel, " · ".join(title_parts), title_font_size)
-        row, col = divmod(i, cols)
-        x = outer + col * (cell_w + gap) + (cell_w - panel.size[0]) // 2
-        y = outer + row * (cell_h + gap) + (cell_h - panel.size[1]) // 2
+        row, col = divmod(index, cols)
+        x = outer + col * (cell_width + gap) + (cell_width - panel.size[0]) // 2
+        y = outer + row * (cell_height + gap) + (cell_height - panel.size[1]) // 2
         canvas.paste(panel, (x, y))
         if inner > 0:
             draw = ImageDraw.Draw(canvas)
@@ -310,25 +260,6 @@ def compose_panel_grid(
     return canvas
 
 
-def _even_rgb_array(frame) -> np.ndarray:
-    """Return an RGB uint8 array padded to even dimensions for H.264."""
-    arr = np.asarray(frame.convert("RGB"), dtype=np.uint8)
-    h, w = arr.shape[:2]
-    pad_h = h % 2
-    pad_w = w % 2
-    if pad_h or pad_w:
-        padded = np.zeros((h + pad_h, w + pad_w, 3), dtype=np.uint8)
-        padded[:h, :w] = arr
-        if pad_h:
-            padded[h:, :w] = arr[h - 1 : h]
-        if pad_w:
-            padded[:h, w:] = arr[:, w - 1 : w]
-        if pad_h and pad_w:
-            padded[h:, w:] = arr[h - 1, w - 1]
-        arr = padded
-    return arr
-
-
 def write_gif(frames: list, path: str | pathlib.Path, fps: float) -> pathlib.Path:
     """Assemble RGB PIL frames into a looping GIF at the given fps."""
     path = pathlib.Path(path)
@@ -338,58 +269,4 @@ def write_gif(frames: list, path: str | pathlib.Path, fps: float) -> pathlib.Pat
         str(path), save_all=True, append_images=frames[1:],
         duration=duration, loop=0, optimize=True, disposal=2,
     )
-    return path
-
-
-def write_mp4(frames: list, path: str | pathlib.Path, fps: float, *, crf: int = 18) -> pathlib.Path:
-    """Assemble RGB PIL frames into an H.264 MP4 using the local ffmpeg binary."""
-    if not frames:
-        raise ValueError("write_mp4 requires at least one frame")
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import imageio_ffmpeg
-    except ImportError:
-        ffmpeg = "ffmpeg"
-    else:
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    arrays = [_even_rgb_array(frame) for frame in frames]
-    height, width = arrays[0].shape[:2]
-    for i, arr in enumerate(arrays[1:], start=1):
-        if arr.shape[:2] != (height, width):
-            raise ValueError(
-                f"all MP4 frames must have the same size; frame 0 is {(height, width)}, "
-                f"frame {i} is {arr.shape[:2]}"
-            )
-    with tempfile.TemporaryDirectory(prefix="quantem-show3d-mp4-") as tmp:
-        tmp_path = pathlib.Path(tmp)
-        for i, arr in enumerate(arrays):
-            from PIL import Image
-            Image.fromarray(arr, mode="RGB").save(tmp_path / f"frame_{i:06d}.png")
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-framerate",
-            f"{max(0.1, float(fps))}",
-            "-i",
-            str(tmp_path / "frame_%06d.png"),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-crf",
-            str(int(crf)),
-            str(path),
-        ]
-        try:
-            subprocess.run(cmd, check=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "save_mp4 requires ffmpeg on PATH. Install ffmpeg or use save_gif instead."
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"ffmpeg failed while writing MP4: {exc}") from exc
     return path

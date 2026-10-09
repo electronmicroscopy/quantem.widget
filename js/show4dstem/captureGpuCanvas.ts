@@ -10,25 +10,25 @@ export async function captureGpuCanvas(
   const texture = context.getCurrentTexture();
   const width = texture.width, height = texture.height;
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
-  const read = device.createBuffer({
+  const readback = device.createBuffer({
     size: bytesPerRow * height,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   try {
     const encoder = device.createCommandEncoder();
-    encoder.copyTextureToBuffer({texture}, {buffer: read, bytesPerRow}, {width, height});
+    encoder.copyTextureToBuffer({texture}, {buffer: readback, bytesPerRow}, {width, height});
     device.queue.submit([encoder.finish()]);
-    await read.mapAsync(GPUMapMode.READ);
-    const source = new Uint8Array(read.getMappedRange());
+    await readback.mapAsync(GPUMapMode.READ);
+    const source = new Uint8Array(readback.getMappedRange());
     const pixels = new Uint8ClampedArray(width * height * 4);
     const bgra = texture.format.startsWith("bgra");
     for (let row = 0; row < height; row++) {
       for (let col = 0; col < width; col++) {
-        const src = row * bytesPerRow + col * 4, dst = (row * width + col) * 4;
-        pixels[dst] = source[src + (bgra ? 2 : 0)];
-        pixels[dst + 1] = source[src + 1];
-        pixels[dst + 2] = source[src + (bgra ? 0 : 2)];
-        pixels[dst + 3] = source[src + 3];
+        const sourceOffset = row * bytesPerRow + col * 4, targetOffset = (row * width + col) * 4;
+        pixels[targetOffset] = source[sourceOffset + (bgra ? 2 : 0)];
+        pixels[targetOffset + 1] = source[sourceOffset + 1];
+        pixels[targetOffset + 2] = source[sourceOffset + (bgra ? 0 : 2)];
+        pixels[targetOffset + 3] = source[sourceOffset + 3];
       }
     }
     const canvas = document.createElement("canvas");
@@ -38,7 +38,7 @@ export async function captureGpuCanvas(
     canvas.getContext("2d", {willReadFrequently: true})!.putImageData(new ImageData(pixels, width, height), 0, 0);
     return canvas;
   } finally {
-    if (read.mapState === "mapped") read.unmap();
-    read.destroy();
+    if (readback.mapState === "mapped") readback.unmap();
+    readback.destroy();
   }
 }

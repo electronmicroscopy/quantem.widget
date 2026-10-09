@@ -1,16 +1,13 @@
 /// <reference types="@webgpu/types" />
-/**
- * WebGPU Volume Renderer — ray-casting with slice plane indicators.
- * Standalone module following the pattern of webgpu-fft.ts.
- */
+/** WebGPU volume renderer: ray casting with slice-plane indicators. */
 
-import { getGPUDevice } from "./fft";
+import { getGPUDevice } from "./display/fft";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface VolumeRenderParams {
+interface VolumeRenderParams {
   sliceX: number;  // 0..nx-1 (current slice positions for plane indicators)
   sliceY: number;  // 0..ny-1
   sliceZ: number;  // 0..nz-1
@@ -481,13 +478,12 @@ export class VolumeRenderer {
     this.canvas = canvas;
 
     // Mark renderer dead on device loss so render() early-returns instead of
-    // crashing on a dead handle. Matches the pattern used in fft.ts.
+    // crashing on a dead handle.
     device.lost.then((info) => {
       this.deviceLost = true;
       console.warn("VolumeRenderer: WebGPU device lost", info?.reason, info?.message);
     });
 
-    // Configure canvas context
     const context = canvas.getContext("webgpu");
     if (!context) throw new Error("WebGPU canvas context not available");
     this.context = context;
@@ -498,7 +494,7 @@ export class VolumeRenderer {
       alphaMode: "opaque",
     });
 
-    // Create sampler (shared for volume + colormap)
+    // One linear clamp-to-edge sampler serves both the volume and the colormap.
     this.sampler = device.createSampler({
       magFilter: "linear",
       minFilter: "linear",
@@ -507,13 +503,12 @@ export class VolumeRenderer {
       addressModeW: "clamp-to-edge",
     });
 
-    // Create uniform buffer
     this.uniformBuffer = device.createBuffer({
       size: UNIFORM_BUFFER_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Create placeholder textures (will be replaced by uploadVolume/uploadColormap)
+    // Placeholder textures keep the bind group valid until uploadVolume/uploadColormap run.
     this.volumeTexture = device.createTexture({
       dimension: "3d",
       size: [1, 1, 1],
@@ -527,7 +522,6 @@ export class VolumeRenderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
-    // Create bind group layout
     this.bindGroupLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
@@ -538,7 +532,7 @@ export class VolumeRenderer {
       ],
     });
 
-    // Create render pipeline (no MSAA — render directly to canvas)
+    // No MSAA: the pipeline renders straight into the canvas texture.
     const shaderModule = device.createShaderModule({ code: VOLUME_SHADER });
     shaderModule.getCompilationInfo().then(info => {
       for (const msg of info.messages) {
@@ -576,7 +570,7 @@ export class VolumeRenderer {
 
   uploadVolume(data: Float32Array, nx: number, ny: number, nz: number): void {
     if (this.deviceLost) return;
-    // Normalize to [0,255] uint8 — R8 always supports LINEAR filtering
+    // Normalize to uint8 [0, 255]: r8unorm always supports linear filtering.
     let min = Infinity, max = -Infinity;
     for (let i = 0; i < data.length; i++) {
       const value = data[i];
@@ -599,7 +593,6 @@ export class VolumeRenderer {
     const maxDim = Math.max(nx, ny, nz);
     this.aspectRatio = [nx / maxDim, ny / maxDim, nz / maxDim];
 
-    // Destroy old texture and create new 3D texture
     this.volumeTexture.destroy();
     this.volumeTexture = this.device.createTexture({
       dimension: "3d",
@@ -619,9 +612,9 @@ export class VolumeRenderer {
     } else {
       payload = new Uint8Array(bytesPerRow * ny * nz);
       for (let z = 0; z < nz; z++) {
-        for (let y = 0; y < ny; y++) {
-          const srcOffset = (z * ny + y) * nx;
-          const dstOffset = (z * ny + y) * bytesPerRow;
+        for (let row = 0; row < ny; row++) {
+          const srcOffset = (z * ny + row) * nx;
+          const dstOffset = (z * ny + row) * bytesPerRow;
           payload.set(normalized.subarray(srcOffset, srcOffset + nx), dstOffset);
         }
       }
@@ -638,7 +631,7 @@ export class VolumeRenderer {
 
   uploadColormap(lut: Uint8Array): void {
     if (this.deviceLost) return;
-    // Convert RGB (3 bytes per entry) to RGBA (4 bytes per entry) — WebGPU doesn't support RGB8
+    // WebGPU has no RGB8 texture format, so widen each 3-byte LUT entry to RGBA.
     const rgba = new Uint8Array(256 * 4);
     for (let i = 0; i < 256; i++) {
       rgba[i * 4 + 0] = lut[i * 3 + 0];
@@ -725,7 +718,6 @@ export class VolumeRenderer {
     const maxDim = Math.max(params.nx, params.ny, params.nz);
     const numSteps = numStepsOverride ?? Math.min(512, Math.max(128, maxDim * 2));
 
-    // Write uniforms
     const uniformData = new ArrayBuffer(UNIFORM_BUFFER_SIZE);
     const f32 = new Float32Array(uniformData);
     const u32 = new Uint32Array(uniformData);

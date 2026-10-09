@@ -3,8 +3,6 @@ name: widget ci
 on:
   pull_request:
     paths:
-      - ".github/PULL_REQUEST_TEMPLATE.md"
-      - ".github/workflows/pr-cleanup-guidance.yml"
       - ".github/workflows/widget-ci.yml"
       - "docs/**"
       - "js/**"
@@ -17,8 +15,6 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/PULL_REQUEST_TEMPLATE.md"
-      - ".github/workflows/pr-cleanup-guidance.yml"
       - ".github/workflows/widget-ci.yml"
       - "docs/**"
       - "js/**"
@@ -29,31 +25,6 @@ on:
       - "package.json"
       - "pyproject.toml"
   workflow_dispatch:
-    inputs:
-      signoff_mode:
-        description: "Local signoff mode"
-        type: choice
-        default: default
-        options:
-          - default
-          - quick
-          - full
-      browser:
-        description: "Run exported HTML browser smoke"
-        type: boolean
-        default: false
-      mobile:
-        description: "Run 390x844 mobile Chromium pre-check with browser smoke"
-        type: boolean
-        default: false
-      performance:
-        description: "Run real-data export performance smoke"
-        type: boolean
-        default: false
-      skip_docs:
-        description: "Skip documentation build"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -63,19 +34,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  signoff:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # npm run build (inside the signoff) syncs the WebGPU engine sources from
-      # quantem.gpu; the TestPyPI release can lag the webgpu module, so install
-      # quantem.gpu from its source tip (below) after the TestPyPI deps.
-      - uses: actions/checkout@v7
-        with:
-          repository: bobleesj/quantem.gpu
-          ref: main
-          path: quantem-gpu-src
 
       - uses: actions/setup-python@v6
         with:
@@ -92,44 +54,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --extra-index-url https://test.pypi.org/simple/ -e ".[test]"
-          python -m pip install ./quantem-gpu-src
 
-      - name: Install frontend dependencies
-        run: npm ci
+      # quantem.gpu is optional for the widget, but the show4dstem and showptycho
+      # bundles compile its WebGPU science kernels, so the build reads them from
+      # its source tip (the same checkout widget-docs and widget-release use).
+      - uses: actions/checkout@v7
+        with:
+          repository: bobleesj/quantem.gpu
+          path: quantem-gpu-src
 
-      - name: Run local signoff
+      - name: Build frontend bundles
         env:
-          # WebGPU source-sync fallback (see the quantem.gpu checkout above).
           QUANTEM_GPU_SRC: ${{ github.workspace }}/quantem-gpu-src/src
         run: |
-          args=(--artifact-dir /tmp/quantem-widget-ci-signoff)
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            case "${{ inputs.signoff_mode }}" in
-              quick) args+=(--quick) ;;
-              full) args+=(--full) ;;
-            esac
-            if [[ "${{ inputs.browser }}" == "true" || "${{ inputs.mobile }}" == "true" ]]; then
-              args+=(--browser)
-            fi
-            if [[ "${{ inputs.mobile }}" == "true" ]]; then
-              args+=(--mobile)
-            fi
-            if [[ "${{ inputs.performance }}" == "true" ]]; then
-              args+=(--performance)
-            fi
-            if [[ "${{ inputs.skip_docs }}" == "true" ]]; then
-              args+=(--skip-docs)
-            fi
-          else
-            args+=(--quick)
-          fi
-          scripts/widget_local_signoff.sh "${args[@]}"
+          npm ci
+          npm run build
 
-      - name: Upload signoff report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: widget-ci-signoff
-          path: /tmp/quantem-widget-ci-signoff
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Size guards
+        run: |
+          python scripts/check_large_files.py
+          python scripts/check_notebook_sizes.py
+
+      - name: Test
+        run: PYTHONPATH=src python -m pytest -q

@@ -11,12 +11,11 @@ import Menu from "@mui/material/Menu";
 import Switch from "@mui/material/Switch";
 import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
-import Tooltip from "@mui/material/Tooltip";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawColorbar } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
-import { computeHistogramFromBytes, findDataRange, sliderRange, applyLogScaleInPlace } from "../stats";
-import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../colormaps";
+import { findDataRange, sliderRange, applyLogScaleInPlace } from "../display/stats";
+import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../display/colormaps";
 import { MetadataSection } from "../widgetInfo";
 import {
   dataAngleToScreen,
@@ -25,9 +24,15 @@ import {
   frameStats,
   screenToData,
   staleFrameNote,
+  staggerLabelRows,
   viewTransform,
 } from "./overlayGeometry";
 import { buildMeasurementRecords, measurementCsv, measurementMetadata } from "./measurements";
+import { copyPngOrDownload } from "./copyImage";
+import { InfoTooltip } from "../shared/InfoTooltip";
+import { KeyboardShortcuts } from "../shared/KeyboardShortcuts";
+import { useMobileViewport } from "../shared/useMobileViewport";
+import { Histogram } from "../shared/Histogram";
 
 // Style tokens
 
@@ -37,6 +42,8 @@ const DPR = window.devicePixelRatio || 1;
 const CANVAS_MIN = 384;
 const PROFILE_H = 140;
 const PROFILE_PAD = { left: 54, right: 14, top: 16, bottom: 34 };
+// One staggered ring label: its id and d-spacing lines (9 px font, 10 px apart).
+const PROFILE_LABEL_ROW_H = 21;
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
 const typography = {
   label: { fontSize: 11 },
@@ -79,64 +86,6 @@ const downwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 
-// Info tooltip
-
-function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
-  const isDark = theme === "dark";
-  const content = typeof text === "string"
-    ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
-    : text;
-  return (
-    <Tooltip
-      title={content}
-      arrow
-      placement="bottom"
-      componentsProps={{
-        tooltip: {
-          sx: {
-            bgcolor: isDark ? "#333" : "#fff",
-            color: isDark ? "#ddd" : "#333",
-            border: `1px solid ${isDark ? "#555" : "#ccc"}`,
-            maxWidth: 280,
-            p: 1,
-          },
-        },
-        arrow: {
-          sx: {
-            color: isDark ? "#333" : "#fff",
-            "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` },
-          },
-        },
-      }}
-    >
-      <Typography
-        component="span"
-        sx={{
-          fontSize: 12,
-          color: isDark ? "#888" : "#666",
-          cursor: "help",
-          ml: 0.5,
-          "&:hover": { color: isDark ? "#aaa" : "#444" },
-        }}
-      >
-        ⓘ
-      </Typography>
-    </Tooltip>
-  );
-}
-
-function KeyboardShortcuts({ items }: { items: [string, string][] }) {
-  return (
-    <Box component="table" sx={{ borderCollapse: "collapse", "& td": { py: 0.25, fontSize: 11, lineHeight: 1.3, verticalAlign: "top" }, "& td:first-of-type": { pr: 1.5, opacity: 0.7, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" } }}>
-      <tbody>
-        {items.map(([key, desc], i) => (
-          <tr key={i}><td>{key}</td><td>{desc}</td></tr>
-        ))}
-      </tbody>
-    </Box>
-  );
-}
-
 function calibrationSourceLabel(source: string): string {
   const labels: Record<string, string> = {
     from_phase: "phase",
@@ -148,262 +97,12 @@ function calibrationSourceLabel(source: string): string {
   return labels[source] ?? source;
 }
 
-// Mobile viewport
-function useMobileViewport(): boolean {
-  const getIsMobile = React.useCallback(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return false;
-    }
-    return window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 768px)").matches;
-  }, []);
-  const [isMobile, setIsMobile] = React.useState(getIsMobile);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-    const coarsePointer = window.matchMedia("(pointer: coarse)");
-    const narrowViewport = window.matchMedia("(max-width: 768px)");
-    const update = () => setIsMobile(getIsMobile());
-    const addQueryListener = (query: MediaQueryList) => {
-      if (typeof query.addEventListener === "function") query.addEventListener("change", update);
-      else query.addListener(update);
-    };
-    const removeQueryListener = (query: MediaQueryList) => {
-      if (typeof query.removeEventListener === "function") query.removeEventListener("change", update);
-      else query.removeListener(update);
-    };
-    update();
-    addQueryListener(coarsePointer);
-    addQueryListener(narrowViewport);
-    window.addEventListener("resize", update);
-    return () => {
-      removeQueryListener(coarsePointer);
-      removeQueryListener(narrowViewport);
-      window.removeEventListener("resize", update);
-    };
-  }, [getIsMobile]);
-
-  return isMobile;
-}
-
-// Contrast histogram
-
-interface HistogramProps {
-  data: Float32Array | null;
-  vminPct: number;
-  vmaxPct: number;
-  onRangeChange: (min: number, max: number) => void;
-  onRangePreview?: (min: number, max: number) => void;
-  onRangeCommit?: (min: number, max: number) => void;
-  width?: number;
-  height?: number;
-  theme?: "light" | "dark";
-  dataMin?: number;
-  dataMax?: number;
-}
-
-function Histogram({ data, vminPct, vmaxPct, onRangeChange, onRangePreview, onRangeCommit, width = 110, height = 50, theme = "dark", dataMin = 0, dataMax = 1 }: HistogramProps) {
-  const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const sliderRef = React.useRef<HTMLDivElement | null>(null);
-  const minLabelRef = React.useRef<HTMLElement | null>(null);
-  const maxLabelRef = React.useRef<HTMLElement | null>(null);
-  const onRangeChangeRef = React.useRef(onRangeChange);
-  const onRangePreviewRef = React.useRef(onRangePreview);
-  const onRangeCommitRef = React.useRef(onRangeCommit);
-  const pendingRangeRef = React.useRef<[number, number] | null>(null);
-  const rangeRafRef = React.useRef<number | null>(null);
-  const [liveRange, setLiveRange] = React.useState<[number, number]>([vminPct, vmaxPct]);
-  React.useEffect(() => { setLiveRange([vminPct, vmaxPct]); }, [vminPct, vmaxPct]);
-  const [liveVminPct, liveVmaxPct] = liveRange;
-  const bins = React.useMemo(() => data ? computeHistogramFromBytes(data) : new Array(256).fill(0), [data]);
-  const isDark = theme === "dark";
-  const colors = isDark
-    ? { bg: "#1a1a2e", barActive: "#888", barInactive: "#444", border: "#333" }
-    : { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
-
-  const formatValue = React.useCallback((pct: number) => {
-    const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
-  }, [dataMax, dataMin]);
-
-  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    canvas.width = width * DPR;
-    canvas.height = height * DPR;
-    ctx.scale(DPR, DPR);
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, width, height);
-    const displayBins = 64;
-    const binRatio = Math.floor(bins.length / displayBins);
-    const reducedBins: number[] = [];
-    for (let i = 0; i < displayBins; i++) {
-      let sum = 0;
-      for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
-      reducedBins.push(sum / binRatio);
-    }
-    const maxVal = Math.max(...reducedBins, 0.001);
-    const barWidth = width / displayBins;
-    const vminBin = Math.floor((loPct / 100) * displayBins);
-    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
-    for (let i = 0; i < displayBins; i++) {
-      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
-      ctx.fillStyle = (i >= vminBin && i <= vmaxBin) ? colors.barActive : colors.barInactive;
-      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
-    }
-  }, [bins, colors, height, width]);
-
-  const applyRangePreview = React.useCallback((next: [number, number]) => {
-    const [lo, hi] = next;
-    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
-    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
-    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
-    if (thumbs && thumbs.length >= 2) {
-      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
-      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
-    }
-    if (track) {
-      track.style.left = `${lo}%`;
-      track.style.width = `${Math.max(0, hi - lo)}%`;
-    }
-    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
-    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
-    drawHistogram(lo, hi);
-  }, [drawHistogram, formatValue]);
-
-  React.useEffect(() => {
-    drawHistogram(liveVminPct, liveVmaxPct);
-  }, [drawHistogram, liveVmaxPct, liveVminPct]);
-
-  React.useEffect(() => {
-    onRangeChangeRef.current = onRangeChange;
-    onRangePreviewRef.current = onRangePreview;
-    onRangeCommitRef.current = onRangeCommit;
-  }, [onRangeChange, onRangeCommit, onRangePreview]);
-  const emitRangePreview = React.useCallback((min: number, max: number) => {
-    (onRangePreviewRef.current || onRangeChangeRef.current)(min, max);
-  }, []);
-  const emitRangeCommit = React.useCallback((min: number, max: number) => {
-    (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
-  }, []);
-  const applySliderValue = (v: number | number[], emit: (min: number, max: number) => void) => {
-    const [newMin, newMax] = v as number[];
-    const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
-    setLiveRange(next);
-    emit(next[0], next[1]);
-  };
-  const flushRangePreview = React.useCallback(() => {
-    if (rangeRafRef.current != null) {
-      window.cancelAnimationFrame(rangeRafRef.current);
-      rangeRafRef.current = null;
-    }
-    const pending = pendingRangeRef.current;
-    pendingRangeRef.current = null;
-    if (pending) {
-      setLiveRange(pending);
-      applyRangePreview(pending);
-      emitRangeCommit(pending[0], pending[1]);
-    }
-  }, [applyRangePreview, emitRangeCommit]);
-  React.useEffect(() => () => {
-    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
-  }, []);
-  const beginRangeDrag = React.useCallback((event: React.PointerEvent, dragWidth: number, lo0: number, hi0: number) => {
-    const startX = event.clientX;
-    const span = Math.max(1, hi0 - lo0);
-    const previousCursor = document.body.style.cursor;
-    document.body.style.cursor = "grabbing";
-    const onMove = (moveEvent: PointerEvent) => {
-      moveEvent.preventDefault();
-      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
-      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
-      const next: [number, number] = [lo, lo + span];
-      pendingRangeRef.current = next;
-      if (rangeRafRef.current == null) {
-        rangeRafRef.current = window.requestAnimationFrame(() => {
-          rangeRafRef.current = null;
-          const pending = pendingRangeRef.current;
-          if (pending) {
-            setLiveRange(pending);
-            applyRangePreview(pending);
-            emitRangePreview(pending[0], pending[1]);
-          }
-        });
-      }
-    };
-    const onUp = () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
-      document.body.style.cursor = previousCursor;
-      flushRangePreview();
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
-  }, [applyRangePreview, emitRangePreview, flushRangePreview]);
-
-  const sliderInset = 4;
-  const sliderWidth = Math.max(1, width - sliderInset * 2);
-
-  return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
-      <Box sx={{ position: "relative", width, height: height + 6, overflow: "visible" }}>
-        <canvas ref={canvasRef} style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }} />
-        <Box
-          ref={sliderRef}
-          onPointerDownCapture={(e) => {
-            if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
-            const rect = sliderRef.current?.getBoundingClientRect();
-            if (!rect) return;
-            const lo = Math.max(0, Math.min(100, Math.min(liveVminPct, liveVmaxPct)));
-            const hi = Math.max(0, Math.min(100, Math.max(liveVminPct, liveVmaxPct)));
-            const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
-            if (pct < lo || pct > hi) return;
-            const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
-            if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
-            beginRangeDrag(e, rect.width, lo, hi);
-            e.preventDefault();
-            e.stopPropagation();
-            e.nativeEvent.stopImmediatePropagation();
-          }}
-          sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible", touchAction: "none" }}
-        >
-          <Slider
-            value={liveRange}
-            onChange={(_, v) => applySliderValue(v, emitRangePreview)}
-            onChangeCommitted={(_, v) => applySliderValue(v, emitRangeCommit)}
-            min={0} max={100} size="small" valueLabelDisplay="auto"
-            valueLabelFormat={formatValue}
-            sx={{
-              width: sliderWidth,
-              py: 0,
-              position: "relative",
-              zIndex: 3,
-              overflow: "visible",
-              "& .MuiSlider-rail": { height: 2, zIndex: 1 },
-              "& .MuiSlider-track": { height: 2, cursor: "grab", zIndex: 2 },
-              "& .MuiSlider-thumb": { width: 8, height: 8, zIndex: 4 },
-              "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", zIndex: 5 },
-            }}
-          />
-        </Box>
-      </Box>
-      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVminPct)}</Typography><Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVmaxPct)}</Typography></Box>
-    </Box>
-  );
-}
-
-// Stat values
-function formatStat(v: number): string {
-  if (v === 0) return "0";
-  const a = Math.abs(v);
-  if (a >= 1000 || a < 0.01) return v.toExponential(2);
-  if (a >= 1) return v.toFixed(2);
-  return v.toPrecision(3);
+function formatStat(value: number): string {
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1000 || magnitude < 0.01) return value.toExponential(2);
+  if (magnitude >= 1) return value.toFixed(2);
+  return value.toPrecision(3);
 }
 
 // Model types
@@ -498,17 +197,17 @@ interface QualityDict {
   ring_snr?: { cv: number; coverage: number; snr: number };
 }
 
-// Spot colors
 const PICK_COLORS = [
   "#ff4d4f", "#40a9ff", "#73d13d", "#ffa940",
   "#9254de", "#13c2c2", "#f759ab", "#bae637",
 ];
+// Drawn mask regions keep one decimal, so the Exclude menu and the saved mask_regions trait stay short.
+const roundToTenth = (value: number) => Math.round(value * 10) / 10;
 const spotColorAt = (index: number) => PICK_COLORS[((index % PICK_COLORS.length) + PICK_COLORS.length) % PICK_COLORS.length];
 
 // Main component
 
 function ShowDiffraction() {
-  // Offline theme
   const [offline] = useModelState<boolean>("offline");
   const { themeInfo, colors: themeColors } = useTheme(offline);
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -531,11 +230,8 @@ function ShowDiffraction() {
     ...downwardMenuProps,
     PaperProps: themedMenuProps.PaperProps,
   };
-  // Control group
   const controlBox = { ...controlRow, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg };
-  // Number input
   const numInput = (width: number) => ({ width, fontSize: 10, padding: "2px 4px", background: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` });
-  // Status colors
   const statusColors = themeInfo.theme === "dark"
     ? { good: "#81c784", warn: "#ffb74d", bad: "#e57373" }
     : { good: "#2e7d32", warn: "#e65100", bad: "#d32f2f" };
@@ -549,8 +245,8 @@ function ShowDiffraction() {
   const [offlineFrames] = useModelState<DataView>("offline_frames");
   const [frameIdx, setFrameIdx] = useModelState<number>("frame_idx");
   const [nFrames] = useModelState<number>("n_frames");
-  const [centerRow, setCenterRow] = useModelState<number>("center_row");
-  const [centerCol, setCenterCol] = useModelState<number>("center_col");
+  const [centerRow] = useModelState<number>("center_row");
+  const [centerCol] = useModelState<number>("center_col");
   const [bfRadius] = useModelState<number>("bf_radius");
   const [kPixelSize] = useModelState<number>("k_pixel_size");
   const [kCalibrated] = useModelState<boolean>("k_calibrated");
@@ -558,14 +254,13 @@ function ShowDiffraction() {
   const [snapEnabled, setSnapEnabled] = useModelState<boolean>("snap_enabled");
   const [snapRadius] = useModelState<number>("snap_radius");
   const [spotRefine, setSpotRefine] = useModelState<boolean>("spot_refine");
-  const [, setSpotAddRequest] = useModelState<number[]>("_spot_add_request");
-  const [, setSpotUndoRequest] = useModelState<boolean>("_spot_undo_request");
-  const [, setSpotClearRequest] = useModelState<boolean>("_spot_clear_request");
-  const [, setDetectRequest] = useModelState<number>("_detect_spots_request");
-  const [, setDetectRingsRequest] = useModelState<number>("_detect_rings_request");
-  const [, setSpotRemoveRequest] = useModelState<number>("_spot_remove_request");
-  const [, setSpotMoveRequest] = useModelState<number[]>("_spot_move_request");
-  const [, setRingRemoveRequest] = useModelState<number>("_ring_remove_request");
+  // One request channel: Python runs the action, reports in analysis_status and clears it.
+  const [, setRequest] = useModelState<Record<string, unknown>>("_request");
+  const requestSeqRef = React.useRef(0);
+  const request = React.useCallback((action: string, ...args: unknown[]) => {
+    requestSeqRef.current += 1;
+    setRequest({ action, args, seq: requestSeqRef.current });
+  }, [setRequest]);
   const [dpColormap, setDpColormap] = useModelState<string>("dp_colormap");
   const [dpScaleMode, setDpScaleMode] = useModelState<string>("dp_scale_mode");
   const [dpInvert, setDpInvert] = useModelState<boolean>("dp_invert");
@@ -597,10 +292,6 @@ function ShowDiffraction() {
   const [calibrationSource] = useModelState<string>("calibration_source");
   const [calibrationRefD] = useModelState<number>("calibration_ref_d");
   const [calibrationRefRadius] = useModelState<number>("calibration_ref_radius");
-  const [, setRingUndoRequest] = useModelState<boolean>("_ring_undo_request");
-  const [, setRingClearRequest] = useModelState<boolean>("_ring_clear_request");
-  const [, setCalibrateFromRingRequest] = useModelState<number[]>("_calibrate_from_ring_request");
-  const [, setCalibrateFromSpotRequest] = useModelState<number[]>("_calibrate_from_spot_request");
   const [ellipseRatio] = useModelState<number>("ellipse_ratio");
   const [ellipseAngle] = useModelState<number>("ellipse_angle");
   const [ellipseCorrected, setEllipseCorrected] = useModelState<boolean>("ellipse_corrected");
@@ -609,19 +300,8 @@ function ShowDiffraction() {
   const [profileLog, setProfileLog] = useModelState<boolean>("profile_log");
   const [profileSubtract, setProfileSubtract] = useModelState<boolean>("profile_subtract_background");
   const [profileData] = useModelState<DataView>("_profile_data");
-  const [, setRingAddRequest] = useModelState<number[]>("_ring_add_request");
-  const [, setRefineCenterRequest] = useModelState<boolean>("_refine_center_request");
-  const [, setFitRingsRequest] = useModelState<boolean>("_fit_rings_request");
-  const [, setFitEllipseRequest] = useModelState<boolean>("_fit_ellipse_request");
-  const [, setCalibratePhaseRequest] = useModelState<boolean>("_calibrate_phase_request");
-  const [, setIndexRingsRequest] = useModelState<boolean>("_index_rings_request");
-  const [, setIndexSpotsRequest] = useModelState<boolean>("_index_spots_request");
-  const [, setIdentifyRequest] = useModelState<boolean>("_identify_request");
-  const [, setAutoRequest] = useModelState<boolean>("_auto_request");
   const [refineMethod, setRefineMethod] = useModelState<string>("refine_method");
   const [centerMethod] = useModelState<string>("center_method");
-  const [, setMergeRequest] = useModelState<boolean>("_merge_request");
-  const [, setQualityRequest] = useModelState<boolean>("_quality_request");
   const [identifyElements, setIdentifyElements] = useModelState<string>("identify_elements");
   const [identifyCustomOnly, setIdentifyCustomOnly] = useModelState<boolean>("identify_custom_only");
   const [identifyResults] = useModelState<IdentifyResult[]>("_identify_results");
@@ -679,8 +359,8 @@ function ShowDiffraction() {
   const toggleQuality = React.useCallback(() => {
     const next = !showQc;
     setShowQc(next);
-    if (next) setQualityRequest(true);
-  }, [showQc, setQualityRequest]);
+    if (next) request("quality");
+  }, [showQc, request]);
   const [identifyCollapsed, setIdentifyCollapsed] = React.useState(false);
   const [expandedPhaseId, setExpandedPhaseId] = React.useState<string | null>(null);
   const [customName, setCustomName] = React.useState("");
@@ -719,19 +399,20 @@ function ShowDiffraction() {
   const dragPosRef = React.useRef({ row: 0, col: 0 });
   const dragRafRef = React.useRef(0);
 
-  // Smooth scrubbing
+  // The frame slider moves this local copy while dragging and writes frame_idx only on release,
+  // so scrubbing does not send one Python request per tick.
   const [localFrame, setLocalFrame] = React.useState(frameIdx);
   React.useEffect(() => { setLocalFrame(frameIdx); }, [frameIdx]);
 
-  // Identify table
+  // New identify results reopen the candidates table the user may have hidden.
   React.useEffect(() => { setIdentifyCollapsed(false); }, [identifyResults]);
 
   // Center zoom (pixel-center convention)
   const zoomToCenter = React.useCallback(() => {
-    const Z = 2.5;
-    setDpZoom(Z);
-    setDpPanX(canvasSize * Z * (0.5 - (centerCol + 0.5) / Math.max(detCols, 1)));
-    setDpPanY(canvasSize * Z * (0.5 - (centerRow + 0.5) / Math.max(detRows, 1)));
+    const zoom = 2.5;
+    setDpZoom(zoom);
+    setDpPanX(canvasSize * zoom * (0.5 - (centerCol + 0.5) / Math.max(detCols, 1)));
+    setDpPanY(canvasSize * zoom * (0.5 - (centerRow + 0.5) / Math.max(detRows, 1)));
   }, [canvasSize, centerRow, centerCol, detRows, detCols]);
 
   const dpCanvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -746,13 +427,13 @@ function ShowDiffraction() {
 
   const decodeHalves = (data: DataView, on: boolean) => {
     if (!on) return null;
-    const arr = extractFloat32(data);
-    if (!arr || arr.length < 4 || arr.length % 2 !== 0) return null;
-    const n = arr.length / 2;
-    return { x: arr.subarray(0, n), y: arr.subarray(n) };
+    const values = extractFloat32(data);
+    if (!values || values.length < 4 || values.length % 2 !== 0) return null;
+    const half = values.length / 2;
+    return { x: values.subarray(0, half), y: values.subarray(half) };
   };
 
-  // Curve painter
+  // One painter for both profile panels (radial and azimuthal) so their axes and styling match.
   const drawCurvePanel = React.useCallback((
     canvas: HTMLCanvasElement | null,
     data: { x: Float32Array; y: Float32Array } | null,
@@ -771,24 +452,24 @@ function ShowDiffraction() {
     if (!data) return;
     const plotW = canvasSize - PROFILE_PAD.left - PROFILE_PAD.right;
     const plotH = PROFILE_H - PROFILE_PAD.top - PROFILE_PAD.bottom;
-    const n = data.x.length;
-    const xMin = data.x[0], xMax = data.x[n - 1];
+    const sampleCount = data.x.length;
+    const xMin = data.x[0], xMax = data.x[sampleCount - 1];
     let vMin = Infinity, vMax = -Infinity;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < sampleCount; i++) {
       if (data.y[i] < vMin) vMin = data.y[i];
       if (data.y[i] > vMax) vMax = data.y[i];
     }
     const xOf = (x: number) => PROFILE_PAD.left + ((x - xMin) / Math.max(1e-9, xMax - xMin)) * plotW;
     const yOf = (v: number) => {
-      const t = opts?.logY
+      const fraction = opts?.logY
         ? Math.log1p(Math.max(0, v - vMin)) / Math.max(1e-9, Math.log1p(vMax - vMin))
         : (v - vMin) / Math.max(1e-9, vMax - vMin);
-      return PROFILE_PAD.top + (1 - t) * plotH;
+      return PROFILE_PAD.top + (1 - fraction) * plotH;
     };
     ctx.strokeStyle = isDark ? "#333333" : "#d8d8d8";
     ctx.lineWidth = 1;
-    for (let g = 0; g <= 4; g++) {
-      const y = PROFILE_PAD.top + (g / 4) * plotH;
+    for (let gridLine = 0; gridLine <= 4; gridLine++) {
+      const y = PROFILE_PAD.top + (gridLine / 4) * plotH;
       ctx.beginPath(); ctx.moveTo(PROFILE_PAD.left, y); ctx.lineTo(canvasSize - PROFILE_PAD.right, y); ctx.stroke();
     }
     if (zeroLine && vMin < 0 && vMax > 0) {
@@ -796,22 +477,25 @@ function ShowDiffraction() {
       ctx.beginPath(); ctx.moveTo(PROFILE_PAD.left, yOf(0)); ctx.lineTo(canvasSize - PROFILE_PAD.right, yOf(0)); ctx.stroke();
     }
     const ringColor = isDark ? "#ffb74d" : "#e65100";
-    for (const ring of opts?.rings || []) {
+    const rings = opts?.rings || [];
+    // Each ring's label is its id over its d-spacing; neighbouring rings stagger into rows.
+    ctx.font = "9px -apple-system, sans-serif";
+    const ringLabels = rings.map(ring => (kCalibrated && kPixelSize > 0 && ring.radius_px > 0
+      ? [`${ring.id}`, `${(1 / (ring.radius_px * kPixelSize)).toFixed(2)}Å`]
+      : [`${ring.id}`]));
+    const labelRows = staggerLabelRows(
+      rings.map((ring, k) => ({ start: xOf(ring.radius_px) + 2, width: Math.max(...ringLabels[k].map(text => ctx.measureText(text).width)) })),
+      Math.floor(plotH / PROFILE_LABEL_ROW_H),
+    );
+    const ringSelected = (ring: RingDict) => opts?.selectedRingId != null && opts.selectedRingId !== 0 && ring.id === opts.selectedRingId;
+    for (const ring of rings) {
       const x = xOf(ring.radius_px);
-      const selected = opts?.selectedRingId != null && opts.selectedRingId !== 0 && ring.id === opts.selectedRingId;
-      ctx.strokeStyle = selected ? themeColors.accent : ringColor;
-      ctx.lineWidth = selected ? 2.5 : 1;
+      ctx.strokeStyle = ringSelected(ring) ? themeColors.accent : ringColor;
+      ctx.lineWidth = ringSelected(ring) ? 2.5 : 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(x, PROFILE_PAD.top); ctx.lineTo(x, PROFILE_PAD.top + plotH); ctx.stroke();
       ctx.setLineDash([]);
       ctx.lineWidth = 1;
-      ctx.fillStyle = selected ? themeColors.accent : ringColor;
-      ctx.font = "9px -apple-system, sans-serif";
-      ctx.textAlign = "left"; ctx.textBaseline = "top";
-      ctx.fillText(`${ring.id}`, x + 2, PROFILE_PAD.top);
-      if (kCalibrated && kPixelSize > 0 && ring.radius_px > 0) {
-        ctx.fillText(`${(1 / (ring.radius_px * kPixelSize)).toFixed(2)}Å`, x + 2, PROFILE_PAD.top + 10);
-      }
     }
     if (opts?.bfRadius && opts.bfRadius > 0 && opts.bfRadius <= xMax) {
       ctx.strokeStyle = isDark ? "#333333" : "#d8d8d8";
@@ -823,11 +507,29 @@ function ShowDiffraction() {
     ctx.strokeStyle = themeColors.accent;
     ctx.lineWidth = 1.4;
     ctx.beginPath();
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < sampleCount; i++) {
       const px = xOf(data.x[i]), py = yOf(data.y[i]);
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
     ctx.stroke();
+    // Ring labels go on top of the markers and the curve, with a halo in the
+    // background colour so they stay readable where they cross either.
+    ctx.font = "9px -apple-system, sans-serif";
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.strokeStyle = isDark ? "#050505" : "#ffffff";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    rings.forEach((ring, k) => {
+      const row = labelRows[k];
+      if (row === null) return;
+      ctx.fillStyle = ringSelected(ring) ? themeColors.accent : ringColor;
+      ringLabels[k].forEach((text, line) => {
+        const y = PROFILE_PAD.top + row * PROFILE_LABEL_ROW_H + line * 10;
+        ctx.strokeText(text, xOf(ring.radius_px) + 2, y);
+        ctx.fillText(text, xOf(ring.radius_px) + 2, y);
+      });
+    });
+    ctx.lineWidth = 1;
     ctx.fillStyle = isDark ? "#dddddd" : "#222222";
     ctx.font = "10px -apple-system, sans-serif";
     ctx.textAlign = "left"; ctx.textBaseline = "top";
@@ -836,8 +538,8 @@ function ShowDiffraction() {
     ctx.fillText(xLabel, PROFILE_PAD.left, PROFILE_H - 4);
     ctx.textAlign = "center";
     for (const frac of [0.25, 0.5, 0.75, 1.0]) {
-      const xv = xMin + (xMax - xMin) * frac;
-      ctx.fillText(xv >= 100 ? `${Math.round(xv)}` : xv.toFixed(1), xOf(xv), PROFILE_H - 16);
+      const tickValue = xMin + (xMax - xMin) * frac;
+      ctx.fillText(tickValue >= 100 ? `${Math.round(tickValue)}` : tickValue.toFixed(1), xOf(tickValue), PROFILE_H - 16);
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }, [canvasSize, themeInfo.theme, themeColors.accent, kCalibrated, kPixelSize]);
@@ -859,14 +561,14 @@ function ShowDiffraction() {
     const rMax = profileArrays.x[profileArrays.x.length - 1];
     const radius = (((e.clientX - rect.left) * scale - PROFILE_PAD.left) / Math.max(1, plotW)) * rMax;
     if (!(radius > 0 && radius <= rMax)) return;
-    // Ring selection
-    const hit = (rings || []).find((r) => Math.abs(r.radius_px - radius) <= 3);
+    // A click within 3 px of a ring toggles its selection; anywhere else adds a ring there.
+    const hit = (rings || []).find((ring) => Math.abs(ring.radius_px - radius) <= 3);
     if (hit) {
       setSelectedRingId(selectedRingId === hit.id ? 0 : hit.id);
       return;
     }
-    setRingAddRequest([radius]);
-  }, [profileArrays, canvasSize, rings, selectedRingId, setSelectedRingId, setRingAddRequest]);
+    request("add_ring", radius);
+  }, [profileArrays, canvasSize, rings, selectedRingId, setSelectedRingId, request]);
 
   React.useLayoutEffect(() => {
     if (showProfile) {
@@ -916,17 +618,16 @@ function ShowDiffraction() {
     };
   }, [isResizingCanvas, resizeCanvasStart]);
 
-  // Colormap LUT
   const dpLut = React.useMemo(() => {
     const base = COLORMAPS[dpColormap] || COLORMAPS.inferno;
     if (!dpInvert) return base;
-    const n = base.length / 3;
-    const inv = new Uint8Array(base.length);
-    for (let k = 0; k < n; k++) {
-      const s = (n - 1 - k) * 3, d = k * 3;
-      inv[d] = base[s]; inv[d + 1] = base[s + 1]; inv[d + 2] = base[s + 2];
+    const entries = base.length / 3;
+    const inverted = new Uint8Array(base.length);
+    for (let k = 0; k < entries; k++) {
+      const source = (entries - 1 - k) * 3, target = k * 3;
+      inverted[target] = base[source]; inverted[target + 1] = base[source + 1]; inverted[target + 2] = base[source + 2];
     }
-    return inv;
+    return inverted;
   }, [dpColormap, dpInvert]);
 
   // Frame bytes
@@ -935,9 +636,9 @@ function ShowDiffraction() {
     if (offline && offlineFrames && frameLen > 0
         && offlineFrames.byteLength >= frameLen * 4 * nFrames) {
       const stack = extractFloat32(offlineFrames);
-      const idx = Math.max(0, Math.min(frameIdx, nFrames - 1));
-      if (stack && stack.length >= frameLen * (idx + 1)) {
-        return stack.subarray(idx * frameLen, (idx + 1) * frameLen);
+      const clampedFrame = Math.max(0, Math.min(frameIdx, nFrames - 1));
+      if (stack && stack.length >= frameLen * (clampedFrame + 1)) {
+        return stack.subarray(clampedFrame * frameLen, (clampedFrame + 1) * frameLen);
       }
     }
     return extractFloat32(frameBytes, frameLen);
@@ -962,9 +663,9 @@ function ShowDiffraction() {
       applyLogScaleInPlace(raw, scaled);
     } else if (dpScaleMode === "sqrt") {
       scaled = new Float32Array(raw.length);
-      let mn = Infinity;
-      for (let i = 0; i < raw.length; i++) if (raw[i] < mn) mn = raw[i];
-      for (let i = 0; i < raw.length; i++) scaled[i] = Math.sqrt(Math.max(raw[i] - mn, 0));
+      let minValue = Infinity;
+      for (let i = 0; i < raw.length; i++) if (raw[i] < minValue) minValue = raw[i];
+      for (let i = 0; i < raw.length; i++) scaled[i] = Math.sqrt(Math.max(raw[i] - minValue, 0));
     } else {
       scaled = raw;
     }
@@ -987,7 +688,7 @@ function ShowDiffraction() {
     const imgData = ctx.createImageData(detCols, detRows);
     applyColormap(scaledFrame.scaled, imgData.data, dpLut, vmin, vmax);
     ctx.putImageData(imgData, 0, 0);
-    setDpVersion(v => v + 1);
+    setDpVersion(version => version + 1);
   }, [scaledFrame, dpLut, detRows, detCols]);
 
   // Frame render
@@ -1108,35 +809,41 @@ function ShowDiffraction() {
         ctx.ellipse(cx, cy, ring.radius_px * scX, ring.radius_px * scY, 0, 0, 2 * Math.PI);
         ctx.stroke();
         if (showHkl && ring.hkl) {
-          const rrX = ring.radius_px * scX * Math.SQRT1_2;
-          const rrY = ring.radius_px * scY * Math.SQRT1_2;
+          const diagonalX = ring.radius_px * scX * Math.SQRT1_2;
+          const diagonalY = ring.radius_px * scY * Math.SQRT1_2;
           ctx.fillStyle = selected ? themeColors.accent : ringColor;
           ctx.font = "bold 10px -apple-system, sans-serif";
           ctx.textAlign = "left";
           ctx.textBaseline = "bottom";
-          ctx.fillText(ring.hkl, cx + rrX + 4, cy - rrY - 4);
+          ctx.fillText(ring.hkl, cx + diagonalX + 4, cy - diagonalY - 4);
         }
       }
     }
 
+    // Excluded regions and their draw preview share one path each: a disk at its data position, and a
+    // wedge from the centre out past the detector corner so it covers every pixel in its angle range.
+    const maskFill = themeInfo.theme === "dark" ? "rgba(244,67,54,0.18)" : "rgba(211,47,47,0.15)";
+    const traceDisk = (row: number, col: number, radius: number) => ctx.ellipse(
+      dataColToScreenX(col, view), dataRowToScreenY(row, view), radius * scX, radius * scY, 0, 0, 2 * Math.PI,
+    );
+    const traceWedge = (startDeg: number, endDeg: number) => {
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, Math.hypot(detRows * scY, detCols * scX), dataAngleToScreen(startDeg, view), dataAngleToScreen(endDeg, view));
+      ctx.closePath();
+    };
+
     // Excluded mask regions
     if (showMask && maskRegions && maskRegions.length > 0) {
       ctx.save();
-      ctx.fillStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.18)" : "rgba(211,47,47,0.15)";
+      ctx.fillStyle = maskFill;
       for (const region of maskRegions) {
         if (region.kind === "disk" && region.radius != null) {
           ctx.beginPath();
-          ctx.ellipse(
-            dataColToScreenX(region.col ?? 0, view), dataRowToScreenY(region.row ?? 0, view),
-            region.radius * scX, region.radius * scY, 0, 0, 2 * Math.PI,
-          );
+          traceDisk(region.row ?? 0, region.col ?? 0, region.radius);
           ctx.fill();
         } else if (region.kind === "wedge" && region.start_deg != null && region.end_deg != null) {
-          const rBig = Math.hypot(detRows * scY, detCols * scX);
           ctx.beginPath();
-          ctx.moveTo(cx, cy);
-          ctx.arc(cx, cy, rBig, dataAngleToScreen(region.start_deg, view), dataAngleToScreen(region.end_deg, view));
-          ctx.closePath();
+          traceWedge(region.start_deg, region.end_deg);
           ctx.fill();
         }
       }
@@ -1147,20 +854,14 @@ function ShowDiffraction() {
     if (dragPreview && dragPreview.kind !== "spot") {
       ctx.save();
       ctx.strokeStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.9)" : "rgba(211,47,47,0.9)";
-      ctx.fillStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.18)" : "rgba(211,47,47,0.15)";
+      ctx.fillStyle = maskFill;
       ctx.setLineDash([4, 4]);
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       if (dragPreview.kind === "disk") {
-        ctx.ellipse(
-          dataColToScreenX(dragPreview.col, view), dataRowToScreenY(dragPreview.row, view),
-          dragPreview.radius * scX, dragPreview.radius * scY, 0, 0, 2 * Math.PI,
-        );
+        traceDisk(dragPreview.row, dragPreview.col, dragPreview.radius);
       } else {
-        const rBig = Math.hypot(detRows * scY, detCols * scX);
-        ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, rBig, dataAngleToScreen(dragPreview.start_deg, view), dataAngleToScreen(dragPreview.end_deg, view));
-        ctx.closePath();
+        traceWedge(dragPreview.start_deg, dragPreview.end_deg);
       }
       ctx.fill();
       ctx.stroke();
@@ -1169,8 +870,8 @@ function ShowDiffraction() {
 
     // Fitted ellipse
     if (ellipseRatio > 1.002 && rings && rings.length > 0) {
-      const rMax = Math.max(...rings.map((r) => r.radius_px));
-      const s = Math.sqrt(ellipseRatio);
+      const rMax = Math.max(...rings.map((ring) => ring.radius_px));
+      const stretch = Math.sqrt(ellipseRatio);
       ctx.save();
       ctx.strokeStyle = themeInfo.theme === "dark" ? "#4dd0e1" : "#00838f";
       ctx.setLineDash([6, 4]);
@@ -1180,7 +881,7 @@ function ShowDiffraction() {
       ctx.save();
       ctx.translate(cx, cy);
       ctx.scale(scX, scY);
-      ctx.ellipse(0, 0, rMax * s, rMax / s, (ellipseAngle * Math.PI) / 180, 0, 2 * Math.PI);
+      ctx.ellipse(0, 0, rMax * stretch, rMax / stretch, (ellipseAngle * Math.PI) / 180, 0, 2 * Math.PI);
       ctx.restore();
       ctx.stroke();
       ctx.restore();
@@ -1231,9 +932,9 @@ function ShowDiffraction() {
     if (!canvas) return { row: 0, col: 0 };
     const rect = canvas.getBoundingClientRect();
     const scale = rect.width > 0 ? canvasSize / rect.width : 1;
-    const mx = (e.clientX - rect.left) * scale;
-    const my = (e.clientY - rect.top) * scale;
-    return screenToData(mx, my, viewTransform(canvasSize, dpZoom, dpPanX, dpPanY, detRows, detCols));
+    const canvasX = (e.clientX - rect.left) * scale;
+    const canvasY = (e.clientY - rect.top) * scale;
+    return screenToData(canvasX, canvasY, viewTransform(canvasSize, dpZoom, dpPanX, dpPanY, detRows, detCols));
   };
 
   const angleOf = (row: number, col: number) =>
@@ -1331,8 +1032,8 @@ function ShowDiffraction() {
       // per-axis screen distance
       const { scX, scY } = viewTransform(canvasSize, dpZoom, 0, 0, detRows, detCols);
       let nearest = -1, nearestDist = Infinity;
-      spots.forEach((s, i) => {
-        const dist = Math.hypot((s.row - row) * scY, (s.col - col) * scX);
+      spots.forEach((spot, i) => {
+        const dist = Math.hypot((spot.row - row) * scY, (spot.col - col) * scX);
         if (dist < nearestDist) { nearestDist = dist; nearest = i; }
       });
       const hitPx = (e.pointerType === "touch" ? 20 : 12) * dpDisplayScale();
@@ -1352,11 +1053,13 @@ function ShowDiffraction() {
 
   const commitTapAction = (row: number, col: number) => {
     if (centerMode === "manual") {
-      setCenterRow(row);
-      setCenterCol(col);
+      // one message for both coordinates: Python re-measures every ring once per click
+      model.set("center_row", row);
+      model.set("center_col", col);
+      model.save_changes();
       return;
     }
-    setSpotAddRequest([row, col]);
+    request("add_spot", row, col);
   };
 
   const handleDpPointerMove = (e: React.PointerEvent) => {
@@ -1404,10 +1107,9 @@ function ShowDiffraction() {
     }
     if (!activeFrame) return;
     const { row, col } = dpToImage(e);
-    const ri = Math.round(row), ci = Math.round(col);
-    if (ri >= 0 && ri < detRows && ci >= 0 && ci < detCols) {
-      const raw = activeFrame;
-      setCursorInfo({ row: ri, col: ci, value: raw[ri * detCols + ci] });
+    const rowIndex = Math.round(row), colIndex = Math.round(col);
+    if (rowIndex >= 0 && rowIndex < detRows && colIndex >= 0 && colIndex < detCols) {
+      setCursorInfo({ row: rowIndex, col: colIndex, value: activeFrame[rowIndex * detCols + colIndex] });
     } else {
       setCursorInfo(null);
     }
@@ -1454,18 +1156,18 @@ function ShowDiffraction() {
     if (!target) return;
     const { row, col } = dragPosRef.current;
     if (target.kind === "spot") {
-      setSpotMoveRequest([target.id, row, col]);
+      request("move_spot", target.id, row, col);
     } else if (target.kind === "disk") {
       const radius = Math.hypot(row - target.row, col - target.col);
       if (radius >= 2) {
-        setMaskRegions([...(maskRegions || []), { kind: "disk", row: Math.round(target.row * 10) / 10, col: Math.round(target.col * 10) / 10, radius: Math.round(radius * 10) / 10 }]);
+        setMaskRegions([...(maskRegions || []), { kind: "disk", row: roundToTenth(target.row), col: roundToTenth(target.col), radius: roundToTenth(radius) }]);
         setShowMask(true);
       }
       setDrawMode(null);
     } else {
       const end = angleOf(row, col);
       if (end !== target.start_deg) {
-        setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: Math.round(target.start_deg * 10) / 10, end_deg: Math.round(end * 10) / 10 }]);
+        setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: roundToTenth(target.start_deg), end_deg: roundToTenth(end) }]);
         setShowMask(true);
       }
       setDrawMode(null);
@@ -1482,11 +1184,10 @@ function ShowDiffraction() {
   // pointer capture keeps drags alive past the edge; leave only clears the readout
   const handleDpPointerLeave = () => { setCursorInfo(null); };
 
-  // Scroll zoom
+  // Scroll zoom; the native wheel guard below keeps the page from scrolling.
   const handleDpWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setDpZoom(z => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z * delta)));
+    setDpZoom(zoom => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * delta)));
   };
 
   const resetDpView = () => { setDpZoom(1); setDpPanX(0); setDpPanY(0); };
@@ -1495,10 +1196,10 @@ function ShowDiffraction() {
   const dpContainerRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     const prevent = (e: WheelEvent) => e.preventDefault();
-    const dp = dpContainerRef.current;
-    if (dp) dp.addEventListener("wheel", prevent, { passive: false });
+    const container = dpContainerRef.current;
+    if (container) container.addEventListener("wheel", prevent, { passive: false });
     return () => {
-      if (dp) dp.removeEventListener("wheel", prevent);
+      if (container) container.removeEventListener("wheel", prevent);
     };
   }, []);
 
@@ -1506,18 +1207,13 @@ function ShowDiffraction() {
   const handleCopyDP = () => {
     const offscreen = dpOffscreenRef.current;
     if (!offscreen) return;
-    offscreen.toBlob((blob) => {
-      if (blob) {
-        try { navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); }
-        catch { downloadBlob(blob, "diffraction.png"); }
-      }
-    });
+    offscreen.toBlob((blob) => { if (blob) void copyPngOrDownload(blob, "diffraction.png"); });
   };
 
   const handleExportPng = () => {
     setDpExportAnchor(null);
     if (!dpCanvasRef.current) return;
-    dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "showdiffraction_dp.png"); }, "image/png");
+    dpCanvasRef.current.toBlob((blob) => { if (blob) downloadBlob(blob, "showdiffraction_dp.png"); }, "image/png");
   };
 
   // HTML request
@@ -1548,8 +1244,7 @@ function ShowDiffraction() {
     setExportRequest(JSON.stringify({ mode: "clear" }));
   }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
-  // Keyboard
-  // Typing guard
+  // Keyboard shortcuts stay off while the user types in an input.
   const isTypingTarget = React.useCallback((target: EventTarget | null): boolean => {
     if (!(target instanceof HTMLElement)) return false;
     if (target.isContentEditable) return true;
@@ -1581,7 +1276,7 @@ function ShowDiffraction() {
         break;
       case "z":
       case "Z":
-        setSpotUndoRequest(true);
+        request("undo_spot");
         handled = true;
         break;
       case "Escape":
@@ -1595,7 +1290,7 @@ function ShowDiffraction() {
       e.preventDefault();
       e.stopPropagation();
     }
-  }, [isTypingTarget, frameIdx, nFrames, setFrameIdx, setSpotUndoRequest]);
+  }, [isTypingTarget, frameIdx, nFrames, setFrameIdx, request]);
 
   const canvasBox = {
     position: "relative" as const,
@@ -1608,6 +1303,10 @@ function ShowDiffraction() {
     touchAction: "none" as const,
     boxSizing: "border-box" as const,
   };
+  // Optional table columns appear only when some row has a value for them.
+  const spotsHaveReference = (spots || []).some((spot) => spot.d_ref != null);
+  const ringsHaveReference = (rings || []).some((ring) => ring.d_ref != null);
+  const ringsHaveWidth = (rings || []).some((ring) => ring.fwhm_px != null);
   const sideMenuWidth = 76;
   const patternPanelWidth = canvasSize + sideMenuWidth + SPACING.XS;
   // fluid panel: full width on small hosts, capped at the canvas size
@@ -1706,9 +1405,9 @@ function ShowDiffraction() {
           {/* Toolbar */}
           {controlsVisible && (
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: isMobile ? "100%" : patternPanelWidth, boxSizing: "border-box", px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => setAutoRequest(true)} title="Run full analysis">Auto</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => request("auto")} title="Run full analysis">Auto</Button>
               {nFrames > 1 && (
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setMergeRequest(true)} title="Align and merge frames">Merge</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => request("merge")} title="Align and merge frames">Merge</Button>
               )}
               <Button size="small" sx={{ ...compactButton, color: phaseName ? themeColors.accent : themeColors.textMuted }} onClick={(e) => setPhaseMenuAnchor(e.currentTarget)} title="Phase library">
                 {phaseName ? `Phase ${phaseName}` : "Phase"}
@@ -1724,7 +1423,7 @@ function ShowDiffraction() {
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setRefineMenuAnchor(e.currentTarget)} title="Refine center">Refine</Button>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
               <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={topToolbarMenuProps}>
-                {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
+                {COLORMAP_NAMES.map(name => <MenuItem key={name} value={name} sx={{ fontSize: 10 }}>{name}</MenuItem>)}
               </Select>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
               <Select size="small" value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value)} sx={{ ...themedSelect, minWidth: 60 }} MenuProps={topToolbarMenuProps}>
@@ -1743,10 +1442,10 @@ function ShowDiffraction() {
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Phase library</Typography>
               <Box sx={{ maxHeight: 180, overflow: "auto", border: `1px solid ${themeColors.border}`, mb: 1 }}>
                 <MenuItem selected={!phaseName} onClick={() => setPhaseName("")} sx={{ fontSize: 11, minHeight: 24 }}>None</MenuItem>
-                {(phaseLibrary || []).concat(customPhases || []).map((p) => (
-                  <MenuItem key={p.name} selected={p.name === phaseName} onClick={() => setPhaseName(p.name)} sx={{ fontSize: 11, minHeight: 24, display: "flex", justifyContent: "space-between" }}>
-                    <span>{p.name}</span>
-                    <span style={{ color: themeColors.textMuted }}>{[`a=${p.a}`, p.b != null ? `b=${p.b}` : "", p.c != null ? `c=${p.c}` : ""].filter(Boolean).join(" ")} · {p.absences}</span>
+                {(phaseLibrary || []).concat(customPhases || []).map((phase) => (
+                  <MenuItem key={phase.name} selected={phase.name === phaseName} onClick={() => setPhaseName(phase.name)} sx={{ fontSize: 11, minHeight: 24, display: "flex", justifyContent: "space-between" }}>
+                    <span>{phase.name}</span>
+                    <span style={{ color: themeColors.textMuted }}>{[`a=${phase.a}`, phase.b != null ? `b=${phase.b}` : "", phase.c != null ? `c=${phase.c}` : ""].filter(Boolean).join(" ")} · {phase.absences}</span>
                   </MenuItem>
                 ))}
               </Box>
@@ -1754,7 +1453,7 @@ function ShowDiffraction() {
                 <input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="name" style={numInput(70)} />
                 <input type="number" value={customA} onChange={(e) => setCustomA(e.target.value)} placeholder="a (Å)" style={numInput(56)} />
                 <Select size="small" value={customAbsences} onChange={(e) => setCustomAbsences(String(e.target.value))} sx={{ ...themedSelect, minWidth: 78 }} MenuProps={themedMenuProps}>
-                  {["none", "fcc", "bcc", "diamond", "hcp", "wurtzite", "rhombohedral", "rhombohedral-c"].map((r) => <MenuItem key={r} value={r} sx={{ fontSize: 10 }}>{r}</MenuItem>)}
+                  {["none", "fcc", "bcc", "diamond", "hcp", "wurtzite", "rhombohedral", "rhombohedral-c"].map((absence) => <MenuItem key={absence} value={absence} sx={{ fontSize: 10 }}>{absence}</MenuItem>)}
                 </Select>
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
                   disabled={!customName.trim() || !(parseFloat(customA) > 0)}
@@ -1780,13 +1479,13 @@ function ShowDiffraction() {
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mb: 0.5 }}>
                 <Typography sx={{ ...typography.label, fontSize: 10 }} title="Identify ranks only custom phases, not the library">Identify candidates only</Typography>
-                <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
+                <Switch size="small" checked={identifyCustomOnly} onChange={(_, checked) => setIdentifyCustomOnly(checked)} sx={switchStyles.small} />
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length < 2} onClick={() => setCalibratePhaseRequest(true)} title="Calibrate from rings">Calibrate</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length === 0} onClick={() => setIndexRingsRequest(true)}>Index Rings</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !spots || spots.length === 0} onClick={() => setIndexSpotsRequest(true)}>Index Spots</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={(!rings || rings.length === 0) && (!spots || spots.length === 0)} onClick={() => setIdentifyRequest(true)} title="Identify phase">Identify</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length < 2} onClick={() => request("calibrate_phase")} title="Calibrate from rings">Calibrate</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length === 0} onClick={() => request("index_rings")}>Index Rings</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !spots || spots.length === 0} onClick={() => request("index_spots")}>Index Spots</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={(!rings || rings.length === 0) && (!spots || spots.length === 0)} onClick={() => request("identify")} title="Identify phase">Identify</Button>
               </Stack>
             </Box>
           </Menu>
@@ -1820,9 +1519,9 @@ function ShowDiffraction() {
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
                   disabled={!(parseFloat(diskRadius) > 0) || !spots || spots.length === 0}
                   title="Mask disk at last spot"
-                  onClick={() => { const s = spots[spots.length - 1]; setMaskRegions([...(maskRegions || []), { kind: "disk", row: s.row, col: s.col, radius: parseFloat(diskRadius) }]); setDiskRadius(""); }}>Add Disk at Last Spot</Button>
+                  onClick={() => { const lastSpot = spots[spots.length - 1]; setMaskRegions([...(maskRegions || []), { kind: "disk", row: lastSpot.row, col: lastSpot.col, radius: parseFloat(diskRadius) }]); setDiskRadius(""); }}>Add Disk at Last Spot</Button>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Show</Typography>
-                <Switch size="small" checked={showMask} onChange={(_, v) => setShowMask(v)} sx={switchStyles.small} />
+                <Switch size="small" checked={showMask} onChange={(_, checked) => setShowMask(checked)} sx={switchStyles.small} />
               </Stack>
             </Box>
           </Menu>
@@ -1836,7 +1535,7 @@ function ShowDiffraction() {
                   <MenuItem value="symmetry" sx={{ fontSize: 10 }}>Symmetry</MenuItem>
                   <MenuItem value="phase_corr" sx={{ fontSize: 10 }}>Phase corr</MenuItem>
                 </Select>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => { setRefineCenterRequest(true); setRefineMenuAnchor(null); }}>Run</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => { request("refine_center"); setRefineMenuAnchor(null); }}>Run</Button>
               </Stack>
               {centerMethod && (
                 <Typography sx={{ ...typography.value, mt: 0.5, color: themeColors.textMuted }}>
@@ -1935,7 +1634,7 @@ function ShowDiffraction() {
               {quality?.rings && quality.rings.length > 0 && (
                 <Typography sx={typography.value}>
                   <span style={{ color: themeColors.textMuted }}>Ring fits: </span>
-                  {quality.rings.filter((r) => r.fit_quality >= 0.9).length}/{quality.rings.length}
+                  {quality.rings.filter((ring) => ring.fit_quality >= 0.9).length}/{quality.rings.length}
                 </Typography>
               )}
               {quality?.n_unexplained_rings != null && (
@@ -1967,9 +1666,9 @@ function ShowDiffraction() {
               <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
                 <Typography sx={typography.label}>Radial profile</Typography>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Log</Typography>
-                <Switch size="small" checked={profileLog} onChange={(_, v) => setProfileLog(v)} sx={switchStyles.small} />
+                <Switch size="small" checked={profileLog} onChange={(_, checked) => setProfileLog(checked)} sx={switchStyles.small} />
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>−bg</Typography>
-                <Switch size="small" checked={profileSubtract} onChange={(_, v) => setProfileSubtract(v)} sx={switchStyles.small} />
+                <Switch size="small" checked={profileSubtract} onChange={(_, checked) => setProfileSubtract(checked)} sx={switchStyles.small} />
                 <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>click to add ring</Typography>
                 {paneStaleNote && (
                   <Typography sx={{ ...typography.value, color: statusColors.warn }}>{paneStaleNote}</Typography>
@@ -2003,8 +1702,8 @@ function ShowDiffraction() {
                 <Typography sx={typography.label}>Candidate phases</Typography>
                 <input value={identifyElements} onChange={(e) => setIdentifyElements(e.target.value)} placeholder="elements e.g. Fe,O" style={numInput(110)} />
                 <Typography sx={{ ...typography.label, fontSize: 10 }} title="Rank only custom phases, not the library">candidates only</Typography>
-                <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setIdentifyRequest(true)} title="Identify phase">Identify</Button>
+                <Switch size="small" checked={identifyCustomOnly} onChange={(_, checked) => setIdentifyCustomOnly(checked)} sx={switchStyles.small} />
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => request("identify")} title="Identify phase">Identify</Button>
                 <Button size="small" sx={{ ...compactButton, color: themeColors.textMuted }} onClick={() => setIdentifyCollapsed(true)} title="Hide results">Clear</Button>
               </Stack>
               {!identifyCollapsed && (
@@ -2019,18 +1718,18 @@ function ShowDiffraction() {
                       </tr>
                     </thead>
                     <tbody>
-                      {identifyResults.map((cand) => (
-                        <React.Fragment key={cand.phase_id}>
+                      {identifyResults.map((candidate) => (
+                        <React.Fragment key={candidate.phase_id}>
                           <tr
-                            style={{ borderBottom: `1px solid ${themeColors.border}22`, cursor: "pointer", background: expandedPhaseId === cand.phase_id ? `${themeColors.accent}18` : undefined }}
-                            onClick={() => setExpandedPhaseId(expandedPhaseId === cand.phase_id ? null : cand.phase_id)}
+                            style={{ borderBottom: `1px solid ${themeColors.border}22`, cursor: "pointer", background: expandedPhaseId === candidate.phase_id ? `${themeColors.accent}18` : undefined }}
+                            onClick={() => setExpandedPhaseId(expandedPhaseId === candidate.phase_id ? null : candidate.phase_id)}
                           >
-                            <td style={{ padding: "2px 6px", color: themeColors.accent }}>{cand.name}</td>
-                            <td style={{ padding: "2px 6px" }}>{cand.matched}/{cand.n_obs}</td>
-                            <td style={{ padding: "2px 6px" }}>{cand.mean_err != null ? (cand.mean_err * 100).toFixed(2) : "—"}</td>
-                            <td style={{ padding: "2px 6px" }}>{cand.n_missing_strong ?? "-"}</td>
+                            <td style={{ padding: "2px 6px", color: themeColors.accent }}>{candidate.name}</td>
+                            <td style={{ padding: "2px 6px" }}>{candidate.matched}/{candidate.n_obs}</td>
+                            <td style={{ padding: "2px 6px" }}>{candidate.mean_err != null ? (candidate.mean_err * 100).toFixed(2) : "—"}</td>
+                            <td style={{ padding: "2px 6px" }}>{candidate.n_missing_strong ?? "-"}</td>
                           </tr>
-                          {expandedPhaseId === cand.phase_id && (
+                          {expandedPhaseId === candidate.phase_id && (
                             <tr style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
                               <td colSpan={4} style={{ padding: "2px 6px 4px 14px" }}>
                                 <table style={{ width: "100%", fontSize: 10, fontFamily: "monospace", borderCollapse: "collapse", color: themeColors.text }}>
@@ -2045,10 +1744,10 @@ function ShowDiffraction() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {(cand.lines || []).map((line, li) => {
+                                    {(candidate.lines || []).map((line, lineIndex) => {
                                       const lineColor = line.ref_d == null ? statusColors.bad : line.obs_d == null ? themeColors.textMuted : undefined;
                                       return (
-                                        <tr key={li} style={{ color: lineColor }}>
+                                        <tr key={lineIndex} style={{ color: lineColor }}>
                                           <td style={{ padding: "1px 6px" }}>{line.obs_d != null ? line.obs_d.toFixed(3) : "—"}</td>
                                           <td style={{ padding: "1px 6px" }}>{line.ref_d != null ? line.ref_d.toFixed(3) : "—"}</td>
                                           <td style={{ padding: "1px 6px" }}>{line.hkl || "—"}</td>
@@ -2079,9 +1778,9 @@ function ShowDiffraction() {
               <Slider
                 value={localFrame}
                 min={0} max={nFrames - 1} step={1} size="small"
-                valueLabelDisplay="auto" valueLabelFormat={(v) => `${v + 1}`}
-                onChange={(_, v) => setLocalFrame(v as number)}
-                onChangeCommitted={(_, v) => setFrameIdx(v as number)}
+                valueLabelDisplay="auto" valueLabelFormat={(frame) => `${frame + 1}`}
+                onChange={(_, frame) => setLocalFrame(frame as number)}
+                onChangeCommitted={(_, frame) => setFrameIdx(frame as number)}
                 aria-label={`Frame ${localFrame + 1} of ${nFrames}`}
                 sx={{ ...sliderStyles.small, flex: 1, minWidth: 40, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }}
               />
@@ -2144,7 +1843,7 @@ function ShowDiffraction() {
               <Typography sx={{ ...typography.label, color: themeColors.text }}>
                 Spots ({spots ? spots.length : 0})
               </Typography>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(-1)} title="Detect spots">Auto</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => request("detect_spots")} title="Detect spots">Auto</Button>
               <Button size="small" sx={{ ...compactButton, color: moveSpots ? themeColors.accent : themeColors.textMuted }} onClick={() => setMoveSpots(!moveSpots)} title="Drag spots on the pattern to move them">Move</Button>
             </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
@@ -2165,14 +1864,14 @@ function ShowDiffraction() {
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
-                onClick={() => setSpotUndoRequest(true)}
+                onClick={() => request("undo_spot")}
               >
                 Undo
               </Button>
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
-                onClick={() => setSpotClearRequest(true)}
+                onClick={() => request("clear_spots")}
               >
                 Clear
               </Button>
@@ -2186,7 +1885,7 @@ function ShowDiffraction() {
                     <th style={{ padding: "2px 4px" }}>#</th>
                     <th style={{ padding: "2px 6px" }}>d (Å)</th>
                     <th style={{ padding: "2px 6px" }} title="indexed reflection">hkl</th>
-                    {spots.some((s) => s.d_ref != null) && (
+                    {spotsHaveReference && (
                       <th style={{ padding: "2px 6px" }} title="measured vs reference d">Δd (%)</th>
                     )}
                     <th style={{ padding: "2px 6px" }} title="|g| = 1/d, shown in 1/Å / 1/nm">|g| (1/Å / 1/nm)</th>
@@ -2199,30 +1898,30 @@ function ShowDiffraction() {
                 <tbody>
                   {spots.map((spot: SpotDict, i: number) => {
                     const color = spotColorAt(i);
-                    const dStr = spot.d_spacing != null
+                    const dSpacingText = spot.d_spacing != null
                       ? (spot.d_spacing_err ? `${spot.d_spacing.toFixed(3)}±${spot.d_spacing_err.toFixed(3)}` : spot.d_spacing.toFixed(3))
                       : "—";
-                    const gStr = spot.g_magnitude != null
+                    const gText = spot.g_magnitude != null
                       ? `${spot.g_magnitude.toFixed(4)} / ${(spot.g_magnitude * 10).toFixed(3)}`
                       : `${spot.r_pixels.toFixed(1)} px`;
-                    const aStr = spot.angle_deg != null
+                    const angleText = spot.angle_deg != null
                       ? (spot.angle_deg_err ? `${spot.angle_deg.toFixed(1)}±${spot.angle_deg_err.toFixed(1)}` : spot.angle_deg.toFixed(1))
                       : "—";
                     return (
                       <tr key={spot.id} style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
                         <td style={{ padding: "2px 4px", color, fontWeight: "bold" }}>{spot.id}</td>
-                        <td style={{ padding: "2px 6px" }}>{dStr}</td>
+                        <td style={{ padding: "2px 6px" }}>{dSpacingText}</td>
                         <td style={{ padding: "2px 6px" }}>{spot.hkl || "—"}</td>
-                        {spots.some((s) => s.d_ref != null) && (
+                        {spotsHaveReference && (
                           <td style={{ padding: "2px 6px" }}>{spot.d_error != null ? (spot.d_error * 100).toFixed(2) : "—"}</td>
                         )}
-                        <td style={{ padding: "2px 6px" }}>{gStr}</td>
-                        <td style={{ padding: "2px 6px" }}>{aStr}</td>
+                        <td style={{ padding: "2px 6px" }}>{gText}</td>
+                        <td style={{ padding: "2px 6px" }}>{angleText}</td>
                         <td style={{ padding: "2px 6px" }}>{spot.fit_quality != null ? spot.fit_quality.toFixed(2) : "—"}</td>
                         <td style={{ padding: "2px 6px" }}>{formatNumber(spot.intensity)}</td>
                         <td style={{ padding: "1px 4px", textAlign: "center" }}>
                           <span
-                            onClick={() => setSpotRemoveRequest(spot.id)}
+                            onClick={() => request("remove_spot", spot.id)}
                             title="Delete this spot"
                             style={{ cursor: "pointer", color: themeColors.textMuted, fontWeight: "bold", padding: "0 3px" }}
                           >×</span>
@@ -2243,14 +1942,14 @@ function ShowDiffraction() {
               <Typography sx={{ ...typography.label, color: themeColors.text }}>
                 Rings ({rings ? rings.length : 0})
               </Typography>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(-1)} title="Detect rings">Auto</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => request("detect_rings")} title="Detect rings">Auto</Button>
             </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("csv", "rings")}>CSV</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("json", "rings")}>JSON</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setFitRingsRequest(true)} title="Fit ring profiles">Fit</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingUndoRequest(true)}>Undo</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingClearRequest(true)}>Clear</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => request("fit_rings")} title="Fit ring profiles">Fit</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => request("undo_ring")}>Undo</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => request("clear_rings")}>Clear</Button>
             </Stack>
           </Stack>
           {rings && rings.length > 0 && (
@@ -2262,11 +1961,11 @@ function ShowDiffraction() {
                   <th style={{ padding: "2px 6px" }}>radius (px)</th>
                   <th style={{ padding: "2px 6px" }}>d (Å)</th>
                   <th style={{ padding: "2px 6px" }} title="indexed reflection">hkl</th>
-                  {rings.some((r) => r.d_ref != null) && (
+                  {ringsHaveReference && (
                     <th style={{ padding: "2px 6px" }} title="measured vs reference d">Δd (%)</th>
                   )}
                   <th style={{ padding: "2px 6px" }}>|g| (1/Å)</th>
-                  {rings.some((r) => r.fwhm_px != null) && (
+                  {ringsHaveWidth && (
                     <th style={{ padding: "2px 6px" }} title="fitted peak width">fwhm (px)</th>
                   )}
                   <th style={{ padding: "2px 6px" }}>I</th>
@@ -2283,18 +1982,25 @@ function ShowDiffraction() {
                     <td style={{ padding: "2px 6px", color: themeColors.accent }}>{ring.id}</td>
                     <td style={{ padding: "2px 6px" }}>{ring.radius_px.toFixed(1)}</td>
                     <td style={{ padding: "2px 6px" }}>{ring.d_spacing != null ? ring.d_spacing.toFixed(3) : "—"}</td>
-                    <td style={{ padding: "2px 6px" }}>{ring.hkl || "—"}</td>
-                    {rings.some((r) => r.d_ref != null) && (
+                    <td style={{ padding: "2px 6px" }}>
+                      {ring.hkl ? ring.hkl : ring.hkl_candidates && ring.hkl_candidates.length > 0 ? (
+                        // a d-only candidate the ring-radius ratios did not verify
+                        <span style={{ color: themeColors.textMuted }} title={`d within tolerance of ${ring.hkl_candidates.join(", ")}; not verified by ring ratios`}>
+                          {ring.hkl_candidates[0]}?
+                        </span>
+                      ) : "—"}
+                    </td>
+                    {ringsHaveReference && (
                       <td style={{ padding: "2px 6px" }}>{ring.d_error != null ? (ring.d_error * 100).toFixed(2) : "—"}</td>
                     )}
                     <td style={{ padding: "2px 6px" }}>{ring.g_magnitude != null ? ring.g_magnitude.toFixed(4) : "—"}</td>
-                    {rings.some((r) => r.fwhm_px != null) && (
+                    {ringsHaveWidth && (
                       <td style={{ padding: "2px 6px" }}>{ring.fwhm_px != null ? ring.fwhm_px.toFixed(2) : "—"}</td>
                     )}
                     <td style={{ padding: "2px 6px" }}>{formatNumber(ring.intensity)}</td>
                     <td style={{ padding: "1px 4px", textAlign: "center" }}>
                       <span
-                        onClick={(e) => { e.stopPropagation(); setRingRemoveRequest(ring.id); }}
+                        onClick={(e) => { e.stopPropagation(); request("remove_ring", ring.id); }}
                         title="Delete this ring"
                         style={{ cursor: "pointer", color: themeColors.textMuted, fontWeight: "bold", padding: "0 3px" }}
                       >×</span>
@@ -2316,7 +2022,7 @@ function ShowDiffraction() {
               <Select
                 size="small"
                 value={spotRefine ? "fit" : snapEnabled ? "snap" : "exact"}
-                onChange={(e) => { const v = String(e.target.value); setSpotRefine(v === "fit"); setSnapEnabled(v === "snap"); }}
+                onChange={(e) => { const mode = String(e.target.value); setSpotRefine(mode === "fit"); setSnapEnabled(mode === "snap"); }}
                 sx={{ ...themedSelect, minWidth: 96 }}
                 MenuProps={themedMenuProps}
               >
@@ -2329,6 +2035,8 @@ function ShowDiffraction() {
             <Box sx={{ ...controlBox, overflow: "visible" }}>
               <Histogram
                 data={dpHistData}
+                height={50}
+                darkBackground="#1a1a2e"
                 vminPct={dpVminPct}
                 vmaxPct={dpVmaxPct}
                 dataMin={scaledFrame?.dataMin ?? 0}
@@ -2352,12 +2060,12 @@ function ShowDiffraction() {
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!spots || spots.length === 0 || !(parseFloat(dKnown) > 0)}
-              onClick={() => { const d = parseFloat(dKnown); const s = spots[spots.length - 1]; if (d > 0 && s) setCalibrateFromSpotRequest([s.row, s.col, d]); }}
+              onClick={() => { const d = parseFloat(dKnown); const lastSpot = spots[spots.length - 1]; if (d > 0 && lastSpot) request("calibrate_from_spot", lastSpot.row, lastSpot.col, d); }}
             >From Spot</Button>
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!rings || rings.length === 0 || !(parseFloat(dKnown) > 0)}
-              onClick={() => { const d = parseFloat(dKnown); const r = rings[rings.length - 1]; if (d > 0 && r) setCalibrateFromRingRequest([r.radius_px, d]); }}
+              onClick={() => { const d = parseFloat(dKnown); const lastRing = rings[rings.length - 1]; if (d > 0 && lastRing) request("calibrate_from_ring", lastRing.radius_px, d); }}
             >From Ring</Button>
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
@@ -2371,13 +2079,13 @@ function ShowDiffraction() {
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!rings || rings.length === 0}
-              onClick={() => setFitEllipseRequest(true)}
+              onClick={() => request("fit_ellipse")}
               title="Fit ellipse distortion"
             >Fit Ellipse</Button>
             <Typography sx={{ ...typography.label, fontSize: 10 }}>Use Correction</Typography>
             <Switch
               size="small" checked={ellipseCorrected}
-              onChange={(_, v) => setEllipseCorrected(v)}
+              onChange={(_, checked) => setEllipseCorrected(checked)}
               sx={switchStyles.small}
               title="Use fitted ellipse correction"
               disabled={!(ellipseRatio > 1.0)}

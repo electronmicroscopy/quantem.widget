@@ -2,8 +2,7 @@ import * as React from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 
-
-export type FolderWatchState =
+type FolderWatchState =
   | "hidden"
   | "watching"
   | "updating"
@@ -12,13 +11,13 @@ export type FolderWatchState =
   | "stopped"
   | "not_watching";
 
+type VisibleFolderWatchState = Exclude<FolderWatchState, "hidden">;
+
 type FolderWatchPresentation = {
-  state: Exclude<FolderWatchState, "hidden">;
+  state: VisibleFolderWatchState;
   label: string;
   color: string;
 };
-
-type VisibleFolderWatchState = Exclude<FolderWatchState, "hidden">;
 
 const PRESENTATIONS: Record<VisibleFolderWatchState, Omit<FolderWatchPresentation, "state">> = {
   watching: { label: "Watching", color: "#2e7d32" },

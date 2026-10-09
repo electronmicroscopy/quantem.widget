@@ -7,7 +7,7 @@ export const cross = (a: number[], b: number[]): V3 => [
   a[2] * b[0] - a[0] * b[2],
   a[0] * b[1] - a[1] * b[0],
 ];
-export function normalize(v: number[]): V3 {
+function normalize(v: number[]): V3 {
   const n = Math.hypot(...v);
   if (n < 1e-10) throw Error("Direction must be nonzero.");
   return v.map((x) => x / n) as V3;

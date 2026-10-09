@@ -1,7 +1,5 @@
 """Install the newest QuantEM release candidates in Google Colab."""
 
-from __future__ import annotations
-
 import json
 import subprocess
 import sys

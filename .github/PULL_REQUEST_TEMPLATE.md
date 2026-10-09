@@ -35,8 +35,8 @@ evidence in the three visible sections above.
 ## Core checklist (every PR)
 
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
-  and `npm run build`, or run `scripts/widget_local_signoff.sh`.
+  frontend build coverage where possible; run `PYTHONPATH=src pytest -q`
+  and `npm run build`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
   private data, or machine-specific notes.
@@ -89,9 +89,8 @@ evidence in the three visible sections above.
   design system; compare against
   [Show2D](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb),
   [Show3D](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb),
-  [Show3DSlices](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb),
-  [Show4DSTEM](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb), and
-  [ShowEDS](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showeds.ipynb). Follow the
+  [Show3DSlices](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb), and
+  [Show4DSTEM](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb). Follow the
   [widget UI protocol](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-ui-protocol.md).
 - [ ] Controls are compact and content-sized: use icon/text buttons for
   commands, switches for binary options, sliders for numeric values, menus for
@@ -105,7 +104,7 @@ evidence in the three visible sections above.
   rows; keep colons for explanatory prose and tooltips.
 - [ ] Command buttons use Title Case, for example `Copy`, `Export`, `Reset`,
   `Add`, `Clear`, and `Undo`. Keep scientific acronyms and file formats
-  uppercase, for example `FFT`, `ROI`, `BF`, `ADF`, `HTML`, `PNG`, and `MP4`.
+  uppercase, for example `FFT`, `ROI`, `BF`, `ADF`, `HTML`, `PNG`, and `GIF`.
 - [ ] The widget supports both light and dark notebook/docs themes: all labels,
   borders, controls, plots, histograms, ROI handles, status text, and export UI
   remain readable.
@@ -119,11 +118,8 @@ evidence in the three visible sections above.
   panels/regions and verify coordinates, value/readout, labels, detector/ROI
   context, and stats follow the hovered target while edit controls remain
   scoped to the explicitly selected target.
-- [ ] New or changed widget interactions have a matching storyboard story in
-  [docs/maintainer/storyboard-&lt;widget&gt;.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/storyboard.md)
-  (add stories for new behavior, update stale ones), and the storyboard
-  drive-test was run for the affected widget with the driven story IDs
-  reported.
+- [ ] New or changed widget interactions were driven in a browser and the
+  tutorial or API page describes the new behavior.
 
 </details>
 
@@ -134,9 +130,7 @@ evidence in the three visible sections above.
   state; use refs/CSS transforms or an equivalent fast path during drag. See
   [performance notes](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
 - [ ] Use [Show4DSTEM](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb)
-  detector dragging and
-  [ShowEDS](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showeds.ipynb)
-  energy-band dragging as the real-time UX benchmark: aim for 60 FPS when
+  detector dragging as the real-time UX benchmark: aim for 60 FPS when
   feasible and keep live controls at 30 FPS or better.
 - [ ] Real-time interactions are browser-driven and verified by actually
   dragging controls in JupyterLab or exported HTML, not only by reading code or
@@ -149,15 +143,11 @@ evidence in the three visible sections above.
 - [ ] Performance reports separate load time, widget build time, first browser
   paint, and interaction FPS/latency. Include data shape, dtype, raw size,
   backend, and any crop/bin/downsample/quantization. Prefer `verbose=True`
-  output that users and agents can copy; use `quantem.widget.profile_widget`
-  for profiling notebooks when possible. See
+  output that users and agents can copy. See
   [performance notes](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
-- [ ] For interaction-sensitive changes, run
-  `scripts/widget_local_signoff.sh --quick --browser` for exported HTML/UI
-  paths, fix issues immediately, rebuild, refresh, and redrive before claiming
-  the widget is ready. See
-  [Automation](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/automation.md) and
-  [Agent signoff](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/maintainer/widget-agent-signoff.md).
+- [ ] For interaction-sensitive changes, open the exported HTML or the docs
+  tutorial in a browser, fix issues immediately, rebuild, refresh, and redrive
+  before claiming the widget is ready.
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;
   use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
   where the widget interaction requires live feedback.
@@ -202,7 +192,7 @@ evidence in the three visible sections above.
   state.
 - [ ] GitHub sharing is treated separately from live HTML: GitHub notebook
   previews should use static compressed widget pictures, never heavy live widget
-  state. See [GitHub preview](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/github-preview.md).
+  state (`quantem github`, see [the command line](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/cli.md)).
 
 </details>
 -->

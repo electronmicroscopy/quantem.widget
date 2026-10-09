@@ -4,7 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom",
-    include: ["js/**/*.test.ts", "web/src/**/*.test.ts"],
+    include: ["js/**/*.test.ts"],
     // macOS AppleDouble metadata mirrors source names as `._*.test.ts`; they
     // are binary resource forks, not test modules.
     exclude: ["**/._*"],

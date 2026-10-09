@@ -24,6 +24,11 @@ function concatUint8(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * The fixed 256-color GIF palette: a 6x6x6 RGB cube (levels 0, 51, ..., 255)
+ * at indices 0-215, then a gray ramp. Fixed so every frame shares one global
+ * color table and quantizeRgbaForBrowserGif can index it arithmetically.
+ */
 function palette(): Uint8Array {
   if (show3dGifPalette) return show3dGifPalette;
 
@@ -53,19 +58,22 @@ function palette(): Uint8Array {
   return colors;
 }
 
+/** A channel composited onto white, (value * alpha + 255 * (255 - alpha)) / 255, since GIF has no alpha. */
+function overWhite(value: number, alpha: number): number {
+  return alpha === 255 ? value : Math.round((value * alpha + 255 * (255 - alpha)) / 255);
+}
+
+/**
+ * Palette indices for RGBA pixels: each channel is composited onto white, then
+ * rounded to the nearest of the six cube levels, index = 36 red + 6 green + blue.
+ */
 export function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
   const out = new Uint8Array(Math.floor(rgba.length / 4));
   for (let pixel = 0, offset = 0; pixel < out.length; pixel++, offset += 4) {
     const alpha = rgba[offset + 3];
-    const red = alpha === 255
-      ? rgba[offset]
-      : Math.round((rgba[offset] * alpha + 255 * (255 - alpha)) / 255);
-    const green = alpha === 255
-      ? rgba[offset + 1]
-      : Math.round((rgba[offset + 1] * alpha + 255 * (255 - alpha)) / 255);
-    const blue = alpha === 255
-      ? rgba[offset + 2]
-      : Math.round((rgba[offset + 2] * alpha + 255 * (255 - alpha)) / 255);
+    const red = overWhite(rgba[offset], alpha);
+    const green = overWhite(rgba[offset + 1], alpha);
+    const blue = overWhite(rgba[offset + 2], alpha);
     const redBin = Math.max(0, Math.min(5, Math.round(red / 51)));
     const greenBin = Math.max(0, Math.min(5, Math.round(green / 51)));
     const blueBin = Math.max(0, Math.min(5, Math.round(blue / 51)));
@@ -118,6 +126,11 @@ function pushSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
   parts.push(new Uint8Array([0]));
 }
 
+/**
+ * A looping GIF89a of palette-indexed frames (one global palette, NETSCAPE2.0
+ * loop block, `delayCs` hundredths of a second per frame). Built in the browser
+ * so a standalone HTML page can export a GIF without a kernel.
+ */
 export function encodeIndexedGif(
   width: number,
   height: number,

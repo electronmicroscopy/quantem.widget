@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Verify that baked tutorial widgets use this checkout's frontend bundles."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -17,10 +15,12 @@ STATE_RE = re.compile(
 
 
 def _digest(text: str) -> str:
+    """sha256 of a bundle, short enough to compare a stale page against the build by eye."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def main() -> int:
+    """Compare every baked AnyWidget ``_esm`` with this checkout's bundles; exit 1 on a mismatch."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("html_dir", nargs="?", type=Path, default=Path("docs/_build/html"))
     parser.add_argument(

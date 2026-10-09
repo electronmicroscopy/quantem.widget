@@ -1,25 +1,19 @@
-"""Structural protocol for standalone HTML exports.
+"""Standalone HTML export shared by every widget with an export button.
 
-The viewer widgets do not inherit from a shared export base class.  Keep it that
-way: each widget owns its data packing and export modes.  This module is the
-small, discoverable contract for tools, docs, and future widgets.
+``HtmlExportMixin`` owns the toolbar handshake (the ``export_*`` traits and
+the request observer), the default file name, the in-memory bytes path and the
+standalone write. A widget supplies ``_clone_for_html_export`` (an export-only
+copy of itself with the requested packing) and, when it has options, the
+``_html_export_options`` parser plus the matching ``export_html`` signature.
+``write_widget_html`` embeds any widget as a one-file page and applies the
+shell fixes below so the page opens on phones and on a cold CDN cache.
 """
 
-from __future__ import annotations
-
+import json
 import pathlib
-from typing import Any, Protocol, TypeGuard, runtime_checkable
+import tempfile
 
-HtmlExportPath = str | pathlib.Path | None
-
-HTML_EXPORT_TRAITS = (
-    "export_request",
-    "export_status",
-    "export_enabled",
-    "export_payload",
-    "export_payload_id",
-    "export_filename",
-)
+import traitlets
 
 _MOBILE_VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1">'
 _ANYWIDGET_REQUIREJS_CONFIG = """<script id="quantem-widget-anywidget-requirejs">
@@ -61,88 +55,142 @@ def ensure_mobile_viewport(path: str | pathlib.Path) -> pathlib.Path:
     html_path = pathlib.Path(path)
     html = html_path.read_text(encoding="utf-8")
     changed = False
-    needs_anywidget = (
-        '"model_module": "anywidget"' in html
-        or '"_model_module": "anywidget"' in html
-        or '"view_module": "anywidget"' in html
-        or '"_view_module": "anywidget"' in html
+    needs_anywidget = any(
+        f'"{key}": "anywidget"' in html for key in ("model_module", "_model_module", "view_module", "_view_module")
     )
     if needs_anywidget and 'id="quantem-widget-anywidget-requirejs"' not in html:
         marker = '<script src="https://cdn.jsdelivr.net/npm/@jupyter-widgets/html-manager'
-        marker_idx = html.find(marker)
-        if marker_idx >= 0:
-            html = f"{html[:marker_idx]}{_ANYWIDGET_REQUIREJS_CONFIG}\n{html[marker_idx:]}"
+        marker_index = html.find(marker)
+        if marker_index >= 0:
+            html = f"{html[:marker_index]}{_ANYWIDGET_REQUIREJS_CONFIG}\n{html[marker_index:]}"
         elif "</head>" in html:
             html = html.replace("</head>", f"    {_ANYWIDGET_REQUIREJS_CONFIG}\n</head>", 1)
         else:
             html = f"{_ANYWIDGET_REQUIREJS_CONFIG}\n{html}"
         changed = True
+    needs_viewport = 'name="viewport"' not in html and "name='viewport'" not in html
+    needs_layout = 'id="quantem-widget-export-layout"' not in html
     if "<head>" in html:
-        if 'name="viewport"' not in html and "name='viewport'" not in html:
+        if needs_viewport:
             html = html.replace("<head>", f"<head>\n    {_MOBILE_VIEWPORT_META}", 1)
-            changed = True
-        if 'id="quantem-widget-export-layout"' not in html:
+        if needs_layout:
             html = html.replace("</head>", f"    {_STANDALONE_EXPORT_STYLE}\n</head>", 1)
-            changed = True
     else:
-        prefix = ""
-        if 'name="viewport"' not in html and "name='viewport'" not in html:
-            prefix += f"{_MOBILE_VIEWPORT_META}\n"
-        if 'id="quantem-widget-export-layout"' not in html:
-            prefix += f"{_STANDALONE_EXPORT_STYLE}\n"
-        if prefix:
-            html = f"{prefix}{html}"
-            changed = True
-    if changed:
+        viewport = f"{_MOBILE_VIEWPORT_META}\n" if needs_viewport else ""
+        layout = f"{_STANDALONE_EXPORT_STYLE}\n" if needs_layout else ""
+        html = f"{viewport}{layout}{html}"
+    if changed or needs_viewport or needs_layout:
         html_path.write_text(html, encoding="utf-8")
     return html_path
 
 
-@runtime_checkable
-class SupportsHtmlExport(Protocol):
-    """Widget object with a Python API for standalone HTML export.
+def export_slug(title: str, fallback: str) -> str:
+    """File-name stem from a widget title: lowercase, one underscore between words."""
+    label = (title or "").strip() or fallback
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or fallback
 
-    Implementations should write an HTML file that can hydrate the widget with
-    the ipywidgets HTML manager and run without a live Python kernel.  The
-    preferred public options are ``mode`` for file layout, ``encoding`` for data
-    storage, and ``downsample`` for shape reduction. Existing widget-specific
-    names such as ``quantized``, ``dtype``, ``det_bin``, and ``binning`` remain
-    compatibility aliases.
+
+def write_widget_html(path: str | pathlib.Path, widget, title: str) -> pathlib.Path:
+    """Embed one widget with its full state as a standalone HTML page."""
+    from ipywidgets.embed import dependency_state, embed_minimal_html
+
+    export_path = pathlib.Path(path)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    embed_minimal_html(
+        str(export_path),
+        views=[widget],
+        title=title,
+        drop_defaults=False,
+        state=dependency_state([widget], drop_defaults=False),
+    )
+    ensure_mobile_viewport(export_path)
+    return export_path
+
+
+class HtmlExportMixin(traitlets.HasTraits):
+    """Toolbar export handshake and standalone HTML writing.
+
+    The frontend writes a JSON request into ``export_request``; Python answers
+    through ``export_status`` and, for browser downloads, ``export_payload``
+    with the matching ``export_payload_id`` / ``export_filename``. Widgets
+    register ``_on_export_request_change`` on ``export_request`` in their
+    ``__init__`` so a subclass override still receives the request.
     """
 
-    def export_html(
-        self,
-        path: HtmlExportPath = None,
-        *,
-        title: str | None = None,
-        **options: Any,
-    ) -> pathlib.Path:
-        """Write a standalone HTML artifact and return the written path."""
+    export_request = traitlets.Unicode("").tag(sync=True)
+    export_status = traitlets.Unicode("").tag(sync=True)
+    export_enabled = traitlets.Bool(True).tag(sync=True)
+    export_payload = traitlets.Bytes(b"").tag(sync=True)
+    export_payload_id = traitlets.Unicode("").tag(sync=True)
+    export_filename = traitlets.Unicode("").tag(sync=True)
 
+    def _on_export_request_change(self, change: dict) -> None:
+        """React to a toolbar request on ``export_request``: clear the download payload or serve the export."""
+        raw = str(change.get("new") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            mode = str(payload.get("mode", ""))
+            if mode == "clear":
+                self.export_payload = b""
+                self.export_payload_id = ""
+                self.export_filename = ""
+                return
+            self._export_request(payload, mode)
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError, NotImplementedError, MemoryError) as exc:
+            # the toolbar shows the failure; raising would only reach the kernel log
+            self.export_status = f"Export failed: {exc}"
 
-@runtime_checkable
-class SupportsFrontendHtmlExport(SupportsHtmlExport, Protocol):
-    """Widget object with the standard in-widget HTML export bridge."""
+    def _export_request(self, payload: dict, mode: str) -> None:
+        """Serve one toolbar request: a browser download or a file in the kernel cwd."""
+        options = self._html_export_options(payload, mode)
+        if payload.get("download"):
+            filename = str(payload.get("filename") or self._default_html_export_path(**options).name)
+            request_id = str(payload.get("id") or "")
+            self.export_status = f"Preparing {filename}..."
+            html = self._html_export_bytes(**options)
+            self.export_filename = filename
+            self.export_payload = html
+            self.export_payload_id = request_id
+            size_mb = len(html) / (1024 * 1024)
+            self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {self._export_mode_label(**options)})"
+        else:
+            self.export_status = f"Exporting {mode} HTML..."
+            self.export_html(**options)
 
-    export_request: str
-    export_status: str
-    export_enabled: bool
-    export_payload: bytes
-    export_payload_id: str
-    export_filename: str
+    def _html_export_options(self, payload: dict, mode: str) -> dict:
+        """Keyword options for ``export_html`` parsed from the toolbar request; none by default."""
+        return {}
 
+    def _export_mode_label(self, quantized: bool = False, downsample: int = 1) -> str:
+        """Packing named in the toolbar status, so the user sees whether the page holds float32 or uint8 pixels."""
+        if not quantized:
+            return "full float32"
+        if int(downsample) > 1:
+            return f"uint8, {int(downsample)}x downsample"
+        return "uint8"
 
-def supports_html_export(obj: object) -> TypeGuard[SupportsHtmlExport]:
-    """Return whether ``obj`` exposes the structural HTML export API."""
+    def _html_export_bytes(self, **options) -> bytes:
+        """The standalone page as bytes, for the browser download path."""
+        with tempfile.TemporaryDirectory(prefix=f"{type(self).__name__.lower()}-export-") as tmp:
+            path = pathlib.Path(tmp) / self._default_html_export_path(**options).name
+            self._write_html_export(path, **options)
+            return path.read_bytes()
 
-    return callable(getattr(obj, "export_html", None))
+    def _write_html_export(self, path: str | pathlib.Path, *, title: str | None = None, **options) -> pathlib.Path:
+        """Write the standalone page from an export clone, then release the clone."""
+        export_widget = self._clone_for_html_export(**options)
+        try:
+            return write_widget_html(path, export_widget, title or self.title or type(self).__name__)
+        finally:
+            self._release_export_clone(export_widget)
+            # Widget.close leaves the child Layout model open, one more per export
+            export_widget.layout.close()
 
-
-__all__ = [
-    "HTML_EXPORT_TRAITS",
-    "HtmlExportPath",
-    "SupportsFrontendHtmlExport",
-    "SupportsHtmlExport",
-    "ensure_mobile_viewport",
-    "supports_html_export",
-]
+    def _release_export_clone(self, clone) -> None:
+        """Close the export clone so its comm and pixel buffers do not outlive the export; widgets override it."""
+        clone.close()

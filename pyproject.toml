@@ -10,38 +10,55 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "quantem>=0.1.8",
-    "quantem.gpu[movie]>=0.0.1rc11",
+    # Every widget on every platform. torch 2.2 is the newest wheel for Intel Macs, and
+    # torch 2.2 imports only with numpy 1.x there, hence the marker.
+    "torch>=2.2",
+    "numpy>=1.26",
+    "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "anywidget>=0.11.0",
+    "ipywidgets>=7.6",  # Show1D's prepared view, export_html's embedding (anywidget's own floor)
+    "comm>=0.1.3",  # Show3D's saved-notebook preview renders without a frontend model (ipywidgets' own floor)
+    "ipython>=6.1",  # notebook display of the saved-notebook preview (ipywidgets' own floor)
     # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
     "jupyterlab_widgets>=3.0.10",
-    "numpy>=2.0.0",
-    "scipy>=1.10.0",
     "traitlets>=5.0.0",
-    "torch>=2.0.0",
-    "matplotlib>=3.7.0",
+    "tornado>=6.1",  # Show4DSTEM schedules its first view sync on the kernel's IOLoop
     "Pillow>=10.0.0",
-    "numba>=0.60",
-    "xraydb>=4.5.0",
-    "sparse>=0.15.0",
-    "imagecodecs>=2024.1.1",  # decode compressed (e.g. LZW) TIFF frames for show3d / read_image_stack
-    # Apple Metal backend on macOS (tiny wheel, no system toolkit). On Linux the CUDA
-    # decode uses cupy, but we do NOT pin a cupy wheel: a fixed cuda13x/cuda12x would
-    # collide with a cupy the environment already ships (Colab pre-installs cupy-cuda12x ->
-    # "multiple CuPy packages" warning + breakage). A real CUDA workflow already has the
-    # matching cupy; if not, the GPU-only decode path (kernels.detect()) raises with the
-    # exact install command. Widget display itself still routes cuda > mps > cpu via
-    # detect_backend(). So pip install stays one line without a cupy conflict.
-    "pyobjc-framework-Metal>=10.0 ; sys_platform == 'darwin'",
+    "matplotlib>=3.7.0",
+    "scipy>=1.10.0",
+    "scikit-image>=0.22",  # ShowDiffraction denoise="nlm" (non-local means)
+    "h5py>=3.8",  # Show4DSTEM dense reader, EMD images
+    # bitshuffle-LZ4 detector files. Windows on ARM has no wheel and the sdist needs MSVC, so it
+    # is skipped there (x64 Python on Windows on ARM also reports ARM64); the reader names it
+    # when a file needs it.
+    "hdf5plugin>=4.1; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "psutil>=5.9",  # Show4DSTEM dense reader memory ceiling
+    "tifffile>=2024.1.1",  # read_image_stack / Show3D folder frames
+    "imagecodecs>=2024.1.1",  # tifffile codec plugin for compressed (e.g. LZW) TIFF frames
+    # read_image .dm3/.dm4. ncempy 1.15+ requires and imports hdf5plugin; 1.14 reads the same
+    # .dm3/.dm4 files without it, so Windows on ARM takes 1.14.
+    "ncempy>=1.11; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "ncempy>=1.11,<1.15; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "huggingface_hub>=0.25",  # tutorial datasets and io.download
+    # quantem core: readers return its Dataset2d/Dataset3d/Dataset4dstem. It needs torch 2.7 and
+    # NumPy 2 (no Intel Mac wheel) and hdf5plugin 6 (no Windows on ARM wheel); there the widget's
+    # stand-in carries the same attributes (adapters/core.py).
+    "quantem>=0.1.9; (sys_platform != 'darwin' or platform_machine != 'x86_64') and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "ase>=3.22",  # ShowCIF reads crystal structures
 ]
 
 [project.optional-dependencies]
-# Shared HF dataset hub (upload/download), re-exported by quantem.widget.io.hub
-# Not published on PyPI yet so cannot be a hard depedency
-# pip install quantem.widget[hub] once available
+# The same explicit extras as quantem.gpu, which adds encoded GPU acquisitions and GPU file
+# loading. [cuda]: NVIDIA (CuPy). [mps]: Apple silicon (Metal, MLX). [cpu]: no GPU, or an Intel
+# Mac, which cannot install quantem.gpu (torch 2.3+). A wrong pick installs nothing harmful.
+cpu = []
+cuda = ["quantem.gpu[cuda]>=0.0.1rc13; sys_platform != 'darwin'"]
+mps = ["quantem.gpu[mps]>=0.0.1rc13; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# Uploading new tutorial datasets to the shared Hugging Face hub (downloads need
+# only huggingface_hub). quantem.data is not on PyPI, so it stays an extra.
 hub = ["quantem.data>=0.0.1rc1"]
-# PlanPtycho builds crystals from CIF / Materials Project (spglib: primitive -> conventional cell) and projects them with abTEM (brings ase)
-crystal = ["abtem>=1.0", "spglib>=2"]
+# ShowCIF(potential=True) projects atoms with abTEM's Lobato parametrization
+crystal = ["abtem>=1.0"]
 test = [
     "ipykernel>=6",
     "pytest>=8",

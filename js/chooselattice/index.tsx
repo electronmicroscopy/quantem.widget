@@ -1,5 +1,5 @@
 /**
- * ChooseLattice — pick an ordered origin + two lattice-vector points on an image.
+ * ChooseLattice: pick an ordered origin + two lattice-vector points on an image.
  *
  * Lean single-panel viewer: one canvas showing a pre-rendered (server-side
  * colormapped) image. Scroll to zoom, drag to pan, click to place up to 3
@@ -24,6 +24,8 @@ const CANVAS_BORDER_PX = 1;
 const HIT_PX = 10;
 const CLICK_MOVE_THRESHOLD_PX = 4;
 const POINT_COLORS = ["#ff4d4f", "#40a9ff", "#73d13d"];
+// the three picks: the origin, then the ends of lattice vectors u and v
+const POINT_LABELS = ["Origin", "u", "v"];
 
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
 const compactButton = {
@@ -53,7 +55,6 @@ function ChooseLattice() {
   const [width] = useModelState<number>("width");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [title] = useModelState<string>("title");
-  const [pointLabels] = useModelState<string[]>("point_labels");
   const [points, setPoints] = useModelState<Point[]>("points");
 
   // Decode the PNG payload once per change into a drawable bitmap.
@@ -67,12 +68,12 @@ function ChooseLattice() {
     let cancelled = false;
     const blob = new Blob([bytes as unknown as BlobPart], { type: "image/png" });
     if (typeof createImageBitmap === "function") {
-      createImageBitmap(blob).then((bmp) => { if (!cancelled) setImage(bmp); });
+      createImageBitmap(blob).then((bitmap) => { if (!cancelled) setImage(bitmap); });
     } else {
       const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => { if (!cancelled) setImage(img); URL.revokeObjectURL(url); };
-      img.src = url;
+      const imageElement = new Image();
+      imageElement.onload = () => { if (!cancelled) setImage(imageElement); URL.revokeObjectURL(url); };
+      imageElement.src = url;
     }
     return () => { cancelled = true; };
   }, [frameBytes]);
@@ -97,11 +98,11 @@ function ChooseLattice() {
   // React's synthetic onWheel is passive and would only warn if it called
   // preventDefault itself.
   React.useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    const container = containerRef.current;
+    if (!container) return;
     const prevent = (e: WheelEvent) => e.preventDefault();
-    el.addEventListener("wheel", prevent, { passive: false });
-    return () => el.removeEventListener("wheel", prevent);
+    container.addEventListener("wheel", prevent, { passive: false });
+    return () => container.removeEventListener("wheel", prevent);
   }, []);
 
   // Draw the base image with pan/zoom applied.
@@ -138,7 +139,7 @@ function ChooseLattice() {
   }, [image, width, height, displayScale, zoom, panX, panY, canvasW, canvasH, themeColors.bg]);
 
   // Convert a mouse event to original-image (row, col) coordinates.
-  const screenToImg = React.useCallback((e: { clientX: number; clientY: number }): Point => {
+  const screenToImage = React.useCallback((e: { clientX: number; clientY: number }): Point => {
     const canvas = canvasRef.current;
     if (!canvas) return [0, 0];
     const rect = canvas.getBoundingClientRect();
@@ -151,7 +152,7 @@ function ChooseLattice() {
     return [row, col];
   }, [canvasW, canvasH, panX, panY, displayScale, zoom, width, height]);
 
-  const imgToScreen = React.useCallback((row: number, col: number): [number, number] => {
+  const imageToScreen = React.useCallback((row: number, col: number): [number, number] => {
     const cx = canvasW / 2;
     const cy = canvasH / 2;
     const x = cx + (col - width / 2) * displayScale * zoom + panX;
@@ -163,15 +164,15 @@ function ChooseLattice() {
     const hitArea = HIT_PX / (displayScale * zoom);
     const list = points || [];
     for (let i = list.length - 1; i >= 0; i--) {
-      const [pr, pc] = list[i];
-      if (Math.hypot(row - pr, col - pc) <= hitArea) return i;
+      const [pointRow, pointCol] = list[i];
+      if (Math.hypot(row - pointRow, col - pointCol) <= hitArea) return i;
     }
     return -1;
   }, [points, displayScale, zoom]);
 
-  // Wheel: cursor-anchored zoom. Page-scroll prevention is handled by a
-  // native non-passive listener below (React's synthetic onWheel is passive,
-  // so calling preventDefault directly here would only log a console warning).
+  // Wheel: cursor-anchored zoom. Page-scroll prevention is the native
+  // non-passive listener above (React's synthetic onWheel is passive, so
+  // calling preventDefault directly here would only log a console warning).
   const handleWheel = (e: React.WheelEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -199,7 +200,7 @@ function ChooseLattice() {
   // second click will follow (making it a double-click). Placing a point
   // immediately on every plain click would mean double-clicking to reset the
   // view always drops a spurious point first. So a plain click's point is
-  // held for this long — if a double-click follows, it is cancelled instead.
+  // held for this long; if a double-click follows, it is cancelled instead.
   const DOUBLE_CLICK_GRACE_MS = 300;
   const pointsRef = React.useRef(points);
   React.useEffect(() => { pointsRef.current = points; }, [points]);
@@ -231,12 +232,12 @@ function ChooseLattice() {
       dragRef.current = null;
       return;
     }
-    const [row, col] = screenToImg(e);
-    const hitIdx = hitTestPoint(row, col);
-    if (hitIdx !== -1) {
+    const [row, col] = screenToImage(e);
+    const hitIndex = hitTestPoint(row, col);
+    if (hitIndex !== -1) {
       dragRef.current = {
         mode: "point", startClientX: e.clientX, startClientY: e.clientY,
-        startPanX: panX, startPanY: panY, pointIndex: hitIdx,
+        startPanX: panX, startPanY: panY, pointIndex: hitIndex,
       };
       return;
     }
@@ -250,7 +251,7 @@ function ChooseLattice() {
     const drag = dragRef.current;
     if (!drag) return;
     if (drag.mode === "point") {
-      const [row, col] = screenToImg(e);
+      const [row, col] = screenToImage(e);
       const next = (points || []).slice();
       next[drag.pointIndex] = [clamp(row, 0, Math.max(0, height - 1)), clamp(col, 0, Math.max(0, width - 1))];
       setPoints(next);
@@ -275,7 +276,7 @@ function ChooseLattice() {
       // after a short grace period a following double-click can cancel.
       const list = pointsRef.current || [];
       if (list.length < 3) {
-        const [row, col] = screenToImg(e);
+        const [row, col] = screenToImage(e);
         const clamped: Point = [
           clamp(row, 0, Math.max(0, height - 1)),
           clamp(col, 0, Math.max(0, width - 1)),
@@ -300,7 +301,7 @@ function ChooseLattice() {
   const handleMouseMoveReadout = (e: React.MouseEvent) => {
     handleMouseMove(e);
     if (!dragRef.current || dragRef.current.mode === "none") {
-      setCursorPos(screenToImg(e));
+      setCursorPos(screenToImage(e));
     }
   };
 
@@ -315,21 +316,21 @@ function ChooseLattice() {
     ctx.clearRect(0, 0, canvasW, canvasH);
     const list = points || [];
     if (list.length > 1) {
-      const [ox, oy] = imgToScreen(list[0][0], list[0][1]);
+      const [originX, originY] = imageToScreen(list[0][0], list[0][1]);
       ctx.strokeStyle = "rgba(255,255,255,0.6)";
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       for (let i = 1; i < list.length; i++) {
-        const [x, y] = imgToScreen(list[i][0], list[i][1]);
+        const [x, y] = imageToScreen(list[i][0], list[i][1]);
         ctx.beginPath();
-        ctx.moveTo(ox, oy);
+        ctx.moveTo(originX, originY);
         ctx.lineTo(x, y);
         ctx.stroke();
       }
       ctx.setLineDash([]);
     }
     list.forEach(([row, col], i) => {
-      const [x, y] = imgToScreen(row, col);
+      const [x, y] = imageToScreen(row, col);
       const color = POINT_COLORS[i % POINT_COLORS.length];
       ctx.beginPath();
       ctx.arc(x, y, 6, 0, 2 * Math.PI);
@@ -338,7 +339,7 @@ function ChooseLattice() {
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 1;
       ctx.stroke();
-      const label = pointLabels && pointLabels[i] ? pointLabels[i] : String(i + 1);
+      const label = POINT_LABELS[i];
       ctx.font = "bold 11px -apple-system, sans-serif";
       ctx.fillStyle = "#fff";
       ctx.strokeStyle = "rgba(0,0,0,0.85)";
@@ -348,7 +349,7 @@ function ChooseLattice() {
       ctx.strokeText(label, x + 9, y - 6);
       ctx.fillText(label, x + 9, y - 6);
     });
-  }, [points, pointLabels, imgToScreen, canvasW, canvasH]);
+  }, [points, imageToScreen, canvasW, canvasH]);
 
   const canvasBox = {
     position: "relative" as const,
@@ -426,16 +427,16 @@ function ChooseLattice() {
         </Typography>
 
         <Box sx={{ mt: `${SPACING.SM}px` }}>
-          {(pointLabels || []).map((label, i) => {
-            const p = (points || [])[i];
+          {POINT_LABELS.map((label, i) => {
+            const point = (points || [])[i];
             const origin = (points || [])[0];
             // Origin is reported as its raw pixel position; the other two
             // points are reported as lattice vectors relative to the origin
             // (u = a1 - origin, v = a2 - origin), not raw pixel positions.
             const isVector = i > 0;
-            const value = isVector && p && origin
-              ? [p[0] - origin[0], p[1] - origin[1]]
-              : (!isVector ? p : null);
+            const value = isVector && point && origin
+              ? [point[0] - origin[0], point[1] - origin[1]]
+              : (!isVector ? point : null);
             return (
               <Typography key={label + i} sx={{ fontSize: 11, fontFamily: "monospace", color: value ? POINT_COLORS[i % POINT_COLORS.length] : themeColors.textMuted }}>
                 {label}: {value ? `(${value[0].toFixed(1)}, ${value[1].toFixed(1)})` : "not placed"}

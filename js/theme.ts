@@ -8,10 +8,10 @@ import { useState, useEffect, useMemo } from "react";
 // ============================================================================
 // Types
 // ============================================================================
-export type Environment = "jupyterlab" | "vscode" | "colab" | "jupyter-classic" | "docs" | "unknown";
+type Environment = "jupyterlab" | "vscode" | "colab" | "jupyter-classic" | "docs" | "unknown";
 export type Theme = "light" | "dark";
 
-export interface ThemeInfo {
+interface ThemeInfo {
   environment: Environment;
   theme: Theme;
 }
@@ -41,7 +41,7 @@ export const DARK_COLORS: ThemeColors = {
   accent: "#5af",
 };
 
-export const LIGHT_COLORS: ThemeColors = {
+const LIGHT_COLORS: ThemeColors = {
   bg: "#ffffff",
   bgAlt: "#f5f5f5",
   text: "#1e1e1e",
@@ -60,7 +60,7 @@ export function getThemeColors(theme: Theme): ThemeColors {
 // ============================================================================
 
 /** Check if a CSS color string is dark (luminance < 0.5) */
-export function isColorDark(color: string): boolean {
+function isColorDark(color: string): boolean {
   const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
   if (!match) return true;
   const [, r, g, b] = match.map(Number);
@@ -162,7 +162,7 @@ export function useTheme(forceLight = false): { themeInfo: ThemeInfo; colors: Th
   // is a static, theme-less artifact and a forced dark page leaks the kernel's
   // dark Jupyter theme into a shared file the colleague opens in any browser.
   const themeInfo: ThemeInfo = forceLight ? { ...detected, theme: "light" } : detected;
-  // Memoize by theme string so `colors` is referentially stable across renders —
+  // Memoize by theme string so `colors` is referentially stable across renders:
   // effects/components that depend on `colors` only re-run when the theme flips.
   const colors = useMemo(() => getThemeColors(themeInfo.theme), [themeInfo.theme]);
   return { themeInfo, colors };

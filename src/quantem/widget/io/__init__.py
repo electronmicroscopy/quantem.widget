@@ -1,118 +1,42 @@
-"""Widget-owned image, sharing, memory, and transfer I/O helpers.
+"""Widget readers and the tutorial-data download helper.
 
-Microscopy workflows import these helpers directly while exploring data at the
-instrument, so keep this package initializer as a small public surface and put
-implementation details in named modules.
+Every reader returns the dataset type of this machine: ``read_4dstem`` a
+``quantem.gpu.io.Dataset4dstemGPU`` when quantem.gpu is installed and a GPU is
+present (it loads through ``quantem.gpu.io.load``), else a quantem core
+``Dataset4dstem``; ``read_image`` and ``read_images`` quantem core
+``Dataset2d``; ``read_image_stack`` a quantem core ``Dataset3d``. Where quantem
+core cannot install (an Intel Mac, Windows on ARM) the widget's stand-in
+carries the same ``array``, ``name``, ``sampling``, ``units`` and ``metadata``.
+Saving, discovery and inspection of 4D-STEM acquisitions belong to
+``quantem.gpu.io``; this namespace does not forward them.
 
-Scientific 4D-STEM loading, saving, discovery, and inspection belong to
-``quantem.gpu.io``. This namespace intentionally does not forward those APIs.
+>>> from quantem.widget import io  # doctest: +SKIP
+>>> ds = io.read_image(path)  # doctest: +SKIP
+>>> arr = ds.array  # doctest: +SKIP
 """
-from __future__ import annotations
 
 from importlib import import_module
 
-__version__ = "0.0.3"
-
-# Hugging Face dataset sharing. Kept lazy so importing quantem.widget.io stays
-# cheap and huggingface_hub is only imported when a share/fetch is actually run.
-_HUB_EXPORTS = {
-    "upload",
-    "download",
-    "list_datasets",
-    "read_meta",
-    "delete",
-    "status",
+_EXPORTS = {
+    "download": "quantem.widget.io.hub",
+    "read_4dstem": "quantem.widget.show4dstem.reader",
+    "read_image": "quantem.widget.io.image",
+    "read_image_stack": "quantem.widget.io.image",
+    "read_images": "quantem.widget.io.image",
 }
 
-# 2D image reader (Velox EMD HAADF / .npy) - separate from the 4D-STEM loader.
-_IMAGE_EXPORTS = {"read_gif", "read_image", "read_image_stack", "read_images", "RgbImage"}
-
-# Memory profiler (disk staging + RAM + per-GPU VRAM).
-_MEMORY_EXPORTS = {"memory"}
-
-# Data-transfer planner for large microscopy/HPC workflows. Kept import-light so
-# future CLI commands can dry-run transfer plans without importing viewer code.
-_DATA_TRANSFER_EXPORTS = {
-    "DataTransferEntry",
-    "DataTransferFile",
-    "DataTransferGroup",
-    "DataTransferPlan",
-    "DataTransferResult",
-    "DataTransferState",
-    "DataTransferSummary",
-    "collect_data_transfer_groups",
-    "copy_data_transfer",
-    "data_transfer_plan_from_dict",
-    "filter_data_transfer_plan",
-    "inspect_data_transfer",
-    "plan_data_transfer",
-    "read_data_transfer_manifest",
-    "summarize_data_transfer",
-    "target_masters",
-    "data_transfer_load_warnings",
-    "update_data_transfer_plan",
-    "write_data_transfer_manifest",
-}
-
-__all__ = [
-    "delete",
-    "download",
-    "list_datasets",
-    "memory",
-    "DataTransferEntry",
-    "DataTransferFile",
-    "DataTransferGroup",
-    "DataTransferPlan",
-    "DataTransferResult",
-    "DataTransferState",
-    "DataTransferSummary",
-    "collect_data_transfer_groups",
-    "copy_data_transfer",
-    "data_transfer_plan_from_dict",
-    "filter_data_transfer_plan",
-    "inspect_data_transfer",
-    "plan_data_transfer",
-    "read_data_transfer_manifest",
-    "summarize_data_transfer",
-    "target_masters",
-    "data_transfer_load_warnings",
-    "update_data_transfer_plan",
-    "read_meta",
-    "read_gif",
-    "read_image",
-    "read_image_stack",
-    "read_images",
-    "RgbImage",
-    "status",
-    "upload",
-    "write_data_transfer_manifest",
-    "__version__",
-]
+__all__ = sorted(_EXPORTS)
 
 
 def __getattr__(name: str):
-    if name in _HUB_EXPORTS:
-        module = import_module("quantem.widget.io.hub")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name in _IMAGE_EXPORTS:
-        module = import_module("quantem.widget.io.image")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name in _MEMORY_EXPORTS:
-        module = import_module("quantem.widget.io.memory")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name in _DATA_TRANSFER_EXPORTS:
-        module = import_module("quantem.widget.io.data_transfer")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    """Import a reader on first use, so ``from quantem.widget import io`` stays light."""
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(_EXPORTS[name]), name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:
+    """Include the lazy readers in interactive discovery."""
     return sorted(set(globals()) | set(__all__))
