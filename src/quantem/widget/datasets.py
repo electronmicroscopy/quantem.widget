@@ -51,7 +51,7 @@ _FE3O4_SAED_NAME = "fe3o4-saed"
 # The ShowPDF data follow the dataset's current layout (<modality>/<name> at one pinned revision,
 # see the quantem.data README); the loaders above still read the older widget-tutorials/ tree.
 _TA_SIM_PATH = "4dstem/ta_amorphous_sim"
-_TA_SIM_REVISION = None  # the dataset commit that adds it, once its Hugging Face pull request merges
+_TA_SIM_REVISION = "fe907499a3a2c1f827c8827c0b3472c5b08f47bf"  # the dataset commit that adds it
 
 
 def _snapshot_download_dataset(**kwargs) -> Path:

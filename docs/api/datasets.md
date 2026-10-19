@@ -90,9 +90,8 @@ so the same HAADF source image is not duplicated per widget.
 
 `showpdf_ta()` and `showpdf_ta_ground_truth()` read `4dstem/ta_amorphous_sim/`
 (`data.npy`, `meta.json` and `ground_truth_gr.npz`), in the dataset's newer
-`<modality>/<name>` layout instead of under `widget-tutorials/`. That folder is
-not on the hub yet: until its dataset pull request merges, both raise
-`FileNotFoundError`.
+`<modality>/<name>` layout instead of under `widget-tutorials/`, at the dataset
+commit that added that folder; pass `revision` to read another.
 
 ## Reference
 

@@ -14,9 +14,9 @@ new `rcN` heading when that rc is published to TestPyPI.
   exports recompute the curves in the browser, and saved notebooks keep a static
   picture unless `save_state=True`. ShowPDF needs the
   `PairDistributionFunction` of quantem pull request 248, on quantem's dev
-  branch until its next release. Its tutorial (`docs/tutorials/showpdf.ipynb`)
-  and the `datasets.showpdf_ta` loader of its simulated amorphous Ta scan wait
-  for that scan to be published on Hugging Face.
+  branch until its next release. Its tutorial (`docs/tutorials/showpdf.ipynb`),
+  with the `datasets.showpdf_ta` loader of a simulated amorphous Ta scan, joins
+  the docs after that release.
 
 ## rc41 - 2026-10-09
 
