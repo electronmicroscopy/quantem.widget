@@ -13,6 +13,7 @@ from ase import Atoms
 
 import quantem.widget as qw
 from quantem.widget.export import write_widget_html
+from quantem.widget.showpdf import _pdf_class
 
 pytestmark = pytest.mark.browser
 
@@ -30,6 +31,20 @@ WIDGETS = {
     "showdiffraction": lambda: qw.ShowDiffraction(RNG.random((32, 32)).astype(np.float32), device="cpu", verbose=False),
     "showptycho": lambda: qw.ShowPtycho(np.exp(1j * IMAGE).astype(np.complex64), sampling=0.2),
 }
+
+
+def _showpdf():
+    rr, cc = np.mgrid[0:16, 0:16]
+    pattern = (np.exp(-((np.hypot(rr - 7.5, cc - 7.5) - 4.0) ** 2) / 3.0) + 0.1).astype(np.float32)
+    data = np.broadcast_to(pattern, (2, 2, 16, 16)).copy()
+    return qw.ShowPDF(data, find_origin=False, origin_row=7.5, origin_col=7.5)
+
+
+try:  # ShowPDF needs quantem's PairDistributionFunction API (quantem pull request 248)
+    _pdf_class()
+    WIDGETS["showpdf"] = _showpdf
+except ImportError:
+    pass
 # The widget's own DOM inside the embed's view container: anywidget renders into it
 # (without a kernel, Show2D and Show3D draw their saved preview image).
 WIDGET_DRAWN = "() => Array.from(document.querySelectorAll('.widget-subarea')).some(area => area.querySelector('canvas, button, svg, input, img'))"

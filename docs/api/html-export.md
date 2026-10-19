@@ -4,7 +4,7 @@
 
 1. **Widget-level HTML**: `widget.export_html(...)` writes one standalone widget
    viewer. Use this when a single Show1D / Show2D / Show3D / Show3DSlices /
-   Show4DSTEM / ShowDiffraction view is the artifact.
+   Show4DSTEM / ShowDiffraction / ShowPDF view is the artifact.
 2. **Notebook-level HTML**: `jupyter nbconvert --to html notebook.ipynb`
    exports a whole notebook with its saved widget state (add `--execute` to
    rerun it first). Use this for reports and
@@ -46,6 +46,7 @@ back to the `.ipynb` or `.html` file.
 | Show3DSlices | `export_html(path=None, *, title=None, encoding="full")` |
 | Show4DSTEM | `export_html(path=None, *, title=None, dtype="uint8", det_bin=1, scan_bin=1, export_kind="interactive", dataset_scope="unhidden")` |
 | ShowDiffraction | `export_html(path=None, *, title=None)` |
+| ShowPDF | `export_html(path=None, *, title=None, mode="single", encoding="full", downsample=None)` |
 | ShowPtycho | `export(path)` writes a folder: the widget page over exact bright-field counts; the browser builds transient BF-indexed reducers in WebGPU |
 
 `encoding="uint8"` (or `quantized=True`) stores display-scaled data; `downsample`
@@ -80,6 +81,7 @@ it writes the file by calling `export_html(...)`.
 | Show3DSlices | `full`, `uint8` | none | `uint8` packs against the global range |
 | Show4DSTEM | `dtype="uint8"`, `"uint16"` | `det_bin`, `scan_bin`: `1`, `2`, `4`, `8` | mean bin; `uint8` clips counts above 255 and says how many; `export_kind="interactive"` packs the counts into the page and refuses above 2 GiB, naming the least binning that fits; `export_kind="report"` writes static PNG virtual-image pages with no raw 4D |
 | ShowDiffraction | `full` (float32) | none | exact float32 frames |
+| ShowPDF | `full`, `uint8` | none | `full` stores the float32 curves; `uint8` adds every scan position's radial profile (8 bits per k bin) so mask, probe and line selections recompute in the browser |
 
 ## Single-file exports
 

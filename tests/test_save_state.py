@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Plot2D / Show1D / Show2D / Show3D / Show4DSTEM).
+"""Regression shield for the ``save_state`` contract (Plot2D / Show1D / Show2D / Show3D / Show4DSTEM / ShowPDF).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -37,6 +37,14 @@ from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show4DSTEM
 
 
 from quantem.widget.show4dstem.export import export_clone
+
+
+from quantem.widget.showpdf import ShowPDF, _pdf_class
+
+try:  # ShowPDF needs quantem's PairDistributionFunction API (quantem pull request 248)
+    _pdf_class()
+except ImportError:
+    ShowPDF = None
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
@@ -99,11 +107,19 @@ def _make(widget, *, save_state):
     if widget is Show3D:
         return Show3D(np.random.rand(4, 128, 128).astype("float32"),
                       save_state=save_state), "_offline_float_stack"
+    if widget is ShowPDF:
+        rr, cc = np.mgrid[0:16, 0:16]
+        pattern = (np.exp(-((np.hypot(rr - 7.5, cc - 7.5) - 4.0) ** 2) / 3.0) + 0.1).astype("float32")
+        data = np.broadcast_to(pattern, (4, 4, 16, 16)).copy()
+        return ShowPDF(data, find_origin=False, origin_row=7.5, origin_col=7.5,
+                       save_state=save_state), "nav_image_bytes"
     return Show4DSTEM(np.random.rand(8, 8, 16, 16).astype("float32"),
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Plot2D, Show1D, Show2D, Show3D, Show4DSTEM]
+WIDGETS = [Plot2D, Show1D, Show2D, Show3D, Show4DSTEM] + ([ShowPDF] if ShowPDF is not None else [])
+# Line plots keep a lossless PNG preview; the image viewers a JPEG.
+PNG_PREVIEW_WIDGETS = (Plot2D, ShowPDF)
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -140,7 +156,7 @@ def test_static_fallback_present(widget):
     bundle = w._repr_mimebundle_()
     data = bundle[0] if isinstance(bundle, tuple) else bundle
     image_keys = [key for key in IMAGE_MIME_KEYS if key in (data or {})]
-    assert image_keys == ["image/png" if widget is Plot2D else "image/jpeg"], (
+    assert image_keys == ["image/png" if widget in PNG_PREVIEW_WIDGETS else "image/jpeg"], (
         f"{widget.__name__}: missing expected static fallback for a cold reopen")
 
 
@@ -666,7 +682,7 @@ def test_sibling_static_fallback_contract(widget, monkeypatch):
     assert png_calls, f"{widget.__name__}: deferred fill never rendered the PNG"
     assert "post_execute" not in hooks, "one-shot hook did not unregister"
     fill_data, fill_meta = updated[-1]
-    preview_mime = "image/png" if widget is Plot2D else "image/jpeg"
+    preview_mime = "image/png" if widget in PNG_PREVIEW_WIDGETS else "image/jpeg"
     assert isinstance(fill_data[preview_mime], bytes)
     assert len(fill_data[preview_mime]) > 1000
     assert "quantem-static-fallback" in fill_data["text/html"]

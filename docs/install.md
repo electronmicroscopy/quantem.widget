@@ -32,8 +32,10 @@ Requires Python 3.11 or newer.
 - `[cpu]` (and a plain install) brings torch 2.2 or newer, NumPy, h5py,
   hdf5plugin and [quantem](https://github.com/electronmicroscopy/quantem) core
   (hdf5plugin and quantem core not on Windows on ARM, quantem core not on an
-  Intel Mac, see below): every widget, and `Show4DSTEM` on in-memory arrays,
-  tensors on any device and files read densely into memory.
+  Intel Mac, see below): every widget (ShowPDF also needs quantem core with the
+  `PairDistributionFunction` of quantem pull request 248, see [ShowPDF](api/showpdf)),
+  and `Show4DSTEM` on in-memory arrays, tensors on any device and files read densely
+  into memory.
 - `[cuda]` adds [quantem.gpu](https://github.com/bobleesj/quantem.gpu) with
   CuPy; `[mps]` adds it with Metal and MLX. A 4D-STEM file then stays encoded on
   the GPU and loads in seconds. A wrong pick installs nothing harmful (`[cuda]`

@@ -23,6 +23,7 @@ const widgets = [
   "show3dslices",
   "show4dstem",
   "showdiffraction",
+  "showpdf",
   "showptycho",
   "chooselattice",
   "showcif",

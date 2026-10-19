@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from quantem.widget import datasets
 
@@ -193,3 +194,53 @@ def test_gold_session_uses_widget_tutorial_folder(tmp_path, monkeypatch):
             "cache_dir": "/tmp/qw-cache",
         }
     ]
+
+
+def test_showpdf_ta_loads_the_calibrated_scan_and_the_model_gr(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    data_dir = root / "4dstem" / "ta_amorphous_sim"
+    data_dir.mkdir(parents=True)
+    np.save(data_dir / "data.npy", np.arange(2 * 2 * 4 * 4, dtype=np.float32).reshape(2, 2, 4, 4))
+    (data_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "name": "ta_amorphous_sim",
+                "sampling": [1.0, 1.0, 0.01488, 0.01488],
+                "units": ["pixels", "pixels", "A^-1", "A^-1"],
+            }
+        )
+    )
+    np.savez(data_dir / "ground_truth_gr.npz", r=np.array([0.0, 0.05]), gr=np.array([0.0, 1.0]))
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(datasets, "snapshot_download", fake_snapshot_download, raising=False)
+
+    scan = datasets.showpdf_ta(revision="abc123", verbose=False)
+    r, gr = datasets.showpdf_ta_ground_truth(revision="abc123")
+
+    assert scan.array.shape == (2, 2, 4, 4)
+    assert [float(value) for value in scan.sampling] == [1.0, 1.0, 0.01488, 0.01488]
+    assert list(scan.units) == ["pixels", "pixels", "A^-1", "A^-1"]
+    assert r.tolist() == [0.0, 0.05]
+    assert gr.tolist() == [0.0, 1.0]
+    assert calls == 2 * [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["4dstem/ta_amorphous_sim/*"],
+            "force_download": False,
+            "revision": "abc123",
+        }
+    ]
+
+
+def test_showpdf_ta_names_the_hugging_face_path_of_a_missing_folder(tmp_path, monkeypatch):
+    # Hugging Face returns the snapshot without the folder when no file matches allow_patterns.
+    monkeypatch.setattr(datasets, "snapshot_download", lambda **kwargs: tmp_path, raising=False)
+
+    with pytest.raises(FileNotFoundError, match="bobleesj/quantem-data/4dstem/ta_amorphous_sim$"):
+        datasets.showpdf_ta(verbose=False)

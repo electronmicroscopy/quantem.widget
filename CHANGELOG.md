@@ -6,6 +6,18 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add `ShowPDF` for pair distribution function analysis of 4D-STEM data: select
+  scan regions (mask, probe, line, or line scan) and tune the background fit,
+  k window, filters, and low-r damping on top of
+  `quantem.diffraction.PairDistributionFunction`. The number density is a
+  required input for g(r) and damping; it is never estimated. Standalone HTML
+  exports recompute the curves in the browser, and saved notebooks keep a static
+  picture unless `save_state=True`. ShowPDF needs the
+  `PairDistributionFunction` of quantem pull request 248, on quantem's dev
+  branch until its next release. Its tutorial (`docs/tutorials/showpdf.ipynb`)
+  and the `datasets.showpdf_ta` loader of its simulated amorphous Ta scan wait
+  for that scan to be published on Hugging Face.
+
 ## rc41 - 2026-10-09
 
 - Show4DSTEM opens `.qem` acquisitions in the browser with no kernel:

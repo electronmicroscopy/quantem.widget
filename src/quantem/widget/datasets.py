@@ -48,6 +48,10 @@ _GOLD_4DSTEM_NAME = "gold-128-bin8"
 _GOLD_4DSTEM_SOURCE_SIZE = "full"
 _FE3O4_SAED_VIEWER = "showdiffraction"
 _FE3O4_SAED_NAME = "fe3o4-saed"
+# The ShowPDF data follow the dataset's current layout (<modality>/<name> at one pinned revision,
+# see the quantem.data README); the loaders above still read the older widget-tutorials/ tree.
+_TA_SIM_PATH = "4dstem/ta_amorphous_sim"
+_TA_SIM_REVISION = None  # the dataset commit that adds it, once its Hugging Face pull request merges
 
 
 def _snapshot_download_dataset(**kwargs) -> Path:
@@ -86,7 +90,16 @@ def _download_widget_tutorial_folder(
     never pulls the full-size payloads stored next to it.
     """
     size = _normalise_tutorial_size(size)
-    path_in_repo = f"{TUTORIAL_DATA_ROOT}/{viewer}/{name}/{size}"
+    return _download_dataset_folder(
+        f"{TUTORIAL_DATA_ROOT}/{viewer}/{name}/{size}",
+        revision=revision,
+        cache_dir=cache_dir,
+        force_download=force_download,
+    )
+
+
+def _download_dataset_folder(path_in_repo, *, revision=None, cache_dir=None, force_download=False):
+    """Download one folder of the dataset repository and return its local path."""
     kwargs = {
         "repo_id": TUTORIAL_DATA_REPO_ID,
         "repo_type": "dataset",
@@ -340,6 +353,66 @@ def showdiffraction_fe3o4(
     return make_dataset(pattern, name="Fe3O4 SAED")
 
 
+def showpdf_ta(
+    *,
+    cache_dir: str | Path | None = None,
+    revision: str | None = _TA_SIM_REVISION,
+    force_download: bool = False,
+    verbose: bool = True,
+):
+    """Load the simulated amorphous Ta 4D-STEM scan used by the ShowPDF tutorial.
+
+    The scan is downloaded from ``4dstem/ta_amorphous_sim``: a 20 x 20 scan of
+    307 x 307 float32 patterns simulated from a 1,024,000-atom amorphous Ta
+    model, with the detector calibrated in 1/Å (k = 1/d). The model's number
+    density is 1,024,000 / 268.6053³ atoms/Å³.
+
+    Parameters
+    ----------
+    cache_dir
+        Optional Hugging Face cache directory.
+    revision
+        Hugging Face dataset revision; defaults to the pinned one.
+    force_download
+        If ``True``, ask Hugging Face Hub to refresh the cached files.
+    verbose
+        If ``True``, print a short dataset summary.
+
+    Returns
+    -------
+    Dataset4dstem
+        The calibrated scan, a quantem core ``Dataset4dstem`` (the widget's
+        stand-in where quantem core cannot install).
+    """
+    folder = _download_dataset_folder(
+        _TA_SIM_PATH, revision=revision, cache_dir=cache_dir, force_download=force_download
+    )
+    metadata = json.loads((folder / "meta.json").read_text())
+    data = np.load(folder / "data.npy")
+    dataset = make_dataset(
+        data, sampling=metadata["sampling"], units=metadata["units"], name="Simulated amorphous Ta"
+    )
+    if verbose:
+        print(f"Source: {metadata['name']} from Hugging Face")
+        print(f"Scan: {data.shape} {data.dtype}")
+        print(f"Sampling: {[float(value) for value in dataset.sampling]} {list(dataset.units)}")
+    return dataset
+
+
+def showpdf_ta_ground_truth(
+    *,
+    cache_dir: str | Path | None = None,
+    revision: str | None = _TA_SIM_REVISION,
+    force_download: bool = False,
+):
+    """g(r) of the atomic model behind ``showpdf_ta``: ``(r, g)`` arrays, r in Å."""
+    folder = _download_dataset_folder(
+        _TA_SIM_PATH, revision=revision, cache_dir=cache_dir, force_download=force_download
+    )
+    with np.load(folder / "ground_truth_gr.npz") as truth:
+        return truth["r"], truth["gr"]
+
+
 def _gold_haadf_2d_from_folder(folder: Path, *, stride: int, verbose: bool = True):
     """Build a calibrated 2D HAADF preview from the shared tutorial source."""
 
@@ -448,4 +521,6 @@ __all__ = [
     "show3d_gold",
     "show4dstem_gold",
     "showdiffraction_fe3o4",
+    "showpdf_ta",
+    "showpdf_ta_ground_truth",
 ]

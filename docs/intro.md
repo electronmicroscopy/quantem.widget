@@ -81,6 +81,7 @@ acquisitions stay encoded on the GPU at full detector resolution (about 0.1 to
 | `Show4DSTEM` | 4D-STEM: live virtual detectors, multi-master review, and WebGPU HTML export | [tutorial](tutorials/show4dstem) · [export](tutorials/show4dstem_export) · [API](api/show4dstem) |
 | `ShowPtycho` | Ptychography aberration review: phase, FFT, BF-count tradeoffs, and WebGPU folder export | [API](api/showptycho) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
+| `ShowPDF` | Pair distribution function analysis (I(k), F(k), G(r), g(r)) of masked, probe, or line regions of a 4D-STEM scan | [API](api/showpdf) |
 | `ShowCIF` | Unit cells, specimen tilt, and projected potential/phase previews | [tutorial](tutorials/showcif.ipynb) · [API](api/showcif.md) |
 | `ChooseLattice` | Pick an origin and two lattice vectors on a 2D image | [tutorial](tutorials/choose_lattice) · [API](api/choose-lattice) |
 

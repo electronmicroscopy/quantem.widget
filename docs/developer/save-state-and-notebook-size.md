@@ -58,6 +58,7 @@ Six pieces, all in the widget class:
 | Show2D | `frame_bytes`, `panel_stack_bytes`, `export_payload`, `_detail_bytes` | the N panels in `_data` |
 | Show3D | `_offline_stack`, `_offline_float_stack`, `export_payload` | evenly-spaced slices of the z-stack |
 | Show4DSTEM | `_offline_stack`, `export_payload` | the virtual (BF/ADF) image |
+| ShowPDF | `nav_image_bytes`, `mask_b64`, `mask_bytes`, `linescan_bytes`, `export_payload` | the scan image beside the shown curve or line-scan stack |
 
 ## Executing notebooks small (the other half)
 

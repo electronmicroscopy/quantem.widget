@@ -13,8 +13,16 @@ from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
 
+from quantem.widget.showpdf import ShowPDF, _pdf_class
 
-EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction)
+try:  # ShowPDF needs quantem's PairDistributionFunction API (quantem pull request 248)
+    _pdf_class()
+except ImportError:
+    ShowPDF = None
+
+EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction) + (
+    (ShowPDF,) if ShowPDF is not None else ()
+)
 
 
 def _show1d() -> Show1D:
@@ -73,6 +81,14 @@ def _showdiffraction() -> ShowDiffraction:
     return ShowDiffraction(data, title="Protocol ShowDiffraction", verbose=False)
 
 
+def _showpdf():
+    rr, cc = np.mgrid[0:16, 0:16]
+    rad = np.hypot(rr - 7.5, cc - 7.5)
+    pattern = (np.exp(-((rad - 4.0) ** 2) / 3.0) + 0.1).astype(np.float32)
+    data = np.broadcast_to(pattern, (2, 2, 16, 16)).copy()
+    return ShowPDF(data, title="Protocol ShowPDF", find_origin=False, origin_row=7.5, origin_col=7.5)
+
+
 EXPORT_WIDGET_CASES = (
     pytest.param(_show1d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show1D", id="show1d"),
     pytest.param(_show2d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show2D", id="show2d"),
@@ -80,6 +96,10 @@ EXPORT_WIDGET_CASES = (
     pytest.param(_show3dslices, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3DSlices", id="show3dslices"),
     pytest.param(_show4dstem, {"dtype": "uint8"}, {"mode": "single", "dtype": "uint8"}, "Protocol Show4DSTEM", id="show4dstem"),
     pytest.param(_showdiffraction, {}, {"mode": "single"}, "Protocol ShowDiffraction", id="showdiffraction"),
+) + (
+    (pytest.param(_showpdf, {"encoding": "uint8"}, {"mode": "single", "encoding": "uint8"}, "Protocol ShowPDF", id="showpdf"),)
+    if ShowPDF is not None
+    else ()
 )
 
 
