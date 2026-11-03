@@ -1,5 +1,3 @@
-let show3dGifPalette: Uint8Array | null = null;
-
 function asciiBytes(value: string): Uint8Array {
   const out = new Uint8Array(value.length);
   for (let i = 0; i < value.length; i++) {
@@ -24,65 +22,83 @@ function concatUint8(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function palette(): Uint8Array {
-  if (show3dGifPalette) return show3dGifPalette;
-
+/**
+ * The fixed 256-color GIF palette: a 6x6x6 RGB cube (levels 0, 51, ..., 255)
+ * at indices 0-215, then a 40-step gray ramp. Fixed so every frame shares one
+ * global color table and quantizeRgbaForBrowserGif can index it arithmetically.
+ */
+const PALETTE = (() => {
   const colors = new Uint8Array(256 * 3);
   let index = 0;
   for (let red = 0; red < 6; red++) {
     for (let green = 0; green < 6; green++) {
       for (let blue = 0; blue < 6; blue++) {
-        const offset = index * 3;
-        colors[offset] = red * 51;
-        colors[offset + 1] = green * 51;
-        colors[offset + 2] = blue * 51;
-        index++;
+        colors.set([red * 51, green * 51, blue * 51], 3 * index++);
       }
     }
   }
-
   const grayCount = 256 - index;
   for (let gray = 0; index < 256; index++, gray++) {
-    const value = grayCount <= 1 ? 0 : Math.round((gray / (grayCount - 1)) * 255);
-    const offset = index * 3;
-    colors[offset] = value;
-    colors[offset + 1] = value;
-    colors[offset + 2] = value;
+    colors.fill(Math.round((gray / (grayCount - 1)) * 255), 3 * index, 3 * index + 3);
   }
-  show3dGifPalette = colors;
   return colors;
+})();
+
+/**
+ * Palette index of the gray nearest each 8-bit level, among the ramp and the
+ * cube's six grays (the lower index on a tie). Gray pixels, most microscopy,
+ * take these 44 levels; the cube alone would band them to 6.
+ */
+const NEAREST_GRAY_INDEX = (() => {
+  const grays: number[] = [];
+  for (let index = 0; index < 256; index++) {
+    if (PALETTE[3 * index] === PALETTE[3 * index + 1] && PALETTE[3 * index] === PALETTE[3 * index + 2]) grays.push(index);
+  }
+  return Uint8Array.from({ length: 256 }, (_, level) => grays.reduce(
+    (best, index) => (Math.abs(PALETTE[3 * index] - level) < Math.abs(PALETTE[3 * best] - level) ? index : best),
+  ));
+})();
+
+/** A channel composited onto white, (value * alpha + 255 * (255 - alpha)) / 255, since GIF has no alpha. */
+function overWhite(value: number, alpha: number): number {
+  return alpha === 255 ? value : Math.round((value * alpha + 255 * (255 - alpha)) / 255);
 }
 
+/**
+ * Palette indices for RGBA pixels: each channel is composited onto white; gray
+ * pixels take the nearest palette gray, other colors the nearest of the six
+ * cube levels per channel, index = 36 red + 6 green + blue.
+ */
 export function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
   const out = new Uint8Array(Math.floor(rgba.length / 4));
   for (let pixel = 0, offset = 0; pixel < out.length; pixel++, offset += 4) {
     const alpha = rgba[offset + 3];
-    const red = alpha === 255
-      ? rgba[offset]
-      : Math.round((rgba[offset] * alpha + 255 * (255 - alpha)) / 255);
-    const green = alpha === 255
-      ? rgba[offset + 1]
-      : Math.round((rgba[offset + 1] * alpha + 255 * (255 - alpha)) / 255);
-    const blue = alpha === 255
-      ? rgba[offset + 2]
-      : Math.round((rgba[offset + 2] * alpha + 255 * (255 - alpha)) / 255);
-    const redBin = Math.max(0, Math.min(5, Math.round(red / 51)));
-    const greenBin = Math.max(0, Math.min(5, Math.round(green / 51)));
-    const blueBin = Math.max(0, Math.min(5, Math.round(blue / 51)));
-    out[pixel] = redBin * 36 + greenBin * 6 + blueBin;
+    const red = overWhite(rgba[offset], alpha);
+    const green = overWhite(rgba[offset + 1], alpha);
+    const blue = overWhite(rgba[offset + 2], alpha);
+    if (red === green && green === blue) {
+      out[pixel] = NEAREST_GRAY_INDEX[red];
+      continue;
+    }
+    out[pixel] = Math.round(red / 51) * 36 + Math.round(green / 51) * 6 + Math.round(blue / 51);
   }
   return out;
 }
 
+/**
+ * GIF LZW with 8-bit pixel codes: the code size grows from 9 to 12 bits as the
+ * string table fills, and a clear code restarts the table at 4096 entries. A
+ * string table, not one code per pixel, keeps uniform and repeating regions small.
+ */
 function lzwEncode(indices: Uint8Array): Uint8Array {
-  const minimumCodeSize = 8;
-  const clearCode = 1 << minimumCodeSize;
+  const clearCode = 256;
   const endCode = clearCode + 1;
-  const codeSize = minimumCodeSize + 1;
   const bytes: number[] = [];
+  let codeSize = 9;
+  let nextCode = endCode + 1;
+  let table = new Map<number, number>();
   let bitBuffer = 0;
   let bitCount = 0;
-
   const writeCode = (code: number) => {
     bitBuffer |= code << bitCount;
     bitCount += codeSize;
@@ -92,19 +108,30 @@ function lzwEncode(indices: Uint8Array): Uint8Array {
       bitCount -= 8;
     }
   };
-
-  // Clear before the decoder grows beyond 9-bit codes. Browser exports favor
-  // a simple, dependable stream over maximum compression.
   writeCode(clearCode);
-  let sinceClear = 0;
-  for (const index of indices) {
-    if (sinceClear >= 250) {
-      writeCode(clearCode);
-      sinceClear = 0;
+  let prefix = indices[0];
+  for (let position = 1; position < indices.length; position++) {
+    const pixel = indices[position];
+    const key = (prefix << 8) | pixel;
+    const known = table.get(key);
+    if (known !== undefined) {
+      prefix = known;
+      continue;
     }
-    writeCode(index);
-    sinceClear++;
+    writeCode(prefix);
+    if (nextCode === 4096) {
+      writeCode(clearCode);
+      table = new Map();
+      nextCode = endCode + 1;
+      codeSize = 9;
+    } else {
+      // the decoder widens its codes once its table reaches the current code range
+      if (nextCode >= 1 << codeSize) codeSize++;
+      table.set(key, nextCode++);
+    }
+    prefix = pixel;
   }
+  writeCode(prefix);
   writeCode(endCode);
   if (bitCount > 0) bytes.push(bitBuffer & 0xff);
   return new Uint8Array(bytes);
@@ -118,6 +145,11 @@ function pushSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
   parts.push(new Uint8Array([0]));
 }
 
+/**
+ * A looping GIF89a of palette-indexed frames (one global palette, NETSCAPE2.0
+ * loop block, `delayCs` hundredths of a second per frame). Built in the browser
+ * so a standalone HTML page can export a GIF without a kernel.
+ */
 export function encodeIndexedGif(
   width: number,
   height: number,
@@ -140,7 +172,7 @@ export function encodeIndexedGif(
     u16Bytes(width),
     u16Bytes(height),
     new Uint8Array([0xf7, 0, 0]),
-    palette(),
+    PALETTE,
     new Uint8Array([0x21, 0xff, 0x0b]),
     asciiBytes("NETSCAPE2.0"),
     new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),

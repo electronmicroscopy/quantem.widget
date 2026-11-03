@@ -5,8 +5,6 @@ around a real question from the microscope room:
 
 - **HTML and file export** - hand a collaborator one interactive HTML file, a
   figure, or a full report package.
-- **Saving GIF and MP4 movies** - write raw arrays or widget-rendered views to
-  GIF and MP4, with CUDA MP4 compression on NVIDIA workstations.
 - **Memory management** - know what a load will cost in RAM/VRAM, pick the
   GPU, and give the memory back.
 - **Live folder watching** - keep one widget open at the scope and let new
@@ -40,8 +38,8 @@ Show3D exports one portable HTML file. Choose the display payload explicitly:
 
 | Review need | Recommended path | What it means |
 | --- | --- | --- |
-| Email or attach one browseable artifact | `export_html(..., encoding="uint8", downsample=2)` | Compact review copy with explicit spatial reduction. |
-| Preserve the current display shape | `export_html(..., encoding="uint8", downsample=1)` | One portable HTML using display-scaled uint8 data. |
+| Email or attach one browseable artifact | `export_html(..., encoding="uint8", image_bin=2)` | Compact review copy with explicit spatial reduction. |
+| Preserve the current display shape | `export_html(..., encoding="uint8", image_bin=1)` | One portable HTML using display-scaled uint8 data. |
 | Recompute, stream fresh frames, or inspect exact backend arrays | live Jupyter widget | Python owns the arrays and the browser remains interactive. |
 
 ```python
@@ -55,17 +53,16 @@ w = Show3D(
     title="800C 1.3Mx denoise review",
     display_bin=1,
     link_contrast=False,
-    debug=True,
 )
 w.export_html(
     "/data/reports/800C_1.3Mx_review.html",
     encoding="uint8",
-    downsample=1,
+    image_bin=1,
 )
 ```
 
 Large exact float32 files can exceed browser limits. Prefer uint8 for visual review,
-use an explicit `downsample` when needed, and keep exact multi-gigabyte analysis in
+use an explicit `image_bin` when needed, and keep exact multi-gigabyte analysis in
 the live widget rather than creating a companion sidecar folder.
 
 ## Label local regions inside panels
@@ -134,7 +131,7 @@ Show2D(
             "y": 0.32,
             "anchor": "center",
             "bg": "rgba(255,255,255,0.55)",
-            "fg": "#111827",
+            "color": "#111827",
         },
         "residual": {
             "text": "check residual",
@@ -179,7 +176,6 @@ Show3D(
     denoised_stack,
     residual_stack,
     panel_titles=["raw stack", "denoised stack", "residual stack"],
-    marker_style="around",
     panel_annotations=[
         {"panel": "raw stack", "text": "input", "position": "top-left"},
         {
@@ -221,7 +217,7 @@ feature, and normalized boxes when the label should occupy a local region.
 {"text": "region", "box": [0.20, 0.25, 0.30, 0.18]}
 ```
 
-Common style keys are `bg`, `fg`, `border_color`, `border_width`,
+Common style keys are `bg`, `color`, `border_color`, `border_width`,
 `font_size`, `font_weight`, `pad_x`, `pad_y`, `radius`, `opacity`, `align`,
 `max_width`, and `class_name`. `class_name` is useful when exported HTML needs
 project-specific CSS or when a browser test needs a stable selector.
@@ -230,7 +226,7 @@ project-specific CSS or when a browser test needs a stable selector.
 
 ## Add geometric overlays to panel regions
 
-Use `panel_overlays` when a circle, rectangle, or square is part of the
+Use `panel_overlays` when a circle or rectangle is part of the
 scientific figure specification rather than a hand-drawn ROI. These overlays
 are reproducible from Python, saved in widget state, and rendered in exported
 HTML. They are useful for marking a defect, a crop window, a region reused
@@ -253,17 +249,17 @@ Show2D(
                 "shape": "circle",
                 "center": (96, 88),
                 "radius": 14,
-                "stroke": "#60a5fa",
-                "stroke_width": 3,
+                "color": "#60a5fa",
+                "line_width": 3,
                 "line_style": "dashed",
             },
             {
                 "shape": "rect",
                 "box": (48, 58, 126, 146),
-                "stroke": "#facc15",
-                "fill": "#facc15",
+                "color": "#facc15",
+                "fill_color": "#facc15",
                 "fill_opacity": 0.12,
-                "dash": [6, 2, 1, 2],
+                "line_dash": [6, 2, 1, 2],
                 "z_order": 1,
             },
         ],
@@ -272,24 +268,23 @@ Show2D(
                 "shape": "circle",
                 "center": (96, 88),
                 "radius": 14,
-                "stroke": "#34d399",
-                "stroke_width": 3,
+                "color": "#34d399",
+                "line_width": 3,
                 "line_style": "dotted",
             },
             {
-                "shape": "square",
-                "center": (96, 88),
-                "size": 42,
-                "stroke": "#facc15",
+                "shape": "rect",
+                "box": (75, 67, 117, 109),
+                "color": "#facc15",
                 "stroke_opacity": 0.85,
                 "line_style": "dashdot",
             },
         ],
         "residual": {
             "shape": "rect",
-            "xywh": (58, 48, 88, 78),
-            "stroke": "#f87171",
-            "stroke_width": 2,
+            "box": (48, 58, 126, 146),
+            "color": "#f87171",
+            "line_width": 2,
         },
     },
 )
@@ -312,8 +307,8 @@ Show3D(
             {
                 "shape": "rect",
                 "box": (48, 58, 126, 146),
-                "stroke": "#facc15",
-                "fill": "#facc15",
+                "color": "#facc15",
+                "fill_color": "#facc15",
                 "fill_opacity": 0.12,
             }
         ],
@@ -321,8 +316,8 @@ Show3D(
 )
 ```
 
-For a guide that should appear on every panel, use `overlays=[...]` instead of
-`panel_overlays`. For overlays generated in a loop, a flat list can target
+For a guide that should appear on every panel, pass a flat list of shapes
+without `panel=`. For overlays generated in a loop, a flat list can target
 panels with `panel=0` or `panel="raw"`:
 
 ```python
@@ -331,11 +326,11 @@ shared_defect_circle = {
     "center": (0.52, 0.46),
     "radius": 0.07,
     "coords": "relative",
-    "stroke": "#60a5fa",
-    "stroke_width": 2,
+    "color": "#60a5fa",
+    "line_width": 2,
 }
 
-Show2D([raw, denoised], labels=["raw", "denoised"], overlays=[shared_defect_circle])
+Show2D([raw, denoised], labels=["raw", "denoised"], panel_overlays=[shared_defect_circle])
 
 Show2D(
     [raw, denoised],
@@ -349,11 +344,11 @@ Show2D(
 
 Use `coords="relative"` only when normalized 0-1 panel geometry is more stable
 than pixel geometry, for example when comparing panels with different shapes.
-Style keys include `stroke`, `stroke_width`, `line_style`, `dash`,
-`stroke_opacity`, `fill`, `fill_opacity`, `opacity`, and `z_order`.
+Style keys include `color`, `line_width`, `line_style`, `line_dash`,
+`stroke_opacity`, `fill_color`, `fill_opacity`, `opacity`, and `z_order`.
 `line_style` accepts `solid`, `dashed`, `dotted`, or `dashdot`; use
-`dash=[on, off, ...]` for a custom canvas dash pattern. A provided `fill` is
-visible by default; set `fill_opacity=0` for stroke-only shapes.
+`line_dash=[on, off, ...]` for a custom canvas dash pattern. A provided
+`fill_color` is visible by default; set `fill_opacity=0` for stroke-only shapes.
 
 When overlays are present, open `More -> Overlay Edit` in the live widget or
 exported HTML. Click a circle or rectangle to select it, drag inside to move it,
@@ -486,16 +481,14 @@ w.export_html("regularization_review.html", encoding="uint8")
 ```
 
 The collapsed view still shows `Controls` and `Export` in the title chrome.
-In live Jupyter, Show3D's Export menu can write HTML and request GIF/MP4
+In live Jupyter, Show3D's Export menu can write HTML and request GIF
 animation exports through Python. In standalone HTML, the page can download
-itself as HTML, export GIF in the browser, and export MP4 when the browser
-provides WebCodecs H.264 support. If browser MP4 is unavailable, reopen the
-live Python widget for MP4 export.
+itself as HTML and export GIF in the browser.
 
 For PowerPoint, Slack, or publication review, export movies from the live
 widget or from exact HTML when possible. A standalone HTML file made with
-`encoding="uint8"` is still useful for compact review, but GIF/MP4 from that
-file uses the encoded display data and GIF then applies a 256-color palette.
+`encoding="uint8"` is still useful for compact review, but GIF from that
+file uses the encoded display data and then applies a 256-color palette.
 The export panel warns about this path and points users back to
 `encoding="full"` when fidelity matters.
 

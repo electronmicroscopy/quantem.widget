@@ -12,19 +12,14 @@ from quantem.widget import ChooseLattice
 widget = ChooseLattice(image, cmap="gray")
 ```
 
-After clicking the origin, then `a1`, then `a2` on the image:
+After clicking the origin, then the two lattice points on the image:
 
 ```python
 widget.origin   # (row, col) or None
-widget.a1       # (row, col) or None
-widget.a2       # (row, col) or None
-widget.u        # a1 - origin, or None until both are placed
-widget.v        # a2 - origin, or None until both are placed
-widget.points_array  # (n, 2) array of the picked (row, col) pairs so far
+widget.u        # second point - origin, or None until both are placed
+widget.v        # third point - origin, or None until both are placed
+widget.points   # the picked (row, col) pairs so far; assign to set them from Python
 ```
-
-Use `set_points(...)` / `clear_points()` to set or reset the picks
-programmatically.
 
 ## Reference
 

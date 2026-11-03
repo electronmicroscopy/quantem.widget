@@ -2,9 +2,9 @@
 
 The factors are Lobato & Van Dyck, Acta Cryst. A 70, 636 (2014),
 https://doi.org/10.1107/S205327331401643X, evaluated by
-``quantem.diffraction.crystal.electron_scattering_factor``. That function
-arrives with electronmicroscopy/quantem PR #297, in the first release after
-0.1.9, so it is imported on first use.
+``quantem.diffraction.crystal.electron_scattering_factor`` (quantem 0.1.10 and
+later). quantem is not installed on every platform, so it is imported on first
+use.
 """
 
 from __future__ import annotations
@@ -18,10 +18,7 @@ from scipy import constants
 # atom's projected potential in V Å^3, V(k) = PROJECTED_POTENTIAL_PER_SCATTERING_FACTOR * f_e(k).
 PROJECTED_POTENTIAL_PER_SCATTERING_FACTOR = constants.h**2 / (2 * math.pi * constants.m_e * constants.e) * 1e20
 
-QUANTEM_REQUIREMENT = (
-    "quantem with quantem.diffraction.Crystal and bloch "
-    "(electronmicroscopy/quantem PR #297, first release after 0.1.9)"
-)
+QUANTEM_REQUIREMENT = "quantem 0.1.10 or later (quantem.diffraction.Crystal and bloch)"
 
 
 def _scattering_factor_function(feature: str):

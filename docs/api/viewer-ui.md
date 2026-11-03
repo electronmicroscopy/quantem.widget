@@ -2,9 +2,8 @@
 
 QuantEM viewers use the same names for common display chrome. Use explicit
 keyword arguments for durable APIs, and use `ui_mode` as a convenience preset
-for common sharing contexts.
-
-The same tables are also available as the developer-facing [UI Guide](../developer/ui-guide).
+for common sharing contexts. Maintainer-only frontend wording and review rules
+live in [Widget UI protocol](../maintainer/widget-ui-protocol).
 
 ## Presets
 
@@ -18,8 +17,8 @@ The same tables are also available as the developer-facing [UI Guide](../develop
 Explicit keyword arguments override the preset:
 
 ```python
-Show3D(
-    data,
+Show2D(
+    images,
     ui_mode="presentation",
     show_panel_titles=True,
     show_scale_bar=True,
@@ -28,28 +27,27 @@ Show3D(
 
 ## Common Names
 
-| Name | Widgets | Meaning |
-|---|---|---|
-| `show_title` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Show or hide the top title row. |
-| `show_controls` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Expose controls at all. Set `False` for a permanently clean display with no GUI recovery button. |
-| `controls_collapsed` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Start with controls hidden. Show4DSTEM exposes this as programmatic/state control only; other widgets may also show a top `Controls` button. |
-| `collapse_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically collapse controls. |
-| `expand_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically expand controls. |
-| `toggle_controls()` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction | Programmatically toggle collapsed controls. |
-| `show_stats` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction | Show or hide mean/min/max/std readouts where the widget renders or computes them. |
-| `show_panel_titles` | Show2D, Show3D | Show labels on individual image/volume panels. |
-| `panel_title_font_size` | Show2D, Show3D | Font size for per-panel labels. |
-| `panel_title_spans` | Show2D, Show3D | Optional structured colored text spans for panel-title status words; plain `labels` / `panel_titles` strings still work. |
-| `panel_title_style` | Show2D, Show3D | Optional JSON-safe title chrome, for example background, text color, border color/width, padding, radius, and max width. Defaults preserve the normal transparent title look. |
-| `panel_annotations` | Show2D, Show3D | Optional per-panel in-image labels. Use these for multiple local callouts, ROI labels, dose/status badges, or region notes that are not the panel title. |
-| `marker_colors`, `marker_style` | Show2D, Show3D | Optional per-panel identity colors. `marker_style="around"` draws a color frame with a black inner edge. |
-| `row_markers`, `col_markers` | Show2D, Show3D | Optional row/column group frames keyed by zero-based visible row or column slot. Each group draws one rectangle with no internal dividers. |
-| `show_scale_bar` | Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS | Show or hide scale bars. Some widgets keep the saved-state trait name `scale_bar_visible` for compatibility. |
-| `show_resize_handles` | Show3D | Show or hide resize handles. Show2D hides resize handles automatically when controls are collapsed. |
-| `show_zoom_indicator` | Show3D | Show or hide the zoom readout. |
-| `show_legend` | Show1D | Show or hide trace legends. |
-| `show_grid` | Show1D | Show or hide plot grid lines. |
-| `show_crosshair` | Show3DSlices | Show or hide slice intersection guides. |
+Each name below is a constructor keyword of the widgets listed. A widget that
+only syncs the name as a trait takes it as an attribute after construction
+(`widget.show_resize_handles = False`); those are listed in the last column.
+
+| Name | Constructor keyword of | Attribute only | Meaning |
+|---|---|---|---|
+| `ui_mode` | Show1D, Show2D, Show3D, Show4DSTEM | | Preset for the rows below; explicit keywords override it. |
+| `show_title` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction | | Show or hide the top title row. |
+| `show_controls` | Show1D, Show2D, Show4DSTEM, ShowDiffraction | Show3D, Show3DSlices | Expose controls at all. Set `False` for a permanently clean display with no GUI recovery button. |
+| `controls_collapsed` | Show1D, Show2D, Show4DSTEM, ShowDiffraction | Show3D, Show3DSlices | Start with controls hidden behind a top `Controls` button. |
+| `show_stats` | Show1D, Show2D, Show3D, Show4DSTEM, ShowDiffraction | | Show or hide mean/min/max/std readouts where the widget renders or computes them. |
+| `show_panel_titles` | Show2D | Show3D | Show labels on individual image/volume panels. |
+| `panel_title_font_size`, `panel_title_style` | Show2D | | Font size and JSON-safe title chrome (background, text color, border color/width, padding, radius, max width) for per-panel labels. |
+| `panel_title_spans` | Show2D | | Structured colored text spans for panel-title status words; Show3D takes the same spans as `panel_titles` entries. |
+| `panel_annotations` | Show2D, Show3D | | Per-panel in-image labels: local callouts, ROI labels, dose/status badges, or region notes that are not the panel title. |
+| `marker_colors`, `marker_style` | Show2D | | Per-panel identity colors. `marker_style="around"` draws a color frame with a black inner edge. |
+| `row_markers`, `col_markers` | Show2D | | Row/column group frames keyed by zero-based visible row or column slot. Each group draws one rectangle with no internal dividers. |
+| `show_scale_bar` | Show2D, Show3D, Show3DSlices, Show4DSTEM | | Show or hide scale bars. |
+| `show_zoom_indicator` | Show2D | Show3D | Opt into the zoom readout; hidden by default so a publication export does not imply a calibrated scale beyond the scale bar. |
+| `show_resize_handles` | | Show3D | Show or hide resize handles. Show2D hides them automatically when controls are collapsed. |
+| `show_legend`, `show_grid` | Show1D | | Show or hide trace legends and plot grid lines. |
 
 ## Recommended Report Defaults
 

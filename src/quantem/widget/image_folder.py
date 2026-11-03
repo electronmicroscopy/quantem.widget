@@ -1,19 +1,16 @@
 """Shared full-resolution image-folder watching for Show2D and Show3D."""
 
-from __future__ import annotations
-
 import re
 import threading
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 import numpy as np
 
-from quantem.widget._folder_watch_status import set_folder_watch_status
-
+from quantem.widget.folder_watch_status import set_folder_watch_status
 
 _SUPPORTED_IMAGE_SUFFIXES = {
     ".bmp",
@@ -63,12 +60,25 @@ def _normalize_file_types(
     return frozenset(suffixes)
 
 
-def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object], ...], ...]:
-    """Return a deterministic, case-insensitive natural key for a path."""
+def _relative_to_folder(path: Path, root: Path) -> Path:
+    """``path`` relative to ``root``, or ``path`` itself when it lies outside ``root``."""
     try:
-        relative = path.relative_to(root)
+        return path.relative_to(root)
     except ValueError:
-        relative = path
+        return path
+
+
+def _total_natural_path_key(
+    path: Path,
+    root: Path,
+) -> tuple[tuple[tuple[tuple[int, object], ...], ...], str]:
+    """Return a total, case-insensitive natural-order key with an exact-path tie breaker.
+
+    Digit runs compare as numbers (``frame_2`` before ``frame_10``); the exact
+    relative path then orders names that read as the same number
+    (``frame_01``, ``frame_1``) the same way on every poll.
+    """
+    relative = _relative_to_folder(path, root)
     parts: list[tuple[tuple[int, object], ...]] = []
     for component in relative.parts:
         tokens: list[tuple[int, object]] = []
@@ -77,19 +87,7 @@ def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object],
                 continue
             tokens.append((0, int(token)) if token.isdigit() else (1, token))
         parts.append(tuple(tokens))
-    return tuple(parts)
-
-
-def _total_natural_path_key(
-    path: Path,
-    root: Path,
-) -> tuple[tuple[tuple[tuple[int, object], ...], ...], str]:
-    """Return a total natural-order key with an exact-path tie breaker."""
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        relative = path
-    return _natural_path_key(path, root), relative.as_posix()
+    return tuple(parts), relative.as_posix()
 
 
 def _canonical_path(path: Path) -> Path:
@@ -124,26 +122,16 @@ class _ReadImage:
 
 
 def _fingerprint(path: Path) -> _FileFingerprint:
+    """Size and modification time of ``path``; a file still being written changes it between two reads."""
     stat = path.stat()
     return _FileFingerprint(size=int(stat.st_size), mtime_ns=int(stat.st_mtime_ns))
-
-
-def _spatial_metadata(dataset: Any) -> tuple[tuple[float, float] | None, tuple[str, str] | None]:
-    sampling = getattr(dataset, "sampling", None)
-    units = getattr(dataset, "units", None)
-    resolved_sampling = None
-    resolved_units = None
-    if sampling is not None and len(sampling) >= 2:
-        resolved_sampling = (float(sampling[-2]), float(sampling[-1]))
-    if units is not None and len(units) >= 2:
-        resolved_units = (str(units[-2]), str(units[-1]))
-    return resolved_sampling, resolved_units
 
 
 def _calibration_matches(
     first: ImageFolderRecord,
     other: ImageFolderRecord,
 ) -> bool:
+    """Whether two files share units and sampling, so one scale bar is true for both."""
     if first.units != other.units:
         return False
     if first.sampling is None or other.sampling is None:
@@ -151,24 +139,10 @@ def _calibration_matches(
     return bool(np.allclose(first.sampling, other.sampling, rtol=1e-7, atol=0.0))
 
 
-def _safe_set_widget_status(widget: Any, name: str, value: Any) -> None:
-    """Publish optional folder status without requiring a widget trait."""
-    try:
-        setattr(widget, name, value)
-    except Exception:
-        # Status is advisory. Strict/slotted test or downstream widgets may not
-        # expose these optional attributes, which must not break data updates.
-        pass
-
-
-def _display_bin_factor(widget: Any) -> int:
-    """Return the active display-space bin factor for either image viewer."""
-    for name in ("_display_bin_factor", "_display_bin"):
-        try:
-            return max(1, int(getattr(widget, name)))
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return 1
+def _clear_pixel_size(widget, *, show_scale_bar: bool) -> None:
+    """Drop the widget's pixel size so no scale bar claims a calibration the files do not give."""
+    widget.pixel_size = 0.0
+    widget.show_scale_bar = show_scale_bar
 
 
 class WatchedImageFolder:
@@ -209,12 +183,13 @@ class WatchedImageFolder:
         self._poll_lock = threading.Lock()
         self._watch_stop: threading.Event | None = None
         self._watch_thread: threading.Thread | None = None
-        self._widget_ref: weakref.ReferenceType[Any] | None = None
+        self._widget_ref: weakref.ReferenceType | None = None
         self._watch_enabled = False
         self._watch_started = False
 
     @staticmethod
     def _validate_interval(interval: float) -> float:
+        """The polling interval in seconds; a zero, negative or non-finite one would spin or never poll."""
         value = float(interval)
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"watch interval must be a finite value > 0 seconds, got {interval!r}")
@@ -245,10 +220,10 @@ class WatchedImageFolder:
             from quantem.widget import io as widget_io  # noqa: PLC0415
 
             dataset = widget_io.read_image(path)
-            # RgbImage and Dataset2d both expose .array; bare arrays pass through.
-            array = np.asarray(getattr(dataset, "array", dataset))
+            # a Dataset2d, its stand-in or an RgbImage: each holds the pixels in .array
+            array = np.asarray(dataset.array)
             after = _fingerprint(path)
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, KeyError, IndexError, EOFError) as exc:
             self.errors[path] = f"{type(exc).__name__}: {exc}"
             return None
         if before != after:
@@ -260,7 +235,7 @@ class WatchedImageFolder:
         elif array.ndim != 2:
             self.errors[path] = (
                 f"expected a 2D gray or RGB image, got shape "
-                f"{tuple(int(v) for v in array.shape)}"
+                f"{tuple(int(size) for size in array.shape)}"
             )
             return None
         actual_shape = (int(array.shape[0]), int(array.shape[1]))
@@ -276,7 +251,7 @@ class WatchedImageFolder:
         # Color vs gray mix is allowed for Show2D panels, but Show3D stacks must
         # share channel layout. Store spatial shape only in expected_shape;
         # channel mismatch is checked when stacking frames.
-        if getattr(self, "expected_channels", None) is None:
+        if self.expected_channels is None:
             self.expected_channels = int(array.shape[2]) if array.ndim == 3 else 1
         else:
             channels = int(array.shape[2]) if array.ndim == 3 else 1
@@ -287,12 +262,10 @@ class WatchedImageFolder:
                     "Show3D.from_folder cannot mix gray and RGB frames in one stack."
                 )
                 return None
-        sampling, units = _spatial_metadata(dataset)
         self.errors.pop(path, None)
-        return _ReadImage(
-            ImageFolderRecord(path, after, sampling, units),
-            array,
-        )
+        sampling = (float(dataset.sampling[-2]), float(dataset.sampling[-1]))
+        units = (str(dataset.units[-2]), str(dataset.units[-1]))
+        return _ReadImage(ImageFolderRecord(path, after, sampling, units), array)
 
     def read_initial(
         self,
@@ -339,14 +312,14 @@ class WatchedImageFolder:
 
     def attach(
         self,
-        widget: Any,
+        widget,
         *,
         explicit_calibration: bool,
     ) -> Self:
         """Attach this source to an already constructed widget."""
         self._widget_ref = weakref.ref(widget)
         self._explicit_calibration = bool(explicit_calibration)
-        self._scale_bar_requested = bool(getattr(widget, "scale_bar_visible", True))
+        self._scale_bar_requested = bool(widget.show_scale_bar)
         widget._folder_source = self
         self._apply_calibration(widget, self.records)
         self._sync_widget_status(widget)
@@ -354,17 +327,14 @@ class WatchedImageFolder:
 
     def label(self, path: Path) -> str:
         """Return a concise path-derived label that remains unique recursively."""
-        try:
-            relative = path.relative_to(self.folder)
-        except ValueError:
-            relative = path
-        return relative.with_suffix("").as_posix()
+        return _relative_to_folder(path, self.folder).with_suffix("").as_posix()
 
     @property
     def paths(self) -> list[Path]:
+        """Paths of the files the widget shows, in display order."""
         return [record.path for record in self.records]
 
-    def poll(self, widget: Any) -> list[int]:
+    def poll(self, widget) -> list[int]:
         """Append stable new files and return their zero-based widget indices.
 
         A concurrent manual/background poll returns immediately. New decoded
@@ -378,7 +348,7 @@ class WatchedImageFolder:
         finally:
             self._poll_lock.release()
 
-    def _poll_once(self, widget: Any) -> list[int]:
+    def _poll_once(self, widget) -> list[int]:
         """Run one caller-owned folder scan while the poll lock is held."""
         if self._watch_enabled:
             set_folder_watch_status(
@@ -419,7 +389,7 @@ class WatchedImageFolder:
                 self._ready_probation.pop(path, None)
                 continue
             if self.expected_shape is None:
-                self.expected_shape = tuple(int(v) for v in read.array.shape)
+                self.expected_shape = (int(read.array.shape[0]), int(read.array.shape[1]))
 
             fingerprint = read.record.fingerprint
             if self._ready_probation.get(path) != fingerprint:
@@ -452,8 +422,7 @@ class WatchedImageFolder:
         # array. ``set_image`` exposes its new frame count partway through the
         # update, so a concurrent notebook/UI reader must never observe
         # ``n_slices > 0`` while ``folder_waiting`` is still true.
-        _safe_set_widget_status(widget, "_folder_waiting", False)
-        _safe_set_widget_status(widget, "folder_waiting", False)
+        widget.folder_waiting = False
         widget._apply_folder_image_records(
             old_records,
             new_records,
@@ -468,79 +437,46 @@ class WatchedImageFolder:
             if record.path in changed
         ]
 
-    def _apply_calibration(self, widget: Any, records: list[ImageFolderRecord]) -> None:
+    def _apply_calibration(self, widget, records: list[ImageFolderRecord]) -> None:
+        """Set the widget's scale bar from the files' shared calibration, or turn it off when they disagree.
+
+        A scale bar is only drawn when every shown file has the same sampling
+        and units; one mismatched file would make the bar wrong for some panels.
+        """
         if self._explicit_calibration:
             self.calibration_status = "explicit sampling/units override"
-            _safe_set_widget_status(
-                widget,
-                "_folder_calibration_status",
-                self.calibration_status,
-            )
-            return
-        if not records:
-            widget.pixel_size = 0.0
-            if hasattr(widget, "pixel_sizes"):
-                widget.pixel_sizes = []
-            widget.scale_bar_visible = False
+        elif not records:
+            _clear_pixel_size(widget, show_scale_bar=False)
             self.calibration_status = "waiting for the first readable image"
-            _safe_set_widget_status(
-                widget,
-                "_folder_calibration_status",
-                self.calibration_status,
-            )
-            return
-        first = records[0]
-        uniform = all(_calibration_matches(first, record) for record in records[1:])
-        if not uniform:
-            widget.pixel_size = 0.0
-            if hasattr(widget, "pixel_sizes"):
-                widget.pixel_sizes = []
-            widget.scale_bar_visible = False
+        elif not all(_calibration_matches(records[0], record) for record in records[1:]):
+            _clear_pixel_size(widget, show_scale_bar=False)
             self.calibration_status = (
                 "Scale bar disabled because watched files have different sampling or units."
             )
-            _safe_set_widget_status(
-                widget,
-                "_folder_calibration_status",
-                self.calibration_status,
-            )
-            return
-        if first.sampling is not None and first.units is not None:
-            # The scale bar is horizontal, so it uses the final (column) axis.
-            display_bin = _display_bin_factor(widget)
-            widget.pixel_size = float(first.sampling[-1]) * display_bin
+        elif records[0].sampling is not None and records[0].units is not None:
+            first = records[0]
+            # The scale bar is horizontal, so it uses the final (column) axis; it is
+            # drawn on display pixels, so the pixel size scales by the display bin.
+            widget.pixel_size = float(first.sampling[-1]) * max(1, int(widget._display_bin))
             widget.pixel_unit = str(first.units[-1])
-            if hasattr(widget, "pixel_sizes"):
-                widget.pixel_sizes = [
-                    float(record.sampling[-1]) * display_bin
-                    for record in records
-                ]
-            widget.scale_bar_visible = self._scale_bar_requested
+            widget.show_scale_bar = self._scale_bar_requested
             self.calibration_status = (
                 f"uniform: {first.sampling[-1]:g} {first.units[-1]}/pixel"
             )
         else:
-            widget.pixel_size = 0.0
-            if hasattr(widget, "pixel_sizes"):
-                widget.pixel_sizes = []
-            widget.scale_bar_visible = self._scale_bar_requested
+            _clear_pixel_size(widget, show_scale_bar=self._scale_bar_requested)
             self.calibration_status = "files do not provide spatial calibration"
-        _safe_set_widget_status(
-            widget,
-            "_folder_calibration_status",
-            self.calibration_status,
-        )
 
     def _sync_widget_status(
         self,
-        widget: Any,
+        widget,
         *,
         watch_error: str | None = None,
         worker_failed: bool = False,
     ) -> None:
-        """Publish advisory source state without requiring synced traits."""
+        """Publish the source state to the widget's folder traits: waiting flag, status line and watch badge."""
         waiting = not self.records
-        unexpected_error = watch_error is not None and bool(watch_error)
+        unexpected_error = bool(watch_error)
         if watch_error is None:
             pending_paths = set(self.errors) | set(self._ready_probation)
             if pending_paths:
@@ -576,15 +512,8 @@ class WatchedImageFolder:
             )
             if watch_error:
                 folder_status = f"{folder_status}; {watch_error}"
-        _safe_set_widget_status(widget, "_folder_waiting", waiting)
-        _safe_set_widget_status(widget, "folder_waiting", waiting)
-        _safe_set_widget_status(widget, "folder_status", folder_status)
-        _safe_set_widget_status(widget, "_folder_watch_error", watch_error)
-        _safe_set_widget_status(
-            widget,
-            "_folder_calibration_status",
-            self.calibration_status,
-        )
+        widget.folder_waiting = waiting
+        widget.folder_status = folder_status
         if not self._watch_enabled:
             state = "stopped" if self._watch_started else "hidden"
             detail = "Folder watcher stopped" if self._watch_started else ""
@@ -648,7 +577,7 @@ class WatchedImageFolder:
             text = f"{text[: max(0, int(limit) - 1)].rstrip()}…"
         return text
 
-    def start(self, widget: Any, *, interval: float | None = None) -> Self:
+    def start(self, widget, *, interval: float | None = None) -> Self:
         """Start an idempotent daemon watcher for this source."""
         next_interval = (
             self.interval
@@ -664,7 +593,8 @@ class WatchedImageFolder:
         widget_ref = weakref.ref(widget)
 
         def worker() -> None:
-            fatal_error: str | None = None
+            """Poll every ``interval`` until stopped or the widget is gone; an unexpected error turns the badge red."""
+            fatal_error = "an unexpected error (traceback in the kernel log)"
             try:
                 while not stop.wait(self.interval):
                     current_widget = widget_ref()
@@ -672,24 +602,26 @@ class WatchedImageFolder:
                         break
                     try:
                         self.poll(current_widget)
-                    except Exception as exc:
+                    except (OSError, ValueError, RuntimeError, KeyError, IndexError, TypeError, MemoryError) as exc:
                         # Unexpected per-poll failures must not stop a microscope
                         # watcher; ordinary unreadable/mismatched files are
-                        # reported non-fatally through ``folder_errors``.
+                        # reported non-fatally in the folder status.
                         self._sync_widget_status(
                             current_widget,
                             watch_error=f"{type(exc).__name__}: {exc}",
                         )
-            except BaseException as exc:
+            except Exception as exc:
+                # name it on the badge, then let the thread print its traceback
                 fatal_error = f"{type(exc).__name__}: {exc}"
+                raise
             finally:
                 current = threading.current_thread()
                 if self._watch_stop is stop:
                     self._watch_stop = None
                 if self._watch_thread is current:
                     self._watch_thread = None
-                if fatal_error is not None and not stop.is_set():
-                    current_widget = widget_ref()
+                if not stop.is_set():
+                    current_widget = widget_ref()  # None when the loop ended because the widget is gone
                     if current_widget is not None:
                         self._sync_widget_status(
                             current_widget,
@@ -703,20 +635,7 @@ class WatchedImageFolder:
             daemon=True,
         )
         self._watch_thread = thread
-        try:
-            thread.start()
-        except Exception:
-            self._watch_enabled = False
-            if self._watch_stop is stop:
-                self._watch_stop = None
-            if self._watch_thread is thread:
-                self._watch_thread = None
-            set_folder_watch_status(
-                widget,
-                "error",
-                "Watch worker could not start. Check the notebook kernel and retry.",
-            )
-            raise
+        thread.start()
         self._sync_widget_status(widget)
         return self
 
@@ -741,9 +660,12 @@ class WatchedImageFolder:
 class WatchedImageFolderMixin:
     """Public lifecycle shared by folder-backed Show2D and Show3D widgets."""
 
+    _folder_source: WatchedImageFolder | None = None  # set by WatchedImageFolder.attach in from_folder
+
     def _require_folder_source(self) -> WatchedImageFolder:
-        source = getattr(self, "_folder_source", None)
-        if not isinstance(source, WatchedImageFolder):
+        """The folder source of a ``from_folder`` widget; other widgets have nothing to poll."""
+        source = self._folder_source
+        if source is None:
             raise RuntimeError(
                 f"{type(self).__name__}.poll_folder() is available only on widgets "
                 f"created by {type(self).__name__}.from_folder(...)."
@@ -754,11 +676,6 @@ class WatchedImageFolderMixin:
     def folder_paths(self) -> list[Path]:
         """Canonical paths currently represented by this widget."""
         return list(self._require_folder_source().paths)
-
-    @property
-    def folder_errors(self) -> dict[Path, str]:
-        """Files waiting for a successful later poll and their latest errors."""
-        return dict(self._require_folder_source().errors)
 
     def poll_folder(self) -> list[int]:
         """Append stable new files and return their zero-based indices."""
@@ -771,9 +688,8 @@ class WatchedImageFolderMixin:
 
     def stop_folder_watch(self) -> None:
         """Stop and join background folder watching, if active."""
-        source = getattr(self, "_folder_source", None)
-        if isinstance(source, WatchedImageFolder):
-            source.stop()
+        if self._folder_source is not None:
+            self._folder_source.stop()
 
     def close(self) -> None:
         """Stop folder work before closing the widget communication channel."""

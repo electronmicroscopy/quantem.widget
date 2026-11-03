@@ -24,9 +24,9 @@ no console error, no NaN frame).
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
 | More menu: Color shared | `panel_cmaps`, `panel_cmaps_memory` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
-| Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
+| Panel identity markers | `marker_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
-| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity, dashed/dotted line styles, and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
+| Geometric panel overlays | `panel_overlays` | Optional circle and rectangle overlays in data or relative coordinates, with stroke/fill opacity, dashed/dotted line styles, and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
 | More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
@@ -36,34 +36,31 @@ no console error, no NaN frame).
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | FFT zoom / pan | Browser-local per FFT panel; FFT `Link Zoom` and `Link Pan` controls | Wheel or pinch zoom updates an always-visible `N.N×` badge in that FFT panel; reset returns Show2D's `2.0×` FFT default |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
-| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Control visibility | `show_controls`, `controls_collapsed` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
 | Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, saved state, and exported HTML |
-| Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
+| Scale bar toggle | `show_scale_bar` (`show_scale_bar` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
 | Scale bar style | `scale_bar_panels`, `scale_bar_length`, `scale_bar_label`, `scale_bar_style` | Restrict scale bars to selected panels and control exact publication text, font, outline, label spacing, offset, and bar thickness |
-| Gallery gap and borders | `inter_panel_gap_px`, `inter_panel_gap_color`, `gallery_outer_border_px`, `gallery_outer_border_color`, `panel_inner_border_px`, `panel_inner_border_color` | Separately controls the layer between panels, the outside gallery frame, and each panel's own inner stroke for browser, SVG, and static previews |
+| Gallery gap and borders | `panel_gap_px`, `inter_panel_gap_color`, `gallery_outer_border_px`, `gallery_outer_border_color`, `panel_inner_border_px`, `panel_inner_border_color` | Separately controls the layer between panels, the outside gallery frame, and each panel's own inner stroke for browser, SVG, and static previews |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
-| Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
-| Smooth toggle | `smooth` | Bilinear vs nearest sampling |
-| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Region overlay; stats panel reports the ROI; saved notebook previews include all ROI overlays and one comparable right-side zoom crop per visible ROI; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
+| Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col`; constructor `zoom=`, `center=(row, col)` (full-resolution pixels) | Zooms about the cursor |
+| Smooth toggle | `smooth` | Off by default: sharp data pixels (nearest neighbour); on: bilinear interpolation. The FFT panel has its own Smooth switch, also off by default |
+| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI; saved notebook previews include all ROI overlays and one comparable right-side zoom crop per visible ROI; each `roi_list` entry gives the shape, the center `row`/`col` and the size in full-resolution pixels |
 | Gallery select | `selected_idx` | Highlights the active panel |
 | Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`, `panel_playback_fps`; `set_panel_frame()` | Every grayscale 3D list item gets independent slider/play controls; changing one panel does not move another, and constructor-configured playback speed adds no toolbar clutter |
 | Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
-| Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
+| Panel reorder | `panel_order` (a permutation of panel indices; `[]` restores the natural order) | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 | Link Denoise switch (gallery) | `denoise_scope` | Linked ("all"): denoise edits apply to every panel; unlinked ("panel"): edits apply to the selected panel only |
+| Denoise at construction | `denoise=`, `denoise_sigma=`, `denoise_bin=` (scalar for every panel, or one per panel) | `Show2D(images, denoise="anscombe", denoise_sigma=8.0)` shows the filtered view from the first paint with the switch on; a per-panel list selects per-panel scope |
 | Denoise master | `denoise_enabled` | Off shows raw pixels and hides the banner without discarding method, sigma, bin, or per-panel settings |
 | Denoise Settings | `show_denoise` | Expands/collapses the Method, sigma, and bin editor without changing whether the effect is active |
 | Filter master | `frequency_filter_enabled` | Turns frequency filtering on/off without discarding cutoff or band settings |
 | Filter Settings | `show_frequency_filter` | Chooses None, Low-pass, High-pass, or Band-pass and exposes the FFT-ring parameters |
-| More menu: Save State | `saved_view_states`, `saved_view_request`, `saved_view_status`; `save_view_state()`, `load_view_state()`, `delete_view_state()`, `clear_view_states()` | Save named lightweight inspection bookmarks, then load/update/delete them without storing another copy of the image data |
-| View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
-| View menu: Padding | `pad_ratio`, `pad_ratios`, `pad_fill_mode`, `pad_fill_modes`, `pad_scope`; `set_padding()` | Adds a ratio-based display border with min/median/mean fill; gallery edits can apply to all panels or the selected panel |
-| View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
 | More menu: Flip | `image_flips_horizontal`, `image_flips_vertical` | Display-only horizontal/vertical flips help compare orientations and point-defect neighborhoods without changing stored arrays |
-| More menu: Rotate | `image_rotations`, `rotation_scope`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for every panel or the selected panel; raw data and `(row, col)` coordinates stay unchanged |
+| More menu: Rotate | `image_rotations`, `rotation_scope` | Display-only 0/90/180/270° rotation for every panel or the selected panel; raw data and `(row, col)` coordinates stay unchanged |
 | Panel inset plots | `inset_plots` | Optional per-panel mini line plots for calibration curves, ACF/R sweeps, or other scientific context; hover reports the nearest plotted coordinate |
 | Scale bar placement | `scale_bar_position`, `show_zoom_indicator` | Move the scale bar between bottom corners and opt into a zoom badge when a workflow needs a live magnification readout |
 
@@ -152,26 +149,25 @@ Show2D(
                 "shape": "circle",
                 "center": (96, 88),
                 "radius": 14,
-                "stroke": "#60a5fa",
-                "stroke_width": 3,
+                "color": "#60a5fa",
+                "line_width": 3,
                 "line_style": "dashed",
             },
             {
                 "shape": "rect",
                 "box": (48, 58, 126, 146),
-                "stroke": "#facc15",
-                "fill": "#facc15",
+                "color": "#facc15",
+                "fill_color": "#facc15",
                 "fill_opacity": 0.12,
-                "dash": [6, 2, 1, 2],
+                "line_dash": [6, 2, 1, 2],
                 "z_order": 1,
             },
         ],
         "denoised": {
-            "shape": "square",
-            "center": (96, 88),
-            "size": 42,
-            "stroke": "#34d399",
-            "stroke_width": 2,
+            "shape": "rect",
+            "box": (75, 67, 117, 109),
+            "color": "#34d399",
+            "line_width": 2,
             "line_style": "dotted",
         },
     },
@@ -180,23 +176,23 @@ Show2D(
 
 Overlay strokes are solid by default. Set `line_style="dashed"`,
 `line_style="dotted"`, or `line_style="dashdot"` for common scientific
-callouts, or pass `dash=[on, off, ...]` for an exact canvas dash pattern.
+callouts, or pass `line_dash=[on, off, ...]` for an exact canvas dash pattern.
 
-For a shared overlay on every panel, pass `overlays=[...]` instead of
-`panel_overlays`. Use `coords="relative"` when the geometry should follow
-normalized panel coordinates from 0 to 1:
+A flat list of shapes without `panel=` draws each shape on every panel. Use
+`coords="relative"` when the geometry should follow normalized panel
+coordinates from 0 to 1:
 
 ```python
 Show2D(
     [raw, denoised],
     labels=["raw", "denoised"],
-    overlays=[
+    panel_overlays=[
         {
             "shape": "circle",
             "center": (0.5, 0.5),
             "radius": 0.08,
             "coords": "relative",
-            "stroke": "#f87171",
+            "color": "#f87171",
         }
     ],
 )
@@ -207,7 +203,7 @@ overlays are present. In edit mode, click a circle or rectangle to select it,
 drag inside to move it, drag an edge to resize it, press Delete to remove the
 selected overlay, and choose `Reset Overlays` to restore the constructor state.
 Use ROIs when the shape should drive statistics, FFT crops, or Python
-readback through `get_roi_geometries()`.
+readback through `roi_list`.
 
 ## Presentation and export chrome
 
@@ -315,7 +311,7 @@ Show2D(
                 "font_family": PUBLICATION_FONT,
                 "font_size": 15,
                 "font_weight": 800,
-                "fg": "#ff4dff",
+                "color": "#ff4dff",
                 "outline_color": "#000000",
                 "outline_width": 1.8,
                 "variant": "plain",
@@ -329,7 +325,7 @@ Show2D(
                 "font_family": PUBLICATION_FONT,
                 "font_size": 15,
                 "font_weight": 800,
-                "fg": "#58ff58",
+                "color": "#58ff58",
                 "outline_color": "#000000",
                 "outline_width": 1.8,
                 "variant": "plain",
@@ -395,7 +391,7 @@ Show2D(
     panels,
     labels=labels,
     ncols=3,
-    inter_panel_gap_px=2,
+    panel_gap_px=2,
     inter_panel_gap_color="#000000",
     gallery_outer_border_px=2,
     gallery_outer_border_color="#000000",
@@ -404,21 +400,17 @@ Show2D(
 )
 ```
 
-`inter_panel_gap_*` controls only the layer between panels.
+`panel_gap_px` and `inter_panel_gap_color` control only the layer between panels.
 `gallery_outer_border_*` controls the frame around the whole grid.
-`panel_inner_border_*` controls the stroke drawn inside each image panel. The
-older `gallery_gap_px` / `gallery_gap_color` names remain as aliases for old
-notebooks; when used together they populate all three black-grid layers for
-the historical pixel-perfect SVG behavior.
+`panel_inner_border_*` controls the stroke drawn inside each image panel.
 
 ## Which denoise filter should I use?
 
 The Denoise controls are hidden behind their own toggle by default; everything
 here is display-only (the stored array, the stats row, and raw exports keep
 the original counts, and an active denoise always announces itself with a
-one-line banner). Three methods cover the space; binning is a separate knob,
-so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
-**Bin 2**.
+one-line banner). Three methods cover the space and binning is a separate
+knob: for a binned Poisson smooth pick **Poisson (Anscombe)** and set **Bin 2**.
 
 | Your data | Use | Why |
 |---|---|---|
@@ -428,59 +420,48 @@ so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
 | Anything quantitative (FFT, intensities, stats) | None | Measure on raw counts; the stats row is always computed from raw data |
 
 From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
-denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
-spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+denoise_sigma=8` (per-panel lists supported for A/B galleries).
 
 ## Reuse ROI coordinates in notebooks and agents
 
-ROIs are synced in `roi_list` and saved in `state_dict()`. For analysis code,
-prefer `get_roi_geometries()` so the shape-specific coordinates are explicit:
+ROIs are synced in `roi_list` and saved in `state_dict()`. Each entry is a dict
+with the `shape` (`"circle"`, `"square"`, `"rectangle"` or `"annular"`), the
+center `row` and `col`, and the size (`radius`, `radius_inner` for an annulus,
+`width` and `height` for a rectangle) in full-resolution pixels. Set the list
+from Python to place ROIs, and read it back after drawing them in the browser:
 
 ```python
-w = Show2D(img).set_roi(row=72, col=65, radius=12)
-roi = w.get_roi_geometries()[0]
-roi["center"]  # {"row": 72.0, "col": 65.0}
-roi["radius"]  # 12.0
+w = Show2D(img)
+w.roi_list = [{
+    "shape": "circle", "row": 72, "col": 65, "radius": 12, "radius_inner": 6,
+    "width": 24, "height": 24, "color": "#4fc3f7", "line_width": 2, "highlight": False,
+}]
+w.roi_active = True
+roi = w.roi_list[0]
+roi["row"], roi["col"], roi["radius"]  # (72, 65, 12)
 ```
 
-Rectangle and square ROIs include clockwise `corners`; annular ROIs include
-`radius_inner` and `radius_outer`. Every ROI also includes `bounds` and
-`bounds_clipped`, which lets an agent crop an array safely while preserving the
-user's exact visible selection.
+## Save and restore a view
 
-## Save microscope-stage view states
-
-Show2D can store named lightweight inspection bookmarks. This is useful when a
-scientist explores a notebook interactively — for example drawing an ROI around
-a defect, turning on FFT, hiding panels, changing contrast, adding padding for a
-drift check, and then wanting to come back to exactly that view later without
-writing export code.
-
-The GUI path is **More → Save State**. Existing states can be loaded, updated,
-deleted one at a time, or deleted all at once. The Python API uses the same
-state model:
+`state_dict()` returns the display state (ROIs, selected panel, hidden panels,
+panel order, local stack frames, contrast, colormap, FFT, denoise and filter,
+zoom and scale-bar settings) without the image data. `save(path)` writes it to
+a file, and the `state=` argument restores it on a new widget over the same
+images:
 
 ```python
 w = Show2D([raw, corrected, residual], labels=["raw", "corrected", "residual"])
-w.add_roi(row=72, col=65).set_padding(0.2, fill="median")
 w.show_fft = True
+w.save("defect_a.json")
 
-w.save_view_state("defect A drift check")
-w.hidden_panels = [2]
-w.save_view_state("raw vs corrected")
-
-w.load_view_state("defect A drift check")
-w.delete_view_state("raw vs corrected")
-w.clear_view_states()
+Show2D([raw, corrected, residual], state="defect_a.json")
 ```
 
-Saved view states include UI/view traits such as ROI list, selected ROI,
-selected panel, hidden panels, panel order, local stack frame indices, contrast,
-colormap, FFT, denoise/filter, crop, padding, zoom/view box, and scale-bar
-settings. They do **not** store another copy of `frame_bytes`,
-`panel_stack_bytes`, or raw source arrays. `state_dict()` includes the named
-bookmarks so a saved notebook can reopen with the same list of microscope-stage
-positions.
+The file is `{"schema": "quantem.widget-state/2", "widget_name", "widget_version",
+"state"}`, the same for every widget with `save`. A file of another schema
+(or of an earlier release, which has none) and a state key the widget does not
+save raise `ValueError` before anything is applied; an earlier file is not
+converted.
 
 ## Add scientific inset plots to panels
 
@@ -567,49 +548,6 @@ For paged galleries, FFT work is demand-driven: only panels visible on the
 current page are transformed. Visiting another page computes that page once
 and retains the bounded cache for later return visits.
 
-## Crop and pad the view (advanced)
-
-Single-panel widgets can commit the current browser viewport as the display
-extent. Single-panel and gallery widgets can add a ratio-based display border,
-either from the toolbar's **View** menu or from Python:
-
-```python
-w = Show2D(image, view_box=(64, 64, 96))  # zoom into a feature
-w.crop_to_view()          # the 96x96 window becomes the displayed frame
-w.set_padding(0.1, fill="median")  # 10% border on each side
-w.reset_view_ops()        # full frame again, bit-identical
-```
-
-For a drift-correction gallery, use per-panel padding to compare candidate
-margins without rebuilding another notebook cell:
-
-```python
-w = Show2D([raw, corrected, residual], ncols=3)
-w.set_padding(0.20, fill="mean", panels=[1])  # only corrected panel
-```
-
-Both ops honor the display-only contract:
-
-- The stored array is never modified; `reset_view_ops()` returns the exact
-  original frame bytes.
-- The crop applies in the display pipeline **before** denoise, so an active
-  denoise operates on the cropped region; the pad applies after it and uses the
-  selected fill mode (`min`, `median`, or `mean`).
-- The stats row keeps reporting the full raw data, and cursor coordinates
-  remain full-image (row, col) while a crop or pad is active: the crop is a
-  display window, not a new coordinate system.
-- The histogram and canvas are repacked from the padded display frame, so the
-  border contribution is visible while the raw data remain unchanged.
-- An active crop or pad is never silent: a one-line `view:` banner names the
-  window and the ratio, e.g.
-  `view: cropped to (64,64)-(160,160) · pad 10% median (reset_view_ops() restores full frame)`.
-- Both persist through `state_dict()` / `load_state_dict()`.
-
-Crop-to-view remains single-panel in this release because it changes the
-coordinate origin. Padding is gallery-safe: panels share the largest padded
-canvas so comparisons stay aligned, while each panel can still have its own
-ratio/fill mode.
-
 ## FFT quality labels
 
 Pass `show_fft=True` to show the FFT panel. By default, `fft_metrics=True`
@@ -631,17 +569,17 @@ to `2.0×` on double-click, double-tap, or Reset. In a gallery, unlinked FFTs
 report independent values; enabling FFT `Link Zoom` makes their values move
 together without changing the real-space zoom.
 
+## Reorder gallery panels
+
+`panel_order` reorders the gallery display without changing the source data,
+labels, stars or hidden state:
+
 ```python
 w = Show2D(images, labels=["raw", "filtered", "residual"])
-w.set_panel_order(["residual", "raw", "filtered"])
-w.move_panel("raw", 0)
-w.reset_panel_order()
+w.panel_order = [2, 0, 1]  # residual, raw, filtered
+w.panel_order = []         # the natural order again
 ```
 
-```{seealso}
-The deeper behavioral spec (invariants, per-feature pass criteria, isolation
-checks) lives alongside the integration test at `widget/docs/show2d-test-spec.md`.
-```
 
 ## Live image updates
 
@@ -653,7 +591,7 @@ replace the image or gallery data through that method:
 import numpy as np
 from quantem.widget import Show2D
 
-w = Show2D(first_image, labels=["initial"], offline=False)
+w = Show2D(first_image, labels=["initial"])
 w
 
 for step, next_image in enumerate(image_stream, start=1):
@@ -795,12 +733,7 @@ contains only real files, so 45 images form pages of 20, 20, and 5 panels.
 Folder pages keep selection, stars, hidden state, and ordering keyed to each
 source file rather than sharing a hidden slot across pages.
 
-Change the grouping later without rebuilding the widget:
-
-```python
-w.set_folder_page_size(50)   # regroup the same source panels
-w.set_folder_page_size(None) # show one unpaged gallery
-```
+To change the grouping, open the folder again with another `page_size`.
 
 Paging limits the panels, histograms, and FFT views rendered at one time. The
 current folder implementation still retains the complete full-resolution
@@ -830,10 +763,9 @@ file. Close long-running widgets when the notebook no longer needs them.
 `Show2D.from_folder(...)` reads the scientific image data at its source
 resolution.
 
-Maintainer real-time signoff follows
-[S2D-18](../maintainer/storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place):
-add genuine EMD files after the widget is visibly mounted and verify the same
-browser canvas paints each full-resolution panel.
+To verify the live path, add genuine EMD files after the widget is visibly
+mounted and check that the same browser canvas paints each full-resolution
+panel.
 
 ## Paged galleries
 
@@ -880,9 +812,9 @@ w = Show2D(
 
 Paged galleries keep the Python data model simple: all pages use the same panel
 count and image shape, the browser renders only the active page, and page stars
-are stored separately from panel stars. Use `star_page(page)` and
-`unstar_page(page)` from Python, or the star button beside the page slider in
-the widget. The page row also includes play/pause and a small FPS menu so
+are stored separately from panel stars. Use `star_page(page)` from Python
+(`page_starred` holds one 0/1 flag per page, so assigning it clears a star),
+or the star button beside the page slider in the widget. The page row also includes play/pause and a small FPS menu so
 readers can step through iteration or parameter pages without touching the main
 image controls. Manual slider scrubbing pauses page playback. For very large 4K
 sweeps, start with a reduced or representative stack; a future lazy page
@@ -892,5 +824,5 @@ transport can avoid sending every page to the browser at once.
 place does not notify the frontend. The method sends fresh synced `frame_bytes`
 and resets state tied to the old image count or dimensions, including stale
 hidden panels, stars, view box, ROIs, line profiles, detail tiles, and panel
-order. Use `offline=False` for acquisition-style updates so the live Jupyter
-Comm path carries each new frame instead of the saved/offline notebook path.
+order. Each new frame reaches the browser over the live Jupyter connection;
+`offline=True` would only quantize the panels to uint8.

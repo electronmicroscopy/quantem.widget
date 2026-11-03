@@ -5,20 +5,25 @@
 
 import { useState, useEffect, useMemo } from "react";
 
+// The existing Show2D / Show4DSTEM control scale, shared by viewer controls.
+export const WIDGET_UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+export const WIDGET_TYPOGRAPHY = {
+  label: { fontSize: 11, fontFamily: WIDGET_UI_FONT },
+  labelSmall: { fontSize: 10, fontFamily: WIDGET_UI_FONT },
+  value: { fontSize: 10, fontFamily: "monospace" },
+  title: { fontWeight: "bold" as const, fontFamily: WIDGET_UI_FONT },
+};
+
 // ============================================================================
 // Types
 // ============================================================================
-export type Environment = "jupyterlab" | "vscode" | "colab" | "jupyter-classic" | "docs" | "unknown";
 export type Theme = "light" | "dark";
 
-export interface ThemeInfo {
-  environment: Environment;
+interface ThemeInfo {
   theme: Theme;
 }
 
 export interface ThemeColors {
-  // Optional drop-shadow color for draggable chrome (pin tiles etc.).
-  shadow?: string;
   bg: string;
   bgAlt: string;
   text: string;
@@ -41,7 +46,7 @@ export const DARK_COLORS: ThemeColors = {
   accent: "#5af",
 };
 
-export const LIGHT_COLORS: ThemeColors = {
+const LIGHT_COLORS: ThemeColors = {
   bg: "#ffffff",
   bgAlt: "#f5f5f5",
   text: "#1e1e1e",
@@ -60,7 +65,7 @@ export function getThemeColors(theme: Theme): ThemeColors {
 // ============================================================================
 
 /** Check if a CSS color string is dark (luminance < 0.5) */
-export function isColorDark(color: string): boolean {
+function isColorDark(color: string): boolean {
   const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
   if (!match) return true;
   const [, r, g, b] = match.map(Number);
@@ -71,65 +76,34 @@ export function isColorDark(color: string): boolean {
 export function detectTheme(): ThemeInfo {
   // 1. JupyterLab - has data-jp-theme-light attribute
   const jpThemeLight = document.body.dataset.jpThemeLight;
-  if (jpThemeLight !== undefined) {
-    return {
-      environment: "jupyterlab",
-      theme: jpThemeLight === "true" ? "light" : "dark",
-    };
-  }
+  if (jpThemeLight !== undefined) return { theme: jpThemeLight === "true" ? "light" : "dark" };
 
   // 2. VS Code - has vscode-* classes on body or html
   const bodyClasses = document.body.className;
   const htmlClasses = document.documentElement.className;
   if (bodyClasses.includes("vscode-") || htmlClasses.includes("vscode-")) {
     const isDark = bodyClasses.includes("vscode-dark") || htmlClasses.includes("vscode-dark");
-    return {
-      environment: "vscode",
-      theme: isDark ? "dark" : "light",
-    };
+    return { theme: isDark ? "dark" : "light" };
   }
 
   // 3. Google Colab - has specific markers
   if (document.querySelector('colab-shaded-scroller') || document.body.classList.contains('colaboratory')) {
-    const bg = getComputedStyle(document.body).backgroundColor;
-    return {
-      environment: "colab",
-      theme: isColorDark(bg) ? "dark" : "light",
-    };
+    return { theme: isColorDark(getComputedStyle(document.body).backgroundColor) ? "dark" : "light" };
   }
 
   // 4. Classic Jupyter Notebook - has #notebook element
   if (document.getElementById('notebook')) {
-    const bodyBg = getComputedStyle(document.body).backgroundColor;
-    return {
-      environment: "jupyter-classic",
-      theme: isColorDark(bodyBg) ? "dark" : "light",
-    };
+    return { theme: isColorDark(getComputedStyle(document.body).backgroundColor) ? "dark" : "light" };
   }
 
   // 5. Sphinx Book Theme / PyData docs (Jupyter Book) - the light/dark toggle
   // sets data-theme (or a resolved data-mode) on <html>. Follow it so embedded
   // widgets match the docs page instead of only the OS preference.
   const docsTheme = document.documentElement.dataset.mode || document.documentElement.dataset.theme;
-  if (docsTheme === "light" || docsTheme === "dark") {
-    return { environment: "docs", theme: docsTheme };
-  }
+  if (docsTheme === "light" || docsTheme === "dark") return { theme: docsTheme };
 
-  // 6. Fallback: check OS preference, then computed background
-  const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)')?.matches;
-  if (prefersDark !== undefined) {
-    return {
-      environment: "unknown",
-      theme: prefersDark ? "dark" : "light",
-    };
-  }
-
-  // Final fallback: check body background luminance
-  const bg = document.body ? getComputedStyle(document.body).backgroundColor : "";
-  return {
-    environment: "unknown",
-    theme: bg && isColorDark(bg) ? "dark" : "light",
-  };
+  // 6. Anywhere else: the OS preference
+  return { theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" };
 }
 
 // ============================================================================
@@ -139,21 +113,17 @@ export function useTheme(forceLight = false): { themeInfo: ThemeInfo; colors: Th
   const [detected, setDetected] = useState<ThemeInfo>(() => detectTheme());
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const handleChange = () => setDetected(detectTheme());
-    mediaQuery?.addEventListener?.('change', handleChange);
+    mediaQuery.addEventListener('change', handleChange);
 
     const observer = new MutationObserver(() => setDetected(detectTheme()));
-    if (document.body) {
-      observer.observe(document.body, { attributes: true, attributeFilter: ['data-jp-theme-light', 'class'] });
-    }
+    observer.observe(document.body, { attributes: true, attributeFilter: ['data-jp-theme-light', 'class'] });
     // <html> carries the Sphinx/PyData docs light-dark toggle (data-theme / data-mode).
-    if (document.documentElement) {
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'class'] });
-    }
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'class'] });
 
     return () => {
-      mediaQuery?.removeEventListener?.('change', handleChange);
+      mediaQuery.removeEventListener('change', handleChange);
       observer.disconnect();
     };
   }, []);
@@ -162,7 +132,7 @@ export function useTheme(forceLight = false): { themeInfo: ThemeInfo; colors: Th
   // is a static, theme-less artifact and a forced dark page leaks the kernel's
   // dark Jupyter theme into a shared file the colleague opens in any browser.
   const themeInfo: ThemeInfo = forceLight ? { ...detected, theme: "light" } : detected;
-  // Memoize by theme string so `colors` is referentially stable across renders —
+  // Memoize by theme string so `colors` is referentially stable across renders:
   // effects/components that depend on `colors` only re-run when the theme flips.
   const colors = useMemo(() => getThemeColors(themeInfo.theme), [themeInfo.theme]);
   return { themeInfo, colors };

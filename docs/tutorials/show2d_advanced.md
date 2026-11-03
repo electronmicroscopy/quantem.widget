@@ -86,7 +86,7 @@ residual_002 = (raw_002 - den_002).astype("float32")
 | Many conditions, one page at a time | `Show2D(page_stack, page_labels=...)` | Keeps dense sweeps readable without one huge grid |
 | Reproducible visual callouts | `panel_annotations`, `panel_overlays`, `inset_plots` | Saved state and exported HTML reproduce the same figure intent |
 | Live editable figure callouts | `panel_overlays` + More -> Overlay Edit | Reproducible circles/rectangles can be selected, moved, resized, deleted, or reset in live/exported HTML |
-| Measurement geometry with Python readback | ROI tools | ROIs are the path for statistics, FFT crops, and `get_roi_geometries()` readback |
+| Measurement geometry with Python readback | ROI tools | ROIs are the path for statistics and FFT crops; `widget.roi_list` holds their geometry |
 
 ## Start with a report-ready gallery
 
@@ -205,7 +205,7 @@ region labels:
 
 ## Geometric overlays
 
-Use `panel_overlays` when a circle, rectangle, or square is part of a
+Use `panel_overlays` when a circle or rectangle is part of a
 reproducible figure specification. Coordinates use data pixels by default with
 QuantEM's user-facing `(row, col)` convention.
 
@@ -219,25 +219,24 @@ Show2D(
                 "shape": "circle",
                 "center": (96, 88),
                 "radius": 14,
-                "stroke": "#60a5fa",
-                "stroke_width": 3,
+                "color": "#60a5fa",
+                "line_width": 3,
                 "line_style": "dashed",
             },
             {
                 "shape": "rect",
                 "box": (48, 58, 126, 146),
-                "stroke": "#facc15",
-                "fill": "#facc15",
+                "color": "#facc15",
+                "fill_color": "#facc15",
                 "fill_opacity": 0.12,
-                "dash": [6, 2, 1, 2],
+                "line_dash": [6, 2, 1, 2],
             },
         ],
         "denoised": {
-            "shape": "square",
-            "center": (96, 88),
-            "size": 42,
-            "stroke": "#34d399",
-            "stroke_width": 2,
+            "shape": "rect",
+            "box": (75, 67, 117, 109),
+            "color": "#34d399",
+            "line_width": 2,
             "line_style": "dotted",
         },
     },
@@ -246,22 +245,22 @@ Show2D(
 
 Overlay strokes are solid by default. Use `line_style="dashed"`,
 `line_style="dotted"`, or `line_style="dashdot"` for common figure styles, or
-pass `dash=[on, off, ...]` for a custom pattern.
+pass `line_dash=[on, off, ...]` for a custom pattern.
 
-Use `overlays=[...]` for one shared guide on every panel, or include `panel=`
-inside a flat list when overlays are generated in a loop:
+A flat `panel_overlays=[...]` list without `panel=` draws one shared guide on
+every panel; include `panel=` in each entry when overlays are generated in a loop:
 
 ```{code-cell} python
 Show2D(
     [raw, denoised],
     labels=["raw", "denoised"],
-    overlays=[
+    panel_overlays=[
         {
             "shape": "circle",
             "center": (0.5, 0.5),
             "radius": 0.08,
             "coords": "relative",
-            "stroke": "#f87171",
+            "color": "#f87171",
         }
     ],
 )
@@ -461,7 +460,7 @@ w = Show2D(
                 "font_family": PUBLICATION_FONT,
                 "font_size": 15,
                 "font_weight": 800,
-                "fg": "#ff4dff",
+                "color": "#ff4dff",
                 "outline_color": "#000000",
                 "outline_width": 1.8,
                 "variant": "plain",
@@ -475,7 +474,7 @@ w = Show2D(
                 "font_family": PUBLICATION_FONT,
                 "font_size": 15,
                 "font_weight": 800,
-                "fg": "#58ff58",
+                "color": "#58ff58",
                 "outline_color": "#000000",
                 "outline_width": 1.8,
                 "variant": "plain",
@@ -502,7 +501,7 @@ w = Show2D(
     panels,
     labels=labels,
     ncols=3,
-    inter_panel_gap_px=2,
+    panel_gap_px=2,
     inter_panel_gap_color="#000000",
     gallery_outer_border_px=2,
     gallery_outer_border_color="#000000",
@@ -515,7 +514,7 @@ w
 With the settings above, `Show2D` places the first panel at `(2, 2)` in SVG
 coordinates, inserts 2 pixels between panels, adds a 2-pixel frame around the
 outside, and draws a 1-pixel inner stroke on each panel. To remove only the
-between-panel layer while keeping individual frames, set `inter_panel_gap_px=0`
+between-panel layer while keeping individual frames, set `panel_gap_px=0`
 and keep `panel_inner_border_px > 0`.
 
 ### Put the scale bar on only one panel
@@ -546,7 +545,7 @@ for example `"500 pm"` instead of an automatically formatted label.
 
 ```python
 svg_path = w.export_svg("figure2_show2d.svg")
-html_path = w.export_html("figure2_show2d.html", mode="single", encoding="uint8")
+html_path = w.export_html("figure2_show2d.html", encoding="uint8")
 ```
 
 In the live widget, use `Export -> Preview SVG` before saving the SVG. This
@@ -608,7 +607,7 @@ Before sharing a Show2D report, check these items:
 - Keep local annotations and overlays reproducible through `panel_annotations`
   and `panel_overlays`.
 - Use `ui_mode="presentation"` when the exported first view should be clean.
-- State any `downsample` or `encoding="uint8"` choice in the surrounding report
+- State any `image_bin` or `encoding="uint8"` choice in the surrounding report
   when scientific interpretation depends on exact pixels.
 - For interactive proof, drive the exported HTML in a headed browser: zoom,
   pan, change contrast, switch pages or frames, and confirm overlays/labels

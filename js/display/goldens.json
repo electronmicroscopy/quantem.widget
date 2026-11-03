@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "quantized": [
+    {
+      "name": "signed_range",
+      "bytes": [0, 1, 127, 128, 254, 255],
+      "low": -7.5,
+      "high": 12.5,
+      "expected": [-7.5, -7.421568393707275, 2.460784912109375, 2.5392160415649414, 12.42156982421875, 12.5]
+    },
+    {
+      "name": "constant_range",
+      "bytes": [0, 1, 127, 255],
+      "low": 3.25,
+      "high": 3.25,
+      "expected": [3.25, 3.25, 3.25, 3.25]
+    }
+  ],
+  "reciprocal": [
+    {
+      "name": "dc",
+      "row_offset": 0,
+      "column_offset": 0,
+      "rows": 8,
+      "columns": 8,
+      "row_sampling": 0.5,
+      "column_sampling": 0.5,
+      "expected": [0, 0, 0, null]
+    },
+    {
+      "name": "anisotropic_fractional",
+      "row_offset": 1.5,
+      "column_offset": -2.25,
+      "rows": 8,
+      "columns": 16,
+      "row_sampling": 0.25,
+      "column_sampling": 0.5,
+      "expected": [0.75, -0.28125, 0.8010003511235185, 1.2484389034253927]
+    },
+    {
+      "name": "padded_3x5_axis",
+      "source_shape": [3, 5],
+      "padded_shape": [4, 8],
+      "row_offset": 0,
+      "column_offset": 2,
+      "rows": 4,
+      "columns": 8,
+      "row_sampling": 0.2,
+      "column_sampling": 0.2,
+      "expected": [0, 1.25, 1.25, 0.8]
+    }
+  ]
+}

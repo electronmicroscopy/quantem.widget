@@ -26,18 +26,14 @@ export function useHideStaticFallback(
     if (typeof document === "undefined") return;
     const modelId = (model as { model_id?: string } | undefined)?.model_id;
     let cancelled = false;
+    // .jp-Cell covers JupyterLab and nbconvert HTML; .cell covers
+    // jupyter-book / myst-nb docs pages, where model_id is unavailable and
+    // the structural scope is the only way to find this widget's sibling.
+    const cell = rootRef.current?.closest(".jp-Cell, .cell") ?? null;
     const hideFallback = () => {
       if (cancelled) return;
-      // .jp-Cell covers JupyterLab and nbconvert HTML; .cell covers
-      // jupyter-book / myst-nb docs pages, where model_id is unavailable and
-      // the structural scope is the only way to find this widget's sibling.
-      const cell = rootRef.current?.closest(".jp-Cell, .cell") ?? null;
-      const scope: ParentNode = cell ?? document;
-      scope.querySelectorAll("img.quantem-static-fallback").forEach((img) => {
-        if (!cell) {
-          const imgId = img.getAttribute("data-quantem-model-id");
-          if (!modelId || imgId !== modelId) return;
-        }
+      (cell ?? document).querySelectorAll("img.quantem-static-fallback").forEach((img) => {
+        if (!cell && (!modelId || img.getAttribute("data-quantem-model-id") !== modelId)) return;
         const output = img.closest(".jp-OutputArea-child") ?? img;
         (output as HTMLElement).style.display = "none";
       });
@@ -45,12 +41,13 @@ export function useHideStaticFallback(
     hideFallback();
     // The sibling output is filled DEFERRED (post_execute update_display_data)
     // and Lab may recreate its DOM node on the update, so fixed-delay retries
-    // can miss it and the PNG would show under the live widget. Observe the
-    // document for the widget's lifetime and hide the marker whenever it
-    // (re)appears; disconnected on unmount, so a cold reopen (no widget JS)
-    // still shows the fallback.
+    // can miss it and the PNG would show under the live widget. Observe this
+    // widget's cell (the whole page only when there is no cell) for the
+    // widget's lifetime and hide the marker whenever it (re)appears, so edits
+    // elsewhere on the page never run the query; disconnected on unmount, so a
+    // cold reopen (no widget JS) still shows the fallback.
     const observer = new MutationObserver(hideFallback);
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(cell ?? document.body, { childList: true, subtree: true });
     return () => {
       cancelled = true;
       observer.disconnect();

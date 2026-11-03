@@ -7,7 +7,7 @@ import {
   createGPUColormapEngine,
   GPUColormapEngine,
   renderToOffscreen,
-} from "../colormaps";
+} from "../display/colormaps";
 import { extractBytes, downloadBlob } from "../format";
 import { detectTheme, getThemeColors, useTheme } from "../theme";
 import { useHideStaticFallback } from "../staticFallback";
@@ -19,6 +19,38 @@ type Model = {
   on(event: string, callback: () => void): void;
   off(event: string, callback: () => void): void;
 };
+
+// y tick labels end this far left of the plot frame and x tick labels start
+// this far below it, with this much space between neighbouring x labels; the
+// rotated y-axis title occupies the canvas columns left of Y_TITLE_RIGHT.
+const TICK_LABEL_GAP = 6;
+const X_TICK_LABEL_TOP = 8;
+const X_TICK_LABEL_SPACING = 10;
+const Y_TITLE_RIGHT = 22;
+const NICE_STEP_FACTORS = [1, 2, 2.5, 5, 10];
+
+/**
+ * Tick values at 1, 2, 2.5 or 5 times a power of ten inside [low, high], at
+ * most `maxCount` of them, labelled with the decimals the step needs
+ * (exponent notation for very large or very small values). Ticks placed at the
+ * zoom bounds themselves gave long labels that collided at the plot corner and
+ * ran past the canvas edge after a zoom.
+ */
+function niceTicks(low: number, high: number, maxCount: number): { values: number[]; labels: string[] } {
+  const raw = (high - low) / maxCount;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  const factor = NICE_STEP_FACTORS.find((candidate) => candidate * power >= raw * (1 - 1e-9))!;
+  const step = factor * power;
+  const values: number[] = [];
+  for (let index = Math.ceil(low / step - 1e-9); index <= Math.floor(high / step + 1e-9); index++) values.push(index * step);
+  const stepDecade = Math.floor(Math.log10(step) + 1e-9);
+  const extra = factor === 2.5 ? 1 : 0;
+  const largest = Math.max(Math.abs(low), Math.abs(high));
+  const exponent = largest >= 1e5 || stepDecade < -4;
+  const digits = Math.max(0, (exponent ? Math.floor(Math.log10(largest)) : 0) - stepDecade + extra);
+  const labels = values.map((value) => (!exponent ? value.toFixed(digits) : value === 0 ? "0" : value.toExponential(digits)));
+  return { values, labels };
+}
 
 function render({ model, el }: { model: Model; el: HTMLElement }) {
   let themeColors = getThemeColors(detectTheme().theme);
@@ -80,8 +112,8 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
           "& .MuiSelect-icon": { color: colors.text },
           "& .MuiOutlinedInput-notchedOutline": { borderColor: colors.border },
           "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: colors.accent } }}
-        MenuProps={{ PaperProps: { sx: { maxHeight: 320, bgcolor: colors.controlBg,
-          color: colors.text, border: `1px solid ${colors.border}` } } }}
+        MenuProps={{ slotProps: { paper: { sx: { maxHeight: 320, bgcolor: colors.controlBg,
+          color: colors.text, border: `1px solid ${colors.border}` } } } }}
         onChange={(event) => {
           model.set("cmap", event.target.value);
           model.save_changes();
@@ -121,8 +153,8 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
       updateReadout();
     });
   }
-  const full = () => model.get("grid").bounds as number[];
-  function size() {
+  const fullBounds = () => model.get("grid").bounds as number[];
+  function applyMaxWidth() {
     host.style.maxWidth = `${model.get("max_width") ?? 600}px`;
     schedule();
   }
@@ -136,15 +168,13 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
   });
   let paintedBounds = bounds.slice();
   let paintedGeometry = geometry();
-  const number = (value: number) => Number(value.toPrecision(4)).toString();
-  const tickNumber = (value: number, span: number) =>
-    number(Math.abs(value) < span * 1e-12 ? 0 : value);
+  const formatValue = (value: number) => Number(value.toPrecision(4)).toString();
   function commit() {
     model.set("view_bounds", bounds.slice());
     model.save_changes();
   }
   function clampBounds(next: number[]) {
-    const original = full();
+    const original = fullBounds();
     return [0, 2].flatMap((index) => {
       const span = Math.min(
         original[index + 1] - original[index],
@@ -163,21 +193,40 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
   function paint() {
     frame = 0;
     if (disposed || canvas.style.display === "none") return;
-    const g = geometry(),
-      width = g.width - g.left - g.right,
-      height = g.height - g.top - g.bottom;
+    const layout = geometry();
     const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.round(g.width * ratio);
-    canvas.height = Math.round(g.height * ratio);
-    canvas.style.height = `${g.height}px`;
+    canvas.width = Math.round(layout.width * ratio);
+    canvas.height = Math.round(layout.height * ratio);
+    canvas.style.height = `${layout.height}px`;
     const ctx = canvas.getContext("2d")!;
     ctx.scale(ratio, ratio);
+    ctx.font = "12px system-ui";
+    // The left margin grows to fit the widest y tick label beside the y-axis title.
+    const height = layout.height - layout.top - layout.bottom;
+    const yTicks = niceTicks(bounds[2], bounds[3], Math.max(2, Math.min(6, Math.floor(height / 30))));
+    const yLabelWidth = Math.max(...yTicks.labels.map((label) => ctx.measureText(label).width));
+    layout.left = Math.max(layout.left, Math.ceil(Y_TITLE_RIGHT + yLabelWidth + TICK_LABEL_GAP));
+    const width = layout.width - layout.left - layout.right;
+    // x labels centre on their ticks, clamped inside the canvas at the edges;
+    // fewer ticks until neighbouring labels keep their spacing, and for labels
+    // too long even for two ticks, only every second (third, ...) one.
+    const xLabelPlacement = ({ values, labels }: { values: number[]; labels: string[] }) => labels.map((label, index) => {
+      const half = ctx.measureText(label).width / 2;
+      const tick = layout.left + ((values[index] - bounds[0]) / (bounds[1] - bounds[0])) * width;
+      return { label, center: Math.min(Math.max(tick, half + 1), layout.width - half - 1), half };
+    });
+    const crowded = (placed: { center: number; half: number }[]) => placed.some((label, index) =>
+      index > 0 && label.center - label.half < placed[index - 1].center + placed[index - 1].half + X_TICK_LABEL_SPACING);
+    let xLabels = xLabelPlacement(niceTicks(bounds[0], bounds[1], 6));
+    for (let maxCount = 5; maxCount >= 2 && crowded(xLabels); maxCount--) xLabels = xLabelPlacement(niceTicks(bounds[0], bounds[1], maxCount));
+    const allXLabels = xLabels;
+    for (let every = 2; crowded(xLabels); every++) xLabels = allXLabels.filter((_, index) => index % every === 0);
     ctx.fillStyle = themeColors.bg;
-    ctx.fillRect(0, 0, g.width, g.height);
+    ctx.fillRect(0, 0, layout.width, layout.height);
     const grid = model.get("grid"),
-      original = full();
+      original = fullBounds();
     const zoom = (original[1] - original[0]) / (bounds[1] - bounds[0]);
-    zoomLabel.textContent = `${number(zoom)}× · ${zoom > 1.001 ? "Drag to pan" : "Zoom in to pan"}`;
+    zoomLabel.textContent = `${formatValue(zoom)}× · ${zoom > 1.001 ? "Drag to pan" : "Zoom in to pan"}`;
     canvas.style.cursor = drag
       ? "grabbing"
       : zoom > 1.001
@@ -185,7 +234,7 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
         : "crosshair";
     if (bitmap) {
       ctx.save();
-      ctx.translate(g.left, g.top + height);
+      ctx.translate(layout.left, layout.top + height);
       ctx.scale(1, -1);
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(
@@ -202,36 +251,24 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
       ctx.restore();
     }
     ctx.strokeStyle = themeColors.border;
-    ctx.strokeRect(g.left, g.top, width, height);
-    ctx.font = "12px system-ui";
+    ctx.strokeRect(layout.left, layout.top, width, height);
     ctx.fillStyle = themeColors.text;
     ctx.textAlign = "center";
-    ctx.fillText(model.get("title"), g.left + width / 2, 17);
-    for (let tick = 0; tick <= 4; tick++) {
-      const fraction = tick / 4;
-      ctx.textAlign = "center";
-      ctx.fillText(
-        tickNumber(
-          bounds[0] + fraction * (bounds[1] - bounds[0]),
-          bounds[1] - bounds[0],
-        ),
-        g.left + fraction * width,
-        g.top + height + 17,
-      );
-      ctx.textAlign = "right";
-      ctx.fillText(
-        tickNumber(
-          bounds[2] + fraction * (bounds[3] - bounds[2]),
-          bounds[3] - bounds[2],
-        ),
-        g.left - 7,
-        g.top + height * (1 - fraction) + 4,
-      );
-    }
+    ctx.fillText(model.get("title"), layout.left + width / 2, 17);
+    // x labels hang below the frame; y labels are centred on their ticks, so
+    // the lowest one ends above the x labels.
+    ctx.textBaseline = "top";
+    xLabels.forEach(({ label, center }) => ctx.fillText(label, center, layout.top + height + X_TICK_LABEL_TOP));
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    yTicks.values.forEach((value, index) => {
+      ctx.fillText(yTicks.labels[index], layout.left - TICK_LABEL_GAP, layout.top + height * (1 - (value - bounds[2]) / (bounds[3] - bounds[2])));
+    });
+    ctx.textBaseline = "alphabetic";
     ctx.textAlign = "center";
-    ctx.fillText(model.get("x_label"), g.left + width / 2, g.top + height + 37);
+    ctx.fillText(model.get("x_label"), layout.left + width / 2, layout.top + height + 37);
     ctx.save();
-    ctx.translate(15, g.top + height / 2);
+    ctx.translate(15, layout.top + height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.fillText(model.get("y_label"), 0, 0);
     ctx.restore();
@@ -240,32 +277,32 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
       for (let i = 0; i < 256; i++) {
         ctx.fillStyle = `rgb(${lut[i * 3]},${lut[i * 3 + 1]},${lut[i * 3 + 2]})`;
         ctx.fillRect(
-          g.left + (i * width) / 256,
-          g.height - 52,
+          layout.left + (i * width) / 256,
+          layout.height - 52,
           width / 256 + 0.5,
           10,
         );
       }
     ctx.fillStyle = themeColors.text;
     ctx.textAlign = "left";
-    ctx.fillText(number(displayMin), g.left, g.height - 27);
+    ctx.fillText(formatValue(displayMin), layout.left, layout.height - 27);
     ctx.textAlign = "right";
-    ctx.fillText(number(displayMax), g.left + width, g.height - 27);
+    ctx.fillText(formatValue(displayMax), layout.left + width, layout.height - 27);
     ctx.textAlign = "center";
-    ctx.fillText(model.get("colorbar_label"), g.left + width / 2, g.height - 8);
+    ctx.fillText(model.get("colorbar_label"), layout.left + width / 2, layout.height - 8);
     const line = model.get("horizontal_line");
     if (line != null && line >= bounds[2] && line <= bounds[3]) {
-      const pos =
-        g.top + height * (1 - (line - bounds[2]) / (bounds[3] - bounds[2]));
+      const lineY =
+        layout.top + height * (1 - (line - bounds[2]) / (bounds[3] - bounds[2]));
       ctx.strokeStyle = "#e649a0";
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
-      ctx.moveTo(g.left, pos);
-      ctx.lineTo(g.left + width, pos);
+      ctx.moveTo(layout.left, lineY);
+      ctx.lineTo(layout.left + width, lineY);
       ctx.stroke();
     }
     paintedBounds = bounds.slice();
-    paintedGeometry = g;
+    paintedGeometry = layout;
     updateReadout();
     canvas.setAttribute(
       "aria-label",
@@ -288,7 +325,7 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
     const current = ++generation;
     const bytes = extractBytes(model.get("data_bytes"));
     if (!bytes.length) {
-      const saved = model.get("_static_fallback_jpeg");
+      const saved = model.get("_static_fallback_image");
       if (saved) preview.src = `data:${model.get("_static_fallback_mime") || "image/png"};base64,${saved}`;
       else preview.removeAttribute("src");
       preview.style.display = saved ? "block" : "none";
@@ -315,10 +352,12 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
         let next: CanvasImageSource | null = null;
         if (engine) {
           engine.uploadData(0, display, grid.cols, grid.rows);
-          engine.uploadLUT(cmap, lut);
           const rendered = await engine.renderSlotsToImageBitmapAsync(
             [0],
             [{ vmin, vmax }],
+            false,
+            cmap,
+            lut,
           );
           next = rendered?.[0] ?? null;
         }
@@ -347,7 +386,7 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
         displayCmap = cmap;
         displayMin = vmin;
         displayMax = vmax;
-        status.textContent = `${usedGPU ? "WebGPU display" : "Canvas fallback"} · wheel to zoom`;
+        status.textContent = `${usedGPU ? "WebGPU display" : "CPU display"} · wheel to zoom`;
         cancelAnimationFrame(frame);
         paint();
         updateColorControl();
@@ -358,12 +397,12 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
       });
   }
   function plotPosition(event: MouseEvent) {
-    const g = geometry(),
+    const layout = paintedGeometry,
       rect = canvas.getBoundingClientRect();
     const col =
-      (event.clientX - rect.left - g.left) / (g.width - g.left - g.right);
+      (event.clientX - rect.left - layout.left) / (layout.width - layout.left - layout.right);
     const row =
-      1 - (event.clientY - rect.top - g.top) / (g.height - g.top - g.bottom);
+      1 - (event.clientY - rect.top - layout.top) / (layout.height - layout.top - layout.bottom);
     return col >= 0 && col <= 1 && row >= 0 && row <= 1 ? [col, row] : null;
   }
   canvas.onpointerdown = (event) => {
@@ -375,9 +414,9 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
     schedule();
   };
   canvas.onpointermove = (event) => {
-    const g = geometry();
-    const width = g.width - g.left - g.right,
-      height = g.height - g.top - g.bottom;
+    const layout = paintedGeometry;
+    const width = layout.width - layout.left - layout.right,
+      height = layout.height - layout.top - layout.bottom;
     if (drag) {
       const dx =
         ((event.clientX - drag.x) / width) * (drag.bounds[1] - drag.bounds[0]);
@@ -396,11 +435,11 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
   };
   function updateReadout() {
     if (!pointer || !bitmap) { readout.title = readout.textContent = ""; return; }
-    const g = paintedGeometry, rect = canvas.getBoundingClientRect();
-    const width = g.width - g.left - g.right,
-      height = g.height - g.top - g.bottom;
-    const colFraction = (pointer.clientX - rect.left - g.left) / width;
-    const rowFraction = 1 - (pointer.clientY - rect.top - g.top) / height;
+    const layout = paintedGeometry, rect = canvas.getBoundingClientRect();
+    const width = layout.width - layout.left - layout.right,
+      height = layout.height - layout.top - layout.bottom;
+    const colFraction = (pointer.clientX - rect.left - layout.left) / width;
+    const rowFraction = 1 - (pointer.clientY - rect.top - layout.top) / height;
     if (
       colFraction < 0 ||
       colFraction >= 1 ||
@@ -413,18 +452,18 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
     const x = paintedBounds[0] + colFraction * (paintedBounds[1] - paintedBounds[0]),
       y = paintedBounds[2] + rowFraction * (paintedBounds[3] - paintedBounds[2]);
     const grid = model.get("grid"),
-      original = full();
+      original = fullBounds();
     const col = Math.floor(
       ((x - original[0]) / (original[1] - original[0])) * grid.cols,
     );
     const row = Math.floor(
       ((y - original[2]) / (original[3] - original[2])) * grid.rows,
     );
-    const xc =
+    const binX =
       original[0] + ((col + 0.5) * (original[1] - original[0])) / grid.cols;
-    const yc =
+    const binY =
       original[2] + ((row + 0.5) * (original[3] - original[2])) / grid.rows;
-    readout.title = readout.textContent = `Bin (${row}, ${col}) · x ${number(xc)} · y ${number(yc)} · value ${source[row * grid.cols + col]?.toPrecision(6)}`;
+    readout.title = readout.textContent = `Bin (${row}, ${col}) · x ${formatValue(binX)} · y ${formatValue(binY)} · value ${source[row * grid.cols + col]?.toPrecision(6)}`;
   }
   canvas.onpointerup =
     canvas.onpointercancel =
@@ -441,9 +480,9 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
   };
   function zoomBy(factor: number, position = [0.5, 0.5]) {
     bounds = clampBounds(
-      [0, 2].flatMap((i, axis) => {
-        const span = bounds[i + 1] - bounds[i];
-        const anchor = bounds[i] + position[axis] * span;
+      [0, 2].flatMap((lowIndex, axis) => {
+        const span = bounds[lowIndex + 1] - bounds[lowIndex];
+        const anchor = bounds[lowIndex] + position[axis] * span;
         return [
           anchor - position[axis] * span * factor,
           anchor + (1 - position[axis]) * span * factor,
@@ -475,7 +514,7 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
   reset.onclick = () => {
     clearTimeout(wheelTimer);
     drag = null;
-    bounds = full().slice();
+    bounds = fullBounds().slice();
     commit();
     schedule();
   };
@@ -504,21 +543,21 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
     "plot_height_px",
   ])
     observers.push([`change:${key}`, schedule]);
-  observers.push(["change:max_width", size]);
+  observers.push(["change:max_width", applyMaxWidth]);
   observers.push(["change:cmap", updateColorControl]);
   observers.push([
     "change:view_bounds",
     () => {
       bounds = (
-        model.get("view_bounds").length ? model.get("view_bounds") : full()
+        model.get("view_bounds").length ? model.get("view_bounds") : fullBounds()
       ).slice();
       schedule();
     },
   ]);
   observers.forEach(([event, handler]) => model.on(event, handler));
-  const resize = new ResizeObserver(schedule);
-  resize.observe(host);
-  size();
+  const resizeObserver = new ResizeObserver(schedule);
+  resizeObserver.observe(host);
+  applyMaxWidth();
   updateColorControl();
   prepare();
   return () => {
@@ -528,7 +567,7 @@ function render({ model, el }: { model: Model; el: HTMLElement }) {
     clearTimeout(wheelTimer);
     cancelAnimationFrame(readoutFrame);
     colorRoot.unmount();
-    resize.disconnect();
+    resizeObserver.disconnect();
     observers.forEach(([event, handler]) => model.off(event, handler));
     if (bitmap instanceof ImageBitmap) bitmap.close();
     void Promise.all([queue, ready]).then(() => engine?.destroy());

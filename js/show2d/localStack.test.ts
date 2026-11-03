@@ -59,20 +59,20 @@ describe("Show2D panel-frame FFT cache", () => {
 
   it("evicts the oldest inactive result while protecting visible FFTs", () => {
     const cache = new Map<string, GalleryFftCacheEntry>();
-    const a = key(0, 0);
-    const b = key(0, 1);
-    const c = key(0, 2);
-    rememberGalleryFftCache(cache, a, entry([1]));
-    rememberGalleryFftCache(cache, b, entry([2]));
-    const stats = rememberGalleryFftCache(cache, c, entry([3]), {
+    const protectedKey = key(0, 0);
+    const evictedKey = key(0, 1);
+    const newestKey = key(0, 2);
+    rememberGalleryFftCache(cache, protectedKey, entry([1]));
+    rememberGalleryFftCache(cache, evictedKey, entry([2]));
+    const stats = rememberGalleryFftCache(cache, newestKey, entry([3]), {
       maxEntries: 2,
       maxBytes: 1024,
-      protectedKeys: new Set([a]),
+      protectedKeys: new Set([protectedKey]),
     });
 
-    expect(cache.has(a)).toBe(true);
-    expect(cache.has(b)).toBe(false);
-    expect(cache.has(c)).toBe(true);
+    expect(cache.has(protectedKey)).toBe(true);
+    expect(cache.has(evictedKey)).toBe(false);
+    expect(cache.has(newestKey)).toBe(true);
     expect(stats).toMatchObject({ entries: 2, evictions: 1 });
   });
 });

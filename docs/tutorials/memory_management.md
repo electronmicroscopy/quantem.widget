@@ -18,17 +18,9 @@ For raw electron detector counts, start with `uint16`. It keeps the measured
 counts exactly and is still much smaller than `float32`.
 
 Use `uint8` only when you want a lightweight preview or tutorial copy. It is
-fast and small, but it can saturate real counts above 255.
-
-If you request `dtype="u8"` and any counts exceed 255, `load` warns you:
-
-```text
-Warning: dtype='u8' saturated 1,482,913 pixels (0.0124%) above 255 to 255.
-Pass dtype='u16' or 'auto' to keep full counts.
-```
-
-That warning is intentional. It means the browsing copy is no longer exact, so
-use `dtype="u16"` or the default load for quantitative work.
+fast and small, but it can saturate real counts above 255. `load` always keeps
+the detector's own dtype; `uint8` appears only where you choose it, such as
+`export_html(dtype="uint8")` or `quantem show4dstem ... --html --dtype uint8`.
 
 ## Size estimates
 
@@ -40,14 +32,15 @@ A `4096 x 4096` image is about:
 | `uint16` | 32 MB |
 | `float32` | 64 MB |
 
-A common `512 x 512 x 192 x 192` 4D-STEM scan is much larger:
+A common `512 x 512 x 192 x 192` 4D-STEM scan is 18 GiB as a dense `uint16`
+array. `load` never creates that array: it keeps the acquisition ANS encoded on
+the GPU at full detector resolution.
 
-| load mode | approximate size |
+| form | approximate size |
 |---|---:|
-| full detector, `uint16` | 18-20 GB |
-| `det_bin=2`, `uint16` | 4.5-5 GB |
-| `det_bin=4`, `uint16` | 1.1-1.3 GB |
-| `det_bin=4`, `uint8` | about 0.6 GB |
+| dense `uint16` array | 18 GiB |
+| encoded acquisition from `load` | 0.1 to 2 GiB, depending on counts |
+| bounded `read` of 64 scan rows, `uint16` | 2.25 GiB |
 
 Leave a few GB free for the viewer, browser, and downstream processing.
 
@@ -61,45 +54,38 @@ the laptop is the frontend.
 from quantem.gpu.io import load
 from quantem.widget import Show4DSTEM
 
-data = load("scan_master.h5")  # CUDA is selected automatically when available
-Show4DSTEM(data)
+loaded = load("scan_master.h5")  # CUDA is selected automatically when available
+Show4DSTEM(loaded)
 ```
 
-Good first choices:
+The same call fits every common GPU size, because the encoded acquisition is a
+small fraction of the dense array. Memory pressure comes from what you read or
+reconstruct from it, such as large bounded reads or SSB workspaces.
 
-| GPU memory | first try |
-|---:|---|
-| 96 GB | `load(path)` |
-| 48 GB | `load(path)` |
-| 24 GB | `load(path)` for browsing, `load(path, det_bin=2)` if reconstruction also runs |
-| 16 GB or less | `load(path, det_bin=4, dtype="u8")` for browsing |
-
-Check the GPU before and after a large load with `quantem.widget.io.memory()`:
+Check the GPU before and after a large load with `quantem.widget.profile()`:
 
 ```python
+import quantem.widget as qw
 from quantem.gpu.io import load
-from quantem.widget import Show4DSTEM
-from quantem.widget.io import memory
 
-memory()  # check VRAM before loading
-data = load("scan_001_master.h5", verbose=True)
-print(data.data.shape, data.data.dtype, f"{data.data.nbytes / 1e9:.1f} GB")
-memory()  # confirm VRAM after loading
+qw.profile()  # check VRAM before loading
+loaded = load("scan_001_master.h5", verbose=True)
+print(loaded.shape, loaded.dtype,
+      f"{loaded.resident_bytes / 2**30:.2f} GiB encoded, {loaded.logical_bytes / 2**30:.1f} GiB dense")
+qw.profile()  # confirm VRAM after loading
 ```
 
-Typical output:
+For a real `256 x 256 x 192 x 192` Arina scan (uint32 counts on disk), the
+print line reads:
 
 ```text
-VRAM GPU0    12.6 /   95.0 GB used   (82.4 free)   [torch 0.0, cupy 0.0]   NVIDIA RTX PRO 6000
-RAM          84.1 /  540.0 GB used   (447.2 free)
-  Loaded 1,048,576 frames (19.3 GB) in 6.42s (3.0 GB/s)
-(1024, 1024, 96, 96) uint16 19.3 GB
-VRAM GPU0    32.1 /   95.0 GB used   (62.9 free)   [torch 0.0, cupy 19.3]  NVIDIA RTX PRO 6000
-RAM          84.4 /  540.0 GB used   (446.8 free)
+(256, 256, 192, 192) uint16 0.57 GiB encoded, 4.5 GiB dense
 ```
 
-Read this as: the full detector-count stack is now on the NVIDIA GPU as
-`uint16`; no browser copy has been quantized.
+Read this as: every detector pixel and count is on the NVIDIA GPU in encoded
+form, 0.57 GiB instead of 4.5 GiB; the counts fit in `uint16`, so they are
+stored that way, and no copy has been binned or quantized. The `profile()` lines
+show the whole GPU, including other processes.
 
 ## Can I choose the NVIDIA GPU inside the notebook?
 
@@ -121,8 +107,8 @@ from quantem.widget import Show4DSTEM
 
 print(torch.cuda.get_device_name(0))
 
-data = load("scan_001_master.h5")
-Show4DSTEM(data)
+loaded = load("scan_001_master.h5")
+Show4DSTEM(loaded)
 ```
 
 Example output on a Linux workstation with NVIDIA GPUs:
@@ -198,67 +184,34 @@ free, total = torch.cuda.mem_get_info()
 print(f"free {free / 1e9:.1f} GB / total {total / 1e9:.1f} GB")
 ```
 
-Keep a handle to the viewer if you plan to release memory later:
+Keep handles to the acquisition and the viewer if you plan to release memory
+later:
 
 ```python
 from quantem.gpu.io import load
 from quantem.widget import Show4DSTEM
 
-data = load("scan_001_master.h5")
-viewer = Show4DSTEM(data)
+loaded = load("scan_001_master.h5")
+viewer = Show4DSTEM(loaded)
 viewer
 ```
 
-When you are done with that dataset, free the viewer and delete the loaded data:
+When you are done with that dataset, release the viewer first and then the
+acquisition it borrows:
 
 ```python
-viewer.free()   # releases widget tensor/backend caches
-viewer.close()  # closes the ipywidget comm/model
-del viewer
-del data
-
-import gc
-import torch
-
-gc.collect()
-torch.cuda.empty_cache()
-
-try:
-    import cupy as cp
-except Exception:
-    pass
-else:
-    cp.get_default_memory_pool().free_all_blocks()
-    cp.get_default_pinned_memory_pool().free_all_blocks()
+viewer.free()    # releases widget tensor/backend caches
+viewer.close()   # closes the ipywidget comm/model
+loaded.close()   # returns the encoded storage to the GPU
 ```
 
-If `viewer` or `data` still exists anywhere in the notebook, the memory is still
-owned by the live Python process. That is correct behavior. A small residual
-allocation can remain after cleanup because CUDA keeps a runtime context and
-small caches alive until the kernel exits.
-
-NVIDIA GPU cleanup check, using a real 4D-STEM scan
-loaded as `det_bin=4, dtype="u8"`:
-
-```text
-GPU 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
-before:              free 74.12 GiB / total 94.95 GiB
-after load:          free 71.72 GiB   cupy used 2.25 GiB
-after Show4DSTEM:    free 70.64 GiB   torch reserved 0.98 GiB
-after cleanup:       free 73.74 GiB   cupy used 0.00 GiB
-residual:            0.38 GiB CUDA runtime/cache overhead
-
-GPU 1: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-before:              free 80.95 GiB / total 94.97 GiB
-after load:          free 78.68 GiB   cupy used 2.25 GiB
-after Show4DSTEM:    free 77.60 GiB   torch reserved 0.98 GiB
-after cleanup:       free 80.70 GiB   cupy used 0.00 GiB
-residual:            0.25 GiB CUDA runtime/cache overhead
-```
+A viewer from `Show4DSTEM.from_folder(...)` owns the acquisitions it loaded;
+`viewer.free()` or `viewer.close()` closes them.
 
 If memory is still occupied after this pattern, another variable, notebook, or
-kernel still owns it. Shut down old kernels from JupyterLab before assuming the
-GPU is stuck.
+kernel still owns it. A small residual allocation can remain because CUDA keeps
+a runtime context and small caches alive until the kernel exits. Shut down old
+kernels from JupyterLab before assuming the GPU is stuck.
 
 ## Moving image data to Torch or CuPy
 
@@ -319,22 +272,14 @@ On a MacBook, the same API works:
 from quantem.gpu.io import load
 from quantem.widget import Show4DSTEM
 
-data = load("scan_master.h5")
-Show4DSTEM(data)
+loaded = load("scan_master.h5")   # Apple GPU (MPS), encoded like on CUDA
+Show4DSTEM(loaded)
 ```
 
 Mac unified memory is shared by the operating system, browser, Python, and GPU.
-If the machine feels tight, start with:
-
-```python
-data = load("scan_master.h5", det_bin=2)
-```
-
-For a small preview or teaching copy:
-
-```python
-data = load("scan_master.h5", det_bin=4, dtype="u8")
-```
+The encoded acquisition uses a small part of it; large bounded reads and
+reconstructions use the rest, so read the scan region you need rather than the
+whole scan.
 
 ## Related pages
 

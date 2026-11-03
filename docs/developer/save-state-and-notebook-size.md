@@ -1,100 +1,102 @@
-# `save_state`: keep widget notebooks small, still show the render
+# Saved widget state and notebook size
 
-## The problem
+## Why saved state matters
 
-Every quantem widget (Show2D / Show3D / Show4DSTEM) syncs its pixel buffers to the
-frontend as `traitlets.Bytes(...).tag(sync=True)` traits. When a notebook is saved,
-ipywidgets serializes those buffers into `metadata.widgets` as base64. A 5-panel 4k
-Show2D gallery baked **~1 GB into a single `.ipynb`** - the pictures in the cell output
-were only ~11 MB; the 1 GB was the embedded widget *state*.
+Image widgets synchronize pixel buffers to the frontend as traits. Saving their
+full state in `metadata.widgets` can make a notebook much larger than its cell
+outputs: a five-panel 4k Show2D gallery previously embedded about 1 GB of state.
+Some notebook frontends cannot restore that state on a cold reopen, while an
+HTML export with a widget manager can use it. Choose the saved artifact for its
+reader rather than embedding every buffer by default.
 
-That state buys almost nothing: **JupyterLab does not rehydrate a widget from saved
-state on a cold reopen** - it re-renders from the kernel on Run. So the 1 GB was dead
-weight except for the rare "reopen kernel-less and keep interacting" case.
+## The current protocols
 
-## The contract
+Widgets that use `SavedStateMixin` and `StaticFallbackMixin`, including Show1D,
+Show2D, Show3D, Show4DSTEM and ShowPDF, support these choices:
 
-Every widget takes `save_state: bool = False`.
+- **`save_state=False` (default):** trim bulk pixel buffers from the saved full
+  state and provide a static preview where configured. The live widget still
+  receives its pixels. The configurable preview defaults to JPEG; WebP and PNG
+  are available through `notebook_preview_format`.
+- **`save_state=True`:** retain the synchronized state and omit the static
+  preview. A compatible widget manager can restore interactions supported by
+  the embedded data. This does not restart a Python folder watcher, preserve a
+  GPU acquisition owner, or provide computations that require a live kernel.
 
-- **`save_state=False` (default)** - do not persist the bulk pixel buffers. Attach a
-  **static `image/png`** of the current view to the cell output instead, so a cold
-  reopen (GitHub, nbviewer, kernel-less Lab) still shows *how it looked*. Live Jupyter
-  still renders the full interactive widget (richest mime wins).
-- **`save_state=True`** - embed the full interactive state so a reopened notebook
-  restores the live widget without a kernel. No static PNG (the widget restores itself).
+These are opt-in protocols, not parameters guaranteed on every widget.
+ChooseLattice has no `save_state` argument. Show3DSlices and ShowDiffraction use
+state-file and HTML-export protocols without the static-preview mixins. Plot2D
+uses the shared mixins with a fixed PNG preview. Check the widget's current
+constructor and export API before choosing a persistence mode.
 
-## How it is implemented (mirror this for any new widget)
+The preview is a display artifact, not calibrated numerical data. Use the
+widget's explicit export method or the scientific data owner to save values.
 
-Six pieces, all in the widget class:
+## Reuse the shared implementation
 
-1. `save_state: bool = False` kwarg in `__init__` (before `**kwargs`).
-2. `self._save_state = bool(save_state)` set **before** `super().__init__(**kwargs)`
-   (so any `get_state` during comm-open already sees it).
-3. `_UNSAVED_HEAVY_KEYS = (...)` - the bulk `sync=True` Bytes traits (frame buffers,
-   prefetch buffers, offline stacks, export blobs). **Not** the tiny control-sized ones;
-   keep a small current-frame/virtual-image buffer so a cold reopen gets a first paint.
-4. `get_state(self, key=None, drop_defaults=False)` override:
-   ```python
-   state = super().get_state(key=key, drop_defaults=drop_defaults)
-   if key is None and not getattr(self, "_save_state", False):
-       for k in self._UNSAVED_HEAVY_KEYS:
-           state.pop(k, None)
-   return state
-   ```
-   **The `key is None` guard is load-bearing.** ipywidgets calls `get_state(None)` only
-   for the full save/embed snapshot. The live-render path (`send_state`, `hold_sync`)
-   calls it with a specific key or a set - those must pass through untouched, or the
-   frontend never receives the pixels and the widget renders **blank**.
-5. `_static_png_b64(...)` - a downsampled matplotlib render of the current view, base64.
-   Stride-downsample; rendering full 4k here would dominate display time.
-6. `_repr_mimebundle_` override - when `not self._save_state`, add
-   `data["image/png"] = self._static_png_b64()` (handle the bundle being a
-   `(data, metadata)` tuple or a dict).
+The implementation is in
+[`state.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/state.py)
+and [`fallback.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/fallback.py).
+For a new widget adopting these protocols:
 
-### Per-widget heavy keys (as of this writing - verify against the source)
+1. Follow a current participating widget's initialization and mixin order.
+   Set `_save_state` before opening the comm and configure the preview format,
+   quality and size through the shared fallback implementation.
+2. Declare `_UNSAVED_HEAVY_KEYS` for that widget's large synchronized buffers.
+   Keep small control state and use the shared initial-mount handling so the
+   first live view receives its data.
+   ShowPDF, for example, drops `nav_image_bytes`, `mask_b64`, `mask_bytes`,
+   `linescan_bytes` and `export_payload`, and its preview is the scan image
+   beside the shown curve or line-scan stack.
+3. Supply the widget-specific `_static_png_b64` renderer. The shared fallback
+   converts that render to the selected preview format and manages its display.
+   Bound the preview dimensions so it remains inexpensive.
 
-| widget | `_UNSAVED_HEAVY_KEYS` | static PNG source |
-|---|---|---|
-| Show2D | `frame_bytes`, `export_payload` | the N panels in `_data` |
-| Show3D | `frame_bytes`, `_buffer_bytes`, `_offline_stack`, `_offline_float_stack`, `export_payload` | evenly-spaced slices of the z-stack |
-| Show4DSTEM | `_offline_stack`, `export_payload`, `_gif_data` | the virtual (BF/ADF) image |
+Do not copy `get_state` or MIME/display plumbing into each widget. The shared
+implementation distinguishes a full saved snapshot from the initial live mount
+and targeted updates. In particular, `get_state(key=<name or set>)` must retain
+requested buffers: `send_state` and `hold_sync` use those updates to draw the
+live view. Saved folder-watcher state is marked stopped because a notebook
+snapshot cannot retain a running Python thread.
 
-## Executing notebooks small (the other half)
+## Interactive documentation and static copies
 
-The `get_state` trim covers the Python embed path, but two more things bite when you run
-notebooks non-interactively:
+Tracked tutorial notebooks contain source without saved `metadata.widgets` or
+image outputs. The documentation build executes them afresh and captures the
+interactive state in the generated site. Keep that workflow intact; disabling
+state capture during the docs build can leave blank or static-only tutorials.
 
-- **`metadata.widgets` is sticky.** `nbconvert` does *not* clear an existing
-  `metadata.widgets`, so a stale 1 GB blob rides along every rerun even with
-  `store_widget_state=False`. **Clear it first** if a prior run bloated it:
-  ```python
-  nb["metadata"].pop("widgets", None)
-  ```
-- The bulk data also rides the **comm buffers** the widget sends to render (nbconvert
-  records them). Run without persisting those:
-  ```bash
-  jupyter nbconvert --to notebook --execute --inplace \
-      --ExecutePreprocessor.store_widget_state=False <nb>
-  ```
-  With `save_state=False`, the static PNG in the cell output preserves the visual.
+For a separate static GitHub preview, make a copy outside `docs/tutorials/` and
+follow [GitHub preview copy](../cli.md#github-preview-copy). Never run
+`quantem github` in place on canonical documentation notebooks.
 
-## Verifying a change to this code (the drive-test protocol)
+For a local execution that deliberately needs only static previews, copy the
+notebook first. Clear any existing `metadata.widgets` from that copy before
+running it: `store_widget_state=False` does not remove old embedded state.
+Then execute the copy without capturing new widget state:
 
-A screenshot-only pass can miss a blank render, and a size-only pass can miss a broken
-save. Verify **both halves**:
+```bash
+jupyter nbconvert --to notebook --execute --inplace \
+    --ExecutePreprocessor.store_widget_state=False analysis_static.ipynb
+```
 
-1. **Render path intact (browser-free, deterministic):** for `save_state=False`, assert
-   `heavy_key in get_state(heavy_key)` (targeted survives) while
-   `heavy_key not in get_state(None)` (full snapshot trimmed). This is the exact
-   mechanism that delivers pixels to the frontend; if the targeted lookup keeps the key,
-   live render works. (Show3D's `frame_bytes` is empty at construction because it streams
-   on scrub - the key must still be *present*, just empty.)
-2. **Visual oracle (browser-free):** execute on real data, extract the cell's
-   `image/png`, and *look at it*. Confirm the panels are the real render, not blank.
-3. **Live browser drive (when the environment allows headed Chrome):** open the notebook
-   on `:1`, Run the cell, screenshot the mounted canvas, vision-confirm. This is the only
-   check that exercises the real JS render path; do it when a real GPU + headed Chrome is
-   available (see the `widget-drive` skill).
+Inspect the result: static previews exist only for widgets supporting that
+protocol, and frontends differ in their handling of image and widget outputs.
+This command does not certify an interactive documentation build.
 
-The regression shield for steps 1-2 lives in `tests/test_save_state.py` (5 invariants ×
-3 widgets). Extend it whenever a new widget adopts `save_state`.
+## Verify both saving and live rendering
+
+1. **State contract:** with `save_state=False`, verify full saved state omits
+   declared heavy buffers while targeted key and key-set updates retain them.
+   Verify the initial mount separately, plus full state when `save_state=True`.
+2. **Static preview:** decode the configured image MIME output and inspect it.
+   Check JPEG, WebP or PNG as applicable; do not assume every widget emits PNG.
+3. **Live browser:** execute the notebook, inspect the mounted widget, change a
+   control and confirm pixels update. Source-only assertions cannot prove the
+   JavaScript render path. Also check a cold reopen and the intended HTML export.
+
+[`tests/test_save_state.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/tests/test_save_state.py)
+checks participating widgets, preview formats and saved-state behavior. Extend
+protocol tests when adding a participant, and run the repository's notebook
+size guards before publishing. A small notebook and a rendered screenshot alone
+do not establish that its live interaction works.

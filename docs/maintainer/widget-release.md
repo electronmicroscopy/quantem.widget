@@ -49,7 +49,7 @@ npm run build
 For widget/export changes, also run:
 
 ```bash
-PYTHONPATH=src:. pytest -q tests/test_html_export_protocol.py tests/test_showeds.py
+PYTHONPATH=src:. pytest -q tests/test_html_export_protocol.py
 ```
 
 For release packaging, run:
@@ -58,9 +58,8 @@ For release packaging, run:
 scripts/widget_release_check.sh
 ```
 
-This script runs the frontend typecheck/tests/build, standalone browser build,
-offline browser build, Python compile smoke, local wheel build, and wheel-content
-checks.
+This script runs the frontend typecheck/tests/build, Python compile smoke,
+local wheel build, and wheel-content checks.
 
 Before uploading to TestPyPI or PyPI, build fresh artifacts and inspect the
 actual upload payload. Do not upload stale files from an old local `dist/`
@@ -81,52 +80,12 @@ particular, no `.h5`, `.hdf5`, `.emd`, `.npy`, `.npz`, `.zarr`, `.tif`, `.dm3`,
 present. The expected wheel contents are Python source, package metadata,
 licenses, and built widget JavaScript/static assets.
 
-## Visual signoff
+## Visual check
 
 Widgets can import successfully while still rendering blank canvases. Before a
-release candidate, create an agent signoff packet and drive the affected widgets
-in the browser:
-
-```bash
-scripts/widget_agent_signoff.sh --quick
-```
-
-The agent signoff is a fix-and-redrive loop: choose the relevant scientific
-stories from [Storyboard](storyboard), open the docs page,
-notebook, or exported HTML; click, drag, zoom, scrub, resize, and export; patch
-anything that feels wrong; rebuild; refresh; and redrive the same story. Save
-final screenshots or short videos in the packet before tagging. See
-[Agent signoff](widget-agent-signoff).
-
-Also run at least the quick visual smoke:
-
-```bash
-scripts/widget_visual_signoff.sh --quick
-```
-
-For Show4DSTEM/WebGPU-sensitive changes, run:
-
-```bash
-scripts/widget_visual_signoff.sh --show4dstem
-```
-
-For a release-candidate tag, prefer the full signoff:
-
-```bash
-scripts/widget_visual_signoff.sh --full
-```
-
-For broad UI releases, pair it with:
-
-```bash
-scripts/widget_agent_signoff.sh --full
-```
-
-The full signoff includes generic widget visual tests, Show4DSTEM WebGPU browser
-and Jupyter smokes, plus the local release build/check gate. The human-readable
-report should cite storyboard IDs that were verified or skipped. Hardware-
-dependent real-data CUDA/MPS checks may still need a separate machine-specific
-runbook.
+release candidate, open the docs tutorial for each changed widget (or an
+exported HTML) in a browser and click, drag, zoom, scrub, resize and export.
+For Show4DSTEM changes also run `scripts/e2e_fresh.py` against a real master.
 
 ## Tag and publish to TestPyPI
 
@@ -140,12 +99,11 @@ git push origin widget-v0.0.1rc1
 GitHub Actions will:
 
 1. build frontend widget assets,
-2. build the standalone browser GUI,
-3. stamp the package version from the tag,
-4. build the wheel,
-5. run `twine check`,
-6. verify required wheel contents,
-7. publish to TestPyPI.
+2. stamp the package version from the tag,
+3. build the wheel,
+4. run `twine check`,
+5. verify required wheel contents,
+6. publish to TestPyPI.
 
 Watch the `Widget release` workflow until it completes.
 
@@ -164,7 +122,7 @@ python -m pip install \
 python - <<'PY'
 import quantem.widget as qw
 qw.profile()
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM
 print("widgets import ok")
 PY
 ```

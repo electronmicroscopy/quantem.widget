@@ -12,6 +12,7 @@ on:
     paths:
       - "docs/**"
       - "CHANGELOG.md"
+      - "gpu-ref.txt"
       - ".github/workflows/widget-docs.yml"
   workflow_dispatch:
 
@@ -42,16 +43,19 @@ jobs:
       # the WebGPU engine sources from quantem.gpu (scripts/sync-gpu-webgpu.mjs),
       # which imports quantem.gpu and its deps (numpy).
       - run: pip install -r docs/requirements.txt
-      # .[hub] pulls quantem.data (widget_export tutorial); the loaders need
-      # huggingface_hub + h5py + tifffile to download and read tutorial data.
-      - run: pip install --extra-index-url https://test.pypi.org/simple/ -e ".[hub]" huggingface_hub h5py tifffile
+      - run: pip install --extra-index-url https://test.pypi.org/simple/ -e .
       # The TestPyPI quantem.gpu release can lag the webgpu module the sync
-      # script imports, so install quantem.gpu from its source tip instead
-      # (the installed quantem package is regular, not namespace, so a
-      # PYTHONPATH fallback cannot shadow a lagging site-packages release).
+      # script imports, so install quantem.gpu from the ref in gpu-ref.txt
+      # instead, the one CI and the release bundle (the installed quantem
+      # package is regular, not namespace, so a PYTHONPATH fallback cannot
+      # shadow a lagging site-packages release).
+      - name: Read the pinned quantem.gpu ref
+        id: gpu
+        run: echo "ref=$(cat gpu-ref.txt)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: bobleesj/quantem.gpu
+          ref: ${{ steps.gpu.outputs.ref }}
           path: quantem-gpu-src
       - run: pip install ./quantem-gpu-src
       # The executed widgets load their JS from src/quantem/widget/static/,
@@ -72,7 +76,9 @@ jobs:
           # Silence the "unauthenticated requests" warning that otherwise gets
           # baked into tutorial outputs on the published pages.
           HF_HUB_VERBOSITY: error
-          QUANTEM_WIDGET_STATIC_FALLBACK: "0"
+          # Not QUANTEM_*: quantem core would read it as its own config key and
+          # print an "Unknown configuration key" warning on every page.
+          QW_STATIC_FALLBACK: "0"
       - run: python scripts/check_docs_widget_provenance.py docs/_build/html
       # Theme-drift guard: a page with two primary-toggle buttons means the
       # mobile hamburger is dead (see scripts/check_docs_nav_toggle.py).

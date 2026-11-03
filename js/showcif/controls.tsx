@@ -43,13 +43,15 @@ export function CompactSelect({
       }}
       MenuProps={{
         transitionDuration: 0,
-        MenuListProps: { dense: true },
-        PaperProps: {
-          sx: {
-            backgroundColor: colors.controlBg,
-            color: colors.text,
-            borderRadius: 0,
-            border: `1px solid ${colors.border}`,
+        slotProps: {
+          list: { dense: true },
+          paper: {
+            sx: {
+              backgroundColor: colors.controlBg,
+              color: colors.text,
+              borderRadius: 0,
+              border: `1px solid ${colors.border}`,
+            },
           },
         },
       }}

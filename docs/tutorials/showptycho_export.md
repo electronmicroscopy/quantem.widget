@@ -3,22 +3,24 @@
 This tutorial exports a ShowPtycho reconstruction as a **browser folder** and
 opens it with no Python kernel and no Jupyter. You can run it by granting the
 folder to Chrome, or by using the generated local launcher. The exported viewer
-opens from exact bright-field detector columns by default, then runs SSB live as
-you tune aberrations.
+reuses the original QEM acquisition when it exactly matches the session, then
+runs SSB live as you tune aberrations. Other sessions export exact bright-field
+detector columns automatically.
 
 If you just want the interactive widget inside a notebook, see
 [ShowPtycho in Jupyter](showptycho.md) instead. This page assumes you already
-have a **fitted** `ssb` (solved with `ssb.find_aberrations(trials=200,
-refinement="nelder-mead")`; an unfitted export uses only the supplied starting
-aberrations).
+have a **fitted** `ssb` (solved with `ssb.find_aberrations()`, the
+model-based, tilt-corrected default with 200 trials; an unfitted export uses
+only the supplied starting aberrations). The
+[SSB fit methods](../api/showptycho.md#ssb-fit-methods) table lists the other two.
 
 ## Export
 
 ```python
 from quantem.widget import ShowPtycho
 
-# ssb is already fitted: result = ssb.find_aberrations(trials=200, refinement="nelder-mead")
-w = ShowPtycho(ssb, source_file="scan_master.h5", save_dir="out/")
+# ssb is already fitted: result = ssb.find_aberrations()  # tilt-corrected, 200 trials
+w = ShowPtycho(ssb, save_dir="out/")   # opened with SSB.open("scan_master.h5", ...), the session names its file
 w.export("out/", title="my sample SSB")
 ```
 
@@ -26,28 +28,37 @@ This writes a folder:
 
 - `index.html` — the viewer
 - `ShowPtycho.command` — double-click launcher for Chrome on macOS
-- `source/` — the exact BF-column browser source plus linked HDF5 evidence
+- `source/acquisition.qem`: the unchanged whole-scan QEM acquisition, reused
+  without re-encoding on CUDA or MPS. If the session cannot reuse its source,
+  `source/` instead holds exact BF columns: `bf_columns.qem` on CUDA or
+  `bf_columns.u8` / `bf_columns.u16` on MPS.
 - `snapshots/` — calibration, manifest, viewer snapshots, and review metadata
 
-The export persists no expanded float32 images and no complex64 BF reducers.
-By default, the browser range-reads `source/bf_columns.u8` or
-`source/bf_columns.u16` and does not decode the compressed HDF5 stack on open.
+The export persists no expanded float32 images, no complex64 BF reducers and no
+copy of the raw HDF5 acquisition. The browser range-reads the counts under
+`source/` and never decodes the compressed HDF5 stack.
+It gathers every selected BF pixel on the GPU, including the original detector
+crop offset and axis order. A scan crop or changed counts use the exact BF
+companion instead of reusing an incompatible acquisition.
+The source is hardlinked when possible, otherwise symlinked or copied. Check
+`snapshots/manifest.json` before moving a review: a symlink still depends on the
+external source file, while a hardlink or copy is independent.
 Saved aberration states live in `snapshots/snapshots.json`; reopening the
-folder through a folder grant or `quantem showptycho out/` reads them back into
+folder through a folder grant or a local HTTP server reads them back into
 the snapshot strip automatically.
 
 ### Export at native detector size
 
 The WebGPU browser export **cannot bin the detector**. If the `ssb` was built
-with `det_bin=2` (a 96x96 calibration) but the embedded HDF5 is native 192x192,
-the browser decodes 192x192, mismatches the calibration, and shows
+from a detector-binned array (a 96x96 calibration) while the stored counts are
+native 192x192, the browser mismatches the calibration and shows
 
 ```
 detector shape mismatch; HDF5 has 192x192, calibration has 96x96
 ```
 
-with blank panels. Always build and export at native detector size
-(`det_bin=1`, the default).
+with blank panels. Always build and export at native detector size, as
+`SSB.open` and `quantem.gpu.io.load` do.
 
 ## Run it
 
@@ -61,8 +72,8 @@ The exported folder needs `source/` and `snapshots/` present next to
    Mac's built-in Python) and Chrome opens the viewer already wired to it.
 3. Close the Terminal window when done; that stops the server.
 
-The launcher serves only this folder, from wherever it sits — copy the folder
-to another Mac and the same double-click works, nothing to install.
+The launcher serves only this folder. Include the actual source file when
+copying a symlinked review to another Mac; the same double-click then works.
 
 ### B. Double-click `index.html` (File System Access)
 
@@ -73,23 +84,23 @@ to another Mac and the same double-click works, nothing to install.
 
 One grant per session. This works fully offline.
 
-### C. CLI (serves and opens, no grant click)
+### C. Any static server (no grant click)
 
 ```bash
-quantem showptycho out/
+cd out/ && python -m http.server 8900
 ```
 
-The command serves the folder over range-capable HTTP and opens it, so the viewer
-loads without the manual folder-grant. Use this when double-click + grant is
-inconvenient (for example over a remote connection).
+Any Range-capable static server works: open `http://localhost:8900/` and the
+viewer loads without the manual folder grant. Use this when double-click + grant
+is inconvenient (for example over a remote connection, with the port tunnelled).
 
 ## What you can do in the viewer
 
-- Drag **C10 / C12 / phi12 / rotation** — the browser rebuilds the BF-indexed
-  `G(k)` reducers and re-runs SSB live; the phase and FFT update in tens of
-  milliseconds on a real GPU.
+- Drag **C10 / C12 / phi12 / rotation** — the browser reuses the resident
+  scan spectra and reconstructs the phase and FFT on its GPU. Interaction
+  speed depends on the scan, detector selection, sampling and GPU.
 - Toggle the **FFT** panel to watch Bragg spots sharpen as aberrations improve.
-- Change colormap, contrast, and the amplitude/complex view.
+- Change colormap and contrast.
 - **Save** writes the current aberrations and preview JPEG into `snapshots/`
   without prompting for a separate download in the normal local folder workflow.
 
@@ -104,32 +115,16 @@ launch the browser with GPU blocklisting ignored.
 
 ## Checklist
 
-1. The `ssb` was fitted with `fit(trials=200, refinement="nelder-mead")` before export.
-2. Native detector (`det_bin=1`) — the browser cannot bin.
+1. The `ssb` was fitted with `find_aberrations()` (tilt-corrected, 200 trials) before export.
+2. Native detector size: the browser cannot bin.
 3. Export writes a clean root: `index.html`, `ShowPtycho.command`, `source/`,
    and `snapshots/`.
-4. Open by double-click + **Open data folder**, or `quantem showptycho out/`.
+4. Open by double-click + **Open data folder**, or serve `out/` over HTTP.
 5. On open, the stats bar shows a non-null `loss` and the phase renders.
 
 ## Privacy
 
-Exports embed source HDF5 file basenames in the metadata under `snapshots/` and
-in the viewer state. The direct `w.export(...)` example above is therefore for
-local or otherwise trusted use.
-
-For a community-facing folder, build it through the canonical CLI and request
-redaction explicitly:
-
-```bash
-quantem showptycho scan_master.h5 \
-  --out shared-review \
-  --anonymize \
-  --trials 200 \
-  --refinement nelder-mead
-```
-
-`--anonymize` replaces the local acquisition name and source paths in saved
-calibration and optimization provenance while retaining the scientific fit and
-software-version record. Inspect the resulting folder before publishing it;
-the detector evidence itself is still experimental data and must be yours to
-share.
+The folder records the source file as `redacted_local_source`; no acquisition
+name or local path is written under `snapshots/` or into the viewer state. The
+reused QEM file retains its original metadata and detector measurements. Review
+that source before sharing; it must be yours to share.

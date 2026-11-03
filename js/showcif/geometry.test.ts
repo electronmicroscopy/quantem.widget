@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { projectionBasis, dot, cellCorners } from "./geometry";
-import { planGeometry } from "../planptycho/geometry";
 describe("ShowCIF directions", () => {
   it("uses the direct lattice for a nonorthogonal crystal", () => {
     const b = projectionBasis(
@@ -28,26 +27,6 @@ describe("ShowCIF directions", () => {
     expect(cellCorners(c)[7]).toEqual([4, 4, 5]);
   });
 });
-it("double wave support changes only model width", () => {
-  const p = {
-    voltage_kV: 300,
-    semiangle_mrad: 30,
-    focus_depth_nm: -10,
-    thickness_nm: 60,
-    detector_px: 192,
-    detector_mrad_per_px: 0.5570968023269496,
-    scan_step_A: 0.99775,
-    scan_size_px: 64,
-  };
-  const a = planGeometry(p),
-    b = planGeometry({ ...p, wave_window_factor: 2 });
-  expect(b.window_A).toBe(2 * a.window_A);
-  expect(b.pixel_A).toBe(a.pixel_A);
-  expect(b.theta_max_mrad).toBe(a.theta_max_mrad);
-  expect(a.widest_A).toBeGreaterThan(a.window_A);
-  expect(b.widest_A).toBeLessThan(b.window_A);
-});
-
 it("orthogonal side views stay right-handed for an oblique unit cell", async () => {
   const { projectionBasis, orthogonalBases, dot, cross } =
     await import("./geometry");

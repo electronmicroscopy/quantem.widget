@@ -1,0 +1,96 @@
+{
+ "schema": "quantem.widget.interactivity-benchmark/1",
+ "dataset": {
+  "id": "bobleesj/quantem-data",
+  "revision": "5925e4b49b2ca28ff82d6d5a6b9a8bfea9edfb20",
+  "file": "4dstem/gold_512/gold_004_master.h5"
+ },
+ "environment": {
+  "chip": "Apple M5 Max",
+  "macos": "26.4",
+  "python": "3.13.13",
+  "quantem_widget_commit": "e175e2665578",
+  "quantem_gpu_commit": "12ad697cc858"
+ },
+ "viewport": {
+  "width": 1512,
+  "height": 982,
+  "deviceScaleFactor": 2,
+  "mobile": false
+ },
+ "drag_seconds": 6.0,
+ "other_gpu_clients_before": [
+  {
+   "command": "WindowServer",
+   "gpu_percent": 4.4
+  },
+  {
+   "command": "WindowServer",
+   "gpu_percent": 5.1
+  }
+ ],
+ "adapter": {
+  "vendor": "apple",
+  "architecture": "metal-3",
+  "device": "",
+  "description": "",
+  "subgroupMinSize": 32,
+  "subgroupMaxSize": 32,
+  "isFallbackAdapter": false
+ },
+ "display_hz": 59.1,
+ "showptycho": {
+  "native": {
+   "phase_fps": 23.0,
+   "fft_fps": 22.9,
+   "requests_per_s": 23.6,
+   "request_latency_p50_ms": 57.3,
+   "request_latency_p95_ms": 62.5
+  },
+  "2x": {
+   "phase_fps": 12.5,
+   "fft_fps": 12.5,
+   "requests_per_s": 12.9,
+   "request_latency_p50_ms": 110.2,
+   "request_latency_p95_ms": 116.5
+  }
+ },
+ "show4dstem": {
+  "probe": {
+   "updates_per_s": 59.9,
+   "paints_per_s": 59.9,
+   "latency_p50_ms": 6.5,
+   "latency_p95_ms": 7.6,
+   "bytes_per_update": 148114
+  },
+  "bf_drag": {
+   "updates_per_s": 59.5,
+   "paints_per_s": 59.5,
+   "latency_p50_ms": 15.0,
+   "latency_p95_ms": 16.8,
+   "bytes_per_update": 1049371
+  },
+  "adf_resize": {
+   "updates_per_s": 58.6,
+   "paints_per_s": 58.6,
+   "latency_p50_ms": 10.1,
+   "latency_p95_ms": 15.0,
+   "bytes_per_update": 1049243
+  }
+ },
+ "other_gpu_clients_after": [
+  {
+   "command": "WindowServer",
+   "gpu_percent": 6.0
+  },
+  {
+   "command": "whisper-server",
+   "gpu_percent": 6.3
+  },
+  {
+   "command": "WindowServer",
+   "gpu_percent": 5.7
+  }
+ ],
+ "merged_runs": 2
+}

@@ -77,8 +77,8 @@ describe("buildMeasurementRecords", () => {
     }
   });
 
-  it("tolerates missing optional fields", () => {
-    const [spot] = buildMeasurementRecords([{ id: 3, row: 1, col: 2, r_pixels: 5, intensity: 7 }], []);
+  it("tolerates missing optional fields and an uncalibrated spot", () => {
+    const [spot] = buildMeasurementRecords([{ id: 3, row: 1, col: 2, r_pixels: 5, intensity: 7, d_spacing: null, g_magnitude: null }], []);
     expect(spot.hkl_candidates).toBe("");
     expect(spot.d_angstrom).toBeNull();
     expect(spot.note).toBe("");
@@ -100,10 +100,10 @@ describe("measurementCsv", () => {
 describe("measurementMetadata", () => {
   it("mirrors the Python metadata block", () => {
     const metadata = measurementMetadata({
-      centerRow: 64.5,
-      centerCol: 63.5,
+      brightFieldCenterRowPx: 64.5,
+      brightFieldCenterColPx: 63.5,
       centerMethod: "symmetry",
-      kPixelSize: 0.01,
+      detectorSamplingInvA: 0.01,
       kCalibrated: true,
       calibrationSource: "from_phase",
       calibrationRefD: 2.355,
@@ -113,10 +113,10 @@ describe("measurementMetadata", () => {
     });
     expect(metadata).toEqual({
       widget_name: "ShowDiffraction",
-      center_row: 64.5,
-      center_col: 63.5,
+      bright_field_center_row_px: 64.5,
+      bright_field_center_col_px: 63.5,
       center_method: "symmetry",
-      k_pixel_size_inv_angstrom_per_px: 0.01,
+      detector_sampling_inv_A: 0.01,
       calibrated: true,
       calibration_source: "from_phase",
       calibration_ref_d_angstrom: 2.355,

@@ -1,165 +1,126 @@
-import importlib
-import json
+"""Download only the selected tutorial family at its recorded revision."""
+
+import fnmatch
 import sys
-import types
-from pathlib import Path
+from pathlib import PureWindowsPath
+from types import ModuleType
+
+import pytest
+import huggingface_hub
+
+from quantem.widget.io import hub
 
 
-def _module(name: str, **attrs):
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    return module
+def test_qualified_download_preserves_revision_and_file_metadata(tmp_path, monkeypatch):
+    files = ["haadf/gold.npy", "haadf/gold.json", "4dstem/gold/data.npy", "widget/ducky/show1d_monitor.jsonl", "widget/ducky/snapshots/reference.npy", "denoise/README.md", "denoise/empty/README.md"]
+    calls = []
+    monkeypatch.setattr(hub, "_shared_download", lambda *args, **kwargs: None)
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda **kwargs: calls.append(("list", kwargs)) or files)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kwargs: calls.append(("download", kwargs)) or str(tmp_path))
+    assert hub.download("haadf/gold", revision="recorded", verbose=False) == tmp_path / "haadf/gold.npy"
+    assert calls[-1][1]["allow_patterns"] == ["haadf/gold.npy", "haadf/gold.json"]
+    assert all(options["revision"] == "recorded" for _, options in calls)
+    with pytest.raises(ValueError, match="qualified"):
+        hub.download("gold", verbose=False)
+    with pytest.raises(FileNotFoundError):
+        hub.download("denoise/empty", verbose=False)
+    assert hub.download("widget/ducky", revision="recorded", verbose=False) == tmp_path / "widget/ducky"
+    assert calls[-1][1]["allow_patterns"] == "widget/ducky/*"
+    # a file inside a folder dataset is not a dataset name, as in quantem.data
+    with pytest.raises(FileNotFoundError):
+        hub.download("4dstem/gold/data.npy", verbose=False)
 
 
-def _fresh_hub(monkeypatch, modules: dict[str, types.ModuleType]):
-    for name in ("quantem.widget.io.hub", "quantem.data.hub", "quantem.data.huggingface", "quantem.data"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    return importlib.import_module("quantem.widget.io.hub")
+# One listing for the fallback and for quantem.data: a file and a folder sharing a name, sidecars,
+# placeholders, a folder outside the data buckets, a widget monitor and files that are not data.
+LISTING = [
+    "haadf/gold.tif", "haadf/gold.yaml", "haadf/gold.json", "haadf/lone.npy", "haadf/gold/frame.npy",
+    "4dstem/gold/data_master.h5", "4dstem/gold/meta.yaml", "4dstem/placeholder_next/data.npy", "haadf/placeholder_image.png",
+    "survey/overview/image.png", "survey/flat.npy", "widget/ducky/show1d_monitor.jsonl", "widget/monitor.jsonl",
+    "denoise/README.md", "denoise/empty/README.md", "notebooks/demo.ipynb", "README.md",
+]
 
 
-class FakeHuggingFaceHub:
-    """Records file uploads/downloads without network access."""
+def _resolved(download, name, monkeypatch, root):
+    """What ``download(name)`` asks the Hub for on ``LISTING``: the dataset path and the files of its patterns, or the error type."""
+    asked = []
 
-    def __init__(self, files: dict[str, str] | None = None):
-        self.files = dict(files or {})
-        self._tmp: Path | None = None
+    def snapshot(**options):
+        patterns = options["allow_patterns"]
+        asked.append(sorted(path for path in LISTING if any(fnmatch.fnmatchcase(path, pattern) for pattern in ([patterns] if isinstance(patterns, str) else patterns))))
+        for path in asked[-1]:  # quantem.data checks that every selected file arrived
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).touch()
+        return str(root)
 
-    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type):
-        self.files[path_in_repo] = Path(path_or_fileobj).read_text()
-        return type("CommitInfo", (), {"commit_url": "http://commit/file"})()
-
-    def upload_folder(self, *, folder_path, path_in_repo, repo_id, repo_type):
-        self.files[f"{path_in_repo}/_folder"] = "<folder>"
-        return type("CommitInfo", (), {"commit_url": "http://commit/folder"})()
-
-    def list_repo_files(self, *, repo_id, repo_type):
-        return list(self.files)
-
-    def hf_hub_download(self, *, repo_id, repo_type, filename):
-        if self._tmp is None:
-            raise RuntimeError("test must set FakeHuggingFaceHub._tmp")
-        out = self._tmp / Path(filename).name
-        out.write_text(self.files[filename])
-        return str(out)
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda **options: LISTING)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot)
+    try:
+        return download(name, verbose=False).relative_to(root).as_posix(), asked[-1]
+    except (FileNotFoundError, ValueError) as error:
+        return type(error).__name__
 
 
-def test_hub_adapter_prefers_original_quantem_data_hub(monkeypatch):
-    parent = _module("quantem.data")
-    parent.__path__ = []
-    source = _module(
-        "quantem.data.hub",
-        download=lambda name: f"hub:{name}",
-        list_datasets=lambda: ["4dstem/gold"],
-        read_meta=lambda name: {"name": name},
-        status=lambda: {"source": "hub"},
+def test_fallback_resolves_the_names_quantem_data_resolves(tmp_path, monkeypatch):
+    # the fallback took a "survey" bucket quantem.data does not have and listed placeholder_ entries,
+    # so one call succeeded without quantem.data and failed with it
+    monkeypatch.setattr(hub, "_shared_download", lambda *args, **kwargs: None)
+    for name in ("survey/overview", "overview", "flat", "survey/flat.npy", "placeholder_next", "4dstem/placeholder_next", "placeholder_image"):
+        assert _resolved(hub.download, name, monkeypatch, tmp_path) == "FileNotFoundError", name
+    # a folder and a file share the name haadf/gold: the exact path names one, the short name is ambiguous
+    assert _resolved(hub.download, "haadf/gold", monkeypatch, tmp_path) == ("haadf/gold", ["haadf/gold/frame.npy"])
+    assert _resolved(hub.download, "haadf/gold.tif", monkeypatch, tmp_path) == ("haadf/gold.tif", ["haadf/gold.json", "haadf/gold.tif", "haadf/gold.yaml"])
+    assert _resolved(hub.download, "gold", monkeypatch, tmp_path) == "ValueError"
+    # repository paths keep "/" where Path answers haadf\gold.yaml (Windows), which left the sidecars behind
+    monkeypatch.setattr(hub, "Path", PureWindowsPath)
+    patterns = []
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **options: patterns.append(options["allow_patterns"]) or str(tmp_path))
+    hub.download("haadf/gold.tif", verbose=False)
+    assert patterns == [["haadf/gold.tif", "haadf/gold.yaml", "haadf/gold.json"]]
+
+
+def test_fallback_and_quantem_data_agree_on_one_listing(tmp_path, monkeypatch):
+    # runs where quantem.data is importable; the widget itself does not depend on it
+    data_hub = pytest.importorskip("quantem.data.huggingface")
+    monkeypatch.setattr(hub, "_shared_download", lambda *args, **kwargs: None)
+    names = ["haadf/gold", "haadf/gold.tif", "gold", "lone", "haadf/lone", "haadf/lone.npy", "4dstem/gold", "4dstem/gold/data_master.h5",
+             "placeholder_next", "4dstem/placeholder_next", "placeholder_image", "survey/overview", "overview", "flat", "survey/flat.npy",
+             "ducky", "widget/ducky", "widget/monitor", "monitor", "widget/monitor.jsonl", "denoise/empty", "demo", "missing"]
+    for name in names:
+        assert _resolved(hub.download, name, monkeypatch, tmp_path / "widget") == _resolved(data_hub.download, name, monkeypatch, tmp_path / "data"), name
+
+
+def test_download_delegates_all_options_to_compatible_shared_api(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hub, "_shared_download", lambda name, **kwargs: calls.append((name, kwargs)) or tmp_path)
+    assert hub.download("widget/ducky", revision="recorded", cache_dir=tmp_path, force_download=True, verbose=False) == tmp_path
+    assert calls[0][0] == "widget/ducky"
+    assert calls[0][1]["revision"] == "recorded"
+    assert calls[0][1]["cache_dir"] == tmp_path
+    assert calls[0][1]["force_download"] is True
+
+
+def test_old_optional_shared_package_uses_widget_compatibility_resolver(monkeypatch):
+    module = ModuleType("quantem.data.huggingface")
+
+    def old_download(name, *, repo=None, out=None, verbose=True):
+        raise AssertionError("Old resolver must not receive new revision options")
+
+    module.download = old_download
+    monkeypatch.setitem(sys.modules, "quantem.data.huggingface", module)
+    assert hub._shared_download("widget/ducky", revision="recorded") is None
+
+
+def test_existing_session_name_downloads_canonical_folder(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hub, "_shared_download", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        huggingface_hub, "list_repo_files",
+        lambda **kwargs: ["widget/gold_session/gold.emd"],
     )
-
-    hub = _fresh_hub(monkeypatch, {"quantem.data": parent, "quantem.data.hub": source})
-
-    assert hub._SOURCE_NAME == "quantem.data.hub"
-    assert hub.download("gold") == "hub:gold"
-    assert hub.list_datasets() == ["4dstem/gold"]
-    assert hub.read_meta("gold") == {"name": "gold"}
-    assert hub.status() == {"source": "hub"}
-
-
-def test_hub_adapter_uses_huggingface_module_when_hub_module_is_absent(monkeypatch):
-    parent = _module("quantem.data")
-    parent.__path__ = []
-    source = _module(
-        "quantem.data.huggingface",
-        download=lambda name, verbose=True: Path("/cache") / name,
-        list_datasets=lambda: ["haadf/gold_haadf"],
-        read_meta=lambda name: {"flat": name},
-        status=lambda: {"source": "huggingface"},
+    monkeypatch.setattr(
+        huggingface_hub, "snapshot_download",
+        lambda **kwargs: calls.append(kwargs) or str(tmp_path),
     )
-
-    hub = _fresh_hub(monkeypatch, {"quantem.data": parent, "quantem.data.huggingface": source})
-
-    assert hub._SOURCE_NAME == "quantem.data.huggingface"
-    assert hub.download("gold_haadf") == Path("/cache/gold_haadf")
-    assert hub.list_datasets() == ["haadf/gold_haadf"]
-    assert hub.read_meta("gold_haadf") == {"flat": "gold_haadf"}
-
-
-def test_hub_adapter_maps_registry_facade_names(monkeypatch):
-    source = _module(
-        "quantem.data",
-        available=lambda technique=None: ["eds/gold"] if technique == "eds" else ["gold"],
-        info=lambda name: {"name": name, "technique": "eds"},
-        load_raw=lambda name: f"/cache/raw/{name}.emd",
-        list_files=lambda technique=None: [
-            {"path": "eds/gold.npy", "size_mb": 2048.0, "type": "data"},
-            {"path": "eds/gold.json", "size_mb": 0.02, "type": "metadata"},
-        ],
-    )
-    source.__path__ = []
-
-    hub = _fresh_hub(monkeypatch, {"quantem.data": source})
-
-    assert hub._SOURCE_NAME == "quantem.data"
-    assert hub.list_datasets(technique="eds") == ["eds/gold"]
-    assert hub.download("gold") == Path("/cache/raw/gold.emd")
-    assert hub.read_meta("gold") == {"name": "gold", "technique": "eds"}
-    assert hub.status()["total_mb"] == 2048.02
-
-
-def test_hub_adapter_downloads_folder_style_registry_dataset(monkeypatch, tmp_path):
-    source = _module(
-        "quantem.data",
-        list_files=lambda technique=None: [
-            {"path": "4dstem/gold_128_npy_bin8/data.npy", "size_mb": 18.0, "type": "data"},
-            {"path": "4dstem/gold_128_npy_bin8/meta.json", "size_mb": 0.01, "type": "metadata"},
-        ],
-    )
-    source.__path__ = []
-
-    calls = {}
-    def snapshot_download(**kwargs):
-        calls["snapshot"] = kwargs
-        return str(tmp_path)
-
-    hf = _module("huggingface_hub", snapshot_download=snapshot_download)
-
-    hub = _fresh_hub(monkeypatch, {"quantem.data": source, "huggingface_hub": hf})
-
-    result = hub.download("gold_128_npy_bin8", verbose=False)
-
-    assert result == tmp_path / "4dstem/gold_128_npy_bin8"
-    assert calls["snapshot"]["repo_id"] == "bobleesj/quantem-data"
-    assert calls["snapshot"]["repo_type"] == "dataset"
-    assert calls["snapshot"]["allow_patterns"] == "4dstem/gold_128_npy_bin8/*"
-
-
-def test_hub_upload_keeps_legacy_file_sidecar(monkeypatch, tmp_path):
-    source = _module("quantem.data")
-    source.__path__ = []
-    hub = _fresh_hub(monkeypatch, {"quantem.data": source})
-    fake = FakeHuggingFaceHub()
-    monkeypatch.setattr(hub, "_hub", lambda: fake)
-
-    img = tmp_path / "gold.tif"
-    img.write_text("pixels")
-    hub.upload(img, name="gold_haadf", meta={"voltage_kV": 300, "fov_nm": 76.2})
-
-    assert "haadf/gold_haadf.tif" in fake.files
-    assert json.loads(fake.files["haadf/gold_haadf.json"]) == {
-        "voltage_kV": 300,
-        "fov_nm": 76.2,
-    }
-
-
-def test_hub_read_meta_keeps_legacy_folder_sidecar(monkeypatch, tmp_path):
-    source = _module("quantem.data")
-    source.__path__ = []
-    hub = _fresh_hub(monkeypatch, {"quantem.data": source})
-    fake = FakeHuggingFaceHub({
-        "4dstem/gold_512/quantem_meta.json": json.dumps({"scan_shape": [512, 512]})
-    })
-    fake._tmp = tmp_path
-    monkeypatch.setattr(hub, "_hub", lambda: fake)
-
-    assert hub.read_meta("gold_512") == {"scan_shape": [512, 512]}
+    assert hub.download("gold_haadf_session", verbose=False) == tmp_path / "widget/gold_session"
+    assert calls[0]["allow_patterns"] == "widget/gold_session/*"

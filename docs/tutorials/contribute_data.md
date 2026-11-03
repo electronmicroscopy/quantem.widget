@@ -1,21 +1,30 @@
 # Contribute tutorial data
 
-How to add files, including the Hugging Face token
-(`hf auth login`):
+First check the existing inputs in
 [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
-A coding agent can open that Community pull request. Copy the prompt
-[Add tutorial data](https://huggingface.co/datasets/bobleesj/quantem-data#coding-agents)
-from the dataset card.
-The human creates the Write token and attests permission. The agent runs
-`hf upload ... --create-pr` after `python -m check_meta` prints `ok`.
+Viewer collections use `widget/`; reusable images and diffraction scans stay
+under `haadf/` and `4dstem/`. Reusing a dataset for another tutorial does not
+require a new upload. The current canonical-path migration adds no new data.
 
-After that Hugging Face PR is merged, open a GitHub PR here only if a
-notebook should load the fixture by name:
+Hugging Face stores scientific inputs, minimal cards and numerical metadata.
+Keep notebooks, Python helpers, models and result reports in their owning source
+repositories. New data contributions require permission and accurate provenance;
+follow the dataset card and review the exact file list. Contribution validation
+belongs in the `quantem.data` source checkout that provides it, not in a Python
+module downloaded from the dataset. Do not assume an unpublished validator or
+qualified-download API is available in an installed release.
 
-- helper in `src/quantem/widget/data/tutorials.py`
+When a notebook should load an input by name, the widget source change includes:
+
+- helper in `src/quantem/widget/datasets.py`
 - list it on [Tutorial Datasets](../api/datasets.md)
 - use it in the tutorial
-- link the Hugging Face PR
+- record its canonical folder and immutable Hugging Face revision
+- link any associated data change
+
+See [Tutorial Datasets](../api/datasets.md) for the current pin. An explicit
+older revision must resolve all files within that revision, without fetching
+missing files from a newer snapshot.
 
 A new widget is discuss-first. See [Pull requests](../maintainer/pull-requests.md).
-Do not commit `.npy` or `.emd` here. Do not call `quantem.widget.io.upload`.
+Do not commit `.npy` or `.emd` here.

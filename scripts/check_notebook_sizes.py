@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Fail when tutorial notebooks become too large for the main branch."""
 
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
 
 
 def _string_bytes(value: object) -> int:
+    """UTF-8 bytes of every string inside a JSON value, the part of a notebook that grows with outputs."""
     if isinstance(value, str):
         return len(value.encode("utf-8"))
     if isinstance(value, list):
@@ -19,6 +18,7 @@ def _string_bytes(value: object) -> int:
 
 
 def _output_bytes(notebook: dict) -> int:
+    """Bytes of every cell output's data and text."""
     total = 0
     for cell in notebook.get("cells", []):
         for output in cell.get("outputs", []):
@@ -28,6 +28,7 @@ def _output_bytes(notebook: dict) -> int:
 
 
 def main() -> int:
+    """Check each notebook's size, output size and baked widget state; exit 1 on a failure."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="*", default=["docs/tutorials"])
     parser.add_argument("--max-mb", type=float, default=10.0)

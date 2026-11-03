@@ -14,7 +14,6 @@ Example
 >>> DATA_DIR = picker.value   # returns the cached path immediately; after a
                               # new click it returns the freshly selected path
 """
-from __future__ import annotations
 
 import html
 import json
@@ -25,6 +24,7 @@ _CACHE_FILE = _CACHE_DIR / "folders.json"
 
 
 def _load_cache() -> dict[str, str]:
+    """Last pick per key; a missing or unreadable cache is no history, not an error."""
     if not _CACHE_FILE.exists():
         return {}
     try:
@@ -34,25 +34,29 @@ def _load_cache() -> dict[str, str]:
 
 
 def _save_cache(data: dict[str, str]) -> None:
-    # Atomic write: tmp + rename so a crash mid-write never leaves the
-    # picker's recent-folders cache as a half-written file the next launch
-    # treats as "no history".
+    """Write the cache through a temporary file and a rename.
+
+    A crash mid-write then never leaves a half-written cache that the next
+    launch treats as "no history".
+    """
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _CACHE_FILE.with_suffix(_CACHE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(_CACHE_FILE)
+    temporary = _CACHE_FILE.with_suffix(_CACHE_FILE.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2))
+    temporary.replace(_CACHE_FILE)
 
 
 def _list_masters(path: str | None) -> list[str]:
+    """Names of the ``*_master.h5`` files in ``path``; none for no folder or a path that is not one."""
     if not path:
         return []
-    p = Path(path)
-    if not p.is_dir():
+    folder = Path(path)
+    if not folder.is_dir():
         return []
-    return sorted(f.name for f in p.glob("*_master.h5"))
+    return sorted(master.name for master in folder.glob("*_master.h5"))
 
 
 def _render_master_list(path: str | None) -> str:
+    """HTML list of the folder's masters, so the user sees what a pick contains before loading it."""
     if not path:
         return '<div style="color:#888; font-size:12px;">No folder selected.</div>'
     masters = _list_masters(path)
@@ -96,7 +100,10 @@ class FolderPicker:
     """
 
     def __init__(self, key: str, default: str | None = None) -> None:
-        from ipyfilechooser import FileChooser
+        try:
+            from ipyfilechooser import FileChooser  # only session tooling (quantem.live) opens a FolderPicker
+        except ImportError as exc:
+            raise ImportError("FolderPicker needs ipyfilechooser: pip install ipyfilechooser") from exc
         from ipywidgets import HTML, VBox
 
         self._key = key
@@ -109,17 +116,17 @@ class FolderPicker:
             start = default
         else:
             start = str(Path.home())
-        self._fc = FileChooser(
+        self._chooser = FileChooser(
             start,
             show_only_dirs=True,
             title=f"Select folder ({key})",
         )
-        self._fc.register_callback(self._on_pick)
-        # Master-list pane, pre-populated from whichever path .value resolves to
+        self._chooser.register_callback(self._on_pick)
         self._masters_html = HTML(value=_render_master_list(self.value))
-        self._box = VBox([self._fc, self._masters_html])
+        self._box = VBox([self._chooser, self._masters_html])
 
     def _on_pick(self, chooser) -> None:
+        """Remember a new pick under this key and refresh the master list."""
         if chooser.selected:
             cache = _load_cache()
             cache[self._key] = chooser.selected
@@ -129,8 +136,8 @@ class FolderPicker:
     @property
     def value(self) -> str | None:
         """Current path. Resolution order: fresh click → cached → default."""
-        if self._fc.selected:
-            return self._fc.selected
+        if self._chooser.selected:
+            return self._chooser.selected
         cached = _load_cache().get(self._key)
         if cached:
             return cached
@@ -142,6 +149,7 @@ class FolderPicker:
         return _list_masters(self.value)
 
     def _ipython_display_(self) -> None:
+        """Show the chooser above the master list."""
         from IPython.display import display
         display(self._box)
 

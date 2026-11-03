@@ -1,4 +1,5 @@
-import type { GPUColormapEngine } from '../colormaps';
+import type { GPUColormapEngine } from '../display/colormaps';
+import { displayLog } from '../display/displayMath';
 
 /** Read the settled float image summary, abandoning work when a drag or a newer
  * display generation makes those buffers stale. Never dispatch the next stage
@@ -15,10 +16,9 @@ export async function readSettledCompareHistogram(
   if (!isCurrent()) return null;
   const ranges = rawRanges.map(range => {
     if (!Number.isFinite(range.min) || !Number.isFinite(range.max)) return null;
-    return logScale ? {
-      min: Math.log1p(Math.max(0, range.min)),
-      max: Math.log1p(Math.max(0, range.max)),
-    } : range;
+    // The histogram shader bins the signed float32 log of each value, so the
+    // range edges take the same transform (negative DPC values stay negative).
+    return logScale ? { min: displayLog(range.min), max: displayLog(range.max) } : range;
   }).filter((range): range is {min: number; max: number} => Boolean(range));
   if (!ranges.length) return null;
   let min = Number.POSITIVE_INFINITY, max = Number.NEGATIVE_INFINITY;

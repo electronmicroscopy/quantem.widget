@@ -7,9 +7,8 @@ The Bloch-wave tools come from ``quantem.diffraction`` (``Crystal`` and
 ``bloch``) and the preset structures from ASE, a dependency of that quantem
 version. Both are imported on first use;
 :func:`require_crystal_tools` raises an ``ImportError`` with the install step
-when either is missing. ``Crystal`` and ``bloch`` are not in a quantem release
-yet: they arrive with electronmicroscopy/quantem PR #297, in the first release
-after 0.1.9.
+when either is missing. ``Crystal`` and ``bloch`` are in quantem 0.1.10 and
+later, which is not installed on Intel Macs or Windows on ARM.
 
 Energies in this module are in eV (``energy_ev``), the unit of the quantem
 Bloch-wave functions; the widget trait is ``energy_keV``.
@@ -73,9 +72,8 @@ PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _INSTALL_HINT = (
-    "DiffractionSim needs quantem with quantem.diffraction.Crystal and bloch "
-    "(electronmicroscopy/quantem PR #297, first release after 0.1.9), which "
-    "brings ASE and spglib."
+    "DiffractionSim needs quantem 0.1.10 or later (quantem.diffraction.Crystal "
+    "and bloch), which brings ASE and spglib."
 )
 
 

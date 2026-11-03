@@ -46,8 +46,10 @@ Keep the branch to one problem. Use the
 
 Tutorial fixtures for notebooks live in the public Hugging Face dataset
 [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data)
-under `widget-tutorials/`. Upload and download commands are on that dataset
-card. A coding agent opens that Community pull request with
-[Add tutorial data](https://huggingface.co/datasets/bobleesj/quantem-data#coding-agents).
-The GitHub loader pull request is in
-[Contribute tutorial data](../tutorials/contribute_data.md).
+as data and metadata only. Reuse shared acquisitions under `haadf/` and
+`4dstem/`; viewer-specific collections belong under `widget/`. Tutorial helpers
+pin the canonical dataset revision; older folder layouts require their matching
+software version. Keep notebooks and contribution automation in their source
+repositories.
+See [Contribute tutorial data](../tutorials/contribute_data.md) for the mapping
+and review requirements. A code change does not authorize a data upload.

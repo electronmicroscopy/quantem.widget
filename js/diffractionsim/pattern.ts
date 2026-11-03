@@ -4,7 +4,7 @@
  * in canvas coordinates with q_x to the right and q_y up.
  */
 
-import { COLORMAPS, applyColormap } from "../colormaps";
+import { COLORMAPS, applyColormap } from "../display/colormaps";
 import { formatScaleLabel, roundToNiceValue } from "../figure";
 import type { Reflection } from "./physics";
 import type { KosselLine } from "./physics";

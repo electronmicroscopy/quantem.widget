@@ -4,8 +4,6 @@ Complete reference for the widgets, tutorial datasets, HTML export, and data
 loading / I/O.
 Common display-chrome names and presets are documented in [Viewer UI controls](viewer-ui).
 Named tutorial datasets are documented in [Tutorial Datasets](./datasets.md).
-Package-level GIF and MP4 writers are documented in [Movie Export](./movie.md).
-The same tables are surfaced in the developer-facing [UI Guide](../developer/ui-guide).
 Widget pages have two halves:
 
 1. **Reference** - the constructor signature, every parameter, and every public
@@ -45,15 +43,14 @@ readers and test agents.
 | [Plot2D](plot2d) | `quantem.widget.Plot2D` | PNG from browser; Matplotlib figures via Python; no standalone HTML API |
 | [Show1D](show1d) | `quantem.widget.show1d.Show1D` | state JSON, CSV, PNG/PDF via Python, interactive HTML |
 | [Show2D](show2d) | `quantem.widget.show2d.Show2D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
-| [Mask2D](mask2d) | `quantem.widget.mask2d.Mask2D` | Boolean mask and optional selected geometry in Python |
 | [Show3D](show3d) | `quantem.widget.show3d.Show3D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show3DSlices](show3dslices) | `quantem.widget.show3dslices.Show3DSlices` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show4DSTEM](show4dstem) | `quantem.widget.Show4DSTEM` dispatcher | state JSON, PNG, interactive WebGPU HTML; large exports use a companion data directory |
 | [ShowPtycho](showptycho) | `quantem.widget.ShowPtycho` | ptychography state JSON, WebGPU folder export with BF-indexed `G(k)` payload |
 | [ShowDiffraction](showdiffraction) | `quantem.widget.showdiffraction.ShowDiffraction` | state JSON, PNG, interactive HTML |
+| [ShowPDF](showpdf) | `quantem.widget.showpdf.ShowPDF` | state JSON, results zip (CSV), PNG/PDF/TIFF curves, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [ChooseLattice](choose-lattice) | `quantem.widget.choose_lattice.ChooseLattice` | state JSON (`save_state=True`) |
-| [ShowCIF](showcif) | `quantem.widget.ShowCIF` | Interactive HTML with embedded coordinates; CDN widget manager requires network |
-| [DiffractionSim](diffractionsim) | `quantem.widget.diffraction_sim.DiffractionSim` | state JSON, PNG, interactive HTML; CDN widget manager requires network |
-| [PlanPtycho](planptycho) | `quantem.widget.planptycho.PlanPtycho` | none (rebuilt from the crystal) |
+| [ShowCIF](showcif) | `quantem.widget.ShowCIF` | Interactive HTML with embedded coordinates |
+| [DiffractionSim](diffractionsim) | `quantem.widget.DiffractionSim` | state JSON, PNG, interactive HTML |
 
 All widget-level HTML exports follow the [HTML export](html-export) protocol.

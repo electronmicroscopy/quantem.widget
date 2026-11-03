@@ -9,12 +9,11 @@ the ``PRESETS`` structures): Lobato kinematical factors and absorptive
 Weickenmeier-Kohl Bloch couplings at 200 keV, reflections out to
 k_max = 3.0 1/Å. The browser rescales the couplings for other beam energies.
 
-The generated file (about 1 MB) is committed because the website build needs
-it and regenerating it needs a quantem that is not released yet: quantem with
-``quantem.diffraction.Crystal`` and ``bloch`` (electronmicroscopy/quantem
-PR #297, first release after 0.1.9). If your widget environment lacks them,
-run the script with the interpreter of a quantem development checkout and put
-this repository's ``src`` on ``PYTHONPATH``, for example::
+The generated file (about 1 MB) is committed because the web bundle needs it
+and regenerating it needs quantem 0.1.10 or later (``quantem.diffraction.Crystal``
+and ``bloch``). If your widget environment lacks them, run the script with the
+interpreter of a quantem checkout and put this repository's ``src`` on
+``PYTHONPATH``, for example::
 
     PYTHONPATH=src /path/to/quantem/.venv/bin/python scripts/diffraction_sim_presets.py
 

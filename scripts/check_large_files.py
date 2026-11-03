@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Guard the main branch against accidental large data artifacts."""
 
-from __future__ import annotations
-
 import argparse
 import subprocess
 from pathlib import Path
@@ -32,11 +30,13 @@ DATA_MAX_MB_EXCEPTIONS = {
 
 
 def _tracked_files() -> list[Path]:
-    out = subprocess.check_output(["git", "ls-files"], text=True)
-    return [Path(line) for line in out.splitlines() if line]
+    """Every file git tracks in this checkout."""
+    listing = subprocess.check_output(["git", "ls-files"], text=True)
+    return [Path(line) for line in listing.splitlines() if line]
 
 
 def main() -> int:
+    """Check the size of each given (or tracked) file; exit 1 when one is over its limit."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "paths",

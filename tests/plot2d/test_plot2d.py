@@ -1,6 +1,7 @@
 """Review a calibrated correlation map, change its window, and export it."""
 
 import base64
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,7 +9,7 @@ import pytest
 from ipywidgets import Widget
 from ipywidgets.embed import embed_data
 
-from quantem.widget import Plot2D
+from quantem.widget import Plot2D, Show1D, Show2D
 
 
 def test_calibrated_map_export_and_saved_state(tmp_path):
@@ -26,7 +27,7 @@ def test_calibrated_map_export_and_saved_state(tmp_path):
         max_width=420,
         save_state=True,
     )
-    assert plot.plot_width_px == 420
+    assert plot.layout.width == "420px"
     assert plot.layout.max_width == "min(100%, 420px)"
     original = truth.copy()
     np.testing.assert_allclose(plot.grid["bounds"], [0, 10, 0, 180], atol=1e-14)
@@ -105,12 +106,12 @@ def test_lightweight_snapshot_preserves_live_values_and_current_preview():
     first = plot.get_state()
     assert "data_bytes" not in first
     assert first["_static_fallback_mime"] == "image/png"
-    assert base64.b64decode(first["_static_fallback_jpeg"]).startswith(b"\x89PNG")
+    assert base64.b64decode(first["_static_fallback_image"]).startswith(b"\x89PNG")
     plot.view_bounds = [1, 4, 0, 2]
     plot.horizontal_line = 1.5
     plot.set_data(values[::-1])
     saved = plot.get_state()
-    assert saved["_static_fallback_jpeg"] != first["_static_fallback_jpeg"]
+    assert saved["_static_fallback_image"] != first["_static_fallback_image"]
     assert saved["view_bounds"] == [1, 4, 0, 2]
     assert saved["horizontal_line"] == 1.5
     assert "data_bytes" not in saved
@@ -120,3 +121,54 @@ def test_lightweight_snapshot_preserves_live_values_and_current_preview():
         values[::-1].ravel(),
     )
     plot.close()
+
+
+def test_saved_view_loads_onto_a_new_map(tmp_path):
+    """Save the color window, labels and viewport, then restore them onto a fresh map of the same grid."""
+    values = np.arange(24, dtype=float).reshape(4, 6)
+    plot = Plot2D(values, x=np.arange(6), y=np.arange(4), title="G3", x_label="r02 (Å)")
+    plot.cmap = "magma"
+    plot.vmin, plot.vmax = 2.0, 20.0
+    plot.view_bounds = [1, 4, 0, 2]
+    plot.horizontal_line = 1.5
+    path = tmp_path / "plot2d_view.json"
+    plot.save(path)
+    assert json.loads(path.read_text())["widget_name"] == "Plot2D"
+    restored = Plot2D(values, x=np.arange(6), y=np.arange(4))
+    restored.load_state_dict(path)
+    assert restored.state_dict() == plot.state_dict()
+    assert Plot2D(values, x=np.arange(6), y=np.arange(4), state=path).state_dict() == plot.state_dict()
+    axes = restored.figure().axes[0]
+    assert axes.collections[0].cmap.name == "magma"
+    assert axes.collections[0].get_clim() == (2.0, 20.0)
+    np.testing.assert_array_equal(axes.get_xlim(), [1, 4])
+
+
+def test_restored_view_is_checked_like_a_new_one(tmp_path):
+    """Refuse another widget's file and unmappable color limits; a restored width shows in the notebook box."""
+    values = np.arange(24, dtype=float).reshape(4, 6)
+    plot = Plot2D(values, x=np.arange(6), y=np.arange(4), width=500, max_width=600)
+    Show1D(np.arange(8.0)).save(tmp_path / "show1d.json")
+    Show2D(np.ones((4, 4), np.float32), verbose=False).save(tmp_path / "show2d.json")
+    for path in (tmp_path / "show1d.json", tmp_path / "show2d.json"):
+        with pytest.raises(ValueError, match="cannot load into 'Plot2D'"):
+            plot.load_state_dict(path)
+        with pytest.raises(ValueError, match="cannot load into 'Plot2D'"):
+            plot.load_state_dict(json.loads(path.read_text()))
+    for limits in ({"vmin": 5.0, "vmax": 1.0}, {"vmin": float("nan")}, {"vmax": float("inf")}):
+        with pytest.raises(ValueError, match="finite color limits"):
+            plot.load_state_dict({**limits, "cmap": "magma"})
+    assert (plot.vmin, plot.vmax, plot.cmap) == (0.0, 23.0, "viridis")
+    plot.load_state_dict({"max_width": 300})
+    assert (plot.layout.width, plot.layout.max_width) == ("300px", "min(100%, 300px)")
+
+
+def test_device_tensor_bin_centers_are_accepted():
+    # A-16: x and y went through np.array, which refuses a CUDA tensor.
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    centers = torch.arange(4, dtype=torch.float32, device="cuda")
+    plot = Plot2D(np.ones((4, 4)), x=centers, y=centers * 2)
+    np.testing.assert_array_equal(plot.x, [0.0, 1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(plot.y, [0.0, 2.0, 4.0, 6.0])

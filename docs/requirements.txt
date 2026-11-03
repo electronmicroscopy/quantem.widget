@@ -1,14 +1,9 @@
 # Docs-build dependencies. autodoc + napoleon import the package (installed in the
-# build step) to render the NumPy-style docstrings as proper field lists; heavy /
-# native deps (cupy, Mac Metal, lazy io extras) are mocked in _config.yml.
+# build step) to render the NumPy-style docstrings as proper field lists; CuPy and
+# the optional readers are mocked in _config.yml.
 jupyter-book>=1.0,<2
 # Theme versions float on purpose (no pins). pydata-sphinx-theme >= 0.17
 # ships a hidden .primary-toggle button that steals the mobile hamburger's
 # click handlers; _static/nav-toggle-fix.js rewires the visible button and
 # scripts/check_docs_nav_toggle.py guards the built pages in CI.
 ipywidgets
-# PlanPtycho tutorial builds SrTiO3 with ase and reports a pandas DataFrame. Its projected potential also needs quantem
-# with quantem.diffraction.crystal (electronmicroscopy/quantem PR #297, first release after 0.1.9).
-ase>=3.23
-spglib>=2.5
-pandas

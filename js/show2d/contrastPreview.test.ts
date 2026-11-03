@@ -224,8 +224,8 @@ describe("Show2D contrast drag preview", () => {
 describe("Show2D auto/manual contrast transitions", () => {
   it("seeds every panel preview range and the linked envelope", () => {
     const seeded = seedAutoContrastMirror(mirror(), [
-      { i: 0, vminPct: 2, vmaxPct: 88 },
-      { i: 1, vminPct: 7, vmaxPct: 93 },
+      { panel: 0, vminPct: 2, vmaxPct: 88 },
+      { panel: 1, vminPct: 7, vmaxPct: 93 },
     ], true);
 
     expect(seeded.perImage.get(0)).toEqual({ vminPct: 2, vmaxPct: 88 });
@@ -235,8 +235,8 @@ describe("Show2D auto/manual contrast transitions", () => {
 
   it("keeps independent auto ranges independent", () => {
     const seeded = seedAutoContrastMirror(mirror(), [
-      { i: 0, vminPct: 2, vmaxPct: 88 },
-      { i: 1, vminPct: 7, vmaxPct: 93 },
+      { panel: 0, vminPct: 2, vmaxPct: 88 },
+      { panel: 1, vminPct: 7, vmaxPct: 93 },
     ], false);
 
     expect(seeded.linked).toEqual({ vminPct: 5, vmaxPct: 95 });
@@ -246,8 +246,8 @@ describe("Show2D auto/manual contrast transitions", () => {
 
   it("uses a shared-axis range for a linked histogram when provided", () => {
     const seeded = seedAutoContrastMirror(mirror(), [
-      { i: 0, vminPct: 2, vmaxPct: 88 },
-      { i: 1, vminPct: 7, vmaxPct: 93 },
+      { panel: 0, vminPct: 2, vmaxPct: 88 },
+      { panel: 1, vminPct: 7, vmaxPct: 93 },
     ], true, { vminPct: 4, vmaxPct: 61 });
     expect(seeded.linked).toEqual({ vminPct: 4, vmaxPct: 61 });
   });

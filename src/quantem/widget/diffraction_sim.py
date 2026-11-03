@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import math
 import pathlib
-import tempfile
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -31,17 +30,19 @@ from quantem.widget._diffraction_sim_crystal import (
     preset_crystal,
     require_crystal_tools,
 )
-from quantem.widget.export import ensure_mobile_viewport
+from quantem.widget.export import HtmlExportMixin, export_slug
+from quantem.widget.fallback import StaticFallbackMixin
 from quantem.widget.utils.state_io import (
     resolve_widget_version,
     save_state_file,
     unwrap_state_payload,
 )
-from quantem.widget.utils.static_fallback import StaticFallbackMixin
 
 if TYPE_CHECKING:
     from ase import Atoms
-    from quantem.diffraction.crystal import Crystal
+
+# quantem is imported where it is used (it is not installed on every platform); the
+# annotations name its Crystal in full.
 
 _STATIC = pathlib.Path(__file__).parent / "static" / "diffractionsim.js"
 _WIDGET_NAME = "DiffractionSim"
@@ -180,14 +181,7 @@ def quantem_colormap_luts() -> dict[str, list[int]]:
     return out
 
 
-def _slug(text: str) -> str:
-    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip("_")
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return slug
-
-
-class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
+class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
     """Interactive unit cell and diffraction pattern simulator.
 
     The left panel draws the unit cell, the right panel the diffraction
@@ -195,9 +189,8 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
     Kinematical and Bloch wave intensities, CBED disks and Kikuchi lines are
     computed in the browser from a reflection list prepared in Python.
 
-    Requires quantem with ``quantem.diffraction.Crystal`` and ``bloch``
-    (electronmicroscopy/quantem PR #297, first release after 0.1.9), which
-    brings ASE and spglib.
+    Requires quantem 0.1.10 or later (``quantem.diffraction.Crystal`` and
+    ``bloch``), which brings ASE and spglib.
 
     Parameters
     ----------
@@ -401,17 +394,9 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
     offline = traitlets.Bool(False).tag(sync=True)
     _offline_presets = traitlets.Dict(default_value={}).tag(sync=True)
 
-    # HTML export bridge
-    export_request = traitlets.Unicode("").tag(sync=True)
-    export_status = traitlets.Unicode("").tag(sync=True)
-    export_enabled = traitlets.Bool(True).tag(sync=True)
-    export_payload = traitlets.Bytes(b"").tag(sync=True)
-    export_payload_id = traitlets.Unicode("").tag(sync=True)
-    export_filename = traitlets.Unicode("").tag(sync=True)
-
     def __init__(
         self,
-        crystal: Crystal | Atoms | str | pathlib.Path | None = None,
+        crystal: quantem.diffraction.crystal.Crystal | Atoms | str | pathlib.Path | None = None,
         *,
         zone_axis: Sequence[float] | None = None,
         energy_keV: float = 200.0,
@@ -632,11 +617,13 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
         return list(PRESETS)
 
     @property
-    def crystal(self) -> Crystal:
+    def crystal(self) -> quantem.diffraction.crystal.Crystal:
         """The loaded ``quantem.diffraction.crystal.Crystal``."""
         return self._crystal
 
-    def set_crystal(self, crystal: Crystal | Atoms | str | pathlib.Path) -> DiffractionSim:
+    def set_crystal(
+        self, crystal: quantem.diffraction.crystal.Crystal | Atoms | str | pathlib.Path
+    ) -> DiffractionSim:
         """Load a crystal and recompute the reflection list.
 
         Parameters
@@ -904,23 +891,21 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
         return self._static_fallback_jpeg or None
 
     # ------------------------------------------------------------------
-    # HTML export
+    # HTML export: HtmlExportMixin serves the toolbar requests and writes the page
     def export_html(
         self,
         path: str | pathlib.Path | None = None,
         *,
         title: str | None = None,
         presets: Sequence[str] | None = None,
-        **options: Any,
     ) -> pathlib.Path:
         """Write a standalone HTML viewer with the current state.
 
-        The page hydrates with the ipywidgets HTML manager, which loads from
-        a CDN, so opening it needs network access. Every simulation then runs
-        in the browser: rotating the cell and changing thickness, mode or
-        display settings need no Python. The beam energy and ``k_max_inv_A``
-        are fixed to the exported values, and the Kikuchi reference pattern
-        is included when it was computed.
+        The page carries the widget runtime, so it opens with no network and no
+        kernel, and every simulation runs in the browser: rotating the cell and
+        changing thickness, mode or display settings need no Python. The beam
+        energy and ``k_max_inv_A`` are fixed to the exported values, and the
+        Kikuchi reference pattern is included when it was computed.
 
         Parameters
         ----------
@@ -933,109 +918,38 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
         presets : sequence of str, optional
             Additional preset structures to embed so the crystal menu works in
             the page. Each adds its reflection list to the file.
-        **options
-            Standard export options. Only ``mode="single"``,
-            ``encoding="full"`` and ``downsample=None`` (or 1) apply: the page
-            holds no image data to pack or reduce.
 
         Returns
         -------
         pathlib.Path
             The written file.
         """
-        self._check_export_options(options)
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path()
-        self._write_html_export(export_path, title=title, presets=presets)
-        ensure_mobile_viewport(export_path)
-        size_mb = export_path.stat().st_size / (1024 * 1024)
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, single file)"
-        return export_path
+        return self._write_export_and_report(path, title=title, presets=self._export_presets(presets))
 
     @staticmethod
-    def _check_export_options(options: dict[str, Any]) -> None:
-        unknown = sorted(set(options) - {"mode", "encoding", "downsample"})
-        if unknown:
-            raise TypeError(f"export_html() got an unexpected keyword argument {unknown[0]!r}.")
-        if options.get("mode", "single") != "single":
-            raise ValueError("DiffractionSim exports one HTML file; use mode='single'.")
-        if options.get("encoding", "full") != "full":
-            raise ValueError("DiffractionSim has no image data to quantize; use encoding='full'.")
-        if options.get("downsample") not in (None, 1):
-            raise ValueError(
-                "DiffractionSim has no image data to downsample; use downsample=None."
-            )
-
-    def _on_export_request_change(self, change: dict) -> None:
-        raw = str(change.get("new") or "")
-        if not raw:
-            return
-        try:
-            payload = json.loads(raw)
-            if str(payload.get("mode", "single")) == "clear":
-                self.export_payload = b""
-                self.export_payload_id = ""
-                self.export_filename = ""
-                return
-            presets = payload.get("presets") or None
-            if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path().name)
-                request_id = str(payload.get("id") or "")
-                self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes(presets=presets)
-                self.export_filename = filename
-                self.export_payload = html
-                self.export_payload_id = request_id
-                size_mb = len(html) / (1024 * 1024)
-                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, single file)"
-            else:
-                self.export_status = "Exporting HTML..."
-                self.export_html(presets=presets)
-        except Exception as exc:  # noqa: BLE001
-            self.export_status = f"Export failed: {exc}"
-
-    def _default_html_export_path(self) -> pathlib.Path:
-        name = self._crystal.name if self._crystal is not None else "crystal"
-        slug = _slug(f"{name} {self.mode}") or "crystal"
-        return pathlib.Path.cwd() / f"{slug}_diffractionsim.html"
-
-    def _write_html_export(
-        self,
-        path: str | pathlib.Path,
-        *,
-        title: str | None = None,
-        presets: Sequence[str] | None = None,
-    ) -> pathlib.Path:
-        from ipywidgets.embed import dependency_state, embed_minimal_html
-
-        export_path = pathlib.Path(path)
-        export_path.parent.mkdir(parents=True, exist_ok=True)
-        export_widget = self._clone_for_html_export(presets)
-        try:
-            state = dependency_state([export_widget], drop_defaults=False)
-            embed_minimal_html(
-                str(export_path),
-                views=[export_widget],
-                title=title or self.title or _WIDGET_NAME,
-                drop_defaults=False,
-                state=state,
-            )
-        finally:
-            export_widget.close()
-        return export_path
-
-    def _html_export_bytes(self, presets: Sequence[str] | None = None) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="diffractionsim-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path().name
-            self._write_html_export(path, presets=presets)
-            ensure_mobile_viewport(path)
-            return path.read_bytes()
-
-    def _clone_for_html_export(self, presets: Sequence[str] | None = None) -> DiffractionSim:
-        unknown = [name for name in presets or () if name not in PRESETS]
+    def _export_presets(presets: Sequence[str] | None) -> tuple[str, ...]:
+        names = tuple(presets or ())
+        unknown = [name for name in names if name not in PRESETS]
         if unknown:
             raise ValueError(
                 f"Unknown presets {unknown}; choose from DiffractionSim.presets_available()."
             )
+        return names
+
+    def _html_export_options(self, payload: dict, mode: str = "") -> dict:
+        """``export_html`` keywords from a toolbar request: the extra presets to embed."""
+        return {"presets": self._export_presets(payload.get("presets"))}
+
+    def _export_mode_label(self, presets: tuple[str, ...] = ()) -> str:
+        """What the page holds, for the toolbar status line: crystal data, never images."""
+        n = len(set(presets) - {self.preset}) + 1
+        return f"{n} crystal{'s' if n > 1 else ''}, no image data"
+
+    def _default_html_export_path(self, presets: tuple[str, ...] = ()) -> pathlib.Path:
+        name = self._crystal.name if self._crystal is not None else "crystal"
+        return pathlib.Path.cwd() / f"{export_slug(f'{name} {self.mode}', 'crystal')}_diffractionsim.html"
+
+    def _clone_for_html_export(self, presets: tuple[str, ...] = ()) -> DiffractionSim:
         state = self.state_dict()
         state.pop("preset")
         # save_state=True keeps the Kikuchi reference in the embedded state
@@ -1043,7 +957,7 @@ class DiffractionSim(StaticFallbackMixin, anywidget.AnyWidget):
         energy_ev = self.energy_keV * 1e3
         embedded = {
             name: prepare_crystal(preset_crystal(name), energy_ev, self.k_max_inv_A)
-            for name in presets or ()
+            for name in presets
             if name != self.preset
         }
         if self.preset:

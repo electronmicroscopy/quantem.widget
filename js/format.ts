@@ -40,12 +40,6 @@ export function downloadBlob(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-/** Download a DataView as a file (e.g. GIF/ZIP from Python). */
-export function downloadDataView(dataView: DataView, filename: string, mimeType: string): void {
-  const buf = new Uint8Array(dataView.buffer as ArrayBuffer, dataView.byteOffset, dataView.byteLength);
-  downloadBlob(new Blob([buf as BlobPart], { type: mimeType }), filename);
-}
-
 /** Format number with exponential notation for large/small values. */
 export function formatNumber(val: number, decimals: number = 2): string {
   if (val === 0) return "0";
@@ -91,11 +85,6 @@ function markNotebookDirty(manager: AnyWidgetModelWithManager["widget_manager"])
       return;
     }
   }
-}
-
-export function markWidgetNotebookDirty(model: unknown): void {
-  const widgetModel = model as AnyWidgetModelWithManager | null;
-  markNotebookDirty(widgetModel?.widget_manager);
 }
 
 /**
@@ -266,7 +255,7 @@ function updateEmbeddedWidgetStateScript(
   return doc.documentElement.outerHTML;
 }
 
-export function currentWidgetViewState(model: unknown, keys: readonly string[]): Record<string, unknown> {
+function currentWidgetViewState(model: unknown, keys: readonly string[]): Record<string, unknown> {
   const widgetModel = model as AnyWidgetModelWithManager | null;
   const next: Record<string, unknown> = {};
   const attrs = widgetModel?.attributes ?? {};

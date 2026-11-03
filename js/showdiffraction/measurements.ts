@@ -31,12 +31,13 @@ export const MEASUREMENT_COLUMNS = [
   "note",
 ] as const;
 
-export type MeasurementRecord = Record<
+type MeasurementRecord = Record<
   (typeof MEASUREMENT_COLUMNS)[number],
   string | number | null
 >;
 
-interface SpotLike {
+/** One spot as the Python widget syncs it in ``spots``. */
+export interface SpotDict {
   id: number;
   row: number;
   col: number;
@@ -44,38 +45,43 @@ interface SpotLike {
   raw_col?: number | null;
   row_err?: number | null;
   col_err?: number | null;
+  d_spacing: number | null;
+  d_spacing_err?: number | null;
+  g_magnitude: number | null;
+  g_magnitude_err?: number | null;
   r_pixels: number;
   r_pixels_err?: number | null;
-  g_magnitude?: number | null;
-  g_magnitude_err?: number | null;
-  d_spacing?: number | null;
-  d_spacing_err?: number | null;
   angle_deg?: number | null;
   angle_deg_err?: number | null;
-  intensity: number;
   fit_quality?: number | null;
+  intensity: number;
   hkl?: string;
   hkl_candidates?: string[];
+  d_ref?: number | null;
+  d_error?: number | null;
   note?: string;
 }
 
-interface RingLike {
+/** One ring as the Python widget syncs it in ``rings``. */
+export interface RingDict {
   id: number;
   radius_px: number;
-  g_magnitude?: number | null;
-  d_spacing?: number | null;
+  g_magnitude: number | null;
+  d_spacing: number | null;
   intensity: number;
-  fit_quality?: number | null;
+  hkl?: string;
+  hkl_candidates?: string[];
+  d_ref?: number | null;
+  d_error?: number | null;
   fwhm_px?: number | null;
   fwhm_inv_angstrom?: number | null;
   intensity_integrated?: number | null;
-  hkl?: string;
-  hkl_candidates?: string[];
+  fit_quality?: number | null;
   note?: string;
 }
 
 /** Export row for one spot record. */
-export function spotMeasurementRecord(spot: SpotLike): MeasurementRecord {
+function spotMeasurementRecord(spot: SpotDict): MeasurementRecord {
   return {
     id: spot.id,
     kind: "spot",
@@ -105,7 +111,7 @@ export function spotMeasurementRecord(spot: SpotLike): MeasurementRecord {
 }
 
 /** Export row for one ring record. */
-export function ringMeasurementRecord(ring: RingLike): MeasurementRecord {
+function ringMeasurementRecord(ring: RingDict): MeasurementRecord {
   return {
     id: ring.id,
     kind: "ring",
@@ -135,25 +141,25 @@ export function ringMeasurementRecord(ring: RingLike): MeasurementRecord {
 }
 
 /** Export rows for all spots and rings. */
-export function buildMeasurementRecords(spots: SpotLike[], rings: RingLike[]): MeasurementRecord[] {
+export function buildMeasurementRecords(spots: SpotDict[], rings: RingDict[]): MeasurementRecord[] {
   return [...spots.map(spotMeasurementRecord), ...rings.map(ringMeasurementRecord)];
 }
 
 /** CSV text with the full column schema. */
 export function measurementCsv(records: MeasurementRecord[]): string {
-  const esc = (v: string | number | null) => {
-    const s = v == null ? "" : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const escapeCsv = (value: string | number | null) => {
+    const text = value == null ? "" : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
-  const rows = records.map((record) => MEASUREMENT_COLUMNS.map((c) => esc(record[c])).join(","));
+  const rows = records.map((record) => MEASUREMENT_COLUMNS.map((column) => escapeCsv(record[column])).join(","));
   return [MEASUREMENT_COLUMNS.join(","), ...rows].join("\n");
 }
 
 interface MetadataState {
-  centerRow: number;
-  centerCol: number;
+  brightFieldCenterRowPx: number;
+  brightFieldCenterColPx: number;
   centerMethod: string;
-  kPixelSize: number;
+  detectorSamplingInvA: number;
   kCalibrated: boolean;
   calibrationSource: string;
   calibrationRefD: number;
@@ -166,10 +172,10 @@ interface MetadataState {
 export function measurementMetadata(state: MetadataState): object {
   return {
     widget_name: "ShowDiffraction",
-    center_row: state.centerRow,
-    center_col: state.centerCol,
+    bright_field_center_row_px: state.brightFieldCenterRowPx,
+    bright_field_center_col_px: state.brightFieldCenterColPx,
     center_method: state.centerMethod ?? "",
-    k_pixel_size_inv_angstrom_per_px: state.kPixelSize,
+    detector_sampling_inv_A: state.detectorSamplingInvA,
     calibrated: Boolean(state.kCalibrated),
     calibration_source: state.calibrationSource ?? "none",
     calibration_ref_d_angstrom: state.calibrationRefD ?? 0,

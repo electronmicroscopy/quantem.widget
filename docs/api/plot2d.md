@@ -10,7 +10,7 @@ zoom/pan and hover; it does not calculate correlations or train a model.
 import numpy as np
 import quantem.widget as qw
 
-qw.profile(check_updates=False)
+qw.profile()
 radius = (np.arange(100) + 0.5) * 0.1
 angle = (np.arange(36) + 0.5) * 5
 values = np.cos(np.deg2rad(angle[:, None])) ** 2 * radius[None, :]
@@ -73,5 +73,3 @@ notebook or documentation light/dark theme.
 | Reset View / double-click | Restore full physical bounds. |
 | Save PNG | Save the current canvas, including labels and color scale. |
 | Hover | Inspect original `(row, col)`, calibrated coordinates and value. |
-
-The [storyboard](../maintainer/storyboard-plot2d.md) defines browser signoff.

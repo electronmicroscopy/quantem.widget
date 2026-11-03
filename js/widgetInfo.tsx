@@ -2,10 +2,15 @@ import * as React from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 
-export type MetadataRow = [label: string, value: React.ReactNode];
+type MetadataRow = [label: string, value: React.ReactNode];
 
-export function MetadataTable({ rows }: { rows: MetadataRow[] }) {
-  const visibleRows = rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+/** Rows with a value to show: null, undefined and empty strings are dropped. */
+function visibleMetadataRows(rows: MetadataRow[]): MetadataRow[] {
+  return rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+}
+
+function MetadataTable({ rows }: { rows: MetadataRow[] }) {
+  const visibleRows = visibleMetadataRows(rows);
   if (visibleRows.length === 0) return null;
   return (
     <Box
@@ -30,7 +35,7 @@ export function MetadataTable({ rows }: { rows: MetadataRow[] }) {
 }
 
 export function MetadataSection({ rows }: { rows: MetadataRow[] }) {
-  if (rows.filter(([, value]) => value !== null && value !== undefined && value !== "").length === 0) return null;
+  if (visibleMetadataRows(rows).length === 0) return null;
   return (
     <>
       <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Data</Typography>

@@ -1,7 +1,7 @@
 # Jupyter Book 1.x config for the quantem.widget docs site.
 # Tutorial notebooks are EXECUTED at build time ("force"): tutorial data
 # downloads from Hugging Face and myst-nb bakes the resulting widget state into
-# the HTML, so the published widgets stay interactive offline. Committed
+# the HTML, so the published widgets stay interactive without a Python kernel. Committed
 # notebooks carry no baked state (repo stays small). "force" (not "cache") is
 # deliberate: jupyter-cache does not preserve metadata.widgets, which would
 # silently blank every widget. Building locally needs the package installed
@@ -19,43 +19,47 @@ execute:
 
 # Embedded anywidget views need the ipywidgets HTML manager in the static page.
 # myst-nb writes the widget state baked into each notebook; this pulls the JS
-# runtime that rehydrates it so the published widgets stay interactive offline.
+# runtime that rehydrates it so the published widgets stay interactive without a Python kernel.
 sphinx:
-  extra_extensions:
-    - sphinx.ext.autodoc
-    - sphinx.ext.napoleon
   config:
+    # Jupyter Book's defaults without sphinx-thebe: no page offers a live
+    # kernel, and its inline config script loads twice, so every page threw
+    # "Identifier 'THEBE_JS_URL' has already been declared".
+    extensions:
+      - sphinx_togglebutton
+      - sphinx_copybutton
+      - myst_nb
+      - jupyter_book
+      - sphinx_comments
+      - sphinx_external_toc
+      - sphinx.ext.intersphinx
+      - sphinx_design
+      - sphinx_book_theme
+      - sphinx.ext.autodoc
+      - sphinx.ext.napoleon
     # A tutorial that errors must fail the docs build, not publish a half-blank page.
     nb_execution_raise_on_error: true
-    # napoleon parses the NumPy-style docstrings into proper Parameters / Returns
-    # field lists (autodoc2's raw render flattened them into a wall of text).
+    # Links such as show4dstem.md#live-scope-folders resolve to the heading,
+    # the same anchor GitHub renders for the source file.
+    myst_heading_anchors: 2
+    # napoleon parses the NumPy-style docstrings into Parameters / Returns field lists.
     napoleon_numpy_docstring: true
     napoleon_google_docstring: false
     napoleon_use_param: true
     napoleon_use_rtype: true
     autodoc_member_order: "bysource"
     autoclass_content: "both"
-    # autodoc imports the package; the CPU-only runner has no torch/cupy/numba, so
-    # mock the heavy + native deps. The pure-python deps (anywidget, traitlets,
-    # numpy, quantem core) are installed in the docs build step.
-
-    # quantem.data is optional (not on PyPI)
-    # mock it so autodoc can still import quantem.widget.io.hub to
-    # document list_datasets and download
+    # autodoc imports the package; CuPy is not on the runner, so it and the
+    # optional readers are mocked. torch, numpy and quantem core are installed
+    # in the docs build step.
     autodoc_mock_imports:
       - anywidget
-      - quantem.data
       - cupy
-      - cupyx
       - h5py
       - hdf5plugin
       - tifffile
       - ncempy
       - huggingface_hub
-      - Metal
-      - objc
-      - Foundation
-      - Quartz
     suppress_warnings:
       - "etoc.toctree"
     # No in-page Contents sidebar: the pages showcase wide interactive

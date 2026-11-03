@@ -1,101 +1,96 @@
 // Bundle each widget as a self-contained ESM file.
 // anywidget loads bundles via Blob URL; relative imports break in that context.
 // esbuild flattens everything into one file per widget.
+//
+//   npm run build                     all bundles
+//   npm run build -- show2d show3d    only the named bundles
+//   npm run build:web                 only the web-page bundles (WEB_BUNDLES below)
+//
+// Every build first syncs js/.generated/engine from quantem.gpu (QUANTEM_GPU_SRC
+// or an installed quantem.gpu; CI checks out the ref in gpu-ref.txt): show4dstem
+// and showptycho bundle its WebGPU science kernels, and every bundle that draws
+// through js/display validates borrowed count images with its contract.
 
 import { build, context } from "esbuild";
-import { rmSync, copyFileSync, mkdirSync, existsSync } from "fs";
+import { copyFileSync, mkdirSync, rmSync } from "fs";
 import { syncGpuWebgpuSources } from "./sync-gpu-webgpu.mjs";
 
 const watch = process.argv.includes("--watch");
-// --web-only (`npm run build:web`): build only the web-page bundles below and
-// leave static/ alone. A plain build never builds them.
-const webOnly = process.argv.includes("--web-only");
-if (process.env.QUANTEM_WIDGET_SKIP_GPU_WEBGPU_SYNC !== "1") {
-  syncGpuWebgpuSources();
-}
-const widgets = [
-  { name: "plot2d" },
-  { name: "show1d" },
-  { name: "show2d" },
-  { name: "mask2d" },
-  { name: "show3d" },
-  { name: "show3dslices" },
-  { name: "show4dstem" },
-  { name: "showdiffraction" },
-  { name: "showeds" },
-  { name: "showptycho" },
-  { name: "chooselattice" },
-  { name: "planptycho" },
-  { name: "showcif" },
-  { name: "diffractionsim" },
-];
-
-// Framework-free bundles for web pages (MyST `anywidget` directive), built
-// only by `npm run build:web`: one self-contained ESM file each, with
-// `export default { render }`. They are written to dist/web/, outside the
-// Python package, and copied to the website by hand.
-const webBundles = [
-  { name: "diffraction-sim", entry: "js/diffractionsim-web/index.ts" },
-];
-const webOutDir = "dist/web";
-
-if (!webOnly) {
-  rmSync("src/quantem/widget/static", { recursive: true, force: true });
-  mkdirSync("src/quantem/widget/static", { recursive: true });
-}
-if (webOnly) mkdirSync(webOutDir, { recursive: true });
-
 const baseOpts = {
   bundle: true,
   format: "esm",
   jsx: "automatic",
   target: "es2022",
   define: { "process.env.NODE_ENV": '"production"' },
-  loader: { ".css": "text" },
   minify: true,
   sourcemap: false,
   legalComments: "none",
 };
+const widgets = [
+  "plot2d",
+  "show1d",
+  "show2d",
+  "show3d",
+  "show3dslices",
+  "show4dstem",
+  "showdiffraction",
+  "showpdf",
+  "showptycho",
+  "chooselattice",
+  "showcif",
+  "diffractionsim",
+];
+// Framework-free bundles for web pages, built only by `npm run build:web`: one self-contained ESM
+// file each, with `export default { render }`, written into the quantem.diffsim package (PyPI),
+// which serves them to web pages and Dash apps. The MyST `anywidget` directive loads the same file.
+const WEB_BUNDLES = [
+  {
+    entry: "js/diffractionsim-web/index.ts",
+    outfile: "packages/quantem.diffsim/src/quantem/diffsim/static/diffraction-sim.js",
+  },
+];
+const webOnly = process.argv.includes("--web-only");
+const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+const unknown = requested.filter((name) => !widgets.includes(name));
+if (unknown.length) throw new Error(`unknown bundle(s): ${unknown.join(", ")}`);
+const selected = requested.length ? widgets.filter((name) => requested.includes(name)) : widgets;
 
-for (const w of webOnly ? [] : widgets) {
-  const opts = {
-    ...baseOpts,
-    entryPoints: [`js/${w.name}/index.tsx`],
-    outfile: `src/quantem/widget/static/${w.name}.js`,
-  };
-  if (watch) {
-    const ctx = await context(opts);
-    await ctx.watch();
-    console.log(`watching ${w.name}...`);
-  } else {
+if (webOnly) {
+  for (const web of WEB_BUNDLES) {
     const start = Date.now();
-    await build(opts);
-    console.log(`built ${w.name}.js (${Date.now() - start}ms)`);
+    await build({ ...baseOpts, entryPoints: [web.entry], outfile: web.outfile });
+    console.log(`built ${web.outfile} (${Date.now() - start}ms)`);
   }
-  // Copy CSS sibling if present (anywidget _css trait reads from static/).
-  for (const cssName of [`${w.name}.css`, "styles.css"]) {
-    const cssSrc = `js/${w.name}/${cssName}`;
-    if (existsSync(cssSrc)) {
-      copyFileSync(cssSrc, `src/quantem/widget/static/${w.name}.css`);
-      break;
-    }
-  }
+  process.exit(0);
 }
 
-for (const w of webOnly ? webBundles : []) {
+try {
+  syncGpuWebgpuSources();
+} catch (error) {
+  console.error(`\nNOT built: ${selected.join(", ")}\n${error.message}`);
+  process.exit(1);
+}
+
+// A full build replaces the whole static tree so retired bundles cannot linger.
+if (!requested.length) rmSync("src/quantem/widget/static", { recursive: true, force: true });
+mkdirSync("src/quantem/widget/static", { recursive: true });
+// The wheel names the quantem.gpu sources its bundles carry; quantem.widget.profile() prints it.
+copyFileSync("js/.generated/engine/MANIFEST.json", "src/quantem/widget/static/engine-manifest.json");
+
+for (const name of selected) {
   const opts = {
     ...baseOpts,
-    entryPoints: [w.entry],
-    outfile: `${webOutDir}/${w.name}.js`,
+    entryPoints: [`js/${name}/index.tsx`],
+    outfile: `src/quantem/widget/static/${name}.js`,
   };
   if (watch) {
-    const ctx = await context(opts);
-    await ctx.watch();
-    console.log(`watching ${w.name}...`);
+    const watcher = await context(opts);
+    await watcher.watch();
+    console.log(`watching ${name}...`);
   } else {
     const start = Date.now();
     await build(opts);
-    console.log(`built ${webOutDir}/${w.name}.js (${Date.now() - start}ms)`);
+    console.log(`built ${name}.js (${Date.now() - start}ms)`);
   }
 }
 

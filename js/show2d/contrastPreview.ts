@@ -3,8 +3,8 @@ export type ContrastPercentRange = {
   vmaxPct: number;
 };
 
-export type AutoContrastPercentRange = ContrastPercentRange & {
-  i: number;
+type AutoContrastPercentRange = ContrastPercentRange & {
+  panel: number;
 };
 
 export type ContrastMirror = {
@@ -48,7 +48,7 @@ export function seedAutoContrastMirror(
 ): ContrastMirror {
   const perImage = new Map(mirror.perImage);
   for (const range of ranges) {
-    perImage.set(range.i, {
+    perImage.set(range.panel, {
       vminPct: range.vminPct,
       vmaxPct: range.vmaxPct,
     });

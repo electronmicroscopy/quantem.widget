@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { displayLog } from '../display/displayMath';
 import { readSettledCompareHistogram } from './settledHistogram';
 
 function deferred<T>() {
@@ -61,6 +62,16 @@ describe('settled comparison histograms', () => {
     expect(await task).toBeNull();
   });
 
+  it('bins signed panels (DPC) over the signed log range the histogram shader applies', async () => {
+    const f = fixture();
+    f.engine.computeRangeBatch.mockImplementationOnce(async () => [{min: -3, max: 4}, {min: -6, max: 1}]);
+    const result = await readSettledCompareHistogram(f.engine, [0, 1], true, f.isCurrent);
+    expect(result?.min).toBe(Math.fround(-Math.log(4 + 3)));
+    expect(result?.max).toBe(Math.fround(Math.log(5)));
+    expect(f.engine.computeHistogramBatch).toHaveBeenLastCalledWith([0, 1],
+      [{min: result!.min, max: result!.max}, {min: result!.min, max: result!.max}], true);
+  });
+
   it('resumes on settled float images with exact merged bins and current log ranges', async () => {
     const f = fixture();
     f.state.pendingSettle = true;
@@ -69,8 +80,8 @@ describe('settled comparison histograms', () => {
     f.state.pendingSettle = false; // Settled float normalization has been queued.
     for (const log of [false, true]) {
       const result = await readSettledCompareHistogram(f.engine, [0, 1], log, current);
-      expect(result?.min).toBe(log ? Math.log1p(2) : 2);
-      expect(result?.max).toBe(log ? Math.log1p(8) : 8);
+      expect(result?.min).toBe(log ? displayLog(2) : 2);
+      expect(result?.max).toBe(log ? displayLog(8) : 8);
       expect(Array.from(result!.bins.slice(0, 3))).toEqual([1, 3, 0]);
       expect(result!.bins.reduce((sum, n) => sum + n, 0)).toBe(4);
       expect(f.engine.computeHistogramBatch).toHaveBeenLastCalledWith([0, 1],

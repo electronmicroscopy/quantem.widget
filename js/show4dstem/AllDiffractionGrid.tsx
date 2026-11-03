@@ -1,7 +1,7 @@
 import * as React from "react";
-import { GPUColormapEngine } from "../colormaps";
+import { GPUColormapEngine } from "../display/colormaps";
 import { extractBytes } from "../format";
-import { getGPUDevice, isSoftwareGPUAdapter } from "../.generated/engine/device/webgpu";
+import { getGPUDevice, isSoftwareGPUAdapter } from "../display/device";
 
 type DiffractionSlots = {
   engine: GPUColormapEngine;
@@ -43,7 +43,7 @@ export function AllDiffractionGrid({bytes, indices, rows, cols, selectionLabel, 
       try {
         const ranges = await engine.computeRangeBatch([...slots.values()]);
         if (cancelled) return;
-        const range = {min: Math.min(...ranges.map(r => r.min)), max: Math.max(...ranges.map(r => r.max))};
+        const range = {min: Math.min(...ranges.map(slotRange => slotRange.min)), max: Math.max(...ranges.map(slotRange => slotRange.max))};
         setData({engine, slots, ranges: new Map(indices.map(frame => [frame, range]))});
       } catch (cause) { if (!cancelled) setError(String(cause)); }
     })();

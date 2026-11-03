@@ -18,12 +18,11 @@ path, an ASE `Atoms` object, or a quantem `Crystal`.
 
 ## Requirements
 
-DiffractionSim needs quantem with `quantem.diffraction.Crystal` and
-`quantem.diffraction.bloch`. They come with electronmicroscopy/quantem
-PR #297 and are in no quantem release yet; the first release after 0.1.9 will
-include them. That quantem version also brings ASE and spglib, so no extra is
-needed. With an older quantem, constructing the widget raises an `ImportError`
-that names this requirement, and the DiffractionSim tests are skipped.
+DiffractionSim needs quantem 0.1.10 or later, for `quantem.diffraction.Crystal`
+and `quantem.diffraction.bloch`. quantem is a base dependency of
+quantem.widget except on Intel Macs and Windows on ARM; there, constructing the
+widget raises an `ImportError` that names this requirement, and the
+DiffractionSim tests are skipped.
 
 This widget is unrelated to [ShowDiffraction](showdiffraction), which measures
 experimental patterns.

@@ -43,11 +43,16 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      # gpu-ref.txt is the one quantem.gpu ref every widget build bundles
+      - name: Read the pinned quantem.gpu ref
+        id: gpu
+        run: echo "ref=$(cat gpu-ref.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Check out quantem.gpu browser-compute sources
         uses: actions/checkout@v7
         with:
           repository: bobleesj/quantem.gpu
-          ref: gpu-v0.0.1rc11
+          ref: ${{ steps.gpu.outputs.ref }}
           path: quantem-gpu-src
 
       - name: Resolve widget version from tag
@@ -73,21 +78,10 @@ jobs:
           QUANTEM_GPU_SRC: ${{ github.workspace }}/quantem-gpu-src/src
         run: |
           npm ci
-          npm run typecheck
           npm run build
+          npx tsc --noEmit  # the build synced the quantem.gpu kernels; `npm run typecheck` would sync them again
           test -s src/quantem/widget/static/show2d.js
           test -s src/quantem/widget/static/show4dstem.js
-
-      - name: Build standalone browser GUI
-        working-directory: web
-        env:
-          QUANTEM_GPU_SRC: ${{ github.workspace }}/quantem-gpu-src/src
-        run: |
-          npm ci
-          OFFLINE_HTML=1 npm run build
-          mkdir -p ../src/quantem/widget/static/browser
-          cp -R dist/. ../src/quantem/widget/static/browser/
-          test -s ../src/quantem/widget/static/browser/index.html
 
       - name: Stamp widget package version
         env:
@@ -131,17 +125,17 @@ jobs:
           required = {
               "quantem/widget/static/chooselattice.js",
               "quantem/widget/static/diffractionsim.js",
-              "quantem/widget/static/planptycho.js",
+              "quantem/widget/static/engine-manifest.json",
               "quantem/widget/static/show1d.js",
               "quantem/widget/static/plot2d.js",
               "quantem/widget/static/show2d.js",
               "quantem/widget/static/show3d.js",
               "quantem/widget/static/show3dslices.js",
               "quantem/widget/static/show4dstem.js",
+              "quantem/widget/static/showcif.js",
               "quantem/widget/static/showdiffraction.js",
-              "quantem/widget/static/showeds.js",
+              "quantem/widget/static/showpdf.js",
               "quantem/widget/static/showptycho.js",
-              "quantem/widget/static/browser/index.html",
           }
           with zipfile.ZipFile(wheel) as zf:
               names = set(zf.namelist())

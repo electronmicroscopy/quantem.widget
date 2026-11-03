@@ -65,7 +65,7 @@ def _beam_direction(widget, uvw) -> np.ndarray:
 
 def test_missing_crystal_tools_raise_with_requirement(monkeypatch):
     monkeypatch.setitem(sys.modules, "ase", None)
-    with pytest.raises(ImportError, match=r"PR #297, first release after 0\.1\.9") as info:
+    with pytest.raises(ImportError, match=r"quantem 0\.1\.10 or later") as info:
         _diffraction_sim_crystal.require_crystal_tools()
     assert "abtem" not in str(info.value).lower()
     assert "[crystal]" not in str(info.value)
@@ -73,16 +73,15 @@ def test_missing_crystal_tools_raise_with_requirement(monkeypatch):
 
 def test_export_html_signature_follows_protocol():
     from quantem.widget import DiffractionSim
-    from quantem.widget.export import HTML_EXPORT_TRAITS, supports_html_export
+    from quantem.widget.export import HtmlExportMixin
 
-    assert supports_html_export(DiffractionSim)
+    assert issubclass(DiffractionSim, HtmlExportMixin)
     signature = inspect.signature(DiffractionSim.export_html)
     assert signature.parameters["path"].default is None
     assert signature.parameters["title"].default is None
     assert signature.parameters["title"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    assert signature.parameters["presets"].default is None
     assert signature.return_annotation in {"pathlib.Path", Path}
-    assert set(HTML_EXPORT_TRAITS) <= set(DiffractionSim.class_trait_names())
 
 
 def test_constructor_is_keyword_only_after_crystal():
@@ -326,7 +325,7 @@ def test_save_and_load_roundtrip(tmp_path):
     widget.save(path)
     envelope = json.loads(path.read_text())
     assert envelope["widget_name"] == "DiffractionSim"
-    assert "metadata_version" in envelope and "widget_version" in envelope
+    assert "schema" in envelope and "widget_version" in envelope
 
     restored = DiffractionSim(state=path)
     assert restored.preset == "Ti (hcp)"
@@ -434,14 +433,12 @@ def test_export_html_embeds_state_presets_and_luts(tmp_path):
 @needs_crystal
 def test_export_html_rejects_options_that_do_not_apply(tmp_path):
     widget = _sim()
-    with pytest.raises(ValueError, match="encoding"):
+    # the page holds no image data, so there is no packing to choose
+    with pytest.raises(TypeError, match="encoding"):
         widget.export_html(tmp_path / "a.html", encoding="uint8")
-    with pytest.raises(ValueError, match="downsample"):
-        widget.export_html(tmp_path / "a.html", downsample=2)
-    with pytest.raises(TypeError, match="quantized"):
-        widget.export_html(tmp_path / "a.html", quantized=True)
     with pytest.raises(ValueError, match="Unknown presets"):
         widget.export_html(tmp_path / "a.html", presets=["Nope"])
+    assert not (tmp_path / "a.html").exists()
 
 
 @needs_crystal

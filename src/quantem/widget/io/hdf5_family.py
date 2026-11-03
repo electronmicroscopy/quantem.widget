@@ -1,17 +1,33 @@
-"""Resolve the files that form one compressed HDF5 detector acquisition."""
+"""Open HDF5 files with hdf5plugin's filters; resolve the files of one compressed detector acquisition."""
 
-from __future__ import annotations
-
+import contextlib
 from pathlib import Path
 
 
-def _external_data_files(master: Path) -> list[Path]:
-    """Return data files referenced by external links in a wrapper master."""
+def open_hdf5(path):
+    """Open ``path`` read-only with h5py, after hdf5plugin has registered its compression filters.
 
-    try:
-        import h5py
-    except ImportError:
-        return []
+    Every reader that decodes HDF5 data opens files here, so a bitshuffle-LZ4
+    or other hdf5plugin-compressed dataset reads whichever reader runs first.
+    hdf5plugin is imported only now, and before h5py, which hdf5plugin 1.x
+    requires. It is optional: Windows on ARM has no hdf5plugin wheel, and
+    files without its filters open without it.
+    """
+    with contextlib.suppress(ImportError):
+        import hdf5plugin  # noqa: F401  registers bitshuffle-LZ4, LZ4, Zstd and other filters with h5py
+    import h5py
+
+    return h5py.File(Path(path), "r")
+
+
+def _external_data_files(master: Path) -> list[Path]:
+    """Return data files referenced by external links in a wrapper master.
+
+    A wrapper master names its detector files through HDF5 external links
+    instead of the ``<prefix>_data_*.h5`` convention, so the family cannot be
+    found by file name. A file that is not HDF5 has no links and returns [].
+    """
+    import h5py
 
     files: list[Path] = []
     try:
@@ -29,18 +45,12 @@ def _external_data_files(master: Path) -> list[Path]:
                 files.append(source.expanduser().resolve())
     except OSError:
         return []
-
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in files:
-        if path in seen:
-            continue
+    unique = list(dict.fromkeys(files))
+    for path in unique:
         if not path.is_file():
             raise FileNotFoundError(
                 f"HDF5 wrapper {master} points at missing data file {path}"
             )
-        unique.append(path)
-        seen.add(path)
     return unique
 
 

@@ -11,10 +11,12 @@ Catches silent regressions when traits are added, renamed, or dropped without
 updating the state_dict roundtrip path.
 """
 import json
+import re
 
 import numpy as np
 import pytest
-from quantem.widget import Show2D, Show3D, Show4DSTEM
+from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction
+from quantem.widget.show4dstem.export import export_clone
 
 
 def _flip_value(default):
@@ -42,12 +44,90 @@ def _mutate_state(state: dict) -> dict:
             continue
         # Lists hold structured items (dicts, tuples) for ROI / profile / labels;
         # mutating them generically is fragile. The roundtrip-defaults test already
-        # covers list trait persistence — here we only mutate scalars.
+        # covers list trait persistence; here we only mutate scalars.
         if isinstance(v, list):
             out[k] = v
             continue
         out[k] = _flip_value(v)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The save() file of every widget
+# ---------------------------------------------------------------------------
+
+# widget -> (how to build it on fixed data, one trait of its state with a value that is not the default)
+STATE_WIDGETS = {
+    "Plot2D": (lambda: Plot2D(np.arange(24, dtype=float).reshape(4, 6), x=np.arange(6), y=np.arange(4)), "cmap", "magma"),
+    "Show1D": (lambda: Show1D(np.arange(8.0)), "log_scale", True),
+    "Show2D": (lambda: Show2D(np.arange(64, dtype=np.float32).reshape(8, 8), verbose=False), "cmap", "viridis"),
+    "Show3D": (lambda: Show3D(np.arange(256, dtype=np.float32).reshape(4, 8, 8), verbose=False), "cmap", "viridis"),
+    "Show3DSlices": (lambda: Show3DSlices(np.arange(256, dtype=np.float32).reshape(4, 8, 8)), "cmap", "viridis"),
+    "Show4DSTEM": (lambda: Show4DSTEM(np.ones((4, 4, 8, 8), dtype=np.uint16), verbose=False), "dp_colormap", "viridis"),
+    "ShowDiffraction": (lambda: ShowDiffraction(np.ones((16, 16), dtype=np.float32), verbose=False), "dp_colormap", "viridis"),
+}
+
+
+@pytest.mark.parametrize("name", list(STATE_WIDGETS))
+def test_save_file_round_trips_and_only_the_current_schema_loads(tmp_path, name):
+    # every widget read an envelope without checking its layout: a file of an earlier release set the keys that
+    # still exist and dropped the renamed ones, with a warning in Show3D and Show3DSlices and no message elsewhere
+    build, trait, value = STATE_WIDGETS[name]
+    widget = build()
+    setattr(widget, trait, value)
+    widget.save(tmp_path / "view.json")
+    envelope = json.loads((tmp_path / "view.json").read_text())
+    assert set(envelope) == {"schema", "widget_name", "widget_version", "state"}
+    assert (envelope["schema"], envelope["widget_name"]) == ("quantem.widget-state/2", name)
+    restored = build()
+    restored.load_state_dict(tmp_path / "view.json")
+    assert restored.state_dict() == widget.state_dict()
+    # a file of the earlier layout, a file of another schema and an unknown key raise and change nothing
+    untouched = build()
+    before = untouched.state_dict()
+    earlier = {"metadata_version": "1.0", "widget_name": name, "widget_version": "0.0.1rc42", "state": envelope["state"]}
+    (tmp_path / "earlier.json").write_text(json.dumps(earlier))
+    with pytest.raises(ValueError, match=r"earlier\.json has schema None; .* reads 'quantem\.widget-state/2' only"):
+        untouched.load_state_dict(tmp_path / "earlier.json")
+    with pytest.raises(ValueError, match="has schema 'quantem.widget-state/1'"):
+        untouched.load_state_dict({**envelope, "schema": "quantem.widget-state/1"})
+    for state in ({trait: value, "not_a_key": 1}, {**envelope, "state": {trait: value, "not_a_key": 1}}):
+        with pytest.raises(ValueError, match=r"does not save: \['not_a_key'\]"):
+            untouched.load_state_dict(state)
+    assert untouched.state_dict() == before
+
+
+def test_a_refused_state_keyword_leaves_no_widget_behind(tmp_path):
+    # state= was checked at the end of the constructor: the refused widget was already registered with
+    # ipywidgets, so it stayed alive holding its data (a 4D stack on the GPU) with no handle to free it
+    from ipywidgets.widgets.widget import _instances
+
+    earlier = {"metadata_version": "1.0", "widget_name": "Show2D", "state": {"cmap": "viridis"}}
+    builders = {
+        "Plot2D": lambda state: Plot2D(np.arange(24, dtype=float).reshape(4, 6), x=np.arange(6), y=np.arange(4), state=state),
+        "Show1D": lambda state: Show1D(np.arange(8.0), state=state),
+        "Show2D": lambda state: Show2D(np.arange(64, dtype=np.float32).reshape(8, 8), state=state, verbose=False),
+        "Show4DSTEM": lambda state: Show4DSTEM(np.ones((4, 4, 8, 8), dtype=np.uint16), state=state, verbose=False),
+    }
+    for name, build in builders.items():
+        alive = set(_instances)
+        for state in ({**earlier, "widget_name": name}, {"not_a_key": 1}):
+            with pytest.raises(ValueError, match="has schema None|does not save"):
+                build(state)
+        assert set(_instances) == alive, name
+    # a viewer whose pixels the browser reads applies the state too: it returned before the state was read
+    browser = Show4DSTEM(None, h5_urls=["scan_master.h5"], scan_shape=(4, 4), detector_shape=(8, 8), state={"dp_colormap": "viridis"}, verbose=False)
+    assert browser.dp_colormap == "viridis"
+    with pytest.raises(ValueError, match="does not save"):
+        Show4DSTEM(None, h5_urls=["scan_master.h5"], scan_shape=(4, 4), detector_shape=(8, 8), state={"not_a_key": 1}, verbose=False)
+    # a folder gallery restores its page: the state was loaded before the folder pages existed
+    for index in range(5):
+        np.save(tmp_path / f"frame_{index}.npy", np.full((6, 8), index, dtype=np.float32))
+    paged = Show2D.from_folder(tmp_path, page_size=2, watch=False)
+    paged.page_idx = 2
+    restored = Show2D.from_folder(tmp_path, page_size=2, watch=False, state=paged.state_dict())
+    assert (restored.n_pages, restored.page_idx) == (3, 2)
+    assert Show2D.from_folder(tmp_path, watch=False, state=paged.state_dict()).state_dict() == paged.state_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +184,9 @@ def test_show4dstem_state_dict_roundtrip_mutated(show4dstem_widget):
         "pos_row",
         "pos_col",
         "frame_idx",
-        "path_index",
-        "path_length",
         "vi_roi_center_row",
         "vi_roi_center_col",
         "view_mode",
-        "compare_layout",
         "compare_dp_mode",
         "compare_group_mode",
         "vi_source",
@@ -124,10 +201,7 @@ def test_show4dstem_state_dict_roundtrip_mutated(show4dstem_widget):
     for k, v in mutated.items():
         if k in skip:
             continue
-        if isinstance(v, float):
-            assert abs(out[k] - v) < 1e-3, f"{k}: expected {v}, got {out[k]}"
-        else:
-            assert out[k] == v, f"{k}: expected {v!r}, got {out[k]!r}"
+        assert out[k] == v, f"{k}: expected {v!r}, got {out[k]!r}"  # a float round trip is exact
 
 
 def test_show4dstem_save_and_load(tmp_path, show4dstem_widget):
@@ -140,8 +214,8 @@ def test_show4dstem_save_and_load(tmp_path, show4dstem_widget):
 
     payload = json.loads(path.read_text())
     assert payload["widget_name"] == "Show4DSTEM"
-    assert "metadata_version" in payload
-    assert "state" in payload
+    assert set(payload) == {"schema", "widget_name", "widget_version", "state"}
+    assert payload["schema"] == "quantem.widget-state/2"
 
     data = np.random.default_rng(0).poisson(5, (8, 8, 16, 16)).astype(np.uint16)
     data[:, :, 6:10, 6:10] += 500
@@ -163,14 +237,9 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     )
 
     assert widget.controls_collapsed is True
-    assert widget.expand_controls() is widget
+    widget.controls_collapsed = False
     assert widget.controls_collapsed is False
-    assert widget.collapse_controls() is widget
-    assert widget.controls_collapsed is True
-    assert widget.toggle_controls() is widget
-    assert widget.controls_collapsed is False
-
-    widget.collapse_controls()
+    widget.controls_collapsed = True
     state = widget.state_dict()
     assert state["show_controls"] is True
     assert state["controls_collapsed"] is True
@@ -178,18 +247,22 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     restored = Show4DSTEM(data, state=state, verbose=False)
     assert restored.controls_collapsed is True
 
-    clone = widget._clone_for_html_export(dtype="uint16", det_bin=1)
+    clone = export_clone(widget, "uint16", 1, 1)
     try:
         assert clone.controls_collapsed is True
         assert clone.state_dict()["controls_collapsed"] is True
     finally:
         clone.close()
 
-    out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", encoding="full")
+    out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", dtype="uint16")
     html = out.read_text(encoding="utf-8")
-    assert "controls_collapsed" in html
-    assert "Hide controls" not in html
-    assert "Show controls" not in html
+    # the exported state without the embedded JS bundle, whose shared components
+    # carry other widgets' button labels
+    state = html.split('type="application/vnd.jupyter.widget-state+json">', 1)[1].split("</script>", 1)[0]
+    state = re.sub(r'"_esm": ".*?(?<!\\)"', '"_esm": ""', state, flags=re.S)
+    assert '"controls_collapsed": true' in state
+    assert "Hide controls" not in state
+    assert "Show controls" not in state
 
 
 def test_show4dstem_ui_mode_presets_and_overrides():
@@ -257,10 +330,7 @@ def test_show2d_state_dict_roundtrip_defaults(show2d_widget):
                    state=original, verbose=False)
     restored = fresh.state_dict()
     for k in original:
-        if isinstance(original[k], float):
-            assert abs(restored[k] - original[k]) < 1e-3, f"{k}: {original[k]} -> {restored[k]}"
-        else:
-            assert restored[k] == original[k], f"{k}: {original[k]!r} -> {restored[k]!r}"
+        assert restored[k] == original[k], f"{k}: {original[k]!r} -> {restored[k]!r}"  # a float round trip is exact
 
 
 def test_show2d_save_and_load(tmp_path, show2d_widget):
@@ -347,11 +417,10 @@ def test_show3d_per_panel_cmap_state_roundtrip():
     rng = np.random.default_rng(2)
     data_a = rng.standard_normal((3, 16, 16)).astype(np.float32)
     data_b = rng.standard_normal((3, 16, 16)).astype(np.float32)
-    widget = Show3D(data_a, data_b, cmap=["inferno", "viridis"], verbose=False)
+    widget = Show3D(data_a, data_b, cmap="inferno", verbose=False)
+    widget.panel_cmaps = ["inferno", "viridis"]
 
-    assert widget.cmap == "inferno"
-    assert widget.panel_cmaps == ["inferno", "viridis"]
-
-    fresh = Show3D(data_a, data_b, state=widget.state_dict(), verbose=False)
+    fresh = Show3D(data_a, data_b, verbose=False)
+    fresh.load_state_dict(widget.state_dict())
     assert fresh.cmap == "inferno"
     assert fresh.panel_cmaps == ["inferno", "viridis"]
