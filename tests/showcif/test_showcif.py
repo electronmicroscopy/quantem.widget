@@ -12,7 +12,7 @@ from quantem.widget._lobato import QUANTEM_REQUIREMENT, scattering_factors_avail
 from quantem.widget.showcif import projected_atom_table
 
 
-def bto() -> Atoms:
+def perovskite() -> Atoms:
     """Cubic-like BaTiO3 perovskite cell (5 atoms), the ordered structure most tests inspect."""
     return Atoms(
         "BaTiO3",
@@ -31,23 +31,23 @@ def positions(widget: ShowCIF) -> np.ndarray:
 
 
 def test_cif_file_and_ase_structure_expand_identically(tmp_path):
-    path = tmp_path / "bto.cif"
-    write(path, bto())
+    path = tmp_path / "perovskite.cif"
+    write(path, perovskite())
     from_file = ShowCIF(path, repeats=(2, 3, 4), zone_axis=(0, 0, 1))
-    from_atoms = ShowCIF(bto(), repeats=(2, 3, 4))
+    from_atoms = ShowCIF(perovskite(), repeats=(2, 3, 4))
     assert positions(from_file).shape == (5, 4)
     np.testing.assert_allclose(positions(from_file), positions(from_atoms), atol=1e-6)
     np.testing.assert_allclose(from_file.unit_cell, from_atoms.unit_cell)
     assert sorted(s["count"] for s in from_file.species) == [24, 24, 72]
     assert from_file.title == "BaTiO3 · Atomic structure"
-    assert from_file.source_summary.startswith("bto.cif · 5 atoms/cell")
+    assert from_file.source_summary.startswith("perovskite.cif · 5 atoms/cell")
     before = from_file.unit_atom_bytes
     from_file.visible_species = [False] * 3
     from_file.zone_axis = [1, 1, 0]
     assert from_file.unit_atom_bytes == before
 
 
-COD_STYLE_CIF = """data_bto
+COD_STYLE_CIF = """data_perovskite
 _chemical_formula_sum 'Ba O3 Ti'
 _cell_length_a 4.0
 _cell_length_b 4.0
@@ -72,7 +72,7 @@ O3 O 0 0.5 0.5
 
 def test_title_names_the_formula_the_cif_writes_else_the_hill_formula(tmp_path):
     written = tmp_path / "written.cif"
-    write(written, bto())
+    write(written, perovskite())
     cod = tmp_path / "cod.cif"
     cod.write_text(COD_STYLE_CIF)
     chloroform = Atoms("CHCl3", positions=[(0, 0, 0), (0, 0, 1.1), (1.7, 0, -0.5), (-0.9, 1.5, -0.5), (-0.9, -1.5, -0.5)], cell=[8, 8, 8], pbc=True)
@@ -88,7 +88,7 @@ def test_title_names_the_formula_the_cif_writes_else_the_hill_formula(tmp_path):
 
 
 def test_repeats_change_rebuilds_the_supercell_not_the_unit_cell():
-    original = bto()
+    original = perovskite()
     widget = ShowCIF(original, repeats=(4, 4, 8))
     unit_bytes = widget.unit_atom_bytes
     widget.repeats = [2, 3, 4]
@@ -116,15 +116,15 @@ def test_repeats_change_rebuilds_the_supercell_not_the_unit_cell():
 )
 def test_invalid_inputs_fail_before_any_atoms_are_packed(kwargs):
     with pytest.raises(ValueError):
-        ShowCIF(bto(), **kwargs)
+        ShowCIF(perovskite(), **kwargs)
 
 
 def test_partial_occupancy_and_degenerate_cells_are_refused():
-    partial = bto()
+    partial = perovskite()
     partial.info["occupancy"] = {"0": {"Ba": 0.5}}
     with pytest.raises(ValueError, match="occupancies"):
         ShowCIF(partial)
-    flat = bto()
+    flat = perovskite()
     flat.cell = [[1, 0, 0], [2, 0, 0], [0, 0, 1]]
     with pytest.raises(ValueError, match="finite 3D"):
         ShowCIF(flat)
@@ -134,7 +134,7 @@ def test_partial_occupancy_and_degenerate_cells_are_refused():
 
 
 def test_specimen_tilt_is_display_state_only():
-    atoms = bto()
+    atoms = perovskite()
     untilted = ShowCIF(atoms, repeats=(2, 2, 3))
     tilted = ShowCIF(atoms, repeats=(2, 2, 3))
     tilted.specimen_tilt_mrad = [12, -7]

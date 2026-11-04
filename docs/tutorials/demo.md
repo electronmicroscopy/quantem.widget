@@ -12,7 +12,7 @@ widget cell displays the interactive view.
 
 ShowCIF uses an explicit idealized BaTiO₃ cell. Show3D downloads a public HAADF image and builds a moving-crop
 stack. Show3DSlices uses a synthetic scalar volume. None is presented as an
-experimental BTO reconstruction or a quantitative multislice simulation.
+experimental reconstruction or a quantitative multislice simulation.
 
 ## Prepare once
 
