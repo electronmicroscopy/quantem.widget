@@ -6,22 +6,9 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
-- Add `DiffractionSim`: rotate a unit cell and see its nanobeam, CBED, or
-  Kikuchi pattern update live, with kinematical or Bloch wave intensities
-  computed in the browser, state save/load, and HTML export. Needs quantem
-  with `quantem.diffraction.Crystal` and `bloch` (quantem PR #297, first
-  release after 0.1.9). `npm run build:web` writes
-  `dist/web/diffraction-sim.js`, a framework-free build for web pages, whose
-  structure data comes from `scripts/diffraction_sim_presets.py`.
-- Drop abTEM (and the dask stack it pulled in). The ShowCIF potential preview
-  and `PlanPtycho` now take their Lobato scattering factors from quantem
-  (`quantem.diffraction.crystal`, quantem PR #297, first release after 0.1.9);
-  the `crystal` extra is now ASE, spglib and pandas. `PlanPtycho` keeps every
-  atom: abTEM lost one of 48 in the Si [112] cell and dropped atoms at
-  -1e-17 Å from the projected potential (SrTiO3 [111] was 20 % low). The
-  potential is now the exact Fourier sum of the cell on the same grid; column
-  peaks are about 1 % below abTEM's, whose bilinear atom spreading and sinc
-  correction do not cancel.
+- Add `DiffractionSim`: rotate a unit cell and see its nanobeam, CBED or Kikuchi pattern update live, with kinematical or Bloch wave intensities computed in the browser, state save/load, and HTML export. It needs quantem 0.1.10 or later (`quantem.diffraction.Crystal` and `bloch`).
+- Add `quantem.diffsim`, a separate PyPI package with no dependencies, built from `packages/quantem.diffsim`: the browser build of DiffractionSim (`npm run build:web`) for web pages and Dash apps, with `settings()` and `save_html()` for pymatgen, ASE or CIF structures and `quantem.diffsim.dash` for Dash. A page can pass its structure as CIF text, which replaces the structure menu, and shows a "Powered by quantEM" link to the quantEM documentation. CIFs loaded in the browser now get the absorptive Weickenmeier-Kohl couplings with a Debye-Waller factor, ported from quantem, instead of an absorption fixed at 8 % of the elastic coupling, which was up to 5 times too strong for the low-order reflections of light elements and up to 4 times too weak for the high-order reflections of gold.
+- Drop abTEM. The ShowCIF potential preview takes its Lobato scattering factors from quantem (the tables agree with abTEM's to 1e-4), so the `crystal` extra is now empty and kept only so existing install lines work.
 - ShowPtycho's trial strip lists the default fit's trials (model agreement, each with its own sample tilt and depth spread) as well as phase-variance ones; it showed only phase-variance trials, so it was empty for every default fit. Each tile names its objective and score (agreement higher is better, phase variance lower), trials rank within one objective, and clicking a trial applies its optics and sample model.
 - Show4DSTEM Compute SSB runs quantem.gpu's default fit, the SSB model with the sample tilt and depth spread (tilt-corrected); it ran the tilt-0 fit with Nelder-Mead. `compute_ssb(tilt=False)` fits the same model at tilt 0 and `compute_ssb(tilt=False, objective="phase_variance")` is the older phase-variance SSB; the new **Fit** menu (`ssb_compute_tilt`, `ssb_compute_objective`) picks one of the three, and the record names the `objective`. `refinement` takes quantem.gpu's `"auto"` (default), `"newton"`, `"nelder-mead"` or None, and the record names the optimizer that ran. Locks in the tilt-corrected fit are quantem.gpu's `fixed_aberrations` (C10 alone, C12 at 0 alone, or both locks for all three). A manual recompute keeps the fitted tilt and depth spread. Record `quantem.show4dstem-ssb-calibration/3` adds `tilt`, `sample_tilt_mrad`, `depth_spread_nm` and `tilt_fit_gain`; `scripts/rewrite_ssb_calibration.py` carries /2 files over as tilt 0.
 - Show4DSTEM places its BF, ABF, ADF and HAADF presets on the bright-field disk `data.calibration.fit_detector_sampling()` recorded, else on the same fit (`quantem.gpu.detector.fit_bright_field_disk`): the radius is now the disk edge, where the convergence semiangle sits, instead of the equal-area circle above mean + std (the presets of a blurred disk move by a few percent). A disk given as `bright_field_center_px` / `bright_field_radius_px` still wins.

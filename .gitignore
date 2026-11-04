@@ -16,6 +16,7 @@ js/.generated/
 src/quantem/widget/static/*.js
 src/quantem/widget/static/*.css
 src/quantem/widget/static/engine-manifest.json
+packages/quantem.diffsim/src/quantem/diffsim/static/*.js
 
 # Docs build
 docs/_build/

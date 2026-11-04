@@ -20,6 +20,11 @@
 //   axes), show_hkl, show_kikuchi (default true), polyhedra, n_cells, power (brightness exponent,
 //   default 0.5 = square root of the intensity), vmax (upper end of the contrast window, default 0.5
 //   of the strongest diffracted beam), energy_keV, field_mrad, rotation_speed_deg_per_s, show_ewald.
+// A host page that shows one structure (a Dash app, a materials database page) passes it as
+//   cif (CIF text; the structure menu and the CIF button are then hidden), structure_name (its name in
+//   the status line), title (the heading, default "Electron diffraction simulator"),
+// and for any page: thermal_sigma_A (RMS thermal displacement of CIF structures, default 0.05 Å) and
+//   show_logo (the "Powered by quantEM" link to the quantEM documentation, default true).
 // Earlier option names are still read: semiconv_mrad, pattern_range, size, energy_ev,
 // rotation_speed_deg.
 //
@@ -37,7 +42,10 @@ import {
 } from "../diffractionsim/pattern";
 import { normalizeMode } from "../diffractionsim/mode";
 import { ENERGY_EV, PRESETS } from "./presets";
-import { ParsedCif, crystalFromCif, parseCif } from "./cif";
+import { ParsedCif, THERMAL_SIGMA_A, crystalFromCif, parseCif } from "./cif";
+import { QUANTEM_LOGO_SVG } from "./logo";
+
+const QUANTEM_DOCS_URL = "https://electronmicroscopy.github.io/quantem-docs/";
 
 const DIRECT: Reflection = { index: -1, hkl: [0, 0, 0], g: [0, 0, 0], gLen: 0, s: 0 };
 const SG_MAX = 0.05;
@@ -57,13 +65,21 @@ function fmtIndices(v: [number, number, number] | null, hexagonal = false): stri
   return "[" + idx.map((h) => (h < 0 ? `${-h}̅` : `${h}`)).join("") + "]";
 }
 
-function detectDark(): boolean {
+/** Dark theme: the MyST "dark" / "light" class, else the first opaque background behind the
+ *  widget, else the browser canvas, which is dark only when the page opts into a dark color scheme. */
+function detectDark(el: HTMLElement): boolean {
   const de = document.documentElement;
   if (de.classList.contains("dark")) return true;
   if (de.classList.contains("light")) return false;
   try {
-    const m = getComputedStyle(document.body).backgroundColor.match(/\d+/g);
-    if (m && m.length >= 3) return (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255 < 0.5;
+    for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+      const m = getComputedStyle(node).backgroundColor.match(/[\d.]+/g);
+      // rgba(0, 0, 0, 0) is the transparent default, not black
+      if (m && m.length >= 3 && (m.length < 4 || +m[3] > 0)) return (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255 < 0.5;
+    }
+    const scheme = getComputedStyle(de).colorScheme || "normal";
+    if (!scheme.includes("dark")) return false;
+    if (!scheme.includes("light")) return true;
   } catch (e) { /* ignore */ }
   return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
 }
@@ -75,10 +91,22 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
   };
   const id = "dsim-" + Math.random().toString(36).slice(2, 8);
   const names = Object.keys(PRESETS);
+  const thermalSigma = opt("thermal_sigma_A", THERMAL_SIGMA_A) as number;
+  // a structure passed by the host page replaces the structure menu
+  const hostCif = opt("cif", "") as string;
+  let host: ParsedCif | null = null;
+  let hostError = "";
+  if (hostCif) {
+    try {
+      host = parseCif(hostCif, opt("structure_name", "") || "structure");
+    } catch (err) {
+      hostError = `could not read the structure: ${(err as Error).message}`;
+    }
+  }
 
   // ---------------------------------------------------------------- state
   const state = {
-    preset: names.includes(opt("preset", "")) ? opt("preset", "") : names[0],
+    preset: host ? host.name : names.includes(opt("preset", "")) ? opt("preset", "") : names[0],
     mode: normalizeMode(opt("mode", "cbed"), "cbed") as string,
     dynamical: opt("dynamical", true) as boolean,
     thickness: opt("thickness_A", 400) as number,
@@ -110,9 +138,10 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
   if (!ENERGIES.includes(state.energy)) ENERGIES.push(state.energy);
   ENERGIES.sort((a, b) => a - b);
   const cifs = new Map<string, ParsedCif>(); // structures loaded from CIF files, by menu name
+  if (host) cifs.set(host.name, host);
   const loadCrystal = (name: string, energy: number): CrystalData => {
     const cif = cifs.get(name);
-    if (cif) return crystalFromCif(cif, energy, 3.0);
+    if (cif) return crystalFromCif(cif, energy, 3.0, thermalSigma);
     return parseCrystal(PRESETS[name], energy)!;
   };
   let crystal: CrystalData = loadCrystal(state.preset, state.energy);
@@ -178,20 +207,24 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
     .${id}-hist { display: block; border: 1px solid var(--${id}-border, #444); border-radius: 3px; cursor: ew-resize; touch-action: none; }
     .${id}-histwrap { display: flex; flex-direction: column; gap: 2px; }
     .${id}-histwrap .${id}-hint { display: flex; justify-content: space-between; font-family: ui-monospace, Menlo, monospace; }
+    .${id}-footer { display: flex; justify-content: flex-end; margin-top: 4px; }
+    .${id}-powered { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--${id}-dim, #777); text-decoration: none; }
+    .${id}-powered:hover { color: var(--${id}-fg, #ccc); }
+    .${id}-powered svg { height: 44px; width: auto; color: var(--${id}-title, #ddd); }
   `;
   el.appendChild(style);
 
   const wrap = document.createElement("div");
   wrap.className = `${id}-wrap`;
-  const presetOptions = names.map((n) => `<option value="${n}"${n === state.preset ? " selected" : ""}>${n}</option>`).join("");
+  const presetOptions = (host ? [host.name, ...names] : names).map((n) => `<option value="${n}"${n === state.preset ? " selected" : ""}>${n}</option>`).join("");
   wrap.innerHTML = `
     <div class="${id}-titlerow">
-      <div class="${id}-title">Electron diffraction simulator</div>
-      <div class="${id}-btn" id="${id}-cifbtn" title="Load a crystal structure from a CIF file">load CIF…</div>
+      <div class="${id}-title" id="${id}-title"></div>
+      <div class="${id}-btn" id="${id}-cifbtn" title="Load a crystal structure from a CIF file"${host ? ' style="display:none"' : ""}>load CIF…</div>
       <input type="file" class="${id}-file" id="${id}-ciffile" accept=".cif,.CIF,text/plain">
     </div>
     <div class="${id}-top">
-      <label>structure <select id="${id}-preset">${presetOptions}</select></label>
+      <label${host ? ' style="display:none"' : ""}>structure <select id="${id}-preset">${presetOptions}</select></label>
       <label>zone axis <input type="text" id="${id}-zone" size="8" placeholder="1 1 0"></label>
       <div class="${id}-btn" id="${id}-go">go</div>
       <div class="${id}-btn" id="${id}-reset">reset</div>
@@ -265,9 +298,12 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
         </div>
       </div>
     </div>
+    ${opt("show_logo", true) ? `<div class="${id}-footer"><a class="${id}-powered" href="${QUANTEM_DOCS_URL}" target="_blank" rel="noopener" title="quantEM documentation">Powered by ${QUANTEM_LOGO_SVG.replace(/clip-(\d+)/g, `${id}-clip-$1`)}</a></div>` : ""}
   `;
   el.appendChild(wrap);
   const $ = <T extends HTMLElement>(sel: string) => wrap.querySelector(sel) as T;
+  // a host structure that cannot be read leaves the preset menu in place and says why in the heading
+  $(`#${id}-title`).textContent = (opt("title", "") || "Electron diffraction simulator") + (hostError ? ` (${hostError})` : "");
   const cellCanvas = $<HTMLCanvasElement>(`#${id}-cell`);
   const ewaldCanvas = $<HTMLCanvasElement>(`#${id}-ewaldc`);
   const patCanvas = $<HTMLCanvasElement>(`#${id}-pat`);
@@ -277,9 +313,9 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
     dark: { bg: "#111", fg: "#ccc", title: "#ddd", label: "#aaa", dim: "#777", btnbg: "#222", btnhover: "#333", border: "#444", cellbg: "#161616" },
     light: { bg: "#f4f6f3", fg: "#333", title: "#1f1f1f", label: "#556", dim: "#777", btnbg: "#ffffff", btnhover: "#e9ebe6", border: "#d3d6d0", cellbg: "#fbfbfa" },
   };
-  let dark = detectDark();
+  let dark = detectDark(el);
   const applyTheme = () => {
-    dark = detectDark();
+    dark = detectDark(el);
     const p = palettes[dark ? "dark" : "light"];
     for (const k in p) wrap.style.setProperty(`--${id}-${k}`, (p as Record<string, string>)[k]);
     drawAll();
@@ -780,7 +816,7 @@ export function render({ model, el }: { model: Model; el: HTMLElement }) {
       geomKey = "";
       setZoneAxis(crystal.hexagonal ? [0, 0, 1] : [1, 1, 0]);
       recompute();
-      $(`#${id}-status`).textContent = `${menuName}: ${parsed.symbols.length} atoms in the cell, ${parsed.spacegroup || "symmetry from the file"}, ${crystal.hkl.length} reflections out to ${crystal.k_max.toFixed(2)} Å⁻¹${crystal.k_max < 3 ? " (reduced for this cell size)" : ""}; absorption approximated as 8 % of the potential`;
+      $(`#${id}-status`).textContent = `${menuName}: ${parsed.symbols.length} atoms in the cell, ${parsed.spacegroup || "symmetry from the file"}, ${crystal.hkl.length} reflections out to ${crystal.k_max.toFixed(2)} Å⁻¹${crystal.k_max < 3 ? " (reduced for this cell size)" : ""}; absorptive Weickenmeier-Kohl couplings, ${thermalSigma} Å thermal displacement`;
     } catch (err) {
       $(`#${id}-status`).textContent = `could not read ${file.name}: ${(err as Error).message}`;
     }

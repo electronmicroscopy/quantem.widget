@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quantem.diffsim"
+version = "0.1.0"
+description = "Interactive electron diffraction simulator for web pages and Dash apps, computed in the browser"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+# No runtime dependencies: every calculation runs in the browser. pymatgen or ASE structures are
+# converted to CIF when either is installed; quantem.diffsim.dash needs Dash.
+dependencies = []
+
+[project.optional-dependencies]
+dash = ["dash>=2.11"]
+
+[project.urls]
+Documentation = "https://electronmicroscopy.github.io/quantem-docs/"
+Source = "https://github.com/electronmicroscopy/quantem.widget/tree/main/packages/quantem.diffsim"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantem"]
+# built by `npm run build:web` in the repository root, not tracked
+artifacts = ["src/quantem/diffsim/static/*.js"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["src/quantem/diffsim/static/*.js"]
