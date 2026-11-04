@@ -4,20 +4,21 @@
  * structure factors (Lobato & Van Dyck electron scattering factors, see
  * lobato.ts) and Bloch couplings on the reciprocal lattice out to k_max.
  *
- * Approximation: the absorptive part of the potential is not computed here.
- * It is a fixed fraction of the elastic coupling (ABSORPTION_FRACTION =
- * 0.08), which damps the thickness fringes at a plausible rate but is not a
- * calculated absorption. The preset structures carry the absorptive
- * Weickenmeier-Kohl factors computed in Python by quantem (Weickenmeier &
- * Kohl, Acta Cryst. A 47, 590-597 (1991),
- * https://doi.org/10.1107/S0108767391004774).
+ * The couplings use the absorptive Weickenmeier-Kohl scattering factors with
+ * a Debye-Waller factor (wk.ts), as quantem computes them in Python for the
+ * preset structures, so a CIF of a preset gives the same couplings.
  */
 
 import type { CrystalData } from "../diffractionsim/physics";
-import { relativisticGamma, electronWavelength } from "../diffractionsim/physics";
+import { electronWavelength } from "../diffractionsim/physics";
 import { LOBATO } from "./lobato";
+import { hasWkFactors, wkFactor } from "./wk";
 
-const ABSORPTION_FRACTION = 0.08;
+/** RMS thermal displacement (A) of the couplings, quantem's default. */
+export const THERMAL_SIGMA_A = 0.05;
+// The Weickenmeier-Kohl factors of each species are tabulated on this |g| step (1/A) and
+// interpolated linearly, which keeps them within about 1e-5 of the direct evaluation.
+const WK_STEP = 0.0025;
 
 const SYMBOLS = ["", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"];
 
@@ -257,15 +258,29 @@ export function kMaxForCell(p: ParsedCif, kMaxRequested: number): number {
   return Math.min(kMaxRequested, Math.floor(kBudget * 20) / 20);
 }
 
-/** Build the simulator's crystal data from a parsed CIF at an energy and k_max (1/A). */
-export function crystalFromCif(p: ParsedCif, energyEv: number, kMaxRequested: number): CrystalData {
+/** [real, imaginary] Weickenmeier-Kohl factor of one species at |g|, from a table on WK_STEP. */
+function wkTable(sym: string, kMax: number, energyEv: number, sigma: number): (g: number) => [number, number] {
+  const Z = SYMBOLS.indexOf(sym);
+  if (!hasWkFactors(Z)) throw new Error(`no Weickenmeier-Kohl scattering factors for ${sym}`);
+  const n = Math.ceil(kMax / WK_STEP) + 2;
+  const re = new Float64Array(n), im = new Float64Array(n);
+  for (let i = 0; i < n; i++) [re[i], im[i]] = wkFactor(i * WK_STEP, Z, energyEv, sigma);
+  return (g) => {
+    const x = g / WK_STEP, i = Math.min(Math.floor(x), n - 2), t = x - i;
+    return [re[i] + t * (re[i + 1] - re[i]), im[i] + t * (im[i + 1] - im[i])];
+  };
+}
+
+/** Build the simulator's crystal data from a parsed CIF at an energy (eV), k_max (1/A) and
+ *  RMS thermal displacement (A) of the Debye-Waller factor and the phonon absorption. */
+export function crystalFromCif(p: ParsedCif, energyEv: number, kMaxRequested: number, thermalSigma = THERMAL_SIGMA_A): CrystalData {
   const kMax = kMaxForCell(p, kMaxRequested);
   const cell = p.cell;
   const inv = inv3(cell); // columns of inv = reciprocal vectors; recip rows b_i = inv^T rows
   const recip = [[inv[0][0], inv[1][0], inv[2][0]], [inv[0][1], inv[1][1], inv[2][1]], [inv[0][2], inv[1][2], inv[2][2]]];
   const volume = Math.abs(cell[0][0] * (cell[1][1] * cell[2][2] - cell[1][2] * cell[2][1]) - cell[0][1] * (cell[1][0] * cell[2][2] - cell[1][2] * cell[2][0]) + cell[0][2] * (cell[1][0] * cell[2][1] - cell[1][1] * cell[2][0]));
-  const gamma = relativisticGamma(energyEv);
   const species = [...new Set(p.symbols)];
+  const wk = new Map(species.map((sym) => [sym, wkTable(sym, kMax, energyEv, thermalSigma)]));
   const nmax = recip.map((b) => Math.ceil(kMax / Math.hypot(b[0], b[1], b[2])) + 1);
   const hkl: number[][] = [];
   const g = new Float32Array(0);
@@ -283,33 +298,36 @@ export function crystalFromCif(p: ParsedCif, energyEv: number, kMaxRequested: nu
     const gz = h * recip[0][2] + k * recip[1][2] + l * recip[2][2];
     const gl = Math.hypot(gx, gy, gz);
     if (gl > kMax || isCentered(h, k, l)) continue;
-    // structure factor F = sum f_j occ_j exp(-2 pi i g.r_j) / V  (quantem convention)
-    let re = 0, im = 0;
+    // structure factor F = sum f_j occ_j exp(-2 pi i g.r_j) / V  (quantem convention), and the
+    // coupling U = sum (f'_j + i f''_j) occ_j exp(-2 pi i g.r_j) / V from the absorptive WK factors
+    let re = 0, im = 0, ure = 0, uim = 0;
     const gk = gl.toFixed(5);
     for (const s of species) {
       const key = s + gk;
       let f = fCache.get(key);
       if (f === undefined) { f = scatteringFactor(s, gl); fCache.set(key, f); }
+      const [fr, fi] = wk.get(s)!(gl);
       for (let j = 0; j < p.symbols.length; j++) {
         if (p.symbols[j] !== s) continue;
         const ph = -2 * Math.PI * (h * p.positions[j][0] + k * p.positions[j][1] + l * p.positions[j][2]);
-        re += f * p.occupancy[j] * Math.cos(ph);
-        im += f * p.occupancy[j] * Math.sin(ph);
+        const c = p.occupancy[j] * Math.cos(ph), sn = p.occupancy[j] * Math.sin(ph);
+        re += f * c;
+        im += f * sn;
+        ure += fr * c - fi * sn;
+        uim += fr * sn + fi * c;
       }
     }
     re /= volume; im /= volume;
     hkl.push([h, k, l]);
     gList.push(gx, gy, gz);
     F2.push(re * re + im * im);
-    // coupling U = gamma F / pi, plus an absorptive part i * fraction * U (same phase)
-    const ur = (gamma * re) / Math.PI, ui = (gamma * im) / Math.PI;
-    Ure.push(ur - ABSORPTION_FRACTION * ui);
-    Uim.push(ui + ABSORPTION_FRACTION * ur);
+    Ure.push(ure / volume);
+    Uim.push(uim / volume);
   }
   void g;
-  let f0 = 0;
-  for (let j = 0; j < p.symbols.length; j++) f0 += scatteringFactor(p.symbols[j], 0) * p.occupancy[j];
-  const u0 = (gamma * f0) / (Math.PI * volume);
+  // mean absorption: the imaginary part of U_000
+  let u0Imag = 0;
+  for (let j = 0; j < p.symbols.length; j++) u0Imag += wk.get(p.symbols[j])!(0)[1] * p.occupancy[j];
   const couplingRe = new Map<string, number>();
   const couplingIm = new Map<string, number>();
   for (let i = 0; i < hkl.length; i++) {
@@ -335,7 +353,7 @@ export function crystalFromCif(p: ParsedCif, energyEv: number, kMaxRequested: nu
     U_im: Float32Array.from(Uim),
     couplingRe,
     couplingIm,
-    u0_imag: ABSORPTION_FRACTION * u0,
+    u0_imag: u0Imag / volume,
     absorptive: true,
     energy_ev: energyEv,
     wavelength: electronWavelength(energyEv),
