@@ -12,7 +12,9 @@ its CPU renderer, which `hardware_adapter` rejects):
 Chrome is pointed at the NVIDIA Vulkan driver when it exists, so WebGPU runs
 on the hardware adapter instead of Chrome's bundled CPU renderer. The tier
 refuses to start on a stale frontend: a widget bundle older than the js/
-sources, or a quantem.widget imported from outside this checkout.
+sources, or a quantem.widget imported from outside this checkout, by the
+tests or by the notebook kernel (a relative PYTHONPATH is made absolute
+for the kernel, which starts in another directory).
 """
 
 import functools
@@ -206,6 +208,17 @@ class JupyterLab:
         # An empty config dir keeps the user's Jupyter config (save hooks, extensions) out of the run.
         env = {**os.environ, "JUPYTER_PATH": str(root / "jupyter"), "JUPYTER_RUNTIME_DIR": str(self.runtime),
                "JUPYTER_CONFIG_DIR": str(root / "config"), "JUPYTERLAB_SETTINGS_DIR": str(settings)}
+        # Kernels start in the notebook root, not this cwd: a relative PYTHONPATH (PYTHONPATH=src) would
+        # point nowhere there, and the kernel would import another quantem.widget (an editable install
+        # elsewhere, with older bundles) while the tests import this checkout's.
+        if env.get("PYTHONPATH"):
+            env["PYTHONPATH"] = os.pathsep.join(
+                str(Path(entry).resolve()) for entry in env["PYTHONPATH"].split(os.pathsep) if entry)
+        kernel_import = subprocess.run(
+            [sys.executable, "-c", "import quantem.widget; print(quantem.widget.__file__)"],
+            cwd=root, env=env, capture_output=True, text=True, check=True).stdout.strip()
+        if not Path(kernel_import).resolve().is_relative_to(JS_SOURCES.parent / "src"):
+            pytest.fail(f"The notebook kernel imports quantem.widget from {kernel_import}, not this checkout's src/")
         self.server = subprocess.Popen(
             [sys.executable, "-m", "jupyterlab", "--no-browser", f"--port={port}", "--ip=127.0.0.1",
              "--ServerApp.token=", "--ServerApp.password=", "--ServerApp.disable_check_xsrf=True",
