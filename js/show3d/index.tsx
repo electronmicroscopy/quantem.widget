@@ -8596,8 +8596,40 @@ function Show3D() {
     beginPan(e);
   };
 
+  // One finger drives the active tool (profile line, ROI, lens) through the same handlers as the mouse: a touch drag
+  // sends no mouse events, so these tools did nothing on a phone. Two fingers still pinch and pan the view.
+  const toolTouchRef = React.useRef(false);
+  const touchAsMouse = (touch: React.Touch, e: React.TouchEvent) => ({
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    button: 0,
+    buttons: 1,
+    shiftKey: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    detail: 1,
+    currentTarget: e.currentTarget,
+    target: e.target,
+    nativeEvent: e.nativeEvent,
+    preventDefault: () => e.preventDefault(),
+    stopPropagation: () => e.stopPropagation(),
+  }) as unknown as React.MouseEvent;
   const handleCanvasTouchStart = (e: React.TouchEvent) => {
-    if (profileActive || effectiveRoiActive) return;
+    const toolActive = profileActive || effectiveRoiActive || showLens;
+    if (toolActive && e.touches.length === 1) {
+      e.preventDefault();
+      toolTouchRef.current = true;
+      handleCanvasMouseMove(touchAsMouse(e.touches[0], e));
+      handleCanvasMouseDown(touchAsMouse(e.touches[0], e));
+      return;
+    }
+    if (toolTouchRef.current && e.touches.length >= 2) {
+      // a second finger turns the tool gesture into a pinch: end the tool drag where the first finger is
+      handleCanvasMouseUp(touchAsMouse(e.touches[0], e));
+      toolTouchRef.current = false;
+    }
+    if ((profileActive || effectiveRoiActive) && e.touches.length < 2) return;
     if (e.touches.length === 1) {
       const touch = e.touches[0];
       const panelIdx = panelIdxFromClient(touch.clientX, touch.clientY);
@@ -8629,6 +8661,11 @@ function Show3D() {
   };
 
   const handleCanvasTouchMove = (e: React.TouchEvent) => {
+    if (toolTouchRef.current && e.touches.length === 1) {
+      e.preventDefault();
+      handleCanvasMouseMove(touchAsMouse(e.touches[0], e));
+      return;
+    }
     const start = touchTransformRef.current;
     if (!start) return;
     const canvas = canvasRef.current;
@@ -8668,6 +8705,13 @@ function Show3D() {
   };
 
   const handleCanvasTouchEnd = (e: React.TouchEvent) => {
+    if (toolTouchRef.current) {
+      if (e.touches.length > 0) return;
+      const last = e.changedTouches[0];
+      if (last) handleCanvasMouseUp(touchAsMouse(last, e));
+      toolTouchRef.current = false;
+      return;
+    }
     if (e.touches.length > 0 || !touchTransformRef.current) return;
     commitLivePanelTransforms();
     touchTransformRef.current = null;
@@ -12154,7 +12198,7 @@ function Show3D() {
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}>
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, flexShrink: 0 }}>fps</Typography>
-                    <Slider value={playbackFps} min={1} max={MAX_PLAYBACK_FPS} step={1} onChange={(_, v) => setPlaybackFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: isMobileViewport ? 40 : 44, mx: isMobileViewport ? "3px" : 0, flexShrink: 0 }} aria-label="Playback frames per second" valueLabelDisplay="auto" />
+                    <Slider value={playbackFps} min={1} max={MAX_PLAYBACK_FPS} step={1} onChange={(_, v) => setPlaybackFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: isMobileViewport ? 72 : 44, mx: isMobileViewport ? "6px" : 0, flexShrink: 0 }} aria-label="Playback frames per second" valueLabelDisplay="auto" />
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, minWidth: isMobileViewport ? 16 : 20, flexShrink: 0 }}>{Math.round(playbackFps)}</Typography>
                   </Box>
                   <Box

@@ -101,5 +101,10 @@ export const sliderStyles = {
     "& .MuiSlider-rail": { height: 2, borderRadius: 0 },
     "& .MuiSlider-track": { height: 2, borderRadius: 0 },
     "& .MuiSlider-valueLabel": { borderRadius: 0 },
+    // A finger needs a taller strip and a larger thumb than a mouse; desktop layout keeps the compact rows.
+    "@media (pointer: coarse)": {
+      py: "14px",
+      "& .MuiSlider-thumb": { width: 18, height: 18 },
+    },
   },
 };
