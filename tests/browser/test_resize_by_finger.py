@@ -8,6 +8,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.browser
+
 WIDGETS = {
     "show2d": "from quantem.widget import Show2D\nShow2D(np.random.default_rng(0).random((64, 64)))",
     "show3d": "from quantem.widget import Show3D\nShow3D(np.random.default_rng(0).random((6, 64, 64)))",
