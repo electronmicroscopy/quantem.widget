@@ -1497,6 +1497,8 @@ function Show3D() {
     touchAction: "none",
     zIndex: 5,
     "&:hover": { opacity: 1 },
+    // A finger needs about 44 px: the grip stays 16 px drawn, its hit area grows on touch screens.
+    "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } },
   }), [themeColors.accent]);
   const [statsMean] = useModelState<number>("stats_mean");
   const [statsMin] = useModelState<number>("stats_min");
@@ -4153,9 +4155,11 @@ function Show3D() {
     setLogScale(nextLogScale);
   }, [logScale, setLogScale, setVmaxPerPanel, setVminPerPanel]);
 
+  // Frame labels for the per-panel titles, written straight to the page while playing (set beside frameLabelForIndex).
+  const frameLabelForIndexRef = React.useRef<((idx: number) => string) | undefined>(undefined);
   const updatePlaybackLiveControls = React.useCallback((idx: number) => {
     const settings = playRef.current;
-    writeLiveFrameControls(rootRef.current, playbackSliderRef.current, playbackLiveCountRef.current, idx, Math.max(1, settings.nSlices || nSlices || 1), settings.loop);
+    writeLiveFrameControls(rootRef.current, playbackSliderRef.current, playbackLiveCountRef.current, idx, Math.max(1, settings.nSlices || nSlices || 1), settings.loop, frameLabelForIndexRef.current);
   }, [nSlices]);
 
   const viewportTransformActive = React.useCallback(() => {
@@ -4973,7 +4977,11 @@ function Show3D() {
       const settings = playRef.current;
       const effectiveFps = clampPlaybackFps(settings.fps);
       const intervalMs = playbackIntervalMs(effectiveFps);
-      const uiUpdateIntervalMs = effectiveFps >= 60 ? 250 : 100;
+      // React commits (stats, histogram, star state) once a second while playing: each commit renders the whole
+      // viewer, and at 10 per second they were most of the main-thread time a frame cost (18.5 of 18.5 ms vs 3.5 ms
+      // under a 4x CPU throttle, three 512 px panels). The slider, counters and frame labels are written straight
+      // to the page every frame by updatePlaybackLiveControls.
+      const uiUpdateIntervalMs = 1000;
 
       // First tick paints immediately; otherwise every playback start drops
       // one frame before the cadence timer is even allowed to run.
@@ -6956,7 +6964,7 @@ function Show3D() {
   // Profile height resize
   React.useEffect(() => {
     if (!isResizingProfile) return;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (e: PointerEvent) => {
       if (!profileResizeStart) return;
       const delta = e.clientY - profileResizeStart.y;
       setProfileHeight(Math.max(40, Math.min(300, profileResizeStart.height + delta)));
@@ -6965,11 +6973,13 @@ function Show3D() {
       setIsResizingProfile(false);
       setProfileResizeStart(null);
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizingProfile, profileResizeStart]);
 
@@ -9717,9 +9727,15 @@ function Show3D() {
   };
 
   // Resize handlers
-  const handleMainResizeStart = (e: React.MouseEvent) => {
+  // Pointer events with capture, so a mouse, a finger (Galaxy Fold, touch laptops) and a pen all drag the grip:
+  // mouse events alone never arrive for a touch drag.
+  const handleMainResizeStart = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
+    const grip = e.currentTarget;
+    const pointerId = e.pointerId;
+    try { grip.setPointerCapture(pointerId); } catch { /* capture is best effort */ }
     const rect = canvasContainerRef.current?.getBoundingClientRect();
     const startSize = rect && rect.width > 0 ? rect.width : mainCanvasSize;
     const startX = e.clientX;
@@ -9727,7 +9743,8 @@ function Show3D() {
     const visiblePanels = Math.max(1, visiblePanelCount || 1);
     let rafId = 0;
     let latestSize = startSize;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
       const delta = Math.max(e.clientX - startX, e.clientY - startY);
       const nextSize = startSize + delta;
       // Absolute minimum: 200 px per panel column. Lets reader shrink BELOW
@@ -9743,16 +9760,20 @@ function Show3D() {
         });
       }
     };
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
       cancelAnimationFrame(rafId);
       setMainCanvasSize(latestSize);
       const colsLocal = panelColsForCount(visiblePanels);
       setCanvasSizeTrait(Math.round(latestSize / colsLocal));
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
+      try { grip.releasePointerCapture(pointerId); } catch { /* already released */ }
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
   };
 
   const clampSlice = (idx: number) => Math.max(0, Math.min(nSlices - 1, Math.round(idx)));
@@ -9763,6 +9784,7 @@ function Show3D() {
     if (!text || text === String(idx) || text === String(idx + 1)) return "";
     return text;
   }, [labels]);
+  frameLabelForIndexRef.current = frameLabelForIndex;
   const formatFrameValueLabel = React.useCallback((idx: number) => {
     const rounded = clampSlice(idx);
     const label = frameLabelForIndex(rounded);
@@ -11446,7 +11468,7 @@ function Show3D() {
                     overflowWrap: "anywhere",
                   }}
                 >
-                  {panelTitleContent(panel)}{frameLabel ? ` · ${frameLabel}` : ""}{" "}
+                  {panelTitleContent(panel)}<span key={`label-${shownIdx}`} data-show3d-panel-frame-label="true">{frameLabel ? ` · ${frameLabel}` : ""}</span>{" "}
                   <span key={`${shown}/${total}`} data-show3d-panel-frame-count="true" data-real-frame-count={total}>
                     {`${shown}/${total}`}
                   </span>
@@ -11740,7 +11762,7 @@ function Show3D() {
                 return (
                   <Box
                       key={`resize-${panel}`}
-                      onMouseDown={handleMainResizeStart}
+                      onPointerDown={handleMainResizeStart}
                       title="Resize panels"
                       sx={{
                         position: "absolute",
@@ -11910,8 +11932,8 @@ function Show3D() {
               />
               {showResizeControls && (
                 <div
-                  onMouseDown={(e) => { e.preventDefault(); setIsResizingProfile(true); setProfileResizeStart({ y: e.clientY, height: profileHeight }); }}
-                  style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
+                  onPointerDown={(e) => { e.preventDefault(); setIsResizingProfile(true); setProfileResizeStart({ y: e.clientY, height: profileHeight }); }}
+                  style={{ width: "100%", height: 4, cursor: "ns-resize", touchAction: "none", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
                 />
               )}
             </Box>
@@ -12391,7 +12413,7 @@ function Show3D() {
               <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
               <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * dpr)} height={Math.round(previewCanvasDims.h * dpr)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
               {showResizeControls && (
-                <Box onMouseDown={handleMainResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, ...resizeGripSx }} />
+                <Box onPointerDown={handleMainResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, ...resizeGripSx }} />
               )}
             </Box>
             {/* All-ROI Stats - one row per ROI, same style as main stats bar */}
@@ -12559,7 +12581,7 @@ function Show3D() {
                   return (
                     <Box
                       key={`fft-resize-${panel}`}
-                      onMouseDown={handleMainResizeStart}
+                      onPointerDown={handleMainResizeStart}
                       title="Resize FFT panels"
                       sx={{
                         position: "absolute",

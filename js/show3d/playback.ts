@@ -42,6 +42,7 @@ export function writeLiveFrameControls(
   idx: number,
   total: number,
   loop: boolean,
+  labelFor?: (idx: number) => string,
 ): void {
   const clamped = Math.max(0, Math.min(total - 1, Math.round(idx)));
   const pct = total > 1 ? (clamped / (total - 1)) * 100 : 0;
@@ -63,6 +64,12 @@ export function writeLiveFrameControls(
     const panelTotal = Math.max(1, Math.round(Number(el.dataset.realFrameCount || total) || total));
     el.textContent = `${Math.min(clamped + 1, panelTotal)}/${panelTotal}`;
   });
+  if (labelFor) {
+    const label = labelFor(clamped);
+    root?.querySelectorAll<HTMLElement>("[data-show3d-panel-frame-label]").forEach((el) => {
+      el.textContent = label ? ` · ${label}` : "";
+    });
+  }
 }
 
 /**

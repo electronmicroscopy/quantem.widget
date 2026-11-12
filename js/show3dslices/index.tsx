@@ -2106,7 +2106,9 @@ function Show3DSlices() {
   // -------------------------------------------------------------------------
   const volumeResizeRafRef = React.useRef(0);
 
-  const handleVolumeResizeStart = (event: React.MouseEvent) => {
+  // Pointer events, so a finger or a pen drags the grip as a mouse does.
+  const handleVolumeResizeStart = (event: React.PointerEvent) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
     event.stopPropagation(); event.preventDefault();
     setVolumeResizing(true);
     volumeResizeStartRef.current = { x: event.clientX, y: event.clientY, size: volumeCanvasSize };
@@ -2115,7 +2117,7 @@ function Show3DSlices() {
   React.useEffect(() => {
     if (!volumeResizing) return;
     let latestSize = volumeCanvasSize;
-    const onMove = (event: MouseEvent) => {
+    const onMove = (event: PointerEvent) => {
       const start = volumeResizeStartRef.current;
       if (!start) return;
       const delta = Math.max(event.clientX - start.x, event.clientY - start.y);
@@ -2140,9 +2142,10 @@ function Show3DSlices() {
       setVolumeResizing(false);
       volumeResizeStartRef.current = null;
     };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+    return () => { document.removeEventListener("pointermove", onMove); document.removeEventListener("pointerup", onUp); document.removeEventListener("pointercancel", onUp); };
   }, [persistViewState, volumeCanvasSize, volumeResizing]);
 
   const cameraChanged = camera.yaw !== SHOW3DSLICES_DEFAULT_CAMERA.yaw || camera.pitch !== SHOW3DSLICES_DEFAULT_CAMERA.pitch || (camera.roll ?? 0) !== (SHOW3DSLICES_DEFAULT_CAMERA.roll ?? 0) || camera.distance !== SHOW3DSLICES_DEFAULT_CAMERA.distance || camera.panX !== SHOW3DSLICES_DEFAULT_CAMERA.panX || camera.panY !== SHOW3DSLICES_DEFAULT_CAMERA.panY;
@@ -3911,6 +3914,8 @@ function Show3DSlices() {
     cursor: "nwse-resize", opacity: 0.6,
     background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
     touchAction: "none",
+    // A finger needs about 44 px: the grip stays 16 px drawn, its hit area grows on touch screens.
+    "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } },
     zIndex: 5,
     "&:hover": { opacity: 1 },
   };
@@ -4198,7 +4203,7 @@ function Show3DSlices() {
                   </Button>
                 )}
                 <Box
-                  onMouseDown={handleVolumeResizeStart}
+                  onPointerDown={handleVolumeResizeStart}
                   sx={resizeHandleSx}
                 />
               </Box>

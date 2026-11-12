@@ -940,6 +940,8 @@ function Show2D() {
     touchAction: "none",
     zIndex: 5,
     "&:hover": { opacity: 1 },
+    // A finger needs about 44 px: the grip stays 16 px drawn, its hit area grows on touch screens.
+    "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } },
   }), [themeColors.accent]);
   const [showStats] = useModelState<boolean>("show_stats");
   const [statsMean] = useModelState<number[]>("stats_mean");
@@ -7018,7 +7020,9 @@ function Show2D() {
 
   // Resize Handlers
   // -------------------------------------------------------------------------
-  const handleCanvasResizeStart = (e: React.MouseEvent) => {
+  // Pointer events, so a finger or a pen drags the grip as a mouse does (mouse events never arrive for a touch drag).
+  const handleCanvasResizeStart = (e: React.PointerEvent) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
     canvasResizeCleanupRef.current?.();
@@ -7033,7 +7037,7 @@ function Show2D() {
     let rafId = 0;
     let latestSize = start.size;
 
-    const handleMouseMove = (event: MouseEvent) => {
+    const handleMouseMove = (event: PointerEvent) => {
       const delta = Math.max(event.clientX - start.x, event.clientY - start.y);
       latestSize = Math.max(200, start.size + delta);
       if (!rafId) {
@@ -7050,15 +7054,17 @@ function Show2D() {
       applyResizeViewAnchor(latestSize);
       setCanvasSize(latestSize);
       setPanelWidthPxTrait(Math.round(latestSize));
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", finishResize);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", finishResize);
+      document.removeEventListener("pointercancel", finishResize);
       window.removeEventListener("blur", finishResize);
       canvasResizeCleanupRef.current = null;
       window.setTimeout(() => { canvasResizeViewAnchorRef.current = null; }, 0);
     };
 
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", finishResize);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", finishResize);
+    document.addEventListener("pointercancel", finishResize);
     window.addEventListener("blur", finishResize);
     canvasResizeCleanupRef.current = finishResize;
   };
@@ -8629,7 +8635,7 @@ function Show2D() {
                     )}
                     {showResizeControls && (
                       <Box
-                        onMouseDown={handleCanvasResizeStart}
+                        onPointerDown={handleCanvasResizeStart}
                         title="Resize panels"
                         sx={resizeGripSx}
                       />
@@ -8798,7 +8804,7 @@ function Show2D() {
                       )}
                       {showResizeControls && (
                         <Box
-                          onMouseDown={(e: React.MouseEvent) => {
+                          onPointerDown={(e: React.PointerEvent) => {
                             e.stopPropagation();
                             handleCanvasResizeStart(e);
                           }}
@@ -8904,7 +8910,7 @@ function Show2D() {
               {renderPanelAnnotations(0)}
               {renderPanelFrameControls(0)}
               {showResizeControls && (
-                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
+                <Box onPointerDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
               )}
             </Box>
           )}
@@ -9458,7 +9464,7 @@ function Show2D() {
                 </Box>
               )}
               {showResizeControls && (
-                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
+                <Box onPointerDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
               )}
             </Box>
             {/* FFT Stats Bar */}

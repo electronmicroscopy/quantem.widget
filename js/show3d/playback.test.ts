@@ -50,6 +50,17 @@ describe("live frame controls", () => {
     writeLiveFrameControls(b.root, b.slider, null, 7, 20, false);
     expect(b.root.querySelector("[data-show3d-playback-count]")!.textContent).toBe("8/20");
   });
+
+  it("write each panel's frame label while playing, without a React render", () => {
+    document.body.innerHTML = "";
+    const a = widget(true);
+    a.root.insertAdjacentHTML("beforeend", `<span data-show3d-panel-frame-label="true"></span><span data-show3d-panel-frame-label="true"></span>`);
+    const labels = (idx: number) => (idx === 0 ? "" : `t = ${idx * 0.5} s`);
+    writeLiveFrameControls(a.root, a.slider, null, 4, 20, false, labels);
+    expect([...a.root.querySelectorAll("[data-show3d-panel-frame-label]")].map((el) => el.textContent)).toEqual([" · t = 2 s", " · t = 2 s"]);
+    writeLiveFrameControls(a.root, a.slider, null, 0, 20, false, labels);
+    expect(a.root.querySelector("[data-show3d-panel-frame-label]")!.textContent).toBe("");
+  });
 });
 
 describe("CPU playback colormap", () => {
