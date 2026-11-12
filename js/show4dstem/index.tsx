@@ -6252,11 +6252,13 @@ function Show4DSTEM() {
       setIsResizingProfile(false);
       profileResizeStart.current = null;
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizingProfile]);
 
@@ -6308,11 +6310,13 @@ function Show4DSTEM() {
       setIsResizingViProfile(false);
       viProfileResizeStart.current = null;
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizingViProfile]);
 
@@ -7250,7 +7254,7 @@ function Show4DSTEM() {
   const handleFftMouseLeave = () => { fftClickStartRef.current = null; setIsDraggingFFT(false); setFftDragStart(null); };
 
   // ── Canvas resize handlers ──
-  const handleCanvasResizeStart = (event: React.MouseEvent, panel: "dp" | "vi") => {
+  const handleCanvasResizeStart = (event: React.PointerEvent, panel: "dp" | "vi") => {
     event.stopPropagation();
     event.preventDefault();
     setIsResizingCanvas(true);
@@ -7284,12 +7288,14 @@ function Show4DSTEM() {
       setIsResizingCanvas(false);
       setResizeCanvasStart(null);
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
       cancelAnimationFrame(rafId);
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizingCanvas, resizeCanvasStart, syncResize, setDpPanelWidthPx, setViPanelWidthPx]);
 
@@ -8415,7 +8421,7 @@ function Show4DSTEM() {
                 </Typography>
               </Box>
             )}
-            {panelChromeVisible && <Box data-show4dstem-resize="dp" aria-label="Resize diffraction panel" onMouseDown={event => handleCanvasResizeStart(event, "dp")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
+            {panelChromeVisible && <Box data-show4dstem-resize="dp" aria-label="Resize diffraction panel" onPointerDown={event => handleCanvasResizeStart(event, "dp")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, touchAction: "none", "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } }, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
           </Box>
 
           {/* DP Stats Bar */}
@@ -8459,11 +8465,12 @@ function Show4DSTEM() {
                 style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
-                onMouseDown={(event) => {
+                onPointerDown={(event) => {
+                  event.preventDefault();
                   setIsResizingProfile(true);
                   profileResizeStart.current = { startY: event.clientY, startHeight: profileHeight };
                 }}
-                sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
+                sx={{ width: "100%", height: 4, cursor: "ns-resize", position: "relative", touchAction: "none", "@media (pointer: coarse)": { "&::before": { content: '""', position: "absolute", left: 0, right: 0, top: -20, bottom: -20 } }, borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
             </Box>
           )}
@@ -8779,7 +8786,7 @@ function Show4DSTEM() {
                   </Typography>
                 </Box>
               )}
-              {panelChromeVisible && <Box data-show4dstem-resize="vi" aria-label="Resize image panel" onMouseDown={event => handleCanvasResizeStart(event, "vi")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
+              {panelChromeVisible && <Box data-show4dstem-resize="vi" aria-label="Resize image panel" onPointerDown={event => handleCanvasResizeStart(event, "vi")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, touchAction: "none", "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } }, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
             </Box>
           )}
 
@@ -8809,11 +8816,12 @@ function Show4DSTEM() {
                 style={{ width: "100%", height: viProfileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
-                onMouseDown={(event) => {
+                onPointerDown={(event) => {
+                  event.preventDefault();
                   setIsResizingViProfile(true);
                   viProfileResizeStart.current = { startY: event.clientY, startHeight: viProfileHeight };
                 }}
-                sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
+                sx={{ width: "100%", height: 4, cursor: "ns-resize", position: "relative", touchAction: "none", "@media (pointer: coarse)": { "&::before": { content: '""', position: "absolute", left: 0, right: 0, top: -20, bottom: -20 } }, borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
             </Box>
           )}
@@ -9032,7 +9040,7 @@ function Show4DSTEM() {
                 style={{ position: "absolute", width: "100%", height: "100%", touchAction: "none", cursor: isDraggingFFT ? "grabbing" : "grab" }}
               />
               {fftPanelLoading && renderPanelLoadingOverlay("Loading FFT")}
-              {panelChromeVisible && <Box data-show4dstem-resize="vi" aria-label="Resize image panel" onMouseDown={event => handleCanvasResizeStart(event, "vi")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
+              {panelChromeVisible && <Box data-show4dstem-resize="vi" aria-label="Resize image panel" onPointerDown={event => handleCanvasResizeStart(event, "vi")} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, touchAction: "none", "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } }, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
             </Box>
 
             {/* FFT Stats Bar */}

@@ -711,7 +711,7 @@ function ImagePanel({
   zoom: ZoomState;
   onZoomChange: (z: ZoomState) => void;
   showResize?: boolean;
-  onResizeStart?: (e: React.MouseEvent) => void;
+  onResizeStart?: (e: React.PointerEvent) => void;
   pixelSize?: number;
   realSpacePixelSize?: number;
   smooth?: boolean;
@@ -1011,9 +1011,11 @@ function ImagePanel({
         )}
         {inset}
         {showResize && onResizeStart && (
-          <Box onMouseDown={onResizeStart} sx={{
+          <Box onPointerDown={onResizeStart} sx={{
             position: "absolute", bottom: 0, right: 0, width: 16, height: 16,
-            cursor: "nwse-resize", opacity: 0.6,
+            cursor: "nwse-resize", opacity: 0.6, touchAction: "none",
+            // A finger needs about 44 px: the grip stays 16 px drawn, its hit area grows on touch screens.
+            "@media (pointer: coarse)": { opacity: 0.9, "&::before": { content: '""', position: "absolute", inset: -14 } },
             background: `linear-gradient(135deg, transparent 50%, ${tc.accent} 50%)`,
             "&:hover": { opacity: 1 },
           }} />
@@ -3768,15 +3770,17 @@ function Explore() {
       }
     };
     const handleUp = () => { resizeDrag.current.on = false; };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
     return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
     };
   }, []);
 
-  const startResize = React.useCallback((e: React.MouseEvent) => {
+  const startResize = React.useCallback((e: React.PointerEvent) => {
     e.preventDefault();
     resizeDrag.current = { on: true, startY: e.clientY, startSize: shownPanelRef.current };
   }, []);

@@ -3483,7 +3483,7 @@ function Show3DSlices() {
   // -------------------------------------------------------------------------
   // Canvas resize (matching Show2D)
   // -------------------------------------------------------------------------
-  const handleResizeStart = (event: React.MouseEvent, axis: number = 0) => {
+  const handleResizeStart = (event: React.PointerEvent, axis: number = 0) => {
     event.stopPropagation();
     event.preventDefault();
     const target = axis > 0 ? "side" : "primary";
@@ -3519,12 +3519,14 @@ function Show3DSlices() {
       setIsResizing(false);
       setResizeStart(null);
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizing, persistViewState, resizeStart]);
 
@@ -4333,7 +4335,7 @@ function Show3DSlices() {
                   </Box>
                 )}
                 <Box
-                  onMouseDown={(event) => handleResizeStart(event, axis)}
+                  onPointerDown={(event) => handleResizeStart(event, axis)}
                   sx={resizeHandleSx}
                 />
               </Box>

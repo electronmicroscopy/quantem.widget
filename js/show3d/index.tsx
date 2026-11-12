@@ -11788,7 +11788,7 @@ function Show3D() {
             {panelChromeVisible && effectiveRoiActive && roiItems.length > 0 && showRoiResizeHint && (
               <Box sx={{ position: "absolute", left: 6, top: 6, px: 0.6, py: 0.25, bgcolor: "rgba(0,0,0,0.45)", pointerEvents: "none" }}>
                 <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.8)", lineHeight: 1.1 }}>
-                  Hover ROI edge to resize
+                  Drag an ROI edge to resize
                 </Typography>
               </Box>
             )}
