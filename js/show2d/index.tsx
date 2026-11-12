@@ -11,6 +11,7 @@
 
 import * as React from "react";
 import { createRender, useModel, useModelState } from "@anywidget/react";
+import { useStreamPanels } from "./streamPanels";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -18,7 +19,7 @@ import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
 import Menu from "@mui/material/Menu";
 import Switch from "@mui/material/Switch";
-import Slider from "@mui/material/Slider";
+import Slider from "../shared/Slider";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Badge from "@mui/material/Badge";
@@ -28,8 +29,8 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import { useTheme, WIDGET_TYPOGRAPHY as typography } from "../theme";
-import { SPACING, controlRow, compactButton, switchStyles, upwardMenuProps, reorderBadgeSx, panelStarButtonSx } from "../controlStyles";
+import { PANEL_WIDTHS, useTheme, WIDGET_TYPOGRAPHY as typography } from "../theme";
+import { SPACING, controlRow, compactButton, switchStyles, sliderStyles, upwardMenuProps, reorderBadgeSx, panelStarButtonSx } from "../controlStyles";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { type ScaleBarOptions, drawColorbar, drawScaleBarInRegion, formatZoomLabel, roundToNiceValue, scaleBarGeometry, strokePeakMarker } from "../figure";
 import { angstromsPerUnit, unitSymbol } from "../units";
@@ -46,7 +47,6 @@ import { useHideStaticFallback } from "../staticFallback";
 import { findDataRange, applyLogScale, signedLog1p, sliderRange, computeStats, computeHistogramFromBytes } from "../display/stats";
 import { dequantizeUint8 } from "../display/quantization";
 import { MetadataSection } from "../widgetInfo";
-import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
 import { getDisplayFFT, DisplayFFT, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, fftClickReadout, zeroPadTopLeft } from "../display/fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../display/fftMetrics";
 import {
@@ -57,8 +57,9 @@ import {
 import { COLORMAPS, COLORMAP_NAMES, displayLog, displayNormalize, GPUColormapEngine, renderToOffscreen } from "../display/colormaps";
 import { createLatestFrameQueue } from "../show4dstem/latestFrameQueue";
 import { resizeDetectorFromPointer, type DetectorResizeStart, type DetectorRoiMode } from "../show4dstem/detectorInteraction";
-import { colormapSampledPixels, createColormapEngine, createCPUColormapEngine, type DisplayColormapEngine } from "../display/cpuColormap";
-import { onGPULost } from "../display/device";
+import { colormapSampledPixels, createColormapEngine, createCPUColormapEngine, packRgbPixels, type DisplayColormapEngine } from "../display/cpuColormap";
+import { onGPULost, type RenderPath } from "../display/device";
+import type { PanelCanvasDraw } from "../display/directRender";
 import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, resolvePanelDenoiseKnobs } from "../display/filter";
 import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../display/frequencyFilter";
 import { InfoTooltip } from "../shared/InfoTooltip";
@@ -84,11 +85,7 @@ import {
   resolveVisibleDiffPlan,
   type GalleryFftCacheEntry,
 } from "./localStack";
-import {
-  itemPageIndices,
-  pageShortcutTarget,
-  usesGalleryLayout,
-} from "./itemPages";
+import { pageShortcutTarget, usesGalleryLayout } from "./pageLayout";
 import {
   cancelContrastPreview,
   contrastPreviewIndices,
@@ -165,7 +162,7 @@ const SHOW2D_STANDALONE_VIEW_STATE_KEYS = [
   "log_scale",
   "marker_colors",
   "marker_style",
-  "ncols",
+  "columns",
   "page_idx",
   "panel_annotations",
   "panel_cmaps",
@@ -414,6 +411,13 @@ function quarterTurns(rotation: number): number {
   return ((Math.round(rotation) % 4) + 4) % 4;
 }
 
+// Source pixels a contrast drag may colormap on WebGPU per tick: a 147-panel sheet of 256 px
+// frames (9.6 M) or four 1.7k images. Larger previews (a single 4096^2 frame) recolor only the
+// canvas pixels on screen instead of allocating a full-resolution bitmap per tick.
+const GPU_PREVIEW_MAX_SOURCE_PIXELS = 12_000_000;
+// A WebGPU gallery frame is copied to the panel's 2D canvas once its panel has not been redrawn
+// for this long, so a drag, wheel or pan never pays the copy per move.
+const GPU_PANEL_RETAIN_MS = 150;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 const DPR = window.devicePixelRatio || 1;
@@ -532,6 +536,8 @@ type DetailTile = {
   bin: number;
   floats: Float32Array;
   canvas: HTMLCanvasElement | null;
+  /** The engine holding the tile in its slot, once uploaded (see drawGpuPanels). */
+  gpuEngine?: DisplayColormapEngine | null;
 };
 // Cap on one detail reply (float32 bytes) so a zoom refetch stays sub-second
 // on a slow kernel->browser channel. Mirrors Show2D._DETAIL_BUDGET_BYTES.
@@ -570,8 +576,8 @@ type TouchZoomState = {
   startState: ZoomState;
 };
 
-const SINGLE_IMAGE_TARGET = 500;
-const GALLERY_IMAGE_TARGET = 300;
+const SINGLE_IMAGE_TARGET = PANEL_WIDTHS.medium;
+const GALLERY_IMAGE_TARGET = PANEL_WIDTHS.medium;
 const DEFAULT_FFT_ZOOM = 2;
 const GALLERY_FFT_OVERVIEW_MAX_DIM = 2048;
 // A paged gallery may revisit many more panels than are visible at once. Keep
@@ -676,16 +682,12 @@ function offlineRangesAreIdentity(mins: number[], maxs: number[]): boolean {
   return mins.length > 0 && mins.every((low, panel) => low === 0 && maxs[panel] === 255);
 }
 
-const sliderStyles = {
-  small: { py: 0, "& .MuiSlider-thumb": { width: 10, height: 10 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 } },
-};
 const imagePanelRadius = 0;
 
 function Show2D() {
   const isMobileViewport = useMobileViewport();
   const canvasRepaintSignal = useCanvasRepaintSignal();
   const model = useModel();
-  const folderWatchLive = useFolderWatchModelLive(model);
   React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
@@ -746,16 +748,12 @@ function Show2D() {
   const [nImages] = useModelState<number>("n_images");
   const [folderWaiting] = useModelState<boolean>("folder_waiting");
   const [folderStatus] = useModelState<string>("folder_status");
-  const [folderWatchState] = useModelState<string>("folder_watch_state");
-  const [folderWatchDetail] = useModelState<string>("folder_watch_detail");
   const [nPages] = useModelState<number>("n_pages");
   const [pageIdx, setPageIdx] = useModelState<number>("page_idx");
   const [panelsPerPage] = useModelState<number>("panels_per_page");
-  const [pageKind] = useModelState<"comparison" | "items">("page_kind");
   const [pageLabels] = useModelState<string[]>("page_labels");
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
-  const isItemPaged = isPaged && pageKind === "items";
   const {
     currentPageIdx, pagePlaying, setPagePlaying, pagePlayFps, setPagePlayFps, setPageSliderPreviewIdx,
     clampPageIdx, commitPageIdx, stopPagePlayback, pageControlIdx, pageControlLabel, pageControlStatus,
@@ -772,7 +770,10 @@ function Show2D() {
   const isGallery = usesGalleryLayout(nImages, isPaged);
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
-  const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [modelFrameBytes] = useModelState<DataView>("frame_bytes");
+  // Show2D.stream sends changed panels as messages; the trait stays as Python last sent it.
+  const streamedFrameBytes = useStreamPanels(model);
+  const frameBytes = streamedFrameBytes ?? modelFrameBytes;
   const [panelFrameCounts] = useModelState<number[]>("panel_frame_counts");
   const [panelFrameIndices, setPanelFrameIndices] = useModelState<number[]>("panel_frame_indices");
   const [panelPlaybackFpsTrait] = useModelState<number>("panel_playback_fps");
@@ -799,11 +800,6 @@ function Show2D() {
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
   const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
-  const activeItemPageIndices = React.useMemo(
-    () => itemPageIndices(nImages, pageControlIdx, panelsPerPage, panelOrder),
-    [nImages, pageControlIdx, panelsPerPage, panelOrder],
-  );
-  const activePagePanelIndices = isItemPaged ? activeItemPageIndices : activePageIndices;
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
   const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
@@ -819,7 +815,7 @@ function Show2D() {
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
   const [panelCmapsMemory, setPanelCmapsMemory] = useModelState<string[]>("panel_cmaps_memory");
-  const [ncols, setNcols] = useModelState<number>("ncols");
+  const [ncols, setNcols] = useModelState<number>("columns");
   const panelCmapFor = React.useCallback((idx: number) => {
     const value = panelCmaps && idx >= 0 && idx < panelCmaps.length ? panelCmaps[idx] : "";
     return value || cmap || "inferno";
@@ -827,6 +823,7 @@ function Show2D() {
   const colorShared = !(panelCmaps && panelCmaps.length === nImages && nImages > 1);
 
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
+  const [valueFlip, setValueFlip] = useModelState<boolean>("value_flip");
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
   const [traitVmin] = useModelState<number | null>("vmin");
   const [traitVmax] = useModelState<number | null>("vmax");
@@ -1359,12 +1356,8 @@ function Show2D() {
   const exactHtmlSize = formatEstimatedHtmlSize(htmlPixelCount * 4);
   const quantizedHtmlSize = formatEstimatedHtmlSize(htmlPixelCount);
   const canDownloadCurrentHtml = !exportEnabled && offlineForTheme;
-  const standaloneHtmlLabel = offline
-    ? `HTML quantized uint8 (${quantizedHtmlSize})`
-    : `HTML exact float32 (${exactHtmlSize})`;
-  const unavailableStandaloneHtmlLabel = offline
-    ? "HTML exact float32 (not embedded)"
-    : "HTML quantized uint8 (requires backend)";
+  // an exported page re-downloads itself: name its packing, not an estimate of a page it already is
+  const standaloneHtmlLabel = offline ? "This page as HTML (uint8)" : "This page as HTML (exact float32)";
 
   const handleStandaloneHtmlDownload = () => {
     setExportAnchor(null);
@@ -1613,7 +1606,7 @@ function Show2D() {
         // whole gallery here can momentarily apply stale/default ranges to
         // untouched panels before React's settled render restores them. RGB
         // overlays stay on their true-color path in both linked modes.
-        const previewIndices = contrastPreviewIndices(
+        let previewIndices = contrastPreviewIndices(
           linkedContrast,
           visibleImageIndicesRef.current,
           previewIdx,
@@ -1660,11 +1653,23 @@ function Show2D() {
           }
         }
         panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
-        const bitmapRanges = previewIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        let bitmapRanges = previewIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
         // Paint as the settled render does: every panel in its own colormap,
         // and packed uint8 frames through the scaled pass at canvas size.
         const cmapNames = Array.from({ length: nImages }, (_, i) => panelCmapForRef.current(i));
-        if (paintSampledPreviewRef.current(previewIndices, bitmapRanges, previewLogScale, cmapNames)) return;
+        // WebGPU colormaps the dragged window: the CPU sampled preview recolored every visible
+        // canvas pixel per tick (a 48-panel sheet took ~46 ms a tick and dropped half the moves).
+        // Only a source too large to colormap per tick (a few 4k panels) keeps the sampled path,
+        // which touches canvas pixels instead of source pixels.
+        const gpuDrawn = drawGpuPanelsRef.current(previewIndices, ranges, previewLogScale);
+        if (gpuDrawn.size === previewIndices.length) return;
+        if (gpuDrawn.size > 0) {
+          previewIndices = previewIndices.filter(i => !gpuDrawn.has(i));
+          bitmapRanges = previewIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        }
+        const previewSourcePixels = previewIndices.length * width * height;
+        const gpuColormapsPreview = engine instanceof GPUColormapEngine && previewSourcePixels <= GPU_PREVIEW_MAX_SOURCE_PIXELS;
+        if (!gpuColormapsPreview && paintSampledPreviewRef.current(previewIndices, bitmapRanges, previewLogScale, cmapNames)) return;
         const bitmaps = uint8FolderPreviewModeRef.current || cmapNames.some(name => name !== cmapNames[0])
           ? await renderScaledPanelBitmaps(engine, previewIndices, bitmapRanges, previewLogScale, cmapNames, mainOffscreensRef.current)
           : await engine.renderSlotsToImageBitmapAsync(previewIndices, bitmapRanges, previewLogScale, cmapNames[0], COLORMAPS[cmapNames[0]] || COLORMAPS.inferno);
@@ -1708,18 +1713,17 @@ function Show2D() {
     }
     Array.from({ length: nImages }, (_, i) => setContrastState(i, { vminPct: lo, vmaxPct: hi }, true));
   }, [linkedContrast, nImages, setAutoContrast, setContrastPreset, setContrastState]);
-  // A histogram drag leaves Auto and the named presets. The preview commits to
-  // React state only on the tick that leaves Auto; the preset is written only
+  // A histogram drag leaves Auto and the named presets on release. The preview
+  // only draws from the contrast refs: a model write or React commit mid-drag
+  // re-renders the widget and messages the kernel. The preset is written only
   // when it changes, since every model write is a message to the kernel.
   const leaveAutoContrast = () => {
-    const leavingAuto = autoContrast;
-    if (leavingAuto) setAutoContrast(false);
+    if (autoContrast) setAutoContrast(false);
     if (contrastPreset !== "manual") setContrastPreset("manual");
-    return leavingAuto;
   };
   const histogramRangeHandlers = (panel: number) => ({
     onRangeChange: (min: number, max: number) => { leaveAutoContrast(); setContrastState(panel, { vminPct: min, vmaxPct: max }); },
-    onRangePreview: (min: number, max: number) => setContrastState(panel, { vminPct: min, vmaxPct: max }, leaveAutoContrast()),
+    onRangePreview: (min: number, max: number) => setContrastState(panel, { vminPct: min, vmaxPct: max }, false),
     onRangeCommit: (min: number, max: number) => { leaveAutoContrast(); setContrastState(panel, { vminPct: min, vmaxPct: max }, true); },
   });
   // Convenience accessors for active image
@@ -1896,8 +1900,10 @@ function Show2D() {
     previousEffectiveFftLinkRef.current = { zoom: linkedZoom, pan: linkPan, contrast: linkedContrast };
   }, [linkedZoom, linkPan, linkedContrast, galleryFftStates, linkedFftZoomState, fftContrastStates, fftVminPct, fftVmaxPct, nImages, selectedIdx]);
 
-  // Resizable state (gallery starts smaller)
-  const [canvasSize, setCanvasSize] = React.useState(nImages > 1 ? GALLERY_IMAGE_TARGET : SINGLE_IMAGE_TARGET);
+  // Use the requested panel width on the first paint; 0 retains automatic sizing.
+  const [canvasSize, setCanvasSize] = React.useState(
+    panelWidthPxTrait > 0 ? panelWidthPxTrait : nImages > 1 ? GALLERY_IMAGE_TARGET : SINGLE_IMAGE_TARGET,
+  );
 
   // Sync initial sizes from traits
   React.useEffect(() => {
@@ -1938,11 +1944,35 @@ function Show2D() {
   // in refs so engine start-up alone re-runs no effect; the reconcile effect
   // keyed on gpuCmapReadyVersion uploads the current frames once it is ready.
   const gpuCmapRef = React.useRef<DisplayColormapEngine | null>(null);
+  // Which path packed the true-color panels on screen; the title badge names it, so a color panel the
+  // CPU drew is never labelled WebGPU. Null while the gallery has no color panel.
+  const [rgbDrawPath, setRgbDrawPath] = React.useState<RenderPath | null>(null);
+  const rgbDrawPathRef = React.useRef<RenderPath | null>(null);
+  const noteRgbDrawPath = React.useCallback((path: RenderPath | null) => {
+    if (rgbDrawPathRef.current === path) return;
+    rgbDrawPathRef.current = path;
+    setRgbDrawPath(path);
+  }, []);
   const gpuCmapReadyRef = React.useRef(false);
 
   // Cached offscreen canvases for main image rendering (avoids per-zoom/pan recompute)
   const mainOffscreensRef = React.useRef<HTMLCanvasElement[]>([]);
+  // WebGPU canvas per gallery panel, layered over its 2D canvas (see drawGpuPanels).
+  const gpuPanelCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const gpuPanelContextsRef = React.useRef(new WeakMap<HTMLCanvasElement, { engine: GPUColormapEngine; ctx: GPUCanvasContext; w: number; h: number }>());
+  const gpuPanelsToRetainRef = React.useRef(new Set<number>());
+  const gpuPanelRetainTimerRef = React.useRef(0);
   const mainImgDatasRef = React.useRef<ImageData[]>([]);
+  // Resize targets stay private until the whole visible batch has rendered.
+  // Layout/hover events must never expose a freshly allocated, blank target.
+  const completedMainPanelsRef = React.useRef<({
+    canvas: HTMLCanvasElement; width: number; height: number; count: number; label: string;
+    titleSpans: RichTitleSpan[] | undefined;
+  } | undefined)[]>([]);
+  const imageResizePending = (panel: number) => {
+    const completed = completedMainPanelsRef.current[panel];
+    return !!completed && (completed.width !== width || completed.height !== height || completed.count !== nImages);
+  };
   const colorbarVminRef = React.useRef(0);
   const colorbarVmaxRef = React.useRef(1);
   const [offscreenVersion, setOffscreenVersion] = React.useState(0);
@@ -2048,10 +2078,10 @@ function Show2D() {
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
 
   const totalPanelCount = Math.max(1, nImages || 1);
-  const [hiddenPageSlots, setHiddenPageSlots] = useHiddenPageSlots(isPaged && !isItemPaged, hiddenPageSlotsTrait, hiddenPanels, activePageStart, activePanelCount);
+  const [hiddenPageSlots, setHiddenPageSlots] = useHiddenPageSlots(isPaged, hiddenPageSlotsTrait, hiddenPanels, activePageStart, activePanelCount);
   const hiddenPanelSet = React.useMemo(() => {
     const out = new Set<number>();
-    if (isPaged && !isItemPaged) {
+    if (isPaged) {
       for (const value of hiddenPageSlots || []) {
         const slot = Math.trunc(Number(value));
         const idx = activePageStart + slot;
@@ -2066,15 +2096,15 @@ function Show2D() {
       }
     }
     const currentPanels = isPaged
-      ? activePagePanelIndices
+      ? activePageIndices
       : Array.from({ length: totalPanelCount }, (_, i) => i);
     const activeHiddenCount = currentPanels
       .filter((idx) => out.has(idx)).length;
-    if (!isItemPaged && activeHiddenCount >= Math.max(1, activePanelCount)) {
+    if (activeHiddenCount >= Math.max(1, activePanelCount)) {
       out.delete(currentPanels[Math.max(0, activePanelCount - 1)]);
     }
     return out;
-  }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged]);
+  }, [activePageEnd, activePageIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged]);
   React.useEffect(() => {
     setPlayingPanelFrames(previous => {
       const next = new Set(Array.from(previous).filter(panel => !hiddenPanelSet.has(panel)));
@@ -2082,8 +2112,8 @@ function Show2D() {
     });
   }, [hiddenPanelSet]);
   const naturalPanelOrder = React.useMemo(
-    () => isPaged ? activePagePanelIndices : Array.from({ length: totalPanelCount }, (_, i) => i),
-    [activePagePanelIndices, isPaged, totalPanelCount]
+    () => isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, i) => i),
+    [activePageIndices, isPaged, totalPanelCount]
   );
   const orderedImageIndices = React.useMemo(() => {
     if (isPaged) return naturalPanelOrder;
@@ -2174,15 +2204,17 @@ function Show2D() {
   const visibleImageCount = Math.max(1, visibleImageIndices.length);
   const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
   const allCurrentPanelsVisible = visibleImageCount === panelMenuTotal;
-  const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
+  const panelLabel = React.useCallback((idx: number) => imageResizePending(idx)
+    ? completedMainPanelsRef.current[idx]!.label
+    : labels?.[idx] || `Image ${idx + 1}`, [labels, width, height, nImages]);
   const panelTitleContent = React.useCallback((idx: number) => (
-    renderRichTitle(panelTitleSpans?.[idx], panelLabel(idx))
+    renderRichTitle(imageResizePending(idx) ? completedMainPanelsRef.current[idx]!.titleSpans : panelTitleSpans?.[idx], panelLabel(idx))
   ), [panelLabel, panelTitleSpans]);
   const panelTitleText = React.useCallback((idx: number) => (
-    richTitlePlainText(panelTitleSpans?.[idx], panelLabel(idx))
+    richTitlePlainText(imageResizePending(idx) ? completedMainPanelsRef.current[idx]!.titleSpans : panelTitleSpans?.[idx], panelLabel(idx))
   ), [panelLabel, panelTitleSpans]);
   const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
-    if (isPaged && !isItemPaged) {
+    if (isPaged) {
       if (panel < activePageStart || panel >= activePageEnd) return;
       const slot = panel - activePageStart;
       const next = validIndexSet(hiddenPageSlots, activePanelCount, Math.trunc);
@@ -2201,12 +2233,8 @@ function Show2D() {
     if (hidden) next.add(panel);
     else next.delete(panel);
     if (next.size >= totalPanelCount) return;
-    if (
-      isItemPaged
-      && activePagePanelIndices.every(value => next.has(value))
-    ) return;
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
   const setPanelsHidden = React.useCallback((panels: number[], hidden: boolean) => {
     const panelSet = new Set(
       panels
@@ -2214,7 +2242,7 @@ function Show2D() {
         .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount),
     );
     if (panelSet.size === 0) return;
-    if (isPaged && !isItemPaged) {
+    if (isPaged) {
       const next = validIndexSet(hiddenPageSlots, activePanelCount, Math.trunc);
       for (const panel of panelSet) {
         if (panel < activePageStart || panel >= activePageEnd) continue;
@@ -2234,9 +2262,8 @@ function Show2D() {
       else next.delete(panel);
     }
     if (next.size >= totalPanelCount) return;
-    if (isItemPaged && activePagePanelIndices.every(value => next.has(value))) return;
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
   const handlePanelSelectionMouseDown = React.useCallback((event: React.MouseEvent, panel: number): boolean => {
     if (!isGallery || reorderMode) return false;
     const orderedVisible = orderedImageIndices.filter((idx) => visibleImageIndices.includes(idx));
@@ -2391,7 +2418,7 @@ function Show2D() {
   }, [isGallery, selectedIdx, selectedPanels, setSelectedPanels, visibleImageIndices]);
   const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount, MAX_PANEL_COLUMNS));
   const effectiveNcols = clampedNcols + diffPanelCount;
-  const displayScale = canvasSize / Math.max(width, height);
+  const displayScale = canvasSize / Math.max(1, width);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
   const panelGapPx = Math.max(0, Number.isFinite(panelGapPxState) ? panelGapPxState : 0);
@@ -2422,7 +2449,7 @@ function Show2D() {
   const applyResizeViewAnchor = React.useCallback((nextSize: number) => {
     const anchor = canvasResizeViewAnchorRef.current;
     if (!anchor || width <= 0 || height <= 0) return;
-    const nextScale = nextSize / Math.max(width, height);
+    const nextScale = nextSize / Math.max(1, width);
     const nextCanvasW = Math.round(width * nextScale);
     const nextCanvasH = Math.round(height * nextScale);
     if (nextCanvasW <= 0 || nextCanvasH <= 0) return;
@@ -3312,6 +3339,9 @@ function Show2D() {
     }
     mainOffscreensRef.current = canvases;
     mainImgDatasRef.current = imgDatas;
+    completedMainPanelsRef.current.length = nImages;
+    setCursorInfo(null);
+    setInsetHoverInfo(null);
   }, [width, height, nImages, canvasW, canvasH, uint8FolderPreviewMode]);
 
   // Compute histogram data for the displayed image (reflects log scale)
@@ -3590,6 +3620,7 @@ function Show2D() {
     if (mainOffscreensRef.current.length === 0 || mainImgDatasRef.current.length === 0) return;
 
     const renderGeneration = ++mainCmapGenerationRef.current;
+    const renderTargets = mainOffscreensRef.current;
     let cancelled = false;
     let renderRaf: number | null = null;
     const isCurrentRender = () => (
@@ -3597,30 +3628,68 @@ function Show2D() {
       && renderGeneration === mainCmapGenerationRef.current
       && (typeof document === "undefined" || !document.hidden)
     );
+    const commitPanels = (indices: number[]) => {
+      if (!isCurrentRender()) return;
+      for (const i of indices) {
+        completedMainPanelsRef.current[i] = {
+          canvas: renderTargets[i], width, height, count: nImages,
+          label: labels?.[i] || `Image ${i + 1}`, titleSpans: panelTitleSpans?.[i],
+        };
+      }
+      setOffscreenVersion(version => version + 1);
+    };
     const panelCmapNames = Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
     const hasMixedPanelCmaps = panelCmapNames.some(name => name !== panelCmapNames[0]);
     const lutName = panelCmapNames[0] || cmap;
     const lut = COLORMAPS[lutName] || COLORMAPS.inferno;
 
-    // RGB panels bypass the LUT + contrast pipeline entirely: paint their
-    // display-ready (r, g, b) floats straight into the offscreen once per data
-    // change. The colormap loops below skip these panels so cmap/contrast/log
-    // changes never overwrite the color pixels.
+    // RGB panels bypass the LUT + contrast pipeline entirely: their
+    // display-ready (r, g, b) floats are packed into the offscreen once per data
+    // change, on WebGPU when the engine runs there (the engine's true-color
+    // pass), else by the Canvas2D engine. The colormap loops below skip these
+    // panels so cmap/contrast/log changes never overwrite the color pixels.
+    // The colormap branches await `rgbPacked` before they commit, so every
+    // panel of a gallery swaps in together.
+    let rgbPacked: Promise<void> = Promise.resolve();
+    if (!isRgbFlags?.some(Boolean)) noteRgbDrawPath(null);
     if (isRgbFlags && isRgbFlags.some(Boolean)) {
-      for (const i of visibleImageIndices) {
-        if (!isRgbFlags[i]) continue;
-        const rgb = rgbDataRef.current[i];
-        const offscreen = mainOffscreensRef.current[i];
+      const rgbPanels = visibleImageIndices.filter(i => isRgbFlags[i] && rgbDataRef.current[i] && mainOffscreensRef.current[i]);
+      const rgbEngine = gpuCmapRef.current;
+      const packOnCpu = (i: number) => {
         const imgData = mainImgDatasRef.current[i];
-        if (!rgb || !offscreen || !imgData) continue;
-        const pixels = imgData.data;
-        for (let k = 0, n = width * height; k < n; k++) {
-          pixels[4 * k] = Math.max(0, Math.min(255, Math.round(rgb[3 * k] * 255)));
-          pixels[4 * k + 1] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 1] * 255)));
-          pixels[4 * k + 2] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 2] * 255)));
-          pixels[4 * k + 3] = 255;
-        }
-        offscreen.getContext("2d")?.putImageData(imgData, 0, 0);
+        const rgb = rgbDataRef.current[i];
+        if (!imgData || !rgb) return;
+        imgData.data.set(packRgbPixels(rgb, width * height));
+        renderTargets[i]?.getContext("2d")?.putImageData(imgData, 0, 0);
+      };
+      // No engine yet: the panels wait for it, as the grayscale ones do (its start re-runs this effect).
+      if (rgbEngine) {
+        rgbPacked = (async () => {
+          let cpuFallback = false;
+          for (const i of rgbPanels) {
+            const rgb = rgbDataRef.current[i];
+            if (!rgb) continue;
+            const bitmap = await rgbEngine.renderRgbToImageBitmapAsync(rgb, width, height);
+            try {
+              if (!isCurrentRender()) return;
+              if (!bitmap) {
+                // The frame exceeds the device's storage-buffer limit.
+                packOnCpu(i);
+                cpuFallback = true;
+                continue;
+              }
+              const ctx = renderTargets[i]?.getContext("2d");
+              ctx?.clearRect(0, 0, width, height);
+              ctx?.drawImage(bitmap, 0, 0);
+            } finally {
+              bitmap?.close();
+            }
+          }
+          if (!isCurrentRender()) return;
+          noteRgbDrawPath(cpuFallback ? "CPU" : rgbEngine.path);
+        })().catch(error => {
+          if (isCurrentRender()) console.error("[Show2D] true-color panel paint failed", error);
+        });
       }
     }
 
@@ -3726,18 +3795,21 @@ function Show2D() {
               panels.map(i => capturedRanges[i] || { vmin: 0, vmax: 1 }),
               capturedLogScale,
               panelCmapNames,
-              mainOffscreensRef.current,
+              renderTargets,
             );
+            if (!isCurrentRender()) return;
+            if (panels.some((_, k) => !bitmaps[k])) return;
+            await rgbPacked;
             if (!isCurrentRender()) return;
             let painted = !!(isRgbFlags && isRgbFlags.some(Boolean));
             for (let k = 0; k < bitmaps.length; k++) {
               const bitmap = bitmaps[k];
               if (!bitmap) continue;
-              const offscreen = mainOffscreensRef.current[panels[k]];
+              const offscreen = renderTargets[panels[k]];
               offscreen?.getContext("2d")?.drawImage(bitmap, 0, 0);
               painted = true;
             }
-            if (painted && isCurrentRender()) setOffscreenVersion(version => version + 1);
+            if (painted) commitPanels(indices);
           } catch (err) {
             if (isCurrentRender()) console.error("[Show2D] scaled WebGPU colormap repaint failed", err);
           } finally {
@@ -3770,18 +3842,27 @@ function Show2D() {
               return;
             }
             const drawn = bitmaps ?? [];
+            if (indices.some((i, k) => !capturedIsRgb[i] && !drawn[k])) {
+              closeBitmaps();
+              return;
+            }
+            await rgbPacked;
+            if (!isCurrentRender()) {
+              closeBitmaps();
+              return;
+            }
             let painted = capturedIsRgb.some(Boolean);
             for (let k = 0; k < drawn.length; k++) {
               const bitmap = drawn[k];
               const i = indices[k];
               if (!bitmap || capturedIsRgb[i]) continue; // RGB offscreen already holds true color pixels
-              const ctx = mainOffscreensRef.current[i]?.getContext("2d");
+              const ctx = renderTargets[i]?.getContext("2d");
               if (!ctx) continue;
               ctx.drawImage(bitmap, 0, 0);
               painted = true;
             }
             closeBitmaps();
-            if (painted && isCurrentRender()) setOffscreenVersion(version => version + 1);
+            if (painted) commitPanels(indices);
           } catch (err) {
             closeBitmaps();
             if (isCurrentRender()) {
@@ -3952,24 +4033,153 @@ function Show2D() {
       flipY: Boolean(imageFlipsVertical?.[panel]),
     };
   };
+  // Gallery panels draw on WebGPU: each panel's slot goes straight into the WebGPU canvas
+  // layered over its 2D canvas, through the one shader every display state uses (a contrast
+  // drag, zoom, pan and the settled frame), so a held drag and its release show the same
+  // pixels. The 2D canvas gets a copy of the GPU frame once the panel stops changing
+  // (GPU_PANEL_RETAIN_MS); exports and the static page read the 2D canvas.
+  const gpuPanelSlotCurrent = (engine: GPUColormapEngine, panel: number): boolean => {
+    const slot = engine.slots[panel];
+    const uploaded = uploadedFramesRef.current;
+    return !!slot && slot.dataKind === "f32" && slot.width === width && slot.height === height
+      && uploaded.engine === engine && !!rawDataRef.current?.[panel] && uploaded.arrays[panel] === rawDataRef.current[panel];
+  };
+  const gpuPanelContext = (engine: GPUColormapEngine, panel: number): GPUCanvasContext | null => {
+    const canvas = gpuPanelCanvasRefs.current[panel];
+    if (!canvas) return null;
+    const w = Math.max(1, Math.round(canvasW));
+    const h = Math.max(1, Math.round(canvasH));
+    const cached = gpuPanelContextsRef.current.get(canvas);
+    if (cached && cached.engine === engine && cached.w === w && cached.h === h) return cached.ctx;
+    const ctx = engine.configureCanvas(canvas, w, h);
+    if (ctx) gpuPanelContextsRef.current.set(canvas, { engine, ctx, w, h });
+    return ctx;
+  };
+  /** Show `panel`'s 2D canvas, which a 2D paint or the retained copy has just drawn. */
+  const hideGpuPanel = (panel: number) => {
+    gpuPanelsToRetainRef.current.delete(panel);
+    const gpuCanvas = gpuPanelCanvasRefs.current[panel];
+    if (gpuCanvas && gpuCanvas.style.opacity !== "0") gpuCanvas.style.opacity = "0";
+  };
+  /**
+   * Draw the eligible `panels` of a gallery on WebGPU with `ranges` (indexed by panel) in one
+   * submission and return the panels drawn; the rest stay on the 2D path. Rotated or flipped
+   * kernel-less exports, packed uint8 folder frames, true color and panels whose slot lags
+   * the data are left to it. With `retain`, each drawn frame is
+   * copied to its 2D canvas in the same task, while the canvas texture still holds it (after
+   * presentation it may be discarded), and the 2D canvas shows again.
+   */
+  const drawGpuPanels = (panels: number[], ranges: { vmin: number; vmax: number }[], panelLogScale: boolean, retain = false): Set<number> => {
+    const drawn = new Set<number>();
+    const engine = gpuCmapRef.current;
+    if (!isGallery || !(engine instanceof GPUColormapEngine) || !gpuCmapReadyRef.current) return drawn;
+    if (uint8FolderPreviewMode || canvasW <= 0 || canvasH <= 0) return drawn;
+    const binned = (displayBin ?? 1) > 1;
+    const draws: PanelCanvasDraw[] = [];
+    for (const panel of panels) {
+      const range = ranges[panel];
+      if (!range || (isRgbFlags && isRgbFlags[panel]) || imageResizePending(panel)) continue;
+      // A full-resolution detail tile over a binned preview draws in the same pass, from its
+      // own slot (after the preview and FFT slots), placed as paintMainPanels places it.
+      const tile = binned ? detailTilesRef.current.get(panel) : undefined;
+      let overlay: PanelCanvasDraw["overlay"];
+      if (tile && detailTileCoversWindow(tile, currentDetailWindow(panel))) {
+        const tileSlot = 2 * nImages + panel;
+        if (tile.gpuEngine !== engine) {
+          engine.uploadData(tileSlot, tile.floats, tile.cols, tile.rows);
+          tile.gpuEngine = engine;
+        }
+        const scaleX = canvasW / width;
+        const scaleY = canvasH / height;
+        overlay = {
+          slot: tileSlot,
+          x: (tile.col0 / displayBin) * scaleX, y: (tile.row0 / displayBin) * scaleY,
+          width: (tile.cols * tile.bin / displayBin) * scaleX, height: (tile.rows * tile.bin / displayBin) * scaleY,
+        };
+      }
+      const placement = panelPlacement(panel);
+      if (placement.rotationTurns !== 0 || placement.flipX || placement.flipY) continue;
+      if (!gpuPanelSlotCurrent(engine, panel)) continue;
+      const ctx = gpuPanelContext(engine, panel);
+      if (!ctx) continue;
+      const name = panelCmapFor(panel);
+      draws.push({
+        slot: panel, ctx, range, logScale: panelLogScale,
+        lut: { name, lut: COLORMAPS[name] || COLORMAPS.inferno },
+        // Zoom about the canvas centre, as applyPanelTransform draws it.
+        transform: { zoom: placement.zoom, panX: canvasW / 2 * (1 - placement.zoom) + placement.panX, panY: canvasH / 2 * (1 - placement.zoom) + placement.panY },
+        overlay,
+      });
+    }
+    if (draws.length === 0) return drawn;
+    try {
+      if (!engine.renderSlotsDirectToCanvases(draws, { width: canvasW, height: canvasH, bgRgb: 0, smooth })) return drawn;
+    } catch (error) {
+      console.error("[Show2D] WebGPU panel draw failed", error);
+      return drawn;
+    }
+    for (const draw of draws) {
+      const panel = draw.slot;
+      drawn.add(panel);
+      const gpuCanvas = gpuPanelCanvasRefs.current[panel];
+      const canvas = canvasRefs.current[panel];
+      const ctx2d = retain ? canvas?.getContext("2d") : null;
+      if (gpuCanvas && canvas && ctx2d) {
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+        ctx2d.drawImage(gpuCanvas, 0, 0, canvas.width, canvas.height);
+        hideGpuPanel(panel);
+        continue;
+      }
+      if (gpuCanvas && gpuCanvas.style.opacity !== "1") gpuCanvas.style.opacity = "1";
+      gpuPanelsToRetainRef.current.add(panel);
+    }
+    if (gpuPanelsToRetainRef.current.size > 0) {
+      window.clearTimeout(gpuPanelRetainTimerRef.current);
+      gpuPanelRetainTimerRef.current = window.setTimeout(() => retainGpuPanelsRef.current(), GPU_PANEL_RETAIN_MS);
+    }
+    return drawn;
+  };
+  // Once the panels stop changing, draw their current state once more and keep that frame.
+  const retainGpuPanels = () => {
+    const panels = Array.from(gpuPanelsToRetainRef.current);
+    gpuPanelsToRetainRef.current.clear();
+    if (panels.length > 0) drawGpuPanels(panels, panelRangesRef.current, logScale, true);
+  };
+  const drawGpuPanelsRef = React.useRef(drawGpuPanels);
+  drawGpuPanelsRef.current = drawGpuPanels;
+  const retainGpuPanelsRef = React.useRef(retainGpuPanels);
+  retainGpuPanelsRef.current = retainGpuPanels;
+  React.useEffect(() => () => window.clearTimeout(gpuPanelRetainTimerRef.current), []);
   const paintMainPanels = (paintIndices: number[]) => {
+    const gpuDrawn = drawGpuPanels(paintIndices.filter(i => completedMainPanelsRef.current[i]), panelRangesRef.current, logScale);
     for (const i of paintIndices) {
+      if (gpuDrawn.has(i)) continue;
       const canvas = canvasRefs.current[i];
-      const offscreen = mainOffscreensRef.current[i];
-      if (!canvas || !offscreen) continue;
+      const completed = completedMainPanelsRef.current[i];
+      if (!canvas || !completed) continue;
+      hideGpuPanel(i);
+      const offscreen = completed.canvas;
       const ctx = canvas.getContext("2d");
       if (!ctx) continue;
       ctx.imageSmoothingEnabled = smooth;
       if (smooth) ctx.imageSmoothingQuality = "high";
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.save();
-      const { drawW, drawH } = applyPanelTransform(ctx, panelPlacement(i));
+      // A growing footprint may change the panel aspect ratio. Keep the old
+      // source geometry until its replacement is ready; do not stretch it.
+      const scale = Math.min(canvasW / completed.width, canvasH / completed.height);
+      const retainedW = imageResizePending(i) ? completed.width * scale : canvasW;
+      const retainedH = imageResizePending(i) ? completed.height * scale : canvasH;
+      ctx.translate((canvasW - retainedW) / 2, (canvasH - retainedH) / 2);
+      const { drawW, drawH } = applyPanelTransform(ctx, {
+        ...panelPlacement(i), canvasW: retainedW, canvasH: retainedH,
+      });
       ctx.drawImage(offscreen, 0, 0, offscreen.width, offscreen.height, 0, 0, drawW, drawH);
       // Detail tile on top of the preview (same zoom/pan transform): tile
       // coordinates are full-res pixels, so divide by the preview bin factor
       // to land in the preview's coordinate space. Outside the tile the
       // preview remains visible as the pan-away fallback.
-      const tile = displayBin > 1 ? detailTilesRef.current.get(i) : undefined;
+      const tile = displayBin > 1 && !imageResizePending(i) ? detailTilesRef.current.get(i) : undefined;
       if (tile && tile.canvas) {
         if (detailTileCoversWindow(tile, currentDetailWindow(i))) {
           const scaleX = drawW / width;
@@ -4011,6 +4221,7 @@ function Show2D() {
     logScale: boolean,
     cmapNames: string[],
   ): boolean => {
+    if (panels.some(imageResizePending)) return true;
     if (smooth || displayBin > 1 || uint8FolderPreviewMode) return false;
     const targets = panels.map(panel => {
       const canvas = canvasRefs.current[panel];
@@ -4033,6 +4244,7 @@ function Show2D() {
       const name = cmapNames[panel];
       colormapSampledPixels(data, target.index, ranges[k], logScale, COLORMAPS[name] || COLORMAPS.inferno, target.image);
       canvas.getContext("2d")?.putImageData(target.image, 0, 0);
+      hideGpuPanel(panel);
     });
     return true;
   };
@@ -4055,6 +4267,9 @@ function Show2D() {
       if (!ctx) continue;
 
       ctx.clearRect(0, 0, overlay.width, overlay.height);
+      // Incoming coordinates/rulers describe the replacement, not the retained
+      // image. Restore them in the same render turn that commits its pixels.
+      if (imageResizePending(i)) continue;
       const view = getZoomState(i);
       const { zoom } = view;
       // Image (row, col) to this overlay's CSS pixels at the panel's zoom and pan.
@@ -4278,7 +4493,7 @@ function Show2D() {
       const lensCtx = lensCanvas.getContext("2d");
       if (lensCtx) lensCtx.clearRect(0, 0, lensCanvas.width, lensCanvas.height);
     }
-    if (!showLens || isGallery || !lensPos || !rawDataRef.current?.[0]) return;
+    if (!showLens || isGallery || !lensPos || !rawDataRef.current?.[0] || imageResizePending(0)) return;
     if (!lensCanvas) return;
     const ctx = lensCanvas.getContext("2d");
     if (!ctx) return;
@@ -5376,6 +5591,7 @@ function Show2D() {
   };
 
   const handleTouchStart = (e: React.TouchEvent, idx: number) => {
+    if (imageResizePending(idx)) return;
     if (profileActive || roiActive || measureActive) return;
     if (isGallery && idx !== selectedIdx) setSelectedIdx(idx);
     const now = Date.now();
@@ -5918,6 +6134,7 @@ function Show2D() {
   }, [insetPlots, showScaleBar, scheduleInsetDragPaint, setInsetPlots]);
 
   const handleMouseDown = (e: React.MouseEvent, idx: number) => {
+    if (imageResizePending(idx)) return;
     if (e.detail >= 2) {
       handleDoubleClick(e, idx);
       return;
@@ -6058,6 +6275,7 @@ function Show2D() {
   };
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
+    if (imageResizePending(idx)) { setCursorInfo(null); return; }
     if (updateInsetPlotDrag(e, idx)) return;
     if (annotationDragRef.current) {
       const drag = annotationDragRef.current;
@@ -6412,6 +6630,7 @@ function Show2D() {
   // -------------------------------------------------------------------------
   // Copy to clipboard handler
   const handleCopy = React.useCallback(async () => {
+    retainGpuPanelsRef.current();
     const canvas = canvasRefs.current[isGallery ? selectedIdx : 0];
     if (!canvas) return;
     try {
@@ -6425,6 +6644,7 @@ function Show2D() {
   }, [isGallery, selectedIdx, labels]);
 
   const buildSvgExport = React.useCallback((scale: number = 3): Show2DSvgExport => {
+    retainGpuPanelsRef.current();  // the 2D canvases hold every panel's current frame
     const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
     const panels = isGallery ? visibleImageIndices : [0];
     if (panels.length === 0 || canvasW <= 0 || canvasH <= 0) {
@@ -7324,11 +7544,6 @@ function Show2D() {
       data-frequency-filter-backend={frequencyFilterEnabled ? frequencyFilterBackend : "off"}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
-      <FolderWatchBadge
-        state={folderWatchState}
-        detail={folderWatchDetail}
-        live={folderWatchLive}
-      />
       {folderWaiting && (
         <Box
           role="region"
@@ -7396,7 +7611,7 @@ function Show2D() {
           {/* Title row */}
           {(showTitle || showControls) && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
             {showTitle && <>{title || (isGallery ? "Gallery" : "Image")}</>}
-            {showTitle && <RenderPathBadge colors={themeColors} />}
+            {showTitle && <RenderPathBadge colors={themeColors} drawnBy={rgbDrawPath} />}
             {showTitle && displayBin > 1 && (
               <Box component="span" sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
                 {displayBin}× binned
@@ -7429,7 +7644,7 @@ function Show2D() {
               {!isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Lens: Magnifier inset that follows the cursor.</Typography>}
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto: Percentile-based contrast (2nd–98th percentile). FFT Auto masks DC + clips to 99.9th.</Typography>
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Link Zoom / Contrast: Sync zoom or histogram range across all gallery images.</Typography>}
-              {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Cols / Panels: Change the gallery grid or hide panels without changing the source data.</Typography>}
+              {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Columns / Panels: Change the gallery grid or hide panels without changing the source data.</Typography>}
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pinning: Click a panel to select or pin it for keyboard actions, per-panel zoom, ROI edits, and delete shortcuts.</Typography>}
               {hasLocalPanelStacks && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Local stacks: A 3D item inside a list gets its own in-panel slider and play button. Select it and use left/right arrows to change only that panel; hiding or reordering it preserves its frame.</Typography>}
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pan: With Pan enabled, drag the image to move the zoomed view. With Link Zoom on, pan and zoom move together across gallery panels.</Typography>
@@ -7489,9 +7704,7 @@ function Show2D() {
                 <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
                   {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("full")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                   {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("uint8")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
-                  {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
                   {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload} sx={{ fontSize: 12 }}>{standaloneHtmlLabel}</MenuItem>}
-                  {canDownloadCurrentHtml && !offline && <MenuItem disabled sx={{ fontSize: 12 }} title="Quantized export requires the Python backend to repack the current float32 data.">{unavailableStandaloneHtmlLabel}</MenuItem>}
                 </Menu>
               </>
             )}
@@ -7499,7 +7712,7 @@ function Show2D() {
           {/* Page navigation sits above the analysis toolbar, matching Show3D. */}
           {controlsVisible && isPaged && (
             <Box
-              data-show2d-page-controls={pageKind || "comparison"}
+              data-show2d-page-controls="comparison"
               aria-label="Page navigation"
               sx={{
                 display: "flex",
@@ -7582,27 +7795,25 @@ function Show2D() {
                     <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
                   ))}
                 </Select>
-                {pageKind !== "items" && (
-                  <IconButton
-                    size="small"
-                    onClick={() => {
-                      const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                      next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
-                      setPageStarred(next);
-                    }}
-                    title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    sx={{
-                      width: 24,
-                      height: 24,
-                      p: 0,
-                      color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
-                      "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
-                    }}
-                  >
-                    {pageStarred?.[pageControlIdx] ? "★" : "☆"}
-                  </IconButton>
-                )}
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+                    next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
+                    setPageStarred(next);
+                  }}
+                  title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+                  aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+                  sx={{
+                    width: 24,
+                    height: 24,
+                    p: 0,
+                    color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
+                  }}
+                >
+                  {pageStarred?.[pageControlIdx] ? "★" : "☆"}
+                </IconButton>
               </Box>
             </Box>
           )}
@@ -7611,7 +7822,7 @@ function Show2D() {
           <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
             {isGallery && (
               <Box sx={controlPairSx}>
-                <Typography sx={compactLabelSx}>Cols</Typography>
+                <Typography sx={compactLabelSx}>Columns</Typography>
                 <Select
                   value={String(clampedNcols)}
                   onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, isPaged ? activePanelCount : nImages, MAX_PANEL_COLUMNS)))}
@@ -8097,9 +8308,7 @@ function Show2D() {
                 {svgExportAvailable && <MenuItem onClick={() => handleSvgExport(3)} sx={{ fontSize: 12 }}>SVG</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("full")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("uint8")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
-                {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
                 {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload} sx={{ fontSize: 12 }}>{standaloneHtmlLabel}</MenuItem>}
-                {canDownloadCurrentHtml && !offline && <MenuItem disabled sx={{ fontSize: 12 }} title="Quantized export requires the Python backend to repack the current float32 data.">{unavailableStandaloneHtmlLabel}</MenuItem>}
               </Menu>
               {(localExportStatus || exportStatus) && (
                 <Typography
@@ -8306,11 +8515,18 @@ function Show2D() {
                       style={responsiveCanvasStyle}
                     />
                     <canvas
+                      data-show2d-gpu-canvas={i}
+                      ref={(el) => { gpuPanelCanvasRefs.current[i] = el; }}
+                      width={canvasW} height={canvasH}
+                      style={{ ...responsiveCanvasStyle, opacity: 0, pointerEvents: "none" }}
+                      aria-hidden="true"
+                    />
+                    <canvas
                       ref={(el) => { overlayRefs.current[i] = el; }}
                       width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                       style={responsiveOverlayStyle}
                     />
-                    {panelChromeVisible && cursorInfo && cursorInfo.idx === i && (
+                    {panelChromeVisible && cursorInfo && cursorInfo.idx === i && !imageResizePending(i) && (
                       /* Show4DSTEM readout spec; top-right, dropped 25px below the star button row */
                       <Box sx={{ position: "absolute", top: 28, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right", zIndex: 2 }}>
                         <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
@@ -8676,7 +8892,7 @@ function Show2D() {
                 width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                 style={responsiveOverlayStyle}
               />
-              {panelChromeVisible && cursorInfo && (
+              {panelChromeVisible && cursorInfo && !imageResizePending(0) && (
                 /* Show4DSTEM readout spec verbatim (single-image mode has no star button) */
                 <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
@@ -8694,7 +8910,7 @@ function Show2D() {
           )}
 
           {/* Stats bar - right below canvas (Show3D style) */}
-          {showStats && (
+          {showStats && !imageResizePending(statsIdx) && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{panelTitleContent(statsIdx)}</Typography>
@@ -8744,10 +8960,14 @@ function Show2D() {
                   <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                     <Box sx={controlPairSx}>
                       <Typography sx={compactLabelSx}>Scale</Typography>
-                      <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps}>
+                      <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Intensity scale (linear or logarithmic)" }}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
                       </Select>
+                    </Box>
+                    <Box sx={controlPairSx}>
+                      <Typography sx={compactLabelSx} title="Show the negated image: a phase with atoms as minima reads with atoms as bright maxima. Display only; stats and export follow.">Flip</Typography>
+                      <Switch checked={!!valueFlip} onChange={() => { setValueFlip(!valueFlip); }} slotProps={{ input: { "aria-label": "Flip sign" } }} size="small" sx={switchStyles.small} />
                     </Box>
                     <Box sx={controlPairSx}>
                       <Typography sx={compactLabelSx}>Color</Typography>
@@ -8845,7 +9065,7 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
-                        <Select size="small" value={denoiseBaseMode} onChange={(e) => { const mode = e.target.value; setDisplayFilter(mode); mirrorFilterKnobEdit("mode", mode); if (mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
+                        <Select size="small" inputProps={{ "aria-label": "Denoise mode" }} value={denoiseBaseMode} onChange={(e) => { const mode = e.target.value; setDisplayFilter(mode); mirrorFilterKnobEdit("mode", mode); if (mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
                           {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
                             <MenuItem key={mode} value={mode}>{label}</MenuItem>
                           ))}
@@ -8853,7 +9073,7 @@ function Show2D() {
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={{ ...compactLabelSx, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
-                        <Slider
+                        <Slider aria-label="Denoise sigma (px)"
                           value={sigmaDraft ?? Number(displaySigma ?? 4)}
                           min={0} max={20} step={0.5}
                           onChange={(_, value) => { if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setSigmaDraftDuringDrag(value as number); }}
@@ -8863,7 +9083,7 @@ function Show2D() {
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
-                        <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { const bin = parseInt(e.target.value, 10); setSpatialBin(bin); mirrorFilterKnobEdit("bin", bin); if (bin > 1 || denoiseBaseMode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
+                        <Select size="small" inputProps={{ "aria-label": "Denoise spatial bin" }} value={String(spatialBin || 1)} onChange={(e) => { const bin = parseInt(e.target.value, 10); setSpatialBin(bin); mirrorFilterKnobEdit("bin", bin); if (bin > 1 || denoiseBaseMode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
                           {[1, 2, 4].map((bin) => (<MenuItem key={bin} value={String(bin)}>{bin}</MenuItem>))}
                         </Select>
                       </Box>
@@ -8873,7 +9093,7 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
-                        <Select size="small" value={frequencyUiKnobs.mode} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); mirrorFrequencyKnobEdit("mode", mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
+                        <Select size="small" inputProps={{ "aria-label": "Frequency filter mode" }} value={frequencyUiKnobs.mode} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); mirrorFrequencyKnobEdit("mode", mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
                           <MenuItem value="none">None</MenuItem>
                           <MenuItem value="lowpass">Low-pass</MenuItem>
                           <MenuItem value="highpass">High-pass</MenuItem>
@@ -8947,7 +9167,7 @@ function Show2D() {
                       size="small"
                       value={newRoiShape}
                       onChange={(e) => setNewRoiShape(e.target.value as "circle" | "square" | "rectangle" | "annular")}
-                      MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 85, fontSize: 10 }}
+                      inputProps={{ "aria-label": "New ROI shape" }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 85, fontSize: 10 }}
                     >
                       {(["square", "rectangle", "circle", "annular"] as const).map((shape) => (<MenuItem key={shape} value={shape}>{shape.charAt(0).toUpperCase() + shape.slice(1)}</MenuItem>))}
                     </Select>
@@ -8969,30 +9189,30 @@ function Show2D() {
                         size="small"
                         value={selectedRoi.shape || "circle"}
                         onChange={(e) => updateSelectedRoi({ shape: e.target.value })}
-                        MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 85, fontSize: 10 }}
+                        inputProps={{ "aria-label": "Selected ROI shape" }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 85, fontSize: 10 }}
                       >
                         {(["square", "rectangle", "circle", "annular"] as const).map((shape) => (<MenuItem key={shape} value={shape}>{shape.charAt(0).toUpperCase() + shape.slice(1)}</MenuItem>))}
                       </Select>
                       {selectedRoi.shape === "rectangle" && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>W</Typography>
-                          <Slider value={selectedRoi.width} min={5} max={width} onChange={(_, value) => updateSelectedRoi({ width: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
+                          <Slider aria-label="ROI width (px)" value={selectedRoi.width} min={5} max={width} onChange={(_, value) => updateSelectedRoi({ width: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>H</Typography>
-                          <Slider value={selectedRoi.height} min={5} max={height} onChange={(_, value) => updateSelectedRoi({ height: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
+                          <Slider aria-label="ROI height (px)" value={selectedRoi.height} min={5} max={height} onChange={(_, value) => updateSelectedRoi({ height: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
                         </>
                       )}
                       {selectedRoi.shape === "annular" && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Inner</Typography>
-                          <Slider value={selectedRoi.radius_inner} min={1} max={selectedRoi.radius - 1} onChange={(_, value) => updateSelectedRoi({ radius_inner: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
+                          <Slider aria-label="ROI inner radius (px)" value={selectedRoi.radius_inner} min={1} max={selectedRoi.radius - 1} onChange={(_, value) => updateSelectedRoi({ radius_inner: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Outer</Typography>
-                          <Slider value={selectedRoi.radius} min={selectedRoi.radius_inner + 1} max={Math.max(width, height)} onChange={(_, value) => updateSelectedRoi({ radius: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
+                          <Slider aria-label="ROI outer radius (px)" value={selectedRoi.radius} min={selectedRoi.radius_inner + 1} max={Math.max(width, height)} onChange={(_, value) => updateSelectedRoi({ radius: value as number })} size="small" sx={{ ...sliderStyles.small, width: 40 }} />
                         </>
                       )}
                       {selectedRoi.shape !== "rectangle" && selectedRoi.shape !== "annular" && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Size</Typography>
-                          <Slider value={selectedRoi.radius} min={5} max={Math.max(width, height)} onChange={(_, value) => updateSelectedRoi({ radius: value as number })} size="small" sx={{ ...sliderStyles.small, width: 50 }} />
+                          <Slider aria-label="ROI radius (px)" value={selectedRoi.radius} min={5} max={Math.max(width, height)} onChange={(_, value) => updateSelectedRoi({ radius: value as number })} size="small" sx={{ ...sliderStyles.small, width: 50 }} />
                         </>
                       )}
                       <Box sx={{ display: "flex", gap: "2px" }}>
@@ -9001,7 +9221,7 @@ function Show2D() {
                         ))}
                       </Box>
                       <Typography sx={{ ...typography.label, fontSize: 10 }}>Border</Typography>
-                      <Slider value={selectedRoi.line_width} min={1} max={6} step={1} onChange={(_, value) => updateSelectedRoi({ line_width: value as number })} size="small" sx={{ ...sliderStyles.small, width: 30 }} />
+                      <Slider aria-label="ROI line width (px)" value={selectedRoi.line_width} min={1} max={6} step={1} onChange={(_, value) => updateSelectedRoi({ line_width: value as number })} size="small" sx={{ ...sliderStyles.small, width: 30 }} />
                       <Box
                         onClick={() => updateSelectedRoi({ highlight: !selectedRoi.highlight })}
                         sx={{ cursor: "pointer", fontSize: 10, color: selectedRoi.highlight ? themeColors.accentGreen : themeColors.textMuted, "&:hover": { opacity: 0.8 } }}
@@ -9054,7 +9274,7 @@ function Show2D() {
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale</Typography>
-                  <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                  <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT intensity scale (linear or logarithmic)" }}>
                     <MenuItem value="linear">Lin</MenuItem>
                     <MenuItem value="log">Log</MenuItem>
                   </Select>
@@ -9065,7 +9285,7 @@ function Show2D() {
                     </>
                   )}
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
-                  <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                  <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT colormap" }}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
                 </Box>
@@ -9269,7 +9489,7 @@ function Show2D() {
                   {/* Row 1: Scale + Color + Colorbar */}
                   <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                     <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
-                    <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                    <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT intensity scale (linear or logarithmic)" }}>
                       <MenuItem value="linear">Lin</MenuItem>
                       <MenuItem value="log">Log</MenuItem>
                     </Select>

@@ -23,7 +23,7 @@ class DenseSession:
     """Detector queries over a ``(scan_row, scan_col, det_row, det_col)`` tensor.
 
     Answers the queries Show4DSTEM asks a detector session: ``frame``,
-    ``mean_dp``, ``masked_sum`` and ``reduce_frames``. Dense data carries no
+    ``mean_pattern``, ``masked_sum`` and ``reduce_frames``. Dense data carries no
     detector flags, so ``detector_validity`` is None.
     """
 
@@ -52,7 +52,7 @@ class DenseSession:
             pattern_t = pattern_t.float()  # NumPy has no bfloat16
         return pattern_t.cpu().numpy()
 
-    def mean_dp(self) -> np.ndarray:
+    def mean_pattern(self) -> np.ndarray:
         """Mean pattern: exact total over every scan position divided once in float64, as float32."""
         total_t = self._chunked_sum(None)
         return self._divide(total_t, self.num_frames).reshape(self.detector_shape)

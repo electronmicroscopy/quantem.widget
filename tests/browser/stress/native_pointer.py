@@ -144,6 +144,7 @@ def drag(
     max_inflight: int = 4,
     ack_timeout_s: float = 10,
     trajectory: Callable[[float], tuple[float, float]] | None = None,
+    start: tuple[float, float] = (0.5, 0.5),
     before_release: Callable[[], None] | None = None,
 ) -> dict:
     """Drive a real held mouse gesture with bounded concurrent CDP requests.
@@ -164,7 +165,9 @@ def drag(
         Upper bound on waiting for one CDP command.
     trajectory : callable, optional
         Given elapsed seconds, return fractional horizontal/vertical position
-        within ``box``. The initial mouse press is at the box center.
+        within ``box``.
+    start : tuple
+        Fractional initial press position within ``box``; default is its center.
     before_release : callable, optional
         Evidence callback after the timed input/drain and before release. Its
         screenshot or final-image checks do not enter the timed input interval.
@@ -189,6 +192,8 @@ def drag(
     box = {key: float(box[key]) for key in ("x", "y", "width", "height")}
     if not all(math.isfinite(value) for value in box.values()) or min(box["width"], box["height"]) <= 0:
         raise ValueError("The drag box must have finite coordinates and positive dimensions.")
+    if len(start) != 2 or not all(math.isfinite(value) and 0 <= value <= 1 for value in start):
+        raise ValueError("The initial press must be inside the drag surface.")
     with urllib.request.urlopen(endpoint.rstrip("/") + "/json/list", timeout=ack_timeout_s) as reply:
         targets = json.load(reply)
     target = next((item for item in targets if item["id"] == target_id and item["type"] == "page"), None)
@@ -202,7 +207,7 @@ def drag(
         "events": [], "status": "failed", "error": None, "released": False,
     }
     connection = _Connection(target["webSocketDebuggerUrl"], ack_timeout_s)
-    position = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    position = (box["x"] + box["width"] * start[0], box["y"] + box["height"] * start[1])
     pressed = False
     try:
         clock = connection.call("Runtime.evaluate", {

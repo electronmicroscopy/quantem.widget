@@ -2,21 +2,16 @@
 
 ``Show1D`` is the line companion to ``Show2D``: ordinary traces, a 2D image
 line profile sampled into the trace view, and the live state a torch
-reconstruction needs. Scalar histories are appended every iteration, image
-snapshots are attached at checkpoints, and a JSONL monitor file beside the
-run lets the dashboard be rebuilt after a notebook disconnect.
+reconstruction needs. Scalar histories are appended every iteration and image
+snapshots are attached at checkpoints.
 """
 
-import json
 import math
 import pathlib
-import threading
-import warnings
 from collections.abc import Mapping, Sequence
 from typing import Self
 
 import anywidget
-import ipywidgets
 import numpy as np
 import traitlets
 
@@ -26,23 +21,11 @@ from quantem.widget.colormap import VALID_CMAPS
 from quantem.widget.export import HtmlExportMixin
 from quantem.widget.fallback import StaticFallbackMixin
 from quantem.widget.show1d.export import Show1DExport
-from quantem.widget.show1d.review import (
-    REVIEW_MODES,
-    TRIAL_SORT_KEYS,
-    TrialReview,
-    as_float,
-    json_safe,
-    label_in_collection,
-    normalise_trial_labels,
-    normalise_trial_notes,
-    normalise_trial_tags,
-    trial_label_key,
-)
 from quantem.widget.show1d.state import Show1DState
 from quantem.widget.state import SavedStateMixin
 from quantem.widget.utils.array import _b64_safe, to_numpy
 from quantem.widget.utils.state_io import read_state
-from quantem.widget.utils.ui import UiMode, reject_unknown_kwargs, resolve_ui_mode
+from quantem.widget.utils.ui import DisplayMode, reject_unknown_kwargs, resolve_mode
 
 # Okabe-Ito palette: distinguishable for every common colour-vision deficiency
 _DEFAULT_COLORS = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#999999"]
@@ -51,13 +34,11 @@ _VALID_OVERLAY_POSITIONS = {"top-left", "top-right", "bottom-left", "bottom-righ
 _UI_DEFAULTS = {
     "show_title": True,
     "show_stats": False,
-    "show_review": False,
     "show_legend": True,
     "show_grid": True,
     "show_controls": True,
     "controls_collapsed": False,
 }
-_MONITOR_FILE_NAME = "show1d_monitor.jsonl"
 
 
 def sample_line_profile(image, line: Sequence[Sequence[float]], *, profile_width: int = 1) -> np.ndarray:
@@ -94,7 +75,7 @@ def sample_line_profile(image, line: Sequence[Sequence[float]], *, profile_width
     return total / width
 
 
-class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.AnyWidget):
+class Show1D(Show1DState, Show1DExport, SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """Interactive 1D viewer for traces, line profiles, and live reconstruction.
 
     Parameters
@@ -114,11 +95,9 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         epochs where a tick at 2.5 has no meaning.
     log_scale : bool, default False
         Logarithmic y display; non-positive values are skipped in the plot.
-    ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
+    mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
         Shared viewer UI preset. Explicit ``show_*`` / ``controls_collapsed``
         keywords override the preset.
-    show_review : bool, optional
-        Start with the trial Review panel (ranking, alerts, notes, tags) open.
     plot_height_px, side_panel_width_px : int
         Initial plot height and snapshot side-panel width in pixels.
     image_cmap : str, default "viridis"
@@ -176,7 +155,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
     log_scale = traitlets.Bool(False).tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
     show_stats = traitlets.Bool(False).tag(sync=True)
-    show_review = traitlets.Bool(False).tag(sync=True)
     show_legend = traitlets.Bool(True).tag(sync=True)
     show_grid = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
@@ -212,20 +190,7 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
     selected_snapshot_group_idx = traitlets.Int(-1).tag(sync=True)
     bookmarked_snapshot_groups = traitlets.List(traitlets.Int()).tag(sync=True)
 
-    starred_snapshot_image_labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_snapshot_image_labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
-    trial_notes = traitlets.Dict().tag(sync=True)
-    trial_tags = traitlets.Dict().tag(sync=True)
-    show_trial_notes = traitlets.Bool(False).tag(sync=True)
-    show_starred_only = traitlets.Bool(False).tag(sync=True)
-    review_mode = traitlets.Unicode("trace").tag(sync=True)
-    trial_sort_key = traitlets.Unicode("label").tag(sync=True)
-    trial_sort_descending = traitlets.Bool(False).tag(sync=True)
-    trial_filter_text = traitlets.Unicode("").tag(sync=True)
-    top_trial_count = traitlets.Int(0).tag(sync=True)
-    trial_rankings = traitlets.List(traitlets.Dict()).tag(sync=True)
-    trial_alerts = traitlets.List(traitlets.Dict()).tag(sync=True)
-    best_trial_label = traitlets.Unicode("").tag(sync=True)
 
     show_snapshots = traitlets.Bool(True).tag(sync=True)
     show_snapshot_thumbnails = traitlets.Bool(True).tag(sync=True)
@@ -266,12 +231,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
     profile_line = traitlets.List(traitlets.Dict()).tag(sync=True)
     profile_width = traitlets.Int(1)  # read by the Python line sampler only, so it is not synced
 
-    # View -> View selected as 2D: the browser asks, Python builds a Show2D below the plot
-    handoff_request = traitlets.Unicode("").tag(sync=True)
-    handoff_status = traitlets.Unicode("").tag(sync=True)
-    handoff_enabled = traitlets.Bool(True).tag(sync=True)
-    prepared_view_widget = traitlets.Instance(ipywidgets.Widget, allow_none=True).tag(sync=True, **ipywidgets.widget_serialization)
-
     _export_light = traitlets.Bool(False).tag(sync=True)
     # Compact saved-notebook preview (see fallback.py) so a cold rehydrate
     # shows the plot even though the heavy buffers are trimmed.
@@ -289,8 +248,7 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         y_label: str = "",
         x_integer: bool = False,
         log_scale: bool = False,
-        ui_mode: UiMode = "interactive",
-        show_review: bool | None = None,
+        mode: DisplayMode = "interactive",
         plot_height_px: int = 320,
         side_panel_width_px: int = 360,
         image_cmap: str = "viridis",
@@ -309,8 +267,7 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
     ) -> None:
         reject_unknown_kwargs(type(self), kwargs, owned=self._CONSTRUCTOR_TRAITS)
         overrides = {key: kwargs.pop(key, None) for key in _UI_DEFAULTS}
-        overrides["show_review"] = show_review
-        kwargs.update(resolve_ui_mode(ui_mode, defaults=_UI_DEFAULTS, overrides=overrides))
+        kwargs.update(resolve_mode(mode, defaults=_UI_DEFAULTS, overrides=overrides))
         # a state this widget cannot load is refused before the model opens: a registered widget stays alive, holding its data
         state = None if state is None else read_state(state, "Show1D", self._STATE_KEYS)
         # Before super().__init__ so any get_state during comm-open sees it.
@@ -322,12 +279,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         self._x = _normalize_x(x, self._data.shape[1])
         self._snapshots: list[np.ndarray] = []
         self._profile_image: np.ndarray | None = None
-        self._trial_metrics: dict[str, dict] = {}
-        self._monitor_warnings: list[str] = []
-        self._monitor_path: pathlib.Path | None = None
-        self._monitor_offset = 0
-        self._monitor_stop: threading.Event | None = None
-        self.prepared_view = None
         self.n_traces = int(self._data.shape[0])
         self.n_points = int(self._data.shape[1])
         self.labels = [str(label) for label in (labels or inferred_labels)]
@@ -355,13 +306,11 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
             self.pixel_size, self.pixel_unit = 0.0, "px"
         self._update_stats()
         self._update_data_bytes()
-        self._update_trial_analysis()
         if profile_image is not None:
             self._set_profile_image(profile_image, line=profile_line)
         if state is not None:
             self.load_state_dict(state)
         self.observe(self._on_export_request_change, names=["export_request"])
-        self.observe(self._on_handoff_request_change, names=["handoff_request"])
 
     # --- trait validation: every assignment, from Python or the browser, lands here
 
@@ -395,22 +344,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         name = str(proposal["value"]).strip().lower()
         if name not in {"overlay", "below"}:
             raise ValueError(f"snapshot_fft_layout must be 'overlay' or 'below', got {proposal['value']!r}")
-        return name
-
-    @traitlets.validate("review_mode")
-    def _validate_review_mode(self, proposal: dict) -> str:
-        """``trace`` reviews scientific series, ``optimization`` ranks trials by loss; the rankings depend on which."""
-        name = str(proposal["value"])
-        if name not in REVIEW_MODES:
-            raise ValueError(f"Unknown review_mode {name!r}. Use 'trace' for scientific series or 'optimization' for loss-ranked trials.")
-        return name
-
-    @traitlets.validate("trial_sort_key")
-    def _validate_trial_sort_key(self, proposal: dict) -> str:
-        """Only keys the ranking rows carry can sort them."""
-        name = str(proposal["value"])
-        if name not in TRIAL_SORT_KEYS:
-            raise ValueError(f"Unknown trial_sort_key {name!r}. Valid: {sorted(TRIAL_SORT_KEYS)}")
         return name
 
     @traitlets.validate("snapshot_contrast_range")
@@ -457,25 +390,15 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
             raise ValueError(f"bookmarked_snapshot_groups must contain non-negative indices, got {indices[0]}")
         return indices
 
-    @traitlets.validate("starred_snapshot_image_labels", "hidden_snapshot_image_labels")
-    def _validate_trial_labels(self, proposal: dict) -> list[str]:
-        """One entry per trial key, so ``lambda_1`` and ``lambda 1`` are not starred twice."""
-        return normalise_trial_labels(proposal["value"])
-
-    @traitlets.validate("trial_notes")
-    def _validate_trial_notes(self, proposal: dict) -> dict[str, str]:
-        """One stripped note per trial; an empty note deletes it."""
-        return normalise_trial_notes(proposal["value"])
-
-    @traitlets.validate("trial_tags")
-    def _validate_trial_tags(self, proposal: dict) -> dict[str, list[str]]:
-        """Unique stripped tags per trial; a trial without tags is dropped."""
-        return normalise_trial_tags(proposal["value"])
+    @traitlets.validate("hidden_snapshot_image_labels")
+    def _validate_image_labels(self, proposal: dict) -> list[str]:
+        """One entry per label key, so ``lambda_1`` and ``lambda 1`` are not starred twice."""
+        return _unique_labels(proposal["value"])
 
     @traitlets.validate(
         "plot_height_px", "side_panel_width_px", "snapshot_thumbnail_size", "snapshot_panel_width_px",
         "snapshot_fps", "snapshot_columns", "snapshot_profile_height", "snapshot_histogram_width",
-        "snapshot_histogram_height", "top_trial_count",
+        "snapshot_histogram_height",
     )
     def _validate_clamped_int(self, proposal: dict) -> int:
         """Round and clamp a size or count into its ``_INT_RANGES`` bounds, whether Python or the browser set it."""
@@ -495,10 +418,8 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         log_scale: bool = True,
         **kwargs,
     ) -> Self:
-        """An empty loss-ranked monitor for repeated :meth:`append` calls."""
+        """An empty monitor for repeated :meth:`append` calls."""
         labels = [str(name) for name in (traces or [])]
-        kwargs.setdefault("review_mode", "optimization")
-        kwargs.setdefault("trial_sort_key", "final_loss")
         return cls(np.empty((len(labels), 0), dtype=np.float32), labels=labels, title=title, x_label=x_label, y_label=y_label, log_scale=log_scale, **kwargs)
 
     @classmethod
@@ -534,67 +455,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
             units=units,
             **kwargs,
         )
-
-    @classmethod
-    def from_monitor_file(
-        cls,
-        path: str | pathlib.Path,
-        *,
-        title: str = "Overnight Reconstruction Monitor",
-        x_label: str = "iteration",
-        y_label: str = "loss",
-        log_scale: bool = True,
-        **kwargs,
-    ) -> Self:
-        """Rebuild a monitor from its JSONL file.
-
-        Each line is a JSON object with an ``iteration`` number and any of
-        ``losses``, ``snapshots``, ``metrics``, ``warnings``, ``starred``,
-        ``hidden``, ``notes`` or ``tags``. Snapshot values are paths to ``.npy``
-        or ``.npz`` arrays, resolved relative to the monitor file.
-        """
-        monitor_file = _monitor_file(path)
-        events, offset = _read_monitor_events(monitor_file, 0)
-        loss_names = list(dict.fromkeys(str(name) for event in events for name in event.get("losses", {})))
-        widget = cls.live(loss_names, title=title, x_label=x_label, y_label=y_label, log_scale=log_scale, **kwargs)
-        widget._monitor_path = monitor_file
-        widget._monitor_offset = offset
-        widget._apply_monitor_events(events)
-        return widget
-
-    @classmethod
-    def watch_run(cls, path: str | pathlib.Path, *, refresh_s: float = 5.0, **kwargs) -> Self:
-        """Open a monitor file and keep tailing it while the kernel is alive.
-
-        Every ``refresh_s`` seconds the complete lines appended since the last
-        read are applied; a half-written trailing line waits for the writer.
-        Call :meth:`stop_monitor` when the notebook no longer needs updates.
-        """
-        widget = cls.from_monitor_file(path, **kwargs)
-        widget._monitor_stop = threading.Event()
-        stop = widget._monitor_stop
-
-        def poll() -> None:
-            """Apply new monitor lines every ``refresh_s`` seconds until stopped or the file becomes unreadable."""
-            while not stop.is_set():
-                try:
-                    widget._refresh_monitor()
-                except (ValueError, OSError) as exc:
-                    warnings.warn(f"Show1D stopped watching {widget._monitor_path}: {exc}", stacklevel=2)
-                    return
-                stop.wait(max(0.25, float(refresh_s)))
-
-        threading.Thread(target=poll, name="Show1DMonitor", daemon=True).start()
-        return widget
-
-    @staticmethod
-    def append_monitor_event(path: str | pathlib.Path, event: Mapping) -> pathlib.Path:
-        """Append one JSON event line to a monitor file, creating the file on first use."""
-        monitor_file = _monitor_file(path, create=True)
-        monitor_file.parent.mkdir(parents=True, exist_ok=True)
-        with monitor_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(json_safe(dict(event)), allow_nan=False, sort_keys=True) + "\n")
-        return monitor_file
 
     # --- live updates
 
@@ -642,7 +502,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
             self.n_points = int(self._data.shape[1])
             self._update_stats()
             self._update_data_bytes()
-            self._update_trial_analysis()
         return self
 
     def snapshot(self, iteration: float, *, label: str | None = None, **images) -> Self:
@@ -671,7 +530,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         self._update_snapshot_bytes()
         self.selected_snapshot_idx = first_image_idx
         self.selected_snapshot_group_idx = group_idx
-        self._update_trial_analysis()
         return self
 
     def set_data(self, data, *, x=None, labels: Sequence[str] | None = None) -> Self:
@@ -684,82 +542,11 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         self.colors = _default_colors(self.n_traces)
         self._update_stats()
         self._update_data_bytes()
-        self._update_trial_analysis()
-        return self
-
-    def goto_snapshot(self, index: int) -> Self:
-        """Select a snapshot group; its first image becomes the primary selected image."""
-        if self.n_snapshot_groups == 0:
-            return self
-        group_idx = max(0, min(self.n_snapshot_groups - 1, int(index)))
-        self.selected_snapshot_group_idx = group_idx
-        self.selected_snapshot_idx = self.snapshot_group_indices.index(group_idx)
         return self
 
     def star_snapshot_group(self, group: int | str | None = None) -> Self:
         """Star a snapshot group (index, label, or the selected one) in the playback timeline."""
         self.bookmarked_snapshot_groups = [*self.bookmarked_snapshot_groups, self._snapshot_group_index(group)]
-        return self
-
-    def to_show2d(self, group: int | str | None = None, images: Sequence[int | str] | None = None, *, title: str | None = None):
-        """A ``Show2D`` gallery of one snapshot group for zoom, FFT, profile and export tools.
-
-        ``group`` is an index, a group label, or ``None`` for the selected
-        group; ``images`` picks group-local indices or image labels, default
-        every image that is not hidden. Colormap, scale bar and stars carry over.
-        """
-        # Show2D pulls in torch; importing it here keeps ``import Show1D`` light.
-        from quantem.widget.show2d import Show2D
-
-        group_idx = self._snapshot_group_index(group)
-        group_images = [idx for idx, image_group in enumerate(self.snapshot_group_indices) if image_group == group_idx]
-        if images is None:
-            selected = [idx for idx in group_images if not label_in_collection(self.snapshot_image_labels[idx], self.hidden_snapshot_image_labels)]
-        else:
-            selected = []
-            for ref in images:
-                if isinstance(ref, str):
-                    matches = [idx for idx in group_images if trial_label_key(self.snapshot_image_labels[idx]) == trial_label_key(ref)]
-                    if not matches:
-                        raise ValueError(f"snapshot image label {ref!r} is not in the selected group")
-                    selected.extend(matches)
-                elif 0 <= int(ref) < len(group_images):
-                    selected.append(group_images[int(ref)])
-                else:
-                    raise ValueError(f"snapshot image index {ref} is not in the selected group")
-            selected = list(dict.fromkeys(selected))
-        if not selected:
-            raise ValueError("Show1D.to_show2d() needs at least one visible snapshot image")
-        panel_labels = [self.snapshot_image_labels[idx] for idx in selected]
-        return Show2D(
-            [self._snapshots[idx].copy() for idx in selected],
-            labels=panel_labels,
-            title=title if title is not None else f"{self.title or 'Show1D'} · {self.snapshot_group_labels[group_idx]}",
-            cmap=self.image_cmap,
-            sampling=self.pixel_size if self.pixel_size > 0 else None,
-            units=self.pixel_unit if self.pixel_size > 0 else None,  # a unit needs a step
-            show_scale_bar=self.show_scale_bar,
-            show_fft=self.show_snapshot_fft,
-            show_controls=True,
-            controls_collapsed=False,
-            show_stats=True,
-            auto_contrast=True,
-            ncols=max(1, min(self.snapshot_columns or len(selected), len(selected))),
-            link_zoom=len(selected) > 1,
-            link_pan=len(selected) > 1,
-            link_contrast=len(selected) > 1,
-            show_panel_titles=True,
-            panel_title_font_size=11,
-            starred=[idx for idx, label in enumerate(panel_labels) if label_in_collection(label, self.starred_snapshot_image_labels)],
-            save_state=False,
-            verbose=False,
-        )
-
-    def stop_monitor(self) -> Self:
-        """Stop the :meth:`watch_run` polling thread."""
-        if self._monitor_stop is not None:
-            self._monitor_stop.set()
-            self._monitor_stop = None
         return self
 
     def __repr__(self) -> str:
@@ -768,60 +555,17 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
             return f"Show1D({self.n_points} points)"
         return f"Show1D({self.n_traces} traces x {self.n_points} points)"
 
-    # --- monitor file
-
-    def _refresh_monitor(self) -> None:
-        """Apply the monitor lines appended since the last read; the offset makes each line apply once."""
-        events, self._monitor_offset = _read_monitor_events(self._monitor_path, self._monitor_offset)
-        if events:
-            self._apply_monitor_events(events)
-
-    def _apply_monitor_events(self, events: Sequence[Mapping]) -> None:
-        """Fold monitor events into the live state: losses, metrics, snapshots, warnings, review marks."""
-        base_dir = self._monitor_path.parent
-        with self.hold_sync():
-            for event in events:
-                iteration = as_float(event.get("iteration", self.n_points))
-                losses = event.get("losses")
-                if isinstance(losses, Mapping) and losses:
-                    self.append(iteration, **{str(name): as_float(value) for name, value in losses.items()})
-                for label, metrics in (event.get("metrics") or {}).items():
-                    if isinstance(metrics, Mapping):
-                        self._trial_metrics.setdefault(str(label), {}).update(metrics)
-                snapshots = event.get("snapshots")
-                if isinstance(snapshots, Mapping):
-                    images = {str(label): image for label, path in snapshots.items() if (image := _load_monitor_image(base_dir / str(path))) is not None}
-                    if images:
-                        self.snapshot(iteration, label=str(event.get("label") or f"iter {iteration:g}"), **images)
-                self._monitor_warnings.extend(_as_list(event.get("warnings")))
-                hidden = _as_list(event.get("hidden"))
-                self.hidden_snapshot_image_labels = [*self.hidden_snapshot_image_labels, *hidden]
-                self.starred_snapshot_image_labels = [
-                    *[label for label in self.starred_snapshot_image_labels if not label_in_collection(label, hidden)],
-                    *_as_list(event.get("starred")),
-                ]
-                notes = event.get("notes")
-                if isinstance(notes, Mapping):
-                    self.trial_notes = {**self.trial_notes, **{str(label): str(note) for label, note in notes.items()}}
-                tags = event.get("tags")
-                if isinstance(tags, Mapping):
-                    merged = {label: list(values) for label, values in self.trial_tags.items()}
-                    for label, values in tags.items():
-                        merged.setdefault(str(label), []).extend(_as_list(values))
-                    self.trial_tags = merged
-            self._update_trial_analysis()
-
     # --- derived synced buffers
 
     def _snapshot_group_index(self, group: int | str | None) -> int:
-        """A group index from an index, a group label (trial-key match), or ``None`` for the selected group."""
+        """A group index from an index, a group label (label-key match), or ``None`` for the selected group."""
         if self.n_snapshot_groups == 0:
             raise ValueError("Show1D has no snapshot groups")
         if group is None:
             return max(0, int(self.selected_snapshot_group_idx))
         if isinstance(group, str):
             for idx, label in enumerate(self.snapshot_group_labels):
-                if trial_label_key(label) == trial_label_key(group):
+                if _label_key(label) == _label_key(group):
                     return idx
             raise ValueError(f"unknown snapshot group {group!r}")
         if not 0 <= int(group) < self.n_snapshot_groups:
@@ -881,29 +625,6 @@ class Show1D(Show1DState, Show1DExport, TrialReview, SavedStateMixin, HtmlExport
         self.snapshot_widths = widths
         self.snapshot_bytes = _b64_safe(stack.tobytes())
 
-    def _on_handoff_request_change(self, change: dict) -> None:
-        """Serve the browser's View as 2D request with a Show2D of the selected group."""
-        raw = str(change["new"] or "")
-        if not raw:
-            return
-        request = json.loads(raw)
-        if request.get("mode") == "clear":
-            self.prepared_view = None
-            self.prepared_view_widget = None
-            self.handoff_status = ""
-            return
-        try:
-            self.prepared_view = self.to_show2d(group=request.get("group"), images=request.get("images"), title=request.get("title"))
-        except ValueError as exc:
-            # the toolbar shows the failure; raising would only reach the kernel log
-            self.prepared_view = None
-            self.prepared_view_widget = None
-            self.handoff_status = f"View failed: {exc}"
-            return
-        self.prepared_view_widget = self.prepared_view
-        n_images = int(self.prepared_view.n_images)
-        self.handoff_status = f"Showing 2D with {n_images} panel{'s' if n_images != 1 else ''}"
-
 
 _INT_RANGES = {
     "plot_height_px": (220, 960),
@@ -915,7 +636,6 @@ _INT_RANGES = {
     "snapshot_profile_height": (44, 220),
     "snapshot_histogram_width": (110, 640),
     "snapshot_histogram_height": (36, 110),
-    "top_trial_count": (0, 10**6),
 }
 
 
@@ -965,6 +685,24 @@ def _normalize_x(x, n_points: int) -> np.ndarray | None:
     return np.ascontiguousarray(arr)
 
 
+def _label_key(label: str) -> str:
+    """Case- and punctuation-insensitive key so ``lambda_10``, ``lambda 10`` and ``Lambda-10`` name one image."""
+    return "".join(ch.lower() for ch in str(label) if ch.isalnum())
+
+
+def _unique_labels(labels: Sequence[str]) -> list[str]:
+    """Stripped labels, first spelling kept per label key, blanks dropped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        text = str(label).strip()
+        key = _label_key(text)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
+
+
 def _finite_pair(value: Sequence[float], name: str, *, increasing: bool = False) -> list[float]:
     """``[]`` or two finite floats, optionally ``min < max``."""
     if len(value) == 0:
@@ -977,15 +715,6 @@ def _finite_pair(value: Sequence[float], name: str, *, increasing: bool = False)
     if increasing and second <= first:
         raise ValueError(f"{name} must be increasing (min < max), got {value!r}")
     return [first, second]
-
-
-def _as_list(value) -> list[str]:
-    """A monitor-event field as a list of strings: a single label, a list of labels, or nothing."""
-    if value is None:
-        return []
-    if isinstance(value, str) or not isinstance(value, Sequence):
-        return [str(value)]
-    return [str(item) for item in value]
 
 
 def _sample_single_line(image: np.ndarray, row0: float, col0: float, row1: float, col1: float) -> np.ndarray:
@@ -1015,52 +744,3 @@ def _sample_single_line(image: np.ndarray, row0: float, col0: float, row1: float
         )
     return out
 
-
-def _monitor_file(path: str | pathlib.Path, *, create: bool = False) -> pathlib.Path:
-    """The JSONL file: ``path`` itself, or ``show1d_monitor.jsonl`` inside a run directory."""
-    raw = pathlib.Path(path)
-    if raw.suffix or not (raw.is_dir() or create):
-        return raw
-    return raw / _MONITOR_FILE_NAME
-
-
-def _read_monitor_events(path: pathlib.Path, offset: int) -> tuple[list[dict], int]:
-    """Complete JSON lines after ``offset`` and the new offset.
-
-    A trailing line without a newline is left for the next read so a
-    half-flushed event from the reconstruction process is never parsed.
-    """
-    if not path.exists():
-        return [], offset
-    offset = min(offset, path.stat().st_size)
-    with path.open("rb") as handle:
-        handle.seek(offset)
-        chunk = handle.read()
-    complete = chunk[: chunk.rfind(b"\n") + 1]
-    events = []
-    for raw in complete.decode("utf-8").splitlines():
-        text = raw.strip()
-        if not text or text.startswith("#"):
-            continue
-        event = json.loads(text)
-        if not isinstance(event, dict):
-            raise ValueError(f"monitor line must be a JSON object: {text[:80]}")
-        events.append(event)
-    return events, offset + len(complete)
-
-
-def _load_monitor_image(path: pathlib.Path) -> np.ndarray | None:
-    """A 2D float32 image from ``.npy`` / ``.npz`` (first array, last frame of a stack); None when missing."""
-    if not path.exists() or path.suffix not in {".npy", ".npz"}:
-        return None
-    if path.suffix == ".npy":
-        arr = np.load(path)
-    else:
-        with np.load(path) as data:
-            if not data.files:
-                return None
-            arr = data[data.files[0]]
-    arr = np.asarray(arr, dtype=np.float32)
-    if arr.ndim == 3:
-        arr = arr[-1]
-    return np.ascontiguousarray(arr) if arr.ndim == 2 else None

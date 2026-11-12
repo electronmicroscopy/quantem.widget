@@ -5,6 +5,17 @@ import { DISPLAY_NORMALIZE_WGSL, RANGE_REDUCE_WGSL } from "./displayShaders";
 import { computePipeline } from "./pipelines";
 
 /** Range and histogram passes over the engine's slots, with their pipelines and scratch buffers. */
+/** Per-panel scratch for the explicit-range panel paint: rgba output, range, and its cached colormap binding. */
+type PanelScratch = {
+  rgba: GPUBuffer;
+  range: GPUBuffer;
+  size: number;
+  colormapParams: GPUBuffer | null;
+  colormapGroup: GPUBindGroup | null;
+  colormapData: GPUBuffer | null;
+  colormapLut: GPUBuffer | null;
+};
+
 export class GPURanges {
   private readonly engine: GPUColormapEngine;
   private readonly device: GPUDevice;
@@ -282,13 +293,13 @@ fn reduce(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_i
   // computeHistogramRegions when N panels share ONE GPU slot (full frame).
   // Each entry holds the panel-sized rgba output buffer and the 16-byte range
   // buffer. Keyed by panel index.
-  private panelRgbaBuffers: Map<number, { rgba: GPUBuffer; range: GPUBuffer; size: number }> = new Map();
+  private panelRgbaBuffers: Map<number, PanelScratch> = new Map();
 
-  private ensurePanelScratch(panel: number, panelPixels: number): { rgba: GPUBuffer; range: GPUBuffer } {
+  private ensurePanelScratch(panel: number, panelPixels: number): PanelScratch {
     const want = panelPixels * 4;
     const existing = this.panelRgbaBuffers.get(panel);
     if (existing && existing.size === want) return existing;
-    if (existing) { existing.rgba.destroy(); existing.range.destroy(); }
+    if (existing) { existing.rgba.destroy(); existing.range.destroy(); existing.colormapParams?.destroy(); }
     const rgba = this.device.createBuffer({
       size: want,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -297,7 +308,7 @@ fn reduce(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_i
       size: 16,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    const entry = { rgba, range, size: want };
+    const entry: PanelScratch = { rgba, range, size: want, colormapParams: null, colormapGroup: null, colormapData: null, colormapLut: null };
     this.panelRgbaBuffers.set(panel, entry);
     return entry;
   }
@@ -417,7 +428,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     this.ensureColormapRangePipeline();
     if (!this.colormapRangePipeline || !this.engine.lutBuffer) return null;
     const slot = this.engine.slots[slotIdx];
-    if (!slot || regions.length === 0) return null;
+    if (!slot || slot.dataKind === "rgb" || regions.length === 0) return null;
     const format = navigator.gpu.getPreferredCanvasFormat();
     this.engine.ensureBlitPipeline(format);
     if (!this.engine.blitPipeline) return null;
@@ -425,7 +436,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     const encoder = this.device.createCommandEncoder();
     const colormapParams = new ArrayBuffer(32);
     const canvases: (OffscreenCanvas | null)[] = [];
-    const tempBuffers: GPUBuffer[] = [];
 
     for (let k = 0; k < regions.length; k++) {
       const region = regions[k];
@@ -444,34 +454,36 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       paramsF32[2] = 0; paramsF32[3] = 100;
       paramsU32[4] = Array.isArray(logScale) ? (logScale[k] ? 1 : 0) : (logScale ? 1 : 0);
       paramsU32[5] = region.x; paramsU32[6] = region.y; paramsU32[7] = slot.width;
-      const colormapParamsBuffer = this.device.createBuffer({
+      // Each panel keeps its params buffer and bind group; a scrub or contrast drag only rewrites the params.
+      scratch.colormapParams ??= this.device.createBuffer({
         size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
-      this.device.queue.writeBuffer(colormapParamsBuffer, 0, colormapParams);
-      tempBuffers.push(colormapParamsBuffer);
-
-      const colormapGroup = this.device.createBindGroup({
-        layout: this.colormapRangePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: colormapParamsBuffer } },
-          { binding: 1, resource: { buffer: slot.dataBuffer } },
-          { binding: 2, resource: { buffer: this.engine.lutBuffer } },
-          { binding: 3, resource: { buffer: scratch.rgba } },
-          { binding: 4, resource: { buffer: scratch.range } },
-        ],
-      });
+      this.device.queue.writeBuffer(scratch.colormapParams, 0, colormapParams);
+      if (!scratch.colormapGroup || scratch.colormapData !== slot.dataBuffer || scratch.colormapLut !== this.engine.lutBuffer) {
+        scratch.colormapGroup = this.device.createBindGroup({
+          layout: this.colormapRangePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: scratch.colormapParams } },
+            { binding: 1, resource: { buffer: slot.dataBuffer } },
+            { binding: 2, resource: { buffer: this.engine.lutBuffer } },
+            { binding: 3, resource: { buffer: scratch.rgba } },
+            { binding: 4, resource: { buffer: scratch.range } },
+          ],
+        });
+        scratch.colormapData = slot.dataBuffer;
+        scratch.colormapLut = this.engine.lutBuffer;
+      }
+      const colormapGroup = scratch.colormapGroup;
       const colormapPass = encoder.beginComputePass();
       colormapPass.setPipeline(this.colormapRangePipeline);
       colormapPass.setBindGroup(0, colormapGroup);
       colormapPass.dispatchWorkgroups(Math.ceil(region.width / 16), Math.ceil(region.height / 16));
       colormapPass.end();
-      const blit = this.engine.encodeBlitToOffscreen(encoder, scratch.rgba, region.width, region.height, format)!;
-      tempBuffers.push(blit.blitParamsBuffer);
-      canvases.push(blit.canvas);
+      const blit = this.engine.encodeBlitToOffscreen(encoder, scratch.rgba, region.width, region.height, format);
+      canvases.push(blit ? blit.canvas : null);
     }
 
     this.device.queue.submit([encoder.finish()]);
-    for (const buffer of tempBuffers) buffer.destroy();
     return this.engine.transferOffscreens(canvases);
   }
 
@@ -817,7 +829,7 @@ fn histogram(@builtin(global_invocation_id) gid: vec3u) {
 
   /** Release the per-panel scratch buffers; the engine's destroy calls this. */
   destroy(): void {
-    for (const scratch of this.panelRgbaBuffers.values()) { scratch.rgba.destroy(); scratch.range.destroy(); }
+    for (const scratch of this.panelRgbaBuffers.values()) { scratch.rgba.destroy(); scratch.range.destroy(); scratch.colormapParams?.destroy(); }
     this.panelRgbaBuffers.clear();
   }
 }

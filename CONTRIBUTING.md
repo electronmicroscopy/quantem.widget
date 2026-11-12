@@ -41,15 +41,34 @@ For Git and GitHub introductions, see
 
 ## Set up the project
 
-Create a dedicated Conda environment, then install the Python package and
-frontend dependencies:
+Create a dedicated Conda environment:
 
 ```bash
 conda create --name live-env --channel conda-forge python=3.14 nodejs=22 pip
 conda activate live-env
-pip install -e .
-npm ci
 ```
+
+The DirectPtycho source migration requires the matching `quantem.gpu` source
+candidate, `0.0.1rc18.dev0` or newer in the rc18 series. These development versions
+are source candidates, not published releases. Install the paired backend first,
+then this widget checkout, so the environment cannot select an older backend
+without the direct reconstruction API. For a fresh paired checkout, run the
+following from a parent workspace directory. Both repositories use the
+`oct-24-direct-iterative-api` branch; their `main` branches do not yet contain
+this candidate API. Existing clones should switch to that same branch first.
+
+```bash
+git clone --branch oct-24-direct-iterative-api https://github.com/bobleesj/quantem.gpu.git
+git clone --branch oct-24-direct-iterative-api https://github.com/bobleesj/quantem.widget.git
+cd quantem.widget
+pip install -e '../quantem.gpu[cuda]'   # use [mps] on Apple silicon
+pip install -e '.[cuda]'              # use [mps] on Apple silicon
+npm ci
+QUANTEM_GPU_SRC=../quantem.gpu/src npm run build
+```
+
+Conventional direct ptychography remains available on CUDA and MPS. The regularized phase and
+complex methods currently require CUDA and do not run in standalone exports.
 
 For documentation work:
 

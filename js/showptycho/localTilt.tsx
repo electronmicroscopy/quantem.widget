@@ -183,7 +183,7 @@ export function useLocalTiltWorkspace({ Panel, tc, ui, overviewSize, zoom, setZo
   const [pending,setPending]=React.useState(false);
   const [elapsed,setElapsed]=React.useState(0);
   const [fittingSelection,setFittingSelection]=React.useState('');
-  const [linked,setLinked]=React.useState(true),[individualZoom,setIndividualZoom]=React.useState<Record<string,Zoom>>({});
+  const [linked,setLinked]=React.useState(false),[individualZoom,setIndividualZoom]=React.useState<Record<string,Zoom>>({});
   const latest=React.useRef(regions); latest.current=regions;
   const timer=React.useRef(0);
   const busyRef=React.useRef(false);
@@ -236,8 +236,8 @@ export function useLocalTiltWorkspace({ Panel, tc, ui, overviewSize, zoom, setZo
     const reply=JSON.parse(replyJson);
     if(reply.status==='running'){
       setPending(true);busyRef.current=true;setFittingSelection(reply.signature);
-      if(reply.stage==='joint_fit')setStatus(`Refitting ${reply.label} · repeat ${reply.repeat}/${reply.repeats} · ${reply.num_trials} trials + Newton`);
-      else if(reply.stage==='preparing')setStatus(`Preparing ${reply.label} · ${reply.repeats} × ${reply.num_trials} trials + Newton`);
+      if(reply.stage==='joint_fit')setStatus(`Refitting ${reply.label} · ${reply.trials} trials + refinement`);
+      else if(reply.stage==='preparing')setStatus(`Preparing ${reply.label}`);
       else if(reply.stage==='reconstructing')setStatus(`Reconstructing ${reply.label} · full scan`);
       return;
     }
@@ -267,7 +267,7 @@ export function useLocalTiltWorkspace({ Panel, tc, ui, overviewSize, zoom, setZo
   const canReset=!!activeRegion||[resultZoom,...Object.values(individualZoom)].some(view=>view.zoom!==1||view.panX!==0||view.panY!==0);
   if(!configJson)return null;
   const toggle=<Box component="label" sx={{...label,display:'inline-flex',alignItems:'center'}}
-    title={available?'Show regional SSB alongside the full field':'Return to the full scan to edit local regions'}>
+    title={available?'Show regional direct ptychography alongside the full field':'Return to the full scan to edit local regions'}>
     Local Tilt<Switch size="small" inputProps={{'aria-label':'Local Tilt'}} checked={enabled&&available}
       disabled={!available} onChange={e=>setEnabled(e.target.checked)}/>
   </Box>;
@@ -335,10 +335,11 @@ export function useLocalTiltWorkspace({ Panel, tc, ui, overviewSize, zoom, setZo
           <Box component="label" sx={{...label,display:'inline-flex',alignItems:'center'}}>Link Zoom<Switch size="small" inputProps={{'aria-label':'Link Zoom'}} checked={linked} onChange={e=>{setLinked(e.target.checked);setIndividualZoom({});setResultZoom(RESET);}}/></Box>
         </Box>
         <Button sx={control} onClick={resetView}>Reset View</Button>
-        <Typography sx={{...value,color:tc.textMuted,mt:1}}>Tilt (row, col), mrad. SD measures repeatability across optimizer seeds.</Typography>
+        <Typography sx={{...value,color:tc.textMuted,mt:1}}>Tilt (row, col), mrad. One joint fit per region; uncertainty is not estimated.</Typography>
       </Box>;
   const comparison=panels.map((p:any)=>{
-    const fit=fits.find((f:any)=>`${f.label} · SSB`===p.meta.label);
+    const fit=fits.find((f:any)=>`${f.label} · Direct`===p.meta.label);
+    const uncertainty=Number.isFinite(fit?.seed_sd_mrad)?` · SD ${fit.seed_sd_mrad.toFixed(3)}`:'';
     const region=regions.find(r=>r.id===fit?.id);
     if(fit&&!region)return null;
     const isCurrent=region&&current(region);
@@ -364,9 +365,9 @@ export function useLocalTiltWorkspace({ Panel, tc, ui, overviewSize, zoom, setZo
         }}>
         <DeleteOutlineIcon sx={{fontSize:15}}/>
       </IconButton>}
-      <Typography title={fit?.aberrations?`Tilt ${tiltText(fit.sample_tilt_mrad)}, SD ${fit.seed_sd_mrad.toFixed(3)}. Joint fit: C10 ${fit.aberrations.C10_nm.toFixed(3)} nm, C12 ${fit.aberrations.C12_nm.toFixed(3)} nm, φ12 ${fit.aberrations.phi12_deg.toFixed(3)}°, depth ${fit.depth_spread_nm.toFixed(3)} nm`:undefined}
+      <Typography title={fit?.aberrations?`Tilt ${tiltText(fit.sample_tilt_mrad)}${uncertainty}. Joint fit: C10 ${fit.aberrations.C10_nm.toFixed(3)} nm, C12 ${fit.aberrations.C12_nm.toFixed(3)} nm, φ12 ${fit.aberrations.phi12_deg.toFixed(3)}°, depth ${fit.depth_spread_nm.toFixed(3)} nm`:undefined}
         sx={{...value,color:(!isCurrent||fit?.bound_hit?'#b7791f':tc.textMuted),mt:.25,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-        {fit?`Tilt ${tiltText(fit.sample_tilt_mrad)} · SD ${fit.seed_sd_mrad.toFixed(3)}`:p.meta.label}{fit?.adjusted?' · adjusted':''}{fit?.bound_hit?' · fit bound':''}{!isCurrent?' · stale':''}
+        {fit?`Tilt ${tiltText(fit.sample_tilt_mrad)}${uncertainty}`:p.meta.label}{fit?.adjusted?' · adjusted':''}{fit?.bound_hit?' · fit bound':''}{!isCurrent?' · stale':''}
       </Typography>
     </Box>;
   });

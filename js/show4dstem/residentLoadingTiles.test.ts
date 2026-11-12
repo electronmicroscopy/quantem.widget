@@ -23,7 +23,7 @@ function tiles(ready: number, rangesReady = 0, sourceLoading = false) {
   const bindings = {renderIndices: [0, 1, 2], panelByFrame: new Map(),
     gpuSlots: new Map(Array.from({length: ready}, (_, i) => [i, 60 + i])),
     gpuRanges: new Map(Array.from({length: rangesReady}, (_, i) => [i, {min: 0, max: 1}])),
-    gpuEngine: {}, progressivePage: null, sourceLoading};
+    gpuEngine: {}, gpuBytesCurrent: false, progressivePage: null, sourceLoading};
   return new Function(...Object.keys(bindings), `${code};return select();`)(...Object.values(bindings));
 }
 

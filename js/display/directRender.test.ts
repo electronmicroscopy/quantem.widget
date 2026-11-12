@@ -28,3 +28,30 @@ describe("panel-grid direct render", () => {
       .toThrow("Supply one distinct resident slot for each panel.");
   });
 });
+
+describe("per-canvas panel direct render", () => {
+  it("refuses a slot listed for two canvases", () => {
+    const engine = new GPUColormapEngine(device());
+    engine.uploadData(0, new Float32Array(16), 4, 4);
+    const draw = { slot: 0, ctx: {} as GPUCanvasContext, range: { vmin: 0, vmax: 1 }, logScale: false, lut: { name: "gray", lut: COLORMAPS.gray } };
+    expect(() => engine.renderSlotsDirectToCanvases([draw, draw], { width: 4, height: 4, bgRgb: 0 }))
+      .toThrow("Supply one distinct resident slot for each canvas context.");
+  });
+
+  it("refuses a detail overlay drawn from its own panel's slot", () => {
+    const engine = new GPUColormapEngine(device());
+    engine.uploadData(0, new Float32Array(16), 4, 4);
+    const draw = {
+      slot: 0, ctx: {} as GPUCanvasContext, range: { vmin: 0, vmax: 1 }, logScale: false,
+      lut: { name: "gray", lut: COLORMAPS.gray }, overlay: { slot: 0, x: 0, y: 0, width: 2, height: 2 },
+    };
+    expect(() => engine.renderSlotsDirectToCanvases([draw], { width: 4, height: 4, bgRgb: 0 }))
+      .toThrow("Supply one distinct resident slot for each canvas context.");
+  });
+
+  it("draws nothing when a slot is missing, leaving the panel to the 2D path", () => {
+    const engine = new GPUColormapEngine(device());
+    const draw = { slot: 3, ctx: {} as GPUCanvasContext, range: { vmin: 0, vmax: 1 }, logScale: false, lut: { name: "gray", lut: COLORMAPS.gray } };
+    expect(engine.renderSlotsDirectToCanvases([draw], { width: 4, height: 4, bgRgb: 0 })).toBe(false);
+  });
+});

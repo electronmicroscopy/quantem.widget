@@ -1,9 +1,13 @@
-"""``quantem`` command-line interface for the two jobs that need no notebook.
+"""``quantem`` command-line interface for the jobs that need no notebook.
 
-    quantem show4dstem ./masters/                       # *_master.h5 -> live Show4DSTEM notebook
-    quantem show4dstem ./masters/ --backend webgpu --html   # HDF5-backed WebGPU browser folder
-    quantem show4dstem a_master.h5 b_master.h5 --html   # packed offline HTML per master
-    quantem github tutorial_github.ipynb --no-execute   # GitHub-displayable notebook copy
+    quantem-widget show2d a.dm4 b.tif c.npy --no-open          # images -> one shareable Show2D HTML page
+    quantem-widget show2d ./survey/ --columns 4 --no-open      # a folder of images -> one gallery page
+    quantem-widget show3d ./frames/ --no-open                  # a folder of frames -> one Show3D HTML page
+    quantem-widget show3d stack.tif --encoding uint8 --no-open # one (frames, rows, cols) file -> Show3D HTML
+    quantem-widget show4dstem ./masters/                       # *_master.h5 -> live Show4DSTEM notebook
+    quantem-widget show4dstem ./masters/ --backend webgpu --html   # HDF5-backed WebGPU browser folder
+    quantem-widget show4dstem a_master.h5 b_master.h5 --html   # packed offline HTML per master
+    quantem-widget github tutorial_github.ipynb --no-execute   # GitHub-displayable notebook copy
 
 ``show4dstem`` orchestrates master discovery and loading (quantem.gpu when it
 is installed, else the widget's dense reader), the ``Show4DSTEM`` widget and its
@@ -11,6 +15,9 @@ export helpers; WebGPU HTML keeps the compressed
 HDF5 family on disk so Chrome range-fetches and decompresses chunks itself.
 ``github`` strips offline widget state from a notebook and embeds compressed
 pictures of each widget so GitHub's notebook preview can display it.
+``show2d`` and ``show3d`` read image files through ``quantem.widget.io`` and
+write the widget's own ``export_html`` page: the same file the toolbar Export
+button saves, which opens offline, on phones and inside an ``<iframe>``.
 """
 import argparse
 import base64
@@ -36,11 +43,16 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``quantem`` console script. Parse args, dispatch to a
     subcommand, return a process exit code."""
     parser = argparse.ArgumentParser(
-        prog="quantem",
-        description="Open 4D-STEM masters in Show4DSTEM, or make a widget notebook GitHub-displayable.",
+        prog="quantem-widget",
+        description=("Write images as a shareable Show2D or Show3D HTML page, open 4D-STEM masters in "
+                     "Show4DSTEM, or make a widget notebook GitHub-displayable."),
     )
     # A missing command is a usage error (exit 2), as for quantem-gpu.
     subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_show2d_args(subparsers.add_parser(
+        "show2d", help="Write image file(s) or a folder of images as one Show2D HTML page."))
+    _add_show3d_args(subparsers.add_parser(
+        "show3d", help="Write a stack file, image files or a folder of frames as one Show3D HTML page."))
     _add_show4dstem_args(subparsers.add_parser(
         "show4dstem",
         help="Render 4D-STEM master(s) as Show4DSTEM (live notebook, or --html)."))
@@ -54,11 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "github":
             return _prepare_github(args)
+        if args.command == "show2d":
+            return _show2d(args)
+        if args.command == "show3d":
+            return _show3d(args)
         return _show4dstem(args)
-    except (OSError, ValueError, ImportError, MemoryError) as error:
+    except (OSError, ValueError, ImportError, MemoryError, NotImplementedError) as error:
         if isinstance(error, ImportError) and (error.name or "").startswith("quantem.widget"):
             raise  # a broken import inside this package, not a missing install
-        print(f"quantem: {' '.join(str(error).split()) or type(error).__name__}", file=sys.stderr)
+        print(f"quantem-widget: {' '.join(str(error).split()) or type(error).__name__}", file=sys.stderr)
         return 1
 
 
@@ -76,7 +92,7 @@ def _add_github_args(parser: argparse.ArgumentParser) -> None:
                         help="JPEG quality for the embedded renders (default 92).")
     parser.add_argument("--max-width", type=int, default=1200,
                         help="Maximum embedded UI width in pixels (default 1200).")
-    parser.add_argument("--timeout", type=int, default=600,
+    parser.add_argument("--timeout-s", type=int, default=600,
                         help="Per-cell execution timeout in seconds (default 600).")
 
 
@@ -171,7 +187,7 @@ def _cell_has_widget_view_output(cell: dict) -> bool:
 
 
 def _cell_has_full_ui_output(cell: dict) -> bool:
-    """Return true when ``quantem github`` already embedded the full widget UI."""
+    """Return true when ``quantem-widget github`` already embedded the full widget UI."""
     return _cell_has_marked_image(cell, "github_full_ui")
 
 
@@ -527,7 +543,7 @@ def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes | None]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
-        raise ImportError("quantem github needs Playwright to screenshot each widget: pip install playwright") from exc
+        raise ImportError("quantem-widget github needs Playwright to screenshot each widget: pip install playwright") from exc
     shots: list[bytes | None] = []
     launch_kwargs = {}
     for candidate in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
@@ -631,7 +647,7 @@ def _prepare_github(args: argparse.Namespace) -> int:
     if not args.no_execute:
         print(f"executing {notebook.name} ...")
         if subprocess.run(["jupyter", "nbconvert", "--to", "notebook", "--execute", "--inplace",
-                           str(notebook), f"--ExecutePreprocessor.timeout={args.timeout}",
+                           str(notebook), f"--ExecutePreprocessor.timeout={args.timeout_s}",
                            "--ExecutePreprocessor.store_widget_state=True"]).returncode != 0:
             raise ValueError("nbconvert --execute failed (see output above)")
     nb = json.loads(notebook.read_text())
@@ -693,12 +709,218 @@ def _prepare_github(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+_STACK_SUFFIXES = (".npy", ".tif", ".tiff")
+
+
+def _max_mb(value: str) -> float | None:
+    """``--max-mb``: a size in MB, or ``none`` to write a page of any size (``max_mb=None`` in Python)."""
+    if value.strip().lower() == "none":
+        return None
+    size = float(value)
+    if size <= 0:
+        raise argparse.ArgumentTypeError("--max-mb must be a positive size in MB, or none")
+    return size
+
+
+def _add_page_args(parser: argparse.ArgumentParser) -> None:
+    """Options shared by ``show2d`` and ``show3d``, named as the widget keywords they set."""
+    parser.add_argument("--save-dir", default=None, dest="save_dir", help="Output folder (default ~/Downloads).")
+    parser.add_argument("--title", default=None,
+                        help="Page and widget title; also names the file (default: the file or folder name).")
+    parser.add_argument("--labels", nargs="+", default=None,
+                        help="One label per image (Show2D) or per frame (Show3D); default the file names.")
+    parser.add_argument("--cmap", default=None, help="Colormap, e.g. inferno, gray, viridis.")
+    parser.add_argument("--vmin", type=float, default=None, help="Display contrast floor, in image units.")
+    parser.add_argument("--vmax", type=float, default=None, help="Display contrast ceiling, in image units.")
+    parser.add_argument("--sampling", type=float, default=None,
+                        help="Pixel size in --units; overrides the calibration a DM or EMD file carries.")
+    parser.add_argument("--units", default=None, help="Unit of --sampling, e.g. nm or A.")
+    parser.add_argument("--link-contrast", action=argparse.BooleanOptionalAction, default=None, dest="link_contrast",
+                        help=("Share one contrast range across panels (Show2D default) or give each panel its own; "
+                              "use --no-link-contrast for images on different value scales."))
+    parser.add_argument("--columns", type=int, default=None, help="Panels across the gallery.")
+    parser.add_argument("--size", default="medium", choices=("small", "medium", "large", "xlarge"),
+                        help="Width of each panel: 300, 450, 600 or 900 CSS px (default medium).")
+    parser.add_argument("--encoding", default="full", choices=("full", "uint8"),
+                        help="full keeps exact float32 pixels (default); uint8 packs each panel over its own range.")
+    parser.add_argument("--image-bin", type=int, default=None, dest="image_bin", choices=(1, 2, 4, 8),
+                        help="Mean-bin the embedded pixels by this factor (needs --encoding uint8). Default 1.")
+    parser.add_argument("--max-mb", type=_max_mb, default=80.0, dest="max_mb",
+                        help="Refuse a page estimated above this size in MB (default 80); none writes any size.")
+    parser.add_argument("--no-open", action="store_true", help="Write the page but do not open a browser.")
+    parser.add_argument("--serve", action="store_true",
+                        help="Open the page from a local HTTP server instead of file:// (a tunnelable URL).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print the widget's loading messages.")
+
+
+def _add_show2d_args(parser: argparse.ArgumentParser) -> None:
+    """Arguments of ``quantem-widget show2d``: image files, or one folder, to a Show2D page."""
+    parser.add_argument("path", nargs="+",
+                        help="Image files (.dm3/.dm4, .emd, .tif, .png, .jpg, .npy), or one folder of them.")
+    parser.add_argument("--pattern", default="*", help="Folder input: glob selecting the images (default *).")
+    _add_page_args(parser)
+    parser.add_argument("--log-scale", action="store_true", dest="log_scale", help="Show log(1 + value).")
+
+
+def _add_show3d_args(parser: argparse.ArgumentParser) -> None:
+    """Arguments of ``quantem-widget show3d``: a stack file, 2D frame files or one folder of frames, to a Show3D page."""
+    parser.add_argument("path", nargs="+",
+                        help=("One (frames, rows, cols) .npy or .tif stack, several stacks (one panel each), "
+                              "several 2D image files (one frame each), or one folder of frames."))
+    parser.add_argument("--pattern", default="*", help="Folder input: glob selecting the frames (default *).")
+    _add_page_args(parser)
+    parser.add_argument("--fps", type=float, default=None, help="Playback rate in frames per second (default 30).")
+
+
+def _input_paths(paths: list[str], pattern: str) -> tuple[str, list[pathlib.Path]]:
+    """``(default title, image files)``: files as given, or one folder's images matching ``pattern`` in natural order."""
+    from quantem.widget.io.image import _IMAGE_SUFFIXES, _natural_key
+
+    resolved = [pathlib.Path(path).expanduser() for path in paths]
+    for path in resolved:
+        if not path.exists():
+            raise FileNotFoundError(f"not found: {path}")
+    folders = [path for path in resolved if path.is_dir()]
+    if not folders:
+        return (resolved[0].stem if len(resolved) == 1 else ""), resolved
+    if len(resolved) > 1:
+        raise ValueError("pass one folder, or image files, not both and not several folders")
+    folder = folders[0]
+    files = sorted((path for path in folder.glob(pattern)
+                    if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES and not path.name.startswith(".")),
+                   key=_natural_key)
+    if not files:
+        raise FileNotFoundError(f"no readable images in {folder} matching {pattern!r}")
+    return folder.name, files
+
+
+def _widget_options(args: argparse.Namespace) -> dict:
+    """The widget keywords the shared flags set; a flag left out keeps the widget's own default."""
+    options = {"size": args.size, "verbose": args.verbose}
+    for name in ("title", "cmap", "vmin", "vmax", "sampling", "units", "columns", "link_contrast"):
+        value = getattr(args, name)
+        if value is not None:
+            options[name] = value
+    return options
+
+
+def _check_labels(labels: list[str] | None, count: int, what: str) -> None:
+    """``--labels`` must name every image or frame; a short or long list is refused, never padded or cut."""
+    if labels is not None and len(labels) != count:
+        raise ValueError(f"--labels gives {len(labels)} for {count} {what}{'' if count == 1 else 's'}; give one per {what}")
+
+
+def _calibration(dataset) -> dict:
+    """``sampling`` / ``units`` from a calibrated reader result (DM, EMD); none for a plain pixel grid."""
+    units = tuple(getattr(dataset, "units", ()) or ())
+    if not units or all(str(unit) in ("pixels", "px", "") for unit in units):
+        return {}
+    return {"sampling": float(dataset.sampling[-1]), "units": str(units[-1])}
+
+
+def _write_page(widget, args: argparse.Namespace) -> int:
+    """Write the widget's ``export_html`` page into ``--save-dir`` under its default name, report it, open it."""
+    if (args.image_bin or 1) > 1 and args.encoding == "full":
+        raise ValueError("--image-bin needs --encoding uint8; the full encoding keeps every native pixel")
+    out_dir = _out_dir(args.save_dir)
+    options = widget._html_export_choice(args.encoding, args.image_bin)
+    if args.max_mb is not None:
+        # the size check of export_html, worded with the flags that answer it
+        estimate_mb = widget._estimate_html_export_mb(**options)
+        if estimate_mb > args.max_mb:
+            uint8_mb = widget._estimate_html_export_mb(quantized=True, image_bin=options["image_bin"])
+            raise ValueError(
+                f"the page would embed about {estimate_mb:.0f} MB, above --max-mb {args.max_mb:g} (a large "
+                f"single file often fails to open from disk); use --encoding uint8 (about {uint8_mb:.0f} MB), "
+                f"add --image-bin 2 or 4 with uint8, or pass --max-mb {estimate_mb:.0f} to write it anyway")
+    path = out_dir / widget._default_html_export_path(**options).name
+    widget.export_html(path, title=args.title, encoding=args.encoding, image_bin=args.image_bin, max_mb=None)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    print(f"wrote {path} ({size_mb:.1f} MB, {widget._export_mode_label(**options)})", flush=True)
+    if not args.no_open:
+        _open_html(path, serve=args.serve, no_open=False)
+    return 0
+
+
+def _show2d(args: argparse.Namespace) -> int:
+    """``quantem-widget show2d``: every image becomes one panel of a Show2D page."""
+    from quantem.widget import Show2D, io
+
+    title, files = _input_paths(args.path, args.pattern)
+    options = _widget_options(args)
+    options.setdefault("title", title or "Show2D")
+    if args.log_scale:
+        options["log_scale"] = True
+    _check_labels(args.labels, len(files), "image")
+    widget = Show2D([io.read_image(path) for path in files], labels=args.labels or [path.stem for path in files], **options)
+    try:
+        return _write_page(widget, args)
+    finally:
+        widget.close()
+
+
+def _read_stack_file(path: pathlib.Path):
+    """Every frame of one file: the whole array of a .npy or .tif, else the reader's single image."""
+    import numpy as np
+
+    from quantem.widget import io
+
+    suffix = path.suffix.lower()
+    if suffix == ".npy":
+        return np.load(path)
+    if suffix in (".tif", ".tiff"):
+        import tifffile
+
+        return tifffile.imread(path)
+    return io.read_image(path)
+
+
+def _show3d(args: argparse.Namespace) -> int:
+    """``quantem-widget show3d``: one stack per panel, or 2D files and folder frames played in order."""
+    import numpy as np
+
+    from quantem.widget import Show3D
+
+    title, files = _input_paths(args.path, args.pattern)
+    options = _widget_options(args)
+    if args.fps is not None:
+        options["fps"] = args.fps
+
+    items = [_read_stack_file(path) for path in files]
+    arrays = [np.asarray(getattr(item, "array", item)) for item in items]
+    is_image = [array.ndim == 2 or (array.ndim == 3 and array.shape[-1] == 3 and hasattr(items[i], "array"))
+                for i, array in enumerate(arrays)]
+    options.setdefault("title", title or "Show3D")
+    if "sampling" not in options:
+        options.update(_calibration(items[0]))
+    if all(is_image):
+        if len(arrays) < 2:
+            raise ValueError(f"{files[0].name} is one 2D image; Show3D needs a stack file, several images or a folder")
+        shapes = {array.shape for array in arrays}
+        if len(shapes) > 1:
+            raise ValueError(f"frames differ in shape {sorted(shapes)}; Show3D plays frames of one shape")
+        _check_labels(args.labels, len(files), "frame")
+        widget = Show3D(np.stack(arrays), labels=args.labels or [path.stem for path in files], **options)
+    elif not any(is_image):
+        if args.labels is not None:
+            _check_labels(args.labels, int(arrays[0].shape[0]), "frame")
+        panel_titles = [path.stem for path in files] if len(files) > 1 else None
+        widget = Show3D(*arrays, labels=args.labels, panel_titles=panel_titles, **options)
+    else:
+        raise ValueError("mix of 2D images and stacks; pass only stacks (one panel each) or only 2D frames")
+    try:
+        return _write_page(widget, args)
+    finally:
+        widget.close()
+
+
+# ---------------------------------------------------------------------------
 def _add_show4dstem_args(parser: argparse.ArgumentParser) -> None:
     """Attach the ``show4dstem`` options."""
 
     parser.add_argument("path", nargs="+",
                         help="A 4D-STEM master, a folder of masters, or several master files.")
-    parser.add_argument("--out", default=None, help="Output folder (default ~/Downloads).")
+    parser.add_argument("--save-dir", default=None, help="Output folder (default ~/Downloads).")
     parser.add_argument("--no-open", action="store_true", help="Write the file(s) but do not launch anything.")
     parser.add_argument("--serve", action="store_true",
                         help="Open via a local HTTP server even for self-contained files (tunnelable URL).")
@@ -716,15 +938,9 @@ def _add_show4dstem_args(parser: argparse.ArgumentParser) -> None:
                         help="Require and load this many compatible masters from the input.")
     parser.add_argument("--html", action="store_true",
                         help="Export a standalone offline-WebGPU HTML instead of a live notebook.")
-    parser.add_argument("--watch", action="store_true",
-                        help="Folder: write a live viewer notebook that appends new masters.")
-    parser.add_argument("--watch-interval", type=float, default=2.0,
-                        help="Polling interval in seconds for --watch live folders (default 2).")
     parser.add_argument("--dtype", default="auto", choices=("auto", "uint8", "uint16"),
                         help=("--html: packed dtype of the exported counts: auto (default; uint8 when every "
                               "count fits, else uint16, so nothing clips), uint8 or uint16."))
-    parser.add_argument("--scan-size", type=int, default=None,
-                        help="--watch: only include masters with this square scan size.")
     parser.add_argument("--backend", default="auto", choices=("auto", "webgpu"),
                         help=("auto (default): the data loads onto CUDA, Apple MPS or the CPU, whichever "
                               "this machine has; webgpu (with --html): the browser reads the HDF5 files."))
@@ -748,23 +964,16 @@ def _show4dstem(args: argparse.Namespace) -> int:
         from quantem.widget.show4dstem.export import write_qem_bundle
 
         label = paths[0].stem if len(paths) == 1 else f"{len(paths)}_datasets"
-        out_dir = _out_dir(args.out) / f"{label}_show4dstem_webgpu"
+        out_dir = _out_dir(args.save_dir) / f"{label}_show4dstem_webgpu"
         _prepare_show4dstem_webgpu_output_dir(out_dir)
         launcher = write_qem_bundle(paths, out_dir, title=args.title or label)
         print(f"{len(paths)} .qem file(s), backend webgpu -> {out_dir}")
         _open_show4dstem_command(launcher, no_open=args.no_open)
         return 0
     if len(paths) > 1:
-        if args.watch:
-            raise ValueError("--watch requires one folder path, not multiple explicit paths.")
         masters = _select_show4dstem_masters([str(path) for path in paths], args)
-        return _do_4dstem(masters, f"{len(masters)}_datasets", args, source_path=None)
+        return _do_4dstem(masters, f"{len(masters)}_datasets", args)
     path = paths[0]
-    if args.watch:
-        if args.html:
-            raise ValueError("--watch writes a live notebook; omit --html.")
-        if not path.is_dir():
-            raise ValueError("--watch requires a folder path containing *_master.h5 files.")
     from quantem.widget.adapters import gpu as gpu_adapter
     from quantem.widget.show4dstem.reader import find_masters
 
@@ -779,20 +988,10 @@ def _show4dstem(args: argparse.Namespace) -> int:
         raise ValueError(f"no *_master.h5 found in {path}")
     masters = _select_show4dstem_masters(masters, args)
     label = pathlib.Path(masters[0]).stem.replace("_master", "") if path.is_file() else path.name
-    if args.watch:
-        notebook = _render_4dstem_watch_notebook(path, label, args)
-        _launch_notebook(notebook, no_open=args.no_open)
-        return 0
-    return _do_4dstem(masters, label, args, source_path=path)
+    return _do_4dstem(masters, label, args)
 
 
-def _do_4dstem(
-    masters: list[str],
-    label: str,
-    args: argparse.Namespace,
-    *,
-    source_path: pathlib.Path | None = None,
-) -> int:
+def _do_4dstem(masters: list[str], label: str, args: argparse.Namespace) -> int:
     """Dispatch 4D-STEM master(s) to either a live notebook (default) or an offline
     HTML (``--html``), then launch/open it. One master opens alone; many open as a
     dataset comparison (the multi-tilt case)."""
@@ -809,7 +1008,7 @@ def _do_4dstem(
         return 0
     if args.backend == "webgpu":
         raise ValueError("Show4DSTEM --backend webgpu writes browser HTML; add --html.")
-    notebook = _render_4dstem_notebook(masters, label, args, source_path=source_path)
+    notebook = _render_4dstem_notebook(masters, label, args)
     _launch_notebook(notebook, no_open=args.no_open)
     return 0
 
@@ -833,7 +1032,7 @@ def _select_show4dstem_masters(masters: list[str], args: argparse.Namespace) -> 
 def _is_show4dstem_generated_master_link(path: pathlib.Path) -> bool:
     """Return whether *path* is a symlink created by a CLI WebGPU export.
 
-    Rerunning ``quantem show4dstem <source-folder> --out <source-folder>``
+    Rerunning ``quantem-widget show4dstem <source-folder> --save-dir <source-folder>``
     must select the original masters, not the anonymous ``dataset_XX``
     links placed in its owned ``*_show4dstem_webgpu`` output folder.
     """
@@ -867,13 +1066,7 @@ def _effective_detector_bin(args: argparse.Namespace) -> int:
     return detector_bin
 
 
-def _render_4dstem_notebook(
-    masters: list[str],
-    label: str,
-    args: argparse.Namespace,
-    *,
-    source_path: pathlib.Path | None = None,
-) -> pathlib.Path:
+def _render_4dstem_notebook(masters: list[str], label: str, args: argparse.Namespace) -> pathlib.Path:
     """Write a live Jupyter notebook that loads the 4D-STEM master(s) and opens a
     kernel-backed ``Show4DSTEM`` (no baked HTML). Each master stays encoded on the
     GPU at full detector sampling; many open as a dataset comparison (the
@@ -885,21 +1078,7 @@ def _render_4dstem_notebook(
             "storage; --detector-bin applies to --html exports only."
         )
     print(f"{len(masters)} master(s) -> Show4DSTEM (live notebook)")
-    if source_path is not None and source_path.is_dir():
-        source = (
-            "from quantem.widget import Show4DSTEM\n"
-            "\n"
-            f"folder = {str(source_path)!r}\n"
-            "viewer = Show4DSTEM.from_folder(\n"
-            "    folder,\n"
-            f"    max_masters={len(masters)},\n"
-            f"    min_masters={len(masters)},\n"
-            "    watch=False,\n"
-            "    verbose=True,\n"
-            ")\n"
-            "viewer\n"
-        )
-    elif len(masters) == 1:
+    if len(masters) == 1:
         # a path opens through quantem.gpu when it is installed, else densely
         source = (
             "from quantem.widget import Show4DSTEM\n"
@@ -907,7 +1086,7 @@ def _render_4dstem_notebook(
             f"Show4DSTEM({masters[0]!r})\n"
         )
     else:
-        # one Dataset4dstemGPU per master on a GPU, one quantem core Dataset4dstem each elsewhere
+        # one Dataset4dstem per master on a GPU, one quantem core Dataset4dstem each elsewhere
         source = (
             "from quantem.widget import Show4DSTEM, read_4dstem\n"
             "\n"
@@ -916,32 +1095,7 @@ def _render_4dstem_notebook(
             "Show4DSTEM(data)\n"
         )
     title = [f"# {label}\n", f"\n{len(masters)} master(s), full detector sampling."]
-    return _write_viewer_notebook(_out_dir(args.out) / f"{label}.ipynb", title, "viewer", source)
-
-
-def _render_4dstem_watch_notebook(folder: pathlib.Path, label: str, args: argparse.Namespace) -> pathlib.Path:
-    """Write a live viewer notebook for a 4D-STEM acquisition folder."""
-    if _effective_detector_bin(args) != 1:
-        raise ValueError(
-            "A live folder viewer keeps full detector sampling in encoded GPU "
-            "storage; --detector-bin applies to --html exports only."
-        )
-    print(f"{folder.name}: watched folder -> Show4DSTEM over encoded masters")
-    scan_size = "None" if args.scan_size is None else str(int(args.scan_size))
-    source = (
-        "from quantem.widget import Show4DSTEM\n\n"
-        "viewer = Show4DSTEM.from_folder(\n"
-        f"    {str(folder)!r},\n"
-        f"    scan_size={scan_size},\n"
-        f"    watch=True, watch_interval={float(args.watch_interval)!r},\n"
-        ")\nviewer\n"
-    )
-    title = [
-        f"# {label} live Show4DSTEM\n",
-        f"\nWatched folder: `{folder}`\n",
-        f"\nFull detector sampling; watch interval {args.watch_interval:g}s.",
-    ]
-    return _write_viewer_notebook(_out_dir(args.out) / f"{label}_live.ipynb", title, "live-viewer", source)
+    return _write_viewer_notebook(_out_dir(args.save_dir) / f"{label}.ipynb", title, "viewer", source)
 
 
 def _write_viewer_notebook(path: pathlib.Path, title: list[str], cell_id: str, source: str) -> pathlib.Path:
@@ -1066,7 +1220,7 @@ def _render_4dstem_webgpu_h5(
                 f"{observed}; expected {expected}"
             )
 
-    out_dir = _out_dir(args.out) / f"{label}_show4dstem_webgpu"
+    out_dir = _out_dir(args.save_dir) / f"{label}_show4dstem_webgpu"
     replaced = _prepare_show4dstem_webgpu_output_dir(out_dir)
     if replaced:
         print(f"replaced existing Show4DSTEM WebGPU export: {out_dir}")
@@ -1245,7 +1399,7 @@ def _render_4dstem(masters: list[str], args: argparse.Namespace) -> list[pathlib
     1 for full detector sampling) and packed into its own page."""
     from quantem.widget import Show4DSTEM
     from quantem.widget.adapters import gpu as gpu_adapter
-    out_dir = _out_dir(args.out)
+    out_dir = _out_dir(args.save_dir)
     export_dtype = args.dtype  # "auto" resolves per master once its counts are known (_lossless_pack_dtype)
     outputs = []
     iterator = masters
@@ -1281,7 +1435,7 @@ def _render_4dstem(masters: list[str], args: argparse.Namespace) -> list[pathlib
             widget.export_html(str(out), title=args.title or stem, dtype=pack_dtype)
             outputs.append(out)
         except (RuntimeError, ValueError, OSError, MemoryError) as error:
-            print(f"quantem: skipped {stem}: {error}", file=sys.stderr)
+            print(f"quantem-widget: skipped {stem}: {error}", file=sys.stderr)
     if not outputs:
         raise ValueError("every master failed to export (see messages above)")
     return outputs
@@ -1289,11 +1443,11 @@ def _render_4dstem(masters: list[str], args: argparse.Namespace) -> list[pathlib
 
 # ---------------------------------------------------------------------------
 def _out_dir(out: str | None) -> pathlib.Path:
-    """Resolve the output directory (``--out`` or the default ``~/Downloads``)."""
+    """Resolve the output directory (``--save-dir`` or the default ``~/Downloads``)."""
     target = pathlib.Path(out).expanduser() if out else _default_out_dir()
     if target.suffix in {".html", ".ipynb"}:
-        # --out is the folder the outputs are written into; a file name would become a folder
-        raise ValueError(f"--out is the output folder; {target.name} looks like a file name, pass its folder")
+        # --save-dir is the folder the outputs are written into; a file name would become a folder
+        raise ValueError(f"--save-dir is the output folder; {target.name} looks like a file name, pass its folder")
     target.mkdir(parents=True, exist_ok=True)
     return target
 

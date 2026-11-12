@@ -11,7 +11,7 @@ class Show1DState:
     # Bulk buffers dropped from the saved-notebook snapshot when save_state is
     # False. y_bytes / x_bytes stay: they are the trace itself (normally KBs)
     # and let a cold reopen paint the plot. snapshot_bytes is the whale (a
-    # monitor run's full snapshot stack); profile_image_bytes can be a
+    # live run's full snapshot stack); profile_image_bytes can be a
     # full-resolution image in from_image mode.
     _UNSAVED_HEAVY_KEYS = (
         "snapshot_bytes",
@@ -20,7 +20,7 @@ class Show1DState:
     )
     _STATE_KEYS = (
         "title", "labels", "colors", "x_label", "x_integer", "y_label", "x_unit", "y_unit", "log_scale",
-        "show_title", "show_stats", "show_review", "show_legend", "show_grid", "show_controls", "controls_collapsed",
+        "show_title", "show_stats", "show_legend", "show_grid", "show_controls", "controls_collapsed",
         "line_width", "plot_height_px", "plot_width_px", "max_width", "side_panel_width_px",
         "focused_trace", "x_range", "y_range",
         "selected_snapshot_idx", "selected_snapshot_group_idx", "bookmarked_snapshot_groups",
@@ -33,9 +33,7 @@ class Show1DState:
         "snapshot_real_space_zoom", "snapshot_real_space_center", "snapshot_fft_zoom", "snapshot_fft_center",
         "image_cmap", "pixel_size", "pixel_unit", "show_scale_bar",
         "snapshot_playing", "snapshot_fps", "snapshot_loop", "snapshot_bounce",
-        "starred_snapshot_image_labels", "hidden_snapshot_image_labels", "trial_notes", "trial_tags",
-        "show_trial_notes", "show_starred_only", "review_mode", "trial_sort_key", "trial_sort_descending",
-        "trial_filter_text", "top_trial_count",
+        "hidden_snapshot_image_labels",
         "profile_line", "profile_width",
     )
 
@@ -51,4 +49,3 @@ class Show1DState:
         """Restore a ``state_dict``, its envelope or a ``save`` file; the trait validators clamp and normalise every value, an unknown key raises."""
         for key, value in read_state(state, "Show1D", self._STATE_KEYS).items():
             setattr(self, key, value)
-        self._update_trial_analysis()

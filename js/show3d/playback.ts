@@ -82,7 +82,11 @@ export function orderedFramePrewarmIndices(startIdx: number, nFrames: number): n
   return order;
 }
 
-export const MAX_PLAYBACK_FPS = 60;
+// Live playback follows the display: 120 fps on ProMotion and other high-refresh screens.
+export const MAX_PLAYBACK_FPS = 120;
+// A GIF stores frame delays in centiseconds and browsers slow any delay under 2 cs to 10 cs,
+// so an exported animation tops out at 50 fps.
+export const MAX_EXPORT_FPS = 50;
 
 export const clampPlaybackFps = (value: number) => {
   const fps = Number.isFinite(value) ? value : 1;

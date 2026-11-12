@@ -9,7 +9,7 @@ import numpy as np
 from quantem.widget import __version__
 
 # The one layout of a save() file: {"schema", "widget_name", "widget_version", "state"}.
-STATE_SCHEMA = "quantem.widget-state/2"
+STATE_SCHEMA = "quantem.widget-state/3"
 
 
 def read_state(state: dict | str | pathlib.Path, widget_name: str, keys) -> dict:
@@ -36,8 +36,10 @@ def read_state(state: dict | str | pathlib.Path, widget_name: str, keys) -> dict
         raise ValueError("State payload must be a dict.")
     if "state" in state:
         if state.get("schema") != STATE_SCHEMA:
-            raise ValueError(f"{source} has schema {state.get('schema')!r}; {widget_name} reads {STATE_SCHEMA!r} only. "
-                             "A state saved by another release is not converted: set the view again and save() it.")
+            rewrite = ("; rewrite it once with scripts/rewrite_widget_state.py from the quantem.widget repository"
+                       if state.get("schema") == "quantem.widget-state/2" else
+                       ". A state saved by another release is not converted: set the view again and save() it")
+            raise ValueError(f"{source} has schema {state.get('schema')!r}; {widget_name} reads {STATE_SCHEMA!r} only{rewrite}.")
         written_by = state.get("widget_name")
         if written_by is not None and written_by != widget_name:
             raise ValueError(f"State envelope is for {written_by!r}, cannot load into {widget_name!r}")

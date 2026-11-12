@@ -20,7 +20,7 @@ Each widget should be self-contained, meaning that its Python module and `js/<bu
 | Widget state, layout, and interactions | `src/quantem/widget/<widget>.py` and `js/<bundle>/` |
 | Frontend helpers for several widgets | shared modules at the top of [`js/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js) |
 | Display math - colormaps, ranges, histograms, display FFT, display geometry | [`js/display/`](https://github.com/electronmicroscopy/quantem.widget/tree/main/js/display) |
-| WebGPU science kernels - detector reductions, HDF5/bslz4 browser IO, SSB | [`quantem.gpu`](https://github.com/bobleesj/quantem.gpu) |
+| WebGPU science kernels - detector reductions, HDF5/bslz4 browser IO, direct ptychography | [`quantem.gpu`](https://github.com/bobleesj/quantem.gpu) |
 
 Display math is widget source. Each operation has a JavaScript path that runs
 without WebGPU and a WebGPU path that must give the same pixels; the widget
@@ -28,7 +28,7 @@ shows which one is active (`WebGPU` or `CPU` in the title row).
 
 Science kernels belong to `quantem.gpu`.
 [`scripts/sync-gpu-webgpu.mjs`](https://github.com/electronmicroscopy/quantem.widget/blob/main/scripts/sync-gpu-webgpu.mjs)
-copies its `detector/`, `dpc/`, `formats/`, `io/` and `ssb/` sources into
+copies its `detector/`, `dpc/`, `formats/`, `io/` and `direct_ptycho/` sources into
 `js/.generated/engine/`. `show4dstem` and `showptycho` bundle those kernels, and
 `js/display/borrowedImage.ts` re-exports quantem.gpu's borrowed count-image
 contract (`detector/webgpu/borrowed-image.ts`), so every bundle that draws
@@ -61,7 +61,7 @@ This should be consistent across the Python API, frontend, tests, and documentat
 | Base | Use when | Example |
 |---|---|---|
 | `anywidget.AnyWidget` with shared protocol mixins | The widget has its own viewer layout and shares saved-state or export protocols | [`Show3DSlices`](../api/show3dslices): [`widget.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/show3dslices/widget.py), [`js/show3dslices/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/show3dslices/index.tsx) |
-| Standalone `anywidget.AnyWidget` | The widget has its own layout or only needs a small part of the existing viewer infrastructure | [`ChooseLattice`](../api/choose-lattice): [`choose_lattice.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/choose_lattice.py), [`js/chooselattice/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/chooselattice/index.tsx) |
+| Standalone `anywidget.AnyWidget` | The widget has its own layout or only needs a small part of the existing viewer infrastructure | [`ScanControl`](../api/scan-control): [`scan_control.py`](https://github.com/electronmicroscopy/quantem.widget/blob/main/src/quantem/widget/scan_control.py), [`js/scancontrol/index.tsx`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/scancontrol/index.tsx) |
 
 `Ruler2D` is better as a standalone widget. It only needs an image and two endpoints, so carrying the complete `Show2D` state would add unnecessary complexity. When unsure, start by finding the existing widget whose behavior is closest to what you are building.
 
@@ -124,7 +124,7 @@ Use the existing frontend infrastructure:
 
 For `Ruler2D`, dragging an endpoint can update the line locally in the browser and synchronize the final coordinate when the user releases the pointer.
 
-If the frontend develops numerical logic, move that logic into a separate TypeScript module, so that it can be tested independently of React. Keep that module inside the widget's own folder unless another widget needs it, as [`js/showdiffraction/measurements.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/showdiffraction/measurements.ts) does.
+If the frontend develops numerical logic, move that logic into a separate TypeScript module, so that it can be tested independently of React. Keep that module inside the widget's own folder unless another widget needs it, as [`js/showptycho/fftFraming.ts`](https://github.com/electronmicroscopy/quantem.widget/blob/main/js/showptycho/fftFraming.ts) does.
 
 ## Step 5: Scientific vs display coords
 

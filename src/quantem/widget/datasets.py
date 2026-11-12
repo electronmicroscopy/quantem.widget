@@ -3,7 +3,7 @@
 Image and scan loaders take a friendly ``size`` name and return a calibrated quantem
 dataset (or a folder of files), so the tutorials never ship data in git: a
 quantem core ``Dataset2d``/``Dataset3d`` for images and stacks, and for the
-4D-STEM scan a ``quantem.gpu.io.Dataset4dstemGPU`` on a GPU or a quantem core
+4D-STEM scan a ``quantem.gpu.io.Dataset4dstem`` on a GPU or a quantem core
 ``Dataset4dstem`` elsewhere (the widget's stand-in where quantem core cannot
 install).
 """
@@ -100,7 +100,8 @@ def show1d_ducky(
     """Download reconstruction snapshots for the synthetic Ducky example.
 
     The returned folder contains ``show1d_monitor.jsonl`` and snapshot ``.npy``
-    files. Open it with :meth:`quantem.widget.Show1D.from_monitor_file`.
+    files: one JSON event per line (``iteration``, ``losses``, ``snapshots``) for
+    :class:`quantem.widget.Show1D` and its ``snapshot``.
 
     The original ``Trademark ducky dataset`` simulation tutorial is by
     Georgios Varnavides (October 23, 2025). These files contain subsequent
@@ -239,7 +240,7 @@ def show4dstem_gold(
     ``4dstem/gold_128_npy_bin8``; ``"small"`` and
     ``"medium"`` keep every 4th or 2nd scan position and say so in one line.
     The file is read as every 4D-STEM file is (``read_4dstem``): a
-    ``quantem.gpu.io.Dataset4dstemGPU`` that stays on the GPU when quantem.gpu
+    ``quantem.gpu.io.Dataset4dstem`` that stays on the GPU when quantem.gpu
     and a GPU are present, else a quantem core ``Dataset4dstem``.
     """
 
@@ -255,7 +256,7 @@ def show4dstem_gold(
     name = "Gold 4D-STEM bin8 preview"
     sampling = [float(value) * scan_stride if axis < 2 else float(value) for axis, value in enumerate(metadata["sampling"])]
     units = [str(unit) for unit in metadata["units"]]
-    # the sidecar's optics travel with the dataset under the .qem flat names, so Compute SSB reads them from it
+    # the sidecar's optics travel with the dataset under the .qem flat names, so Show4DSTEM.direct_phase() reads them from it
     optics = {"voltage_kV": metadata.get("voltage_kV"), "semiangle_mrad": metadata.get("probe_semiangle_mrad")}
     if gpu_adapter.is_acquisition(loaded):
         with loaded:

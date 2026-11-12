@@ -9,8 +9,8 @@ into each widget class:
 ``StateFileMixin``
     ``save`` writes the versioned JSON envelope around ``state_dict``.
 ``SavedStateMixin``
-    Adds the ``get_state`` trim that keeps heavy pixel buffers and a running
-    folder watcher out of the saved notebook (widgets with a static preview).
+    Adds the ``get_state`` trim that keeps heavy pixel buffers out of the
+    saved notebook (widgets with a static preview).
 
 ``announce_browser_limit`` says when a display payload is too large to reach
 the browser in one message.
@@ -20,7 +20,6 @@ import pathlib
 
 from quantem.widget.utils.state_io import save_state_file
 
-FOLDER_WATCH_LIVE_STATES = frozenset({"watching", "updating", "waiting", "error"})
 # One kernel message above this never reaches the browser: the websocket drops
 # and the widget keeps only its static preview. Measured 2026-10-07 with Show3D
 # in JupyterLab and Chrome: a 1920 MB stack arrives, a 2176 MB stack does not.
@@ -55,7 +54,7 @@ class LiveMountMixin:
     """Flag the first display handshake.
 
     ``get_state`` is called both when a notebook is saved and while the live
-    frontend mounts. Folder-watcher badges and the first live frame must stay
+    frontend mounts. The first live frame must stay
     truthful during the mount, so the display hooks set
     ``_initial_live_mount_state`` for their duration and the trimming in
     ``SavedStateMixin.get_state`` leaves that call alone.
@@ -115,8 +114,7 @@ class SavedStateMixin(StateFileMixin, LiveMountMixin):
         by hold_sync / send_state during live rendering) are untouched, so the
         frontend still receives every buffer. ``save_state=True`` embeds
         everything so a reopened notebook restores the interactive widget
-        without a kernel. A saved snapshot also cannot carry the Python folder
-        watcher thread, so a live watcher badge is written as stopped.
+        without a kernel.
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not self._save_state and not self._initial_live_mount_state:
@@ -131,19 +129,4 @@ class SavedStateMixin(StateFileMixin, LiveMountMixin):
                     state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
-        if (
-            key is None
-            and not self._initial_live_mount_state
-            and state.get("folder_watch_state") in FOLDER_WATCH_LIVE_STATES
-        ):
-            state["folder_watch_state"] = "stopped"
-            state["folder_watch_detail"] = (
-                "Folder watcher is not running in saved widget state. "
-                "Re-run the cell to resume live folder updates."
-            )
-            if state.get("folder_waiting"):
-                state["folder_status"] = (
-                    "No completed image was captured in this saved widget. "
-                    "Re-run the cell to resume folder watching."
-                )
         return state

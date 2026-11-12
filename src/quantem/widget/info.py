@@ -24,9 +24,13 @@ def profile() -> None:
     individual package versions. The report is local and does not contact
     package indexes or Git remotes.
 
+    Kernel location uses ``QW_KERNEL_LOCATION=local|remote`` supplied by
+    the launcher. Without it, location is Unknown; hostnames are never printed.
+
     Installation labels describe local provenance, not publication status.
     Commits come from the imported checkout, VCS install metadata, or an
     explicit ``+g<commit>`` version label; unavailable commits stay unknown.
+    Tracked source also reports its branch and checkout kind without paths.
 
     Examples
     --------
@@ -50,7 +54,7 @@ def profile() -> None:
             return {}
         return metadata if isinstance(metadata, dict) else {}
 
-    def checkout_commit(loaded: Path | None) -> str | None:
+    def checkout_source(loaded: Path | None) -> tuple[str, str, str] | None:
         """Identify tracked source, never a repository surrounding site-packages."""
         if loaded is None or "site-packages" in loaded.parts:
             return None
@@ -72,10 +76,16 @@ def profile() -> None:
         try:
             git("ls-files", "--error-unmatch", str(loaded.relative_to(root)))
             commit = git("rev-parse", "--short=12", "HEAD")
+            branch = git("rev-parse", "--abbrev-ref", "HEAD")
             dirty = bool(git("status", "--porcelain", "--untracked-files=normal"))
         except (OSError, subprocess.SubprocessError):
             return None
-        return commit + (" (dirty checkout)" if dirty else "")
+        workspace = "linked worktree" if (root / ".git").is_file() else "checkout"
+        return (
+            commit + (" (dirty checkout)" if dirty else ""),
+            "detached HEAD" if branch == "HEAD" else branch,
+            workspace,
+        )
 
     def print_distribution_status(distribution_name: str) -> None:
         """Print installation provenance and the associated source commit.
@@ -102,7 +112,7 @@ def profile() -> None:
             else None
         )
 
-        checkout = checkout_commit(loaded)
+        checkout = checkout_source(loaded)
         override = (
             source is not None and loaded is not None
             and not loaded.is_relative_to(source)
@@ -118,10 +128,10 @@ def profile() -> None:
         commit = "not recorded"
         if override or (checkout is not None and not editable):
             status = "source override (differs from installed metadata)"
-            commit = checkout or commit
+            commit = checkout[0] if checkout else commit
         elif editable:
             status = "editable checkout"
-            commit = checkout or commit
+            commit = checkout[0] if checkout else commit
         else:
             if vcs:
                 status = "VCS install"
@@ -139,10 +149,17 @@ def profile() -> None:
                 commit = f"{version_commit[1]} (version metadata)"
         print(f"  install       {status}")
         print(f"  commit        {commit}")
+        if checkout is not None:
+            print(f"  branch        {checkout[1]}")
+            print(f"  workspace     {checkout[2]}")
 
     from quantem.widget.adapters import core as core_adapter
     from quantem.widget.adapters import gpu as gpu_adapter
 
+    location = os.environ.get("QW_KERNEL_LOCATION", "unknown").lower()
+    if location not in {"local", "remote"}:
+        location = "unknown"
+    print(f"Kernel          {location.capitalize()}")
     print(f"quantem.widget  {qw.__version__}")
     print_distribution_status("quantem.widget")
     for name, importable in (("quantem.gpu", gpu_adapter.available()), ("quantem", core_adapter.available())):

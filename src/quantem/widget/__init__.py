@@ -15,27 +15,29 @@ from importlib.metadata import PackageNotFoundError, version
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 warnings.filterwarnings("ignore", message=r"(?s).*multiple CuPy packages.*")
 warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
+# anywidget hot reload (HMR) is a development opt-in: it runs only with
+# ANYWIDGET_HMR=1 and the optional watchfiles package. A kernel that sets
+# ANYWIDGET_HMR=1 globally (an IPython startup file, say) without watchfiles
+# printed "Live-reloading feature is disabled" under every widget cell; the
+# widgets still work, so the nag is silenced. Install watchfiles to get HMR.
+warnings.filterwarnings("ignore", message=r"anywidget: Live-reloading feature is disabled")
 
 _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
-    "ChooseLattice": ("quantem.widget.choose_lattice", "ChooseLattice"),
     "DiffractionSim": ("quantem.widget.diffraction_sim", "DiffractionSim"),
-    "ShowCIF": ("quantem.widget.showcif", "ShowCIF"),
+    "ScanControl": ("quantem.widget.scan_control", "ScanControl"),
+    "ShowGPU": ("quantem.widget.showgpu", "ShowGPU"),
     "Show1D": ("quantem.widget.show1d", "Show1D"),
     "Plot2D": ("quantem.widget.plot2d", "Plot2D"),
     "Show2D": ("quantem.widget.show2d", "Show2D"),
     "Show3D": ("quantem.widget.show3d", "Show3D"),
     "Show3DSlices": ("quantem.widget.show3dslices", "Show3DSlices"),
     "Show4DSTEM": ("quantem.widget.show4dstem", "Show4DSTEM"),
-    "ShowDiffraction": ("quantem.widget.showdiffraction", "ShowDiffraction"),
-    "Phase": ("quantem.widget.showdiffraction", "Phase"),
-    "library_phase": ("quantem.widget.showdiffraction", "library_phase"),
     "ShowPDF": ("quantem.widget.showpdf", "ShowPDF"),
     "ShowPtycho": ("quantem.widget.showptycho", "ShowPtycho"),
     "read_4dstem": ("quantem.widget.show4dstem.reader", "read_4dstem"),
     "read_image": ("quantem.widget.io.image", "read_image"),
     "read_image_stack": ("quantem.widget.io.image", "read_image_stack"),
     "read_images": ("quantem.widget.io.image", "read_images"),
-    "gpu_info": ("quantem.widget.gpu", "gpu_info"),
     "FolderPicker": ("quantem.widget.folder_picker", "FolderPicker"),
     "pick_folder": ("quantem.widget.folder_picker", "pick_folder"),
     "device_info": ("quantem.widget.info", "device_info"),
@@ -74,7 +76,7 @@ def __dir__() -> list[str]:
     return sorted((set(globals()) - {"os", "warnings", "import_module"}) | set(_LAZY_EXPORTS))
 
 
-def free_gpu(verbose: bool = True) -> float:
+def release_cached_memory(verbose: bool = True) -> float:
     """Return cached GPU memory to the driver after you ``del`` your big objects; returns the GB released.
 
     With quantem.gpu installed (``quantem.widget[cuda]`` or ``[mps]``) this is
@@ -88,7 +90,7 @@ def free_gpu(verbose: bool = True) -> float:
     as used and the next load runs out of it. It cannot drop references you still hold, so ``del`` first.
 
     >>> del widget, merged          # drop every reference first
-    >>> free_gpu()
+    >>> release_cached_memory()
     GPU 0: released 2.1 GB, 32.0 GB in use, 69.9 GB free
     2.147483648
     """
@@ -120,18 +122,15 @@ def free_gpu(verbose: bool = True) -> float:
 
 
 __all__ = [
-    "ChooseLattice",
     "DiffractionSim",
+    "ScanControl",
+    "ShowGPU",
     "Show1D",
     "Plot2D",
     "Show2D",
     "Show3D",
     "Show3DSlices",
     "Show4DSTEM",
-    "ShowCIF",
-    "Phase",
-    "ShowDiffraction",
-    "library_phase",
     "ShowPDF",
     "ShowPtycho",
     "read_4dstem",
@@ -140,5 +139,5 @@ __all__ = [
     "read_images",
     "device_info",
     "profile",
-    "free_gpu",
+    "release_cached_memory",
 ]

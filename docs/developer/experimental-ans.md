@@ -25,7 +25,7 @@ Show4DSTEM(loaded)
 ```
 
 See [Show4DSTEM](../api/show4dstem.md#encoded-acquisitions) for the live
-behavior. These views need a kernel; `quantem show4dstem --backend webgpu
+behavior. These views need a kernel; `quantem-widget show4dstem --backend webgpu
 --html` is the offline path, reading the HDF5 family in the browser.
 
 ## Building the shared backend
@@ -43,7 +43,7 @@ QUANTEM_GPU_SRC=/path/to/quantem.gpu/src PYTHON=python npm run build
 `scripts/sync-gpu-webgpu.mjs` recreates the ignored generated engine tree
 `js/.generated/engine/` from the science entries of `quantem.gpu`'s
 `webgpu/sources.json` manifest (`detector/`, `dpc/`, `formats/`, `io/` and
-`ssb/`); the `show4dstem` and `showptycho` bundles use its kernels and every
+`direct_ptycho/`); the `show4dstem` and `showptycho` bundles use its kernels and every
 display bundle its borrowed-image contract. Display kernels are widget source
 under `js/display/`. Edit the package sources, not that
 generated tree. A widget built against an

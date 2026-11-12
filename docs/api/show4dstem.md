@@ -27,12 +27,12 @@ from quantem.widget import Show4DSTEM, read_4dstem
 input:
 
 - a file path (`*_master.h5`, HDF5 or `.npy`) opens as `read_4dstem(path)`
-  does: a `quantem.gpu.io.Dataset4dstemGPU` when `quantem.widget[cuda]` or
+  does: a `quantem.gpu.io.Dataset4dstem` when `quantem.widget[cuda]` or
   `[mps]` is installed and a GPU is present, else a quantem core
   `Dataset4dstem` read whole into host memory (one printed line with the time
   taken; a file larger than 80% of the available memory is refused, never
   binned or cropped) and reduced on `device=`;
-- a `Dataset4dstemGPU` (from `read_4dstem` on a GPU or `quantem.gpu.io.load`)
+- a `Dataset4dstem` (from `read_4dstem` on a GPU or `quantem.gpu.io.load`)
   opens as a live view over its GPU storage;
 - a quantem core `Dataset4dstem` (numpy- or tensor-backed) or the widget's
   stand-in opens as its array or tensor, with its name as the title and its
@@ -66,20 +66,17 @@ viewer = Show4DSTEM(read_4dstem(path))
 viewer = Show4DSTEM(read_4dstem(path), scan_region=(128, 384, 128, 384))
 
 # Several acquisitions: one shared diffraction ROI, one virtual image per file.
-viewer = Show4DSTEM(read_4dstem([path1, path2, path3]), compare_cols=3)
+viewer = Show4DSTEM(read_4dstem([path1, path2, path3]), compare_columns=3)
 
 # A master by path: the same as Show4DSTEM(read_4dstem(path)).
 viewer = Show4DSTEM("/data/session/scan_master.h5")
-
-# Every ready master in a folder; masters completed later are appended.
-viewer = Show4DSTEM.from_folder("/data/session")
 
 # An array in the Python session: counts packed for browser compute and standalone export.
 viewer = Show4DSTEM(array, offline=True)
 viewer.export_html("show4dstem.html")
 ```
 
-Use the CLI `quantem show4dstem ... --backend webgpu --html` folder export for
+Use the CLI `quantem-widget show4dstem ... --backend webgpu --html` folder export for
 a standalone browser viewer over large HDF5 acquisitions.
 
 ## Use the selected scan region in analysis
@@ -151,12 +148,12 @@ from quantem.gpu import detector
 from quantem.gpu.io import load
 
 loaded = load(path)
-center, radius = detector.fit_probe(detector.mean(loaded))
-Show4DSTEM(loaded, bright_field_center_px=center, bright_field_radius_px=radius)
+disk = detector.bright_field_disk(detector.mean(loaded))
+Show4DSTEM(loaded, bright_field_center_px=disk.bright_field_center_px, bright_field_radius_px=disk.bright_field_radius_px)
 ```
 
 The center is `(row, col)` and the radius is in detector pixels. Supplying
-both skips the viewer's automatic disk estimation. `fit_probe` estimates disk
+both skips the viewer's automatic disk estimation. `bright_field_disk` estimates disk
 geometry, not the complex probe or its aberrations. `detector.mean` and the
 other `quantem.gpu.detector` products (`bf`, `adf`, `masked_sum`, or a
 `detector.prepare(loaded)` session for repeated queries) read the encoded
@@ -181,94 +178,28 @@ Show4DSTEM has two acceleration surfaces:
 `io.load` becomes a bounded view inside the constructor, and every other input
 is a dense tensor on its device.
 
-## Live scope folders
-
-For real-time processing on a microscope or acquisition workstation, open the
-acquisition folder directly:
-
-```python
-from quantem.widget import Show4DSTEM
-
-widget = Show4DSTEM.from_folder(
-    "/data/live-scope-session",
-    scan_size=512,          # keep only 512 x 512 scans in a mixed folder
-    columns=5,              # grid width
-    page_size=10,           # datasets per page
-    watch_interval=2.0,     # seconds between folder polls
-)
-widget
-```
-
-`from_folder(...)` loads every ready `*_master.h5` (`pattern=`, `recursive=`)
-with `quantem.gpu.io.load` into encoded storage on one CUDA device or the Apple
-GPU (`backend=`, `device=`), at full detector resolution. At about 0.1 to 2 GiB
-per 512 x 512 x 192 x 192 scan, the whole folder stays resident without
-detector binning or paging. The viewer opens once the first master is loaded;
-the others join the comparison grid in the background, and
-`widget.wait_for_folder()` blocks until they have.
-
-Masters that are not completely written are skipped (`ready_only=True`). When
-the folder mixes geometries, the largest group sharing one scan and detector
-shape is shown; `verbose=True` reports the skipped count. Use `scan_size=` or a
-narrower `pattern=` to choose another group, and `max_masters=` or
-`min_masters=` to bound the count. Other keyword arguments, such as
-`compare_dp_mode="selected"` or `title=`, go to the viewer.
-
-With `watch=True` (default), a master that completes while the viewer is open
-is appended once its header signature is unchanged on two consecutive polls, so
-a file still being written is never read. A compact title-area badge
-distinguishes a live `Watching` worker, `Updating`, `Waiting for file
-completion`, a corrective `Watch error`, and `Stopped`; `watch=False` opens a
-fixed snapshot with no badge.
-
-The folder lifecycle matches Show2D and Show3D:
-
-```python
-widget.wait_for_folder()                  # block until the opening masters are loaded
-new_datasets = widget.poll_folder()       # append newly completed masters now
-widget.stop_folder_watch()                # pause background discovery
-widget.watch_folder(interval=1.0)         # resume discovery
-widget.free()                             # close the acquisitions from_folder loaded
-widget.close()                            # stop folder work, release them, close the widget
-```
-
-Folder watching is append-only. Known masters are not duplicated, incomplete
-or externally linked masters wait until they are readable, and removing a file
-does not delete a dataset from an active scientific view.
-
-To verify the live path, introduce genuine master/chunk files while one
-Jupyter widget is mounted and measure both discovery/control paint and the
-requested virtual-image/diffraction paint.
-
-This path reads the original master data, not cached thumbnails.
-
-On Apple Silicon the same call loads onto the Apple GPU; pass `backend="mps"`
-to require it:
-
-```python
-widget = Show4DSTEM.from_folder(
-    "/data/live-scope-session",
-    backend="mps",
-    scan_size=512,
-    title="Live 4D-STEM",
-)
-widget
-```
+## GPU memory
 
 GPU memory belongs to the loaded acquisitions and the Python session, not to
-the visual widget alone. `free()` and `close()` release the acquisitions that
-`from_folder` loaded; acquisitions you pass to `Show4DSTEM(...)` stay open until
-you call their `close()`. The live widget shows a compact GPU memory label in
-its title row when CUDA or MPS memory is visible. Exported HTML has no live
+the visual widget alone. `free()` and `close()` release an acquisition the viewer
+opened from a path, `Show4DSTEM(path)`; acquisitions you pass to
+`Show4DSTEM(...)` stay open until you call their `close()`. The live widget
+shows a compact GPU memory label in its title row when CUDA or MPS memory is visible. Exported HTML has no live
 Python GPU allocation, so it does not expose a "free GPU memory" control.
 
-## Compute SSB
+## Direct ptychography
 
-With a live kernel on CUDA or MPS, the **Compute SSB** control, or
-`viewer.compute_ssb()`, runs quantem.gpu's default fit,
-`quantem.gpu.SSB(...).find_aberrations()`, on the current 4D frame: the SSB
+The default on CUDA and MPS uses 200 initial TPE trials, then jointly
+refines aberrations through fifth order with sample tilt and depth.
+`ptycho.aberrations(search="broad")` adds broader exploration.
+The initial result is provisional; final refinement can change its phase.
+
+
+With a live kernel on CUDA or MPS, the **Direct ptycho** control (**Calculate Phase**), or
+`viewer.direct_phase()`, runs quantem.gpu's default fit,
+`quantem.gpu.DirectPtycho(...).aberrations()`, on the current 4D frame: the direct ptychography
 model fitted to the data together with the sample tilt and depth spread
-(tilt-corrected; the fitted C10 is the defocus at mid-depth). It attaches the SSB phase and the aligned DPC row/col maps as
+(tilt-corrected; the fitted C10 is the defocus at mid-depth). It attaches the direct ptychography phase and the aligned DPC row/col maps as
 virtual-image sources and switches the virtual image to the phase. The
 voltage, the convergence semiangle and the scan step are read from the dataset
 or `.qem` file:
@@ -277,24 +208,16 @@ or `.qem` file:
 from quantem.gpu.io import load
 
 viewer = Show4DSTEM(load("scan.qem"))
-phase = viewer.compute_ssb()             # tilt-corrected: 200 trials plus refinement
-control = viewer.compute_ssb(tilt=False)  # the same model at tilt 0
-backup = viewer.compute_ssb(tilt=False, objective="phase_variance")  # the phase-variance backup
+phase = viewer.direct_phase()             # 200 initial trials, then joint fifth-order refinement
+control = viewer.direct_phase(tilt=False)  # the same model at tilt 0
 ```
 
-The three fits are quantem.gpu's:
+The two fits are quantem.gpu's:
 
 | Call | Method | Use it for |
 |---|---|---|
-| `find_aberrations()` | model-based, tilt-corrected | the default: every fit |
-| `find_aberrations(tilt=False)` | model-based, tilt held at 0 | thin, untilted samples, or to see what tilt correction changes |
-| `find_aberrations(tilt=False, objective="phase_variance")` | phase variance, the earlier SSB search | a backup: reproducing older results, cross-checking a fit |
-
-Phase variance chooses the aberrations that make the corrected phases of all bright-field pixels agree best: the
-least variance of the corrected phase across them. It stays as a backup, not an equal alternative: it cannot see
-sample tilt or thickness, it scores only how consistent the bright-field images are rather than how well a model
-explains the measurement, and it is about 10x slower. On simulated crystals with known aberrations, the model-based
-fit lands about 3x closer in C10.
+| `aberrations()` | model-based, tilt-corrected | the default: every fit |
+| `aberrations(search="primary", tilt=False)` | model-based, tilt held at 0 | thin, untilted samples, or to see what tilt correction changes |
 
 An input that records no calibration (an array, an HDF5 master) takes it from
 the constructor, under the `.qem` format's names:
@@ -308,31 +231,31 @@ viewer = Show4DSTEM(counts, voltage_kV=300, semiangle_mrad=30, scan_sampling_A=(
 `(row, col)` in mrad or 1/angstrom per pixel. A keyword that contradicts a
 value the input records raises: the dataset or file is the source of its
 calibration. The fit uses every detected
-bright-field pixel (the `compute_ssb` keywords
+bright-field pixel (the `direct_phase` keywords
 `bright_field_intensity_threshold` and `bright_field_radius_px`). The keywords
-`tilt` (True, the default, or False) and `objective` (`"agreement"`, the
-default, or `"phase_variance"`, at tilt 0 only), which the **Fit** menu sets
-(Tilt-corrected, Tilt 0, Phase variance backup), `num_trials`, `refinement`
-(quantem.gpu's `"auto"`, the default, `"newton"`,
-`"nelder-mead"` or None) and `seed` control the search, for example
-`viewer.compute_ssb(num_trials=100, seed=0)`. **Lock C10** and **Lock C12**
+`tilt` (True, the default, or False), which the **Fit** menu sets
+(Tilt-corrected, Tilt 0), `trials`, `refinement` (`"auto"`, the default,
+quantem.gpu's exact-derivative refinement, or None for the best trial without
+one; the retired `"newton"` and `"nelder-mead"` print one line and run
+`"auto"`) and `seed` control the search, for example
+`viewer.direct_phase(trials=100, seed=0)`. **Lock C10** and **Lock C12**
 hold a coefficient at its slider value; in the tilt-corrected fit C12 is held
 alone only at 0, and both locks hold all three coefficients and fit the tilt
 and depth spread alone. A manual recompute from the sliders keeps the last
 tilt-corrected fit's tilt and depth spread. The fitted values are the traits
-`ssb_compute_C10_nm`, `ssb_compute_C12_nm`, `ssb_compute_phi12_deg` and
-`ssb_compute_scan_detector_rotation_deg` (the physical rotation in [0, 360)),
-and the downloadable `*_ssb_calibration.json` holds them under the same names
-with `"schema": "quantem.show4dstem-ssb-calibration/3"` (its `refinement` names the local
-refinement quantem.gpu ran, `"newton"`, `"nelder-mead"` or null; `objective`
+`direct_C10_nm`, `direct_C12_nm`, `direct_phi12_deg` and
+`direct_scan_detector_rotation_deg` (the physical rotation in [0, 360)),
+and the downloadable `*_direct_calibration.json` holds them under the same names
+with `"schema": "quantem.show4dstem-direct-calibration/5"` (`trials` is the search budget; its `refinement` names the local
+refinement quantem.gpu ran, or null; `objective`
 what the fit optimized, null for a manual recompute; `tilt`,
 `sample_tilt_mrad` in the scan frame, `depth_spread_nm` and `tilt_fit_gain`
 record the sample model, false and null at tilt 0). It is not a
-ShowPtycho `calibration.json` (`quantem.ssb-calibration/6`), which records the
-source file, scan region, phase estimator and session identity. Compute SSB
+ShowPtycho `calibration.json` (`quantem.direct-calibration/9`), which records the
+source file, scan region, reconstruction method and session identity. `direct_phase()`
 needs one 4D frame; quantem.gpu centres any scan shape in its FFT grid and the
 phase shows the measured positions. An encoded
-acquisition goes to SSB without a dense copy; SSB decodes only the
+acquisition goes to direct ptychography without a dense copy; direct ptychography decodes only the
 bright-field disk.
 
 ## Multiple grid
@@ -342,8 +265,7 @@ acquisitions that should be inspected side by side. The viewer keeps the
 standard diffraction-panel workflow: one shared detector ROI, one shared scan
 cursor, and one Dataset slider. The virtual-image side becomes a grid of ready
 frames or datasets. Use `view_mode="single"` for one-at-a-time browsing. A list
-of datasets from `read_4dstem` and `Show4DSTEM.from_folder(...)` open in
-multiple mode by default.
+of datasets from `read_4dstem` opens in multiple mode by default.
 
 ```python
 from quantem.widget import Show4DSTEM, read_4dstem
@@ -351,15 +273,15 @@ from quantem.widget import Show4DSTEM, read_4dstem
 widget = Show4DSTEM(
     read_4dstem([path1, path2, path3, path4]),
     view_mode="multiple",
-    compare_cols=2,
+    compare_columns=2,
     compare_max_panels=4,
     compare_dp_mode="selected",
 )
 widget
 ```
 
-`compare_cols=0` lets the frontend pick a responsive layout. Positive
-`compare_cols` values are treated as the
+`compare_columns=0` lets the frontend pick a responsive layout. Positive
+`compare_columns` values are treated as the
 maximum grid columns on desktop; narrow/mobile viewports cap the grid at two
 columns so the tiles remain touch-friendly. A comparison of encoded
 acquisitions never stacks them into one 5D array; each tile reads its own
@@ -412,23 +334,23 @@ Show4DSTEM has two HTML export modes with different goals:
 
 | Export kind | Use when | Data included | Memory behavior |
 |---|---|---|---|
-| `export_kind="report"` | Sharing a curated folder/multiple-grid result or saving a compact screening report | Static PNG virtual-image pages plus a representative diffraction pattern | Page-aware; folder data is rendered page by page and raw 4D tensors are not embedded |
+| `export_kind="report"` | Sharing a curated multiple-grid result or saving a compact screening report | Static PNG virtual-image pages plus a representative diffraction pattern | Page-aware; multiple-grid data is rendered page by page and raw 4D tensors are not embedded |
 | `export_kind="interactive"` | The recipient must drive the actual 4D dataset offline in the browser | Raw 4D payload, explicitly encoded as `uint8` or `uint16` and optionally binned | Can be large; use dtype and binning deliberately before sending. Needs the 4D array in the Python session, so it applies to viewers opened from an array or tensor |
 
 Quick decision rule:
 
-- Use `report` first for large folders, many masters, starred/hidden panel
+- Use `report` first for many masters, starred/hidden panel
   curation, and collaborator screening.
 - Use `interactive` only when the exported browser page must still recompute new
   detector ROIs from raw 4D data.
-- Use the CLI `quantem show4dstem ... --backend webgpu --html --detector-bin 1 --dtype uint8`
+- Use the CLI `quantem-widget show4dstem ... --backend webgpu --html --detector-bin 1 --dtype uint8`
   for a terminal-made full-detector browser artifact that reads source H5 files.
 - Use `--dtype uint16` when a no-notebook user needs the wider detector-count
   range and accepts the larger browser/GPU memory footprint.
 - Keep the original notebook or Python script when the recipient needs to keep
   doing analysis, not just view an export.
 
-Report exports are the safe default for large folders:
+Report exports are the safe default for many masters:
 
 ```python
 widget.export_html(
@@ -473,7 +395,7 @@ widget.export_html(
 Equivalent CLI for users who do not want a notebook:
 
 ```bash
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8 --out ~/Downloads
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8 --save-dir ~/Downloads
 ```
 
 Both `scan_bin` and `detector_bin` use mean binning, not summing. This keeps display
@@ -529,8 +451,8 @@ precomputed `profile.bin`/`com.bin` sidecars; those are generated products, not
 the fast click-to-open path.
 
 ```bash
-quantem show4dstem /path/to/h5_family --backend webgpu --html --detector-bin 1 --count 1
-quantem show4dstem /path/to/h5_family --backend webgpu --html --detector-bin 1 --count 7
+quantem-widget show4dstem /path/to/h5_family --backend webgpu --html --detector-bin 1 --count 1
+quantem-widget show4dstem /path/to/h5_family --backend webgpu --html --detector-bin 1 --count 7
 ```
 
 The folder writes `Show4DSTEM.command`, a hidden `.viewer/` server/viewer
@@ -538,7 +460,7 @@ folder, and linked `tilt_NN_master.h5`/`tilt_NN_data_*.h5` files. On macOS,
 double-clicking the command starts a local range-capable server and opens the
 viewer page in Chrome. The page carries the browser widget-manager runtime, so
 the handoff does not depend on public CDNs or any network. Rerunning
-the same CLI into the same `--out` replaces the generated
+the same CLI into the same `--save-dir` replaces the generated
 `*_show4dstem_webgpu` viewer folder, which prevents stale HTML or stale links
 from surviving a regeneration.
 
@@ -570,7 +492,7 @@ compare-grid signoff.
 
 ```{eval-rst}
 .. autoclass:: quantem.widget.show4dstem.Show4DSTEM
-   :members: selected_scan_region, from_folder, export_html, compute_ssb, apply_preset, state_dict, save, load_state_dict, free, close, poll_folder, wait_for_folder, watch_folder, stop_folder_watch, pattern, virtual_image
+   :members: selected_scan_region, export_html, direct_phase, apply_preset, state_dict, save, load_state_dict, free, close, pattern, virtual_image
 ```
 
 ```{note}
@@ -617,10 +539,10 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Virtual-image ROI | `vi_roi_mode`, `vi_roi_center_row`, `vi_roi_center_col` | Pick a real-space region to average its diffraction |
 | FFT toggle | `show_fft`, `fft_window` | Power spectrum of the virtual image, drawn with sharp pixels |
 | VI Smooth switch | `vi_smooth` | Off by default: sharp scan pixels; on: bilinear interpolation of the virtual image. The diffraction pattern is always drawn with sharp pixels |
-| Multiple grid | `view_mode="multiple"`, `compare_cols`, `compare_grid_width_px`, `compare_max_panels`, `compare_group_mode` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor; `compare_group_mode="all"` collapses pages into one dense grid |
+| Multiple grid | `view_mode="multiple"`, `compare_columns`, `compare_grid_width_px`, `compare_max_panels`, `compare_group_mode` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor; `compare_group_mode="all"` collapses pages into one dense grid |
 | Multiple DP source | `compare_dp_mode` | Shows either the average DP across visible multiple panels or the selected panel's DP |
 | Multiple panel state | `compare_panel_order`, `compare_hidden_panels`, `compare_starred_panels` (lists of panel indices) | Saves/reuses panel order, hidden panels, and starred picks across cells, state files, and HTML export |
-| Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
+| Viewer chrome preset | `mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed` | Permanently remove controls or programmatically collapse/expand them for clean exports |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | DP, virtual-image, and FFT stats bars show/hide |

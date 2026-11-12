@@ -24,7 +24,7 @@ Measured, per drag:
 
 - ShowPtycho, C10 slider dragged back and forth at native sampling and at 2x:
   phase and FFT panel paints per second, and the request latency from the
-  browser's ``ssb-preview`` message to the kernel's phase for the same id;
+  browser's ``direct-preview`` message to the kernel's phase for the same id;
 - Show4DSTEM on the gold scan as loaded (its uint32 counts fit 16 bits once
   the flagged pixels are replaced, so quantem.gpu stores them as the uint16
   count resident): the probe dragged across the scan, the bright-field disk
@@ -84,10 +84,10 @@ data.calibration.scan_sampling_A = 0.5
 data.calibration.detector_sampling_mrad = 0.46
 """
 PTYCHO_CELL = """
-from quantem.gpu import SSB
+from quantem.gpu import DirectPtycho
 # A fitted gold calibration, so the panel opens on a focused image without a 30 s search.
-ssb = SSB(data, aberrations={"C10_nm": -23.24, "C12_nm": 3.42, "phi12_deg": -40.2}, scan_detector_rotation_deg=358.31)
-viewer = ssb.show(show_fft=True)
+ptycho = DirectPtycho(data, aberrations={"C10_nm": -23.24, "C12_nm": 3.42, "phi12_deg": -40.2}, scan_detector_rotation_deg=358.31)
+viewer = ptycho.show(show_fft=True)
 viewer
 """
 COUNTS_CELL = """
@@ -305,7 +305,8 @@ class Session:
              "--disable-background-timer-throttling", "--window-size=1512,1100",
              # On the main display: a second display refreshing at another rate changes every
              # animation-frame-paced number (input coalescing, display-capped rates).
-             "--window-position=40,40", "about:blank"],
+             # QUANTEM_WIDGET_WINDOW_POSITION moves it, e.g. off a screen someone is working on.
+             f"--window-position={os.environ.get('QUANTEM_WIDGET_WINDOW_POSITION', '40,40')}", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
         for _ in range(120):
             try:
@@ -488,7 +489,7 @@ def drive_ptycho(session, seconds, log):
     results = {}
     for factor in (1, 2):
         # set explicitly: "auto" may choose 2x on its own
-        session.kernel("showptycho.ipynb", f"viewer.upsampling_factor = {factor}")
+        session.kernel("showptycho.ipynb", f"viewer.upsample = {factor}")
         time.sleep(3.0)
         label = "native" if factor == 1 else f"{factor}x"
         results[label] = ptycho_drag(session.page, seconds)

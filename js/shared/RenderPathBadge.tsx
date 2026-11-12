@@ -17,17 +17,26 @@ function useRenderPath(): RenderPath | null {
 /**
  * Status chip naming the render path: "WebGPU" on a hardware adapter, "CPU"
  * when the Canvas2D/JS reference draws the same pixels. Styled like the other
- * muted title-row status chips.
+ * muted title-row status chips. A widget that knows which path drew the frame
+ * on screen passes it as `drawnBy`, so the chip never claims WebGPU for pixels
+ * the CPU drew.
  */
-export function RenderPathBadge({ colors }: { colors: { controlBg: string; textMuted: string; border: string } }) {
-  const path = useRenderPath();
-  if (!path) return null;
+export function RenderPathBadge({ colors, drawnBy = null }: {
+  colors: { controlBg: string; textMuted: string; border: string };
+  /** The path that drew the frame on screen, when the widget knows it; it overrides the device's path. */
+  drawnBy?: RenderPath | null;
+}) {
+  const devicePath = useRenderPath();
+  if (!devicePath) return null;
+  const path = drawnBy ?? devicePath;
   const lost = webGPULostReason();
   const title = path === "WebGPU"
     ? `Display math runs on WebGPU (${getGPUInfo()}).`
-    : lost !== null
-      ? `The WebGPU device was lost (${lost}): display math runs in JavaScript with the same pixel values until the page reloads.`
-      : "No hardware WebGPU in this browser: display math runs in JavaScript with the same pixel values.";
+    : devicePath === "WebGPU"
+      ? "This frame was drawn in JavaScript on the CPU although the browser has a WebGPU adapter; the status line says why."
+      : lost !== null
+        ? `The WebGPU device was lost (${lost}): display math runs in JavaScript with the same pixel values until the page reloads.`
+        : "No hardware WebGPU in this browser: display math runs in JavaScript with the same pixel values.";
   return (
     <span
       data-render-path={path}

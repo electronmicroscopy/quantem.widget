@@ -32,19 +32,6 @@ _PDF_REQUIREMENT = (
     "max_iter=...), from electronmicroscopy/quantem pull request 248."
 )
 
-# Removed constructor keywords and what to use instead; passing one raises TypeError with
-# the hint instead of being silently ignored by traitlets.
-_REMOVED_KWARGS = {
-    "density_mode": "the density is never estimated; pass density_value (atoms/Å³) instead",
-    "line_max_bins": "renamed to linescan_max_bins",
-    "_offline": "renamed to offline, which only exported HTML files set",
-    "theme": "removed; the widget follows the notebook theme",
-    "disabled_tools": "removed",
-    "hidden_tools": "removed",
-    "k_width": "removed; the k window's taper width is fixed",
-    "r_min": "removed; the r grid always starts at 0",
-}
-
 # Status hints for an output that needs the number density, which is never estimated.
 _DENSITY_HINT_DAMPING = "Set the density to apply damping and compute g(r)."
 _DENSITY_HINT_GR = "Set the density to compute g(r)."
@@ -176,9 +163,7 @@ def _reject_unknown_kwargs(cls, kwargs):
     traits = set(cls.class_trait_names())
     unknown = sorted(k for k in kwargs if k not in traits)
     if unknown:
-        key = unknown[0]
-        hint = _REMOVED_KWARGS.get(key, "check for typos or a renamed parameter")
-        raise TypeError(f"{cls.__name__}() got unexpected keyword argument {key!r}: {hint}.")
+        raise TypeError(f"{cls.__name__}() got unexpected keyword argument {unknown[0]!r}: check for typos or a renamed parameter.")
 
 
 def _is_whole_number(value):
@@ -447,7 +432,7 @@ class ShowPDF(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.A
     # =========================================================================
     # Version
     # =========================================================================
-    widget_version = traitlets.Unicode("unknown").tag(sync=True)
+    widget_version = traitlets.Unicode("unknown")
 
     # =========================================================================
     # Shape and data (read-only from JS)
@@ -456,8 +441,8 @@ class ShowPDF(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.A
     scan_rows = traitlets.Int(1).tag(sync=True)
     scan_cols = traitlets.Int(1).tag(sync=True)
     nav_image_bytes = traitlets.Bytes(b"").tag(sync=True)
-    nav_data_min = traitlets.Float(0.0).tag(sync=True)
-    nav_data_max = traitlets.Float(1.0).tag(sync=True)
+    nav_data_min = traitlets.Float(0.0)
+    nav_data_max = traitlets.Float(1.0)
     # Scan calibration of the nav scale bar: the dataset's first axis in Å (nm converted),
     # else 1 px.
     nav_pixel_size = traitlets.Float(1.0).tag(sync=True)
@@ -467,7 +452,7 @@ class ShowPDF(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.A
     # Painted mask (JS paints, Python reads): 1 includes a scan position and
     # 0 excludes it, as in calculate_radial_mean
     # =========================================================================
-    mask_bytes = traitlets.Bytes(b"").tag(sync=True)  # raw uint8 copy of mask_b64 (Python only)
+    mask_bytes = traitlets.Bytes(b"")  # raw uint8 copy of mask_b64 (Python only)
     mask_b64 = traitlets.Unicode("").tag(sync=True)  # the mask from JS, base64 uint8
     mask_version = traitlets.Int(0).tag(sync=True)  # JS increments it to trigger a recompute
     mask_tool = traitlets.Unicode("rectangle").tag(sync=True)
@@ -521,20 +506,20 @@ class ShowPDF(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.A
     ik_x_bytes = traitlets.Bytes(b"").tag(sync=True)
     ik_y_bytes = traitlets.Bytes(b"").tag(sync=True)
     ik_bg_y_bytes = traitlets.Bytes(b"").tag(sync=True)
-    n_points_ik = traitlets.Int(0).tag(sync=True)
+    n_points_ik = traitlets.Int(0)
     # F(k) after the k window, the curve the sine transform uses (damped when the low-r
     # correction ran)
     fk_x_bytes = traitlets.Bytes(b"").tag(sync=True)
     fk_y_bytes = traitlets.Bytes(b"").tag(sync=True)
-    n_points_fk = traitlets.Int(0).tag(sync=True)
+    n_points_fk = traitlets.Int(0)
     # G(r) reduced PDF
     gr_x_bytes = traitlets.Bytes(b"").tag(sync=True)
     gr_y_bytes = traitlets.Bytes(b"").tag(sync=True)
-    n_points_gr = traitlets.Int(0).tag(sync=True)
+    n_points_gr = traitlets.Int(0)
     # g(r) pair distribution function
     pdf_x_bytes = traitlets.Bytes(b"").tag(sync=True)
     pdf_y_bytes = traitlets.Bytes(b"").tag(sync=True)
-    n_points_pdf = traitlets.Int(0).tag(sync=True)
+    n_points_pdf = traitlets.Int(0)
 
     # =========================================================================
     # Standalone export data, set in the exported state only. offline_qq is the
@@ -1842,13 +1827,15 @@ class ShowPDF(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidget.A
         curve files; only the mask (mask mode) is saved as ``mask.npy``, since a
         scan-shaped boolean CSV is unwieldy.
 
-        Layout (always present):
+        Layout (always present)::
+
             README.txt
             metadata.txt
             curves_k.csv         k, I(k), B(k), F(k) (selected region)
             curves_r.csv         r, G(r), g(r) (g(r) only if density_value is set)
 
-        Extra files by mode:
+        Extra files by mode::
+
             mask mode:       mask.npy
             line scan:       linescan_position.csv, linescan_Ik.csv,
                              linescan_Ik_bg.csv, linescan_Fk.csv,

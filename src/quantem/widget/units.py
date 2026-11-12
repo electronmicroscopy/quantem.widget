@@ -120,7 +120,7 @@ def acquisition_calibration(sampling, units, metadata) -> dict:
     """The calibration a 4D acquisition records, under the ``.qem`` format's flat names; an unknown value is None.
 
     ``sampling`` and ``units`` are the four axis values of a
-    ``quantem.gpu.io.Dataset4dstemGPU`` (an unknown axis is None) or of a
+    ``quantem.gpu.io.Dataset4dstem`` (an unknown axis is None) or of a
     quantem core ``Dataset4dstem`` (an unknown axis is ``1.0 "pixels"``), and
     ``metadata`` its metadata dict. The scan step is ``scan_sampling_A`` and
     the detector step ``detector_sampling_mrad`` or ``detector_sampling_inv_A``,

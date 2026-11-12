@@ -219,21 +219,10 @@ def test_showpdf_lazy_export():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "kwargs, hint",
-    [
-        ({"density_mode": "manual"}, "never estimated"),
-        ({"line_max_bins": 64}, "renamed to linescan_max_bins"),
-        ({"theme": "dark"}, "follows the notebook theme"),
-        ({"k_width": 0.25}, "taper width is fixed"),
-        ({"r_min": 0.5}, "r grid always starts at 0"),
-        ({"k_widht": 0.3}, "typos"),
-        ({"_offline": True}, "renamed to offline"),
-    ],
-)
-def test_showpdf_rejects_unknown_kwargs(small_pdf, kwargs, hint):
-    # traitlets would silently ignore an unknown keyword; ShowPDF raises with a hint instead.
-    with pytest.raises(TypeError, match=hint):
+@pytest.mark.parametrize("kwargs", [{"density_mode": "manual"}, {"k_widht": 0.3}, {"_offline": True}])
+def test_showpdf_rejects_unknown_kwargs(small_pdf, kwargs):
+    # traitlets would silently ignore an unknown keyword; ShowPDF raises instead.
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{next(iter(kwargs))}': check for typos"):
         ShowPDF(small_pdf, **kwargs)
 
 

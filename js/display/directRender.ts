@@ -2,7 +2,7 @@
 // offscreen bitmap at display size (scaled, shared-grid, per-panel and
 // combined-region layouts), so a repaint never reads pixels back to the CPU.
 import type { GPUColormapEngine, GPUSlot } from "./colormapEngine";
-import { DIRECT_GRID_COLORMAP_SHADER, DIRECT_SLOT_COLORMAP_SHADER, DIRECT_SLOT_GPU_RANGE_SHADER, PACKED_PANEL_TRANSFORM_SHADER } from "./displayShaders";
+import { DIRECT_GRID_COLORMAP_SHADER, DIRECT_SLOT_COLORMAP_SHADER, DIRECT_SLOT_GPU_RANGE_SHADER, DIRECT_SLOT_RGB_SHADER, PACKED_PANEL_TRANSFORM_SHADER } from "./displayShaders";
 import type { GPURanges } from "./gpuRange";
 import { computePipeline, renderPipeline } from "./pipelines";
 
@@ -29,6 +29,16 @@ function clearColorFromRgb(bgRgb: number): GPUColorDict {
 
 type DisplayRange = { vmin: number; vmax: number };
 type ViewTransform = { zoom: number; panX: number; panY: number };
+/** One panel of renderSlotsDirectToCanvases: a resident slot drawn into its own canvas. */
+export type PanelCanvasDraw = {
+  slot: number; ctx: GPUCanvasContext; range: DisplayRange; logScale: boolean;
+  lut: { name: string; lut: Uint8Array }; transform?: ViewTransform;
+  /**
+   * A second slot drawn over the first with the same range, LUT and view: a full-resolution
+   * detail tile over a binned preview. x, y, width and height place it in canvas pixels at zoom 1.
+   */
+  overlay?: { slot: number; x: number; y: number; width: number; height: number };
+};
 /** One canvas view of a slot: its size, background and optional zoom/pan. */
 type CanvasViewOptions = { width: number; height: number; bgRgb: number; transform?: ViewTransform; smooth?: boolean };
 /** A cols x rows grid of equal panels with `gap` pixels between them in a width x height canvas. */
@@ -37,7 +47,7 @@ type PanelGridOptions = {
   transforms?: ViewTransform[]; smooth?: boolean;
 };
 /** Panel grid of one slot drawn by the grid shader, which places the panels itself. */
-type SharedGridOptions = Omit<PanelGridOptions, "transforms" | "smooth"> & { sourcePanelWidth?: number; sharedSource?: boolean };
+type SharedGridOptions = Omit<PanelGridOptions, "transforms"> & { sourcePanelWidth?: number; sharedSource?: boolean };
 /** Panel grid whose panels are column regions of one slot, each with its own range, view and LUT. */
 type PanelRegionOptions = PanelGridOptions & {
   sourcePanelWidth: number; sourcePanelIndices?: number[]; panelLuts?: { name: string; lut: Uint8Array }[];
@@ -82,6 +92,7 @@ export class DirectRenderer {
   private directGridPipeline: GPURenderPipeline | null = null;
   private directSlotPipeline: GPURenderPipeline | null = null;
   private directSlotGpuRangePipeline: GPURenderPipeline | null = null;
+  private directSlotRgbPipeline: GPURenderPipeline | null = null;
   private packedPanelTransformPipeline: GPUComputePipeline | null = null;
   private directGridParams = new ArrayBuffer(64);
   private directGridParamsU32 = new Uint32Array(this.directGridParams);
@@ -105,13 +116,11 @@ export class DirectRenderer {
    * so callers that keep a frame (exports, compare tiles) need a durable copy.
    */
   private async durableFrame(width: number, height: number, draw: (context: GPUCanvasContext) => boolean): Promise<ImageBitmap | null> {
-    const canvas = new OffscreenCanvas(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
-    const context = canvas.getContext("webgpu") as GPUCanvasContext | null;
-    if (!context) return null;
-    context.configure({ device: this.device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: "opaque" });
-    if (!draw(context)) return null;
+    const target = this.engine.acquireOffscreen(width, height, navigator.gpu.getPreferredCanvasFormat());
+    if (!target) return null;
+    if (!draw(target.context)) return null;
     await this.device.queue.onSubmittedWorkDone();
-    return canvas.transferToImageBitmap();
+    return this.engine.transferOffscreen(target.canvas);
   }
 
   private ensureDirectGridPipeline(format: GPUTextureFormat): void {
@@ -205,8 +214,7 @@ export class DirectRenderer {
     const blit = this.engine.encodeBlitToOffscreen(encoder, slot.rgbaBuffer, canvasWidth, canvasHeight, format);
     if (!blit) return null;
     this.device.queue.submit([encoder.finish()]);
-    blit.blitParamsBuffer.destroy();
-    return blit.canvas.transferToImageBitmap();
+    return this.engine.transferOffscreen(blit.canvas);
   }
 
   /**
@@ -242,9 +250,8 @@ export class DirectRenderer {
     const blit = this.engine.encodeBlitToOffscreen(encoder, slot.rgbaBuffer, canvasWidth, canvasHeight, format);
     if (!blit) return null;
     this.device.queue.submit([encoder.finish()]);
-    blit.blitParamsBuffer.destroy();
     await this.device.queue.onSubmittedWorkDone();
-    return blit.canvas.transferToImageBitmap();
+    return this.engine.transferOffscreen(blit.canvas);
   }
 
   renderSharedGridDirectToCanvas(
@@ -256,7 +263,7 @@ export class DirectRenderer {
   ): boolean {
     if (!this.engine.lutBuffer) return false;
     const slot = this.engine.slots[idx];
-    if (!slot) return false;
+    if (!slot || slot.dataKind === "rgb") return false;
     const outW = Math.max(1, Math.round(opts.width));
     const outH = Math.max(1, Math.round(opts.height));
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -278,7 +285,7 @@ export class DirectRenderer {
     paramsU32[8] = logScale ? 1 : 0;
     paramsU32[9] = opts.bgRgb & 0xFFFFFF;
     paramsU32[10] = opts.sharedSource ? 1 : 0;
-    paramsU32[11] = 0;
+    paramsU32[11] = opts.smooth ? 1 : 0;
     paramsF32[12] = range.vmin;
     paramsF32[13] = range.vmax;
     paramsF32[14] = Math.max(0, opts.gap);
@@ -417,6 +424,102 @@ export class DirectRenderer {
     }
     pass.end();
     return true;
+  }
+
+  /**
+   * Draw each slot into its own canvas in one queue submission: a gallery whose panels are
+   * separate canvases, each with its own range, log scale, LUT and zoom/pan. Every canvas is
+   * `opts.width` x `opts.height`; the image fills it at zoom 1, as `drawImage(offscreen, 0, 0, w, h)`
+   * would. Returns false, drawing nothing, when a slot is missing or not a float32 frame.
+   */
+  renderSlotsDirectToCanvases(draws: PanelCanvasDraw[], opts: { width: number; height: number; bgRgb: number; smooth?: boolean }): boolean {
+    if (draws.length === 0) return false;
+    const slotIndices = draws.flatMap(draw => draw.overlay ? [draw.slot, draw.overlay.slot] : [draw.slot]);
+    if (new Set(slotIndices).size !== slotIndices.length) throw new Error("Supply one distinct resident slot for each canvas context.");
+    if (slotIndices.some(idx => this.engine.slots[idx]?.dataKind !== "f32")) return false;
+    const outW = Math.max(1, Math.round(opts.width));
+    const outH = Math.max(1, Math.round(opts.height));
+    this.ensureDirectSlotPipeline(navigator.gpu.getPreferredCanvasFormat());
+    const pipeline = this.directSlotPipeline;
+    if (!pipeline) return false;
+    const encoder = this.device.createCommandEncoder();
+    for (const draw of draws) {
+      const zoom = Math.max(1e-6, draw.transform?.zoom ?? 1);
+      const panX = draw.transform?.panX ?? 0;
+      const panY = draw.transform?.panY ?? 0;
+      const lutBuffer = this.engine.namedLutBuffer(draw.lut.name, draw.lut.lut);
+      const base = this.bindCanvasSlot(pipeline, draw.slot, lutBuffer, draw, outW, outH, zoom, panX, panY, opts);
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: draw.ctx.getCurrentTexture().createView(),
+          loadOp: "clear" as GPULoadOp,
+          storeOp: "store" as GPUStoreOp,
+          clearValue: clearColorFromRgb(opts.bgRgb),
+        }],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, base);
+      pass.draw(3);
+      const overlay = draw.overlay;
+      if (overlay) {
+        const tileW = Math.max(1, Math.round(overlay.width));
+        const tileH = Math.max(1, Math.round(overlay.height));
+        const left = panX + zoom * overlay.x;
+        const top = panY + zoom * overlay.y;
+        // The pixels whose centres fall inside the tile; the shader paints outside it black.
+        const x0 = Math.max(0, Math.ceil(left - 0.5));
+        const y0 = Math.max(0, Math.ceil(top - 0.5));
+        const x1 = Math.min(outW, Math.ceil(left + zoom * tileW - 0.5));
+        const y1 = Math.min(outH, Math.ceil(top + zoom * tileH - 0.5));
+        if (x1 > x0 && y1 > y0) {
+          pass.setBindGroup(0, this.bindCanvasSlot(pipeline, overlay.slot, lutBuffer, draw, tileW, tileH, zoom, left, top, opts));
+          pass.setScissorRect(x0, y0, x1 - x0, y1 - y0);
+          pass.draw(3);
+        }
+      }
+      pass.end();
+    }
+    this.device.queue.submit([encoder.finish()]);
+    return true;
+  }
+
+  /** Write `idx`'s params for an outW x outH image placed at (panX, panY) and zoom, and return its cached binding. */
+  private bindCanvasSlot(
+    pipeline: GPURenderPipeline, idx: number, lutBuffer: GPUBuffer, draw: PanelCanvasDraw,
+    outW: number, outH: number, zoom: number, panX: number, panY: number, opts: { bgRgb: number; smooth?: boolean },
+  ): GPUBindGroup {
+    const slot = this.engine.slots[idx]!;
+    const paramsU32 = this.directGridParamsU32;
+    const paramsF32 = this.directGridParamsF32;
+    paramsU32[0] = slot.width;
+    paramsU32[1] = slot.height;
+    paramsU32[2] = 0;
+    paramsU32[3] = slot.width;
+    paramsU32[4] = outH;
+    paramsU32[5] = outW;
+    paramsF32[6] = 0;
+    paramsF32[7] = 0;
+    paramsU32[8] = draw.logScale ? 1 : 0;
+    paramsU32[9] = opts.bgRgb & 0xFFFFFF;
+    paramsF32[10] = zoom;
+    paramsU32[11] = shouldSmoothDirectSample(opts.smooth, zoom, slot.width, slot.height, outW, outH) ? 1 : 0;
+    paramsF32[12] = draw.range.vmin;
+    paramsF32[13] = draw.range.vmax;
+    paramsF32[14] = panX;
+    paramsF32[15] = panY;
+    this.device.queue.writeBuffer(slot.paramsBuffer, 0, this.directGridParams);
+    if (!slot.directCanvasBindGroup || slot.directCanvasLut !== lutBuffer) {
+      slot.directCanvasBindGroup = this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: slot.paramsBuffer } },
+          { binding: 1, resource: { buffer: slot.dataBuffer } },
+          { binding: 2, resource: { buffer: lutBuffer } },
+        ],
+      });
+      slot.directCanvasLut = lutBuffer;
+    }
+    return slot.directCanvasBindGroup;
   }
 
   /**
@@ -682,7 +785,7 @@ export class DirectRenderer {
   ): boolean {
     if (!this.engine.lutBuffer) return false;
     const slot = this.engine.slots[slotIdx];
-    if (!slot) return false;
+    if (!slot || slot.dataKind === "rgb") return false;
     const hasActiveTransform = (opts.transforms || []).some((transform) => (
       Math.abs((transform?.zoom ?? 1) - 1) > 1e-6 ||
       Math.abs(transform?.panX ?? 0) > 1e-3 ||
@@ -797,5 +900,97 @@ export class DirectRenderer {
     slotIdx: number, range: DisplayRange | DisplayRange[], logScale: boolean | boolean[], opts: PanelRegionOptions,
   ): Promise<ImageBitmap | null> {
     return this.durableFrame(opts.width, opts.height, (context) => this.renderCombinedPanelRegionsDirectToCanvas(slotIdx, range, logScale, context, opts));
+  }
+
+  /**
+   * True-color twin of renderCombinedPanelRegionsDirectToCanvas: each grid
+   * panel draws a column region of an RGB slot (uploadRgbData) through its own
+   * viewport, with the panel's zoom and pan, straight into `ctx`. No colormap,
+   * range or log applies; the channels are drawn as stored.
+   */
+  renderRgbPanelRegionsDirectToCanvas(slotIdx: number, ctx: GPUCanvasContext, opts: PanelRegionOptions): boolean {
+    const slot = this.engine.slots[slotIdx];
+    if (!slot || slot.dataKind !== "rgb") return false;
+    const layout = gridLayout(opts);
+    if (!layout) return false;
+    const { n, panelW, panelH } = layout;
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    this.directSlotRgbPipeline ??= renderPipeline(this.device, DIRECT_SLOT_RGB_SHADER, format);
+    const pipeline = this.directSlotRgbPipeline;
+    const params = this.directGridParams;
+    const paramsU32 = this.directGridParamsU32;
+    const paramsF32 = this.directGridParamsF32;
+    const sourcePanelW = Math.max(1, Math.min(slot.width, Math.round(opts.sourcePanelWidth)));
+    while (slot.directRegionParamsBuffers.length < n) {
+      slot.directRegionParamsBuffers.push(null);
+      slot.directRegionBindGroups.push(null);
+    }
+    for (let panel = 0; panel < n; panel++) {
+      let paramsBuffer = slot.directRegionParamsBuffers[panel];
+      if (!paramsBuffer) {
+        paramsBuffer = this.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        slot.directRegionParamsBuffers[panel] = paramsBuffer;
+      }
+      const sourcePanel = Math.max(0, Math.round(opts.sourcePanelIndices?.[panel] ?? panel));
+      const srcX0 = Math.min(sourcePanel * sourcePanelW, Math.max(0, slot.width - 1));
+      const sourceWidth = Math.max(1, Math.min(sourcePanelW, slot.width - srcX0));
+      const transform = opts.transforms?.[panel];
+      const zoomValue = Math.max(1e-6, transform?.zoom ?? 1);
+      const origin = panelOrigin(layout, panel);
+      paramsU32[0] = slot.width;
+      paramsU32[1] = slot.height;
+      paramsU32[2] = srcX0;
+      paramsU32[3] = sourceWidth;
+      paramsU32[4] = Math.max(1, Math.round(panelH));
+      paramsU32[5] = Math.max(1, Math.round(panelW));
+      paramsF32[6] = origin.x;
+      paramsF32[7] = origin.y;
+      paramsU32[8] = 0;
+      paramsU32[9] = opts.bgRgb & 0xFFFFFF;
+      paramsF32[10] = zoomValue;
+      paramsU32[11] = shouldSmoothDirectSample(opts.smooth, zoomValue, sourceWidth, slot.height, panelW, panelH) ? 1 : 0;
+      paramsF32[12] = 0;
+      paramsF32[13] = 0;
+      paramsF32[14] = transform?.panX ?? 0;
+      paramsF32[15] = transform?.panY ?? 0;
+      this.device.queue.writeBuffer(paramsBuffer, 0, params);
+      // The LUT-name cache key marks this bind group as the RGB layout (no LUT binding).
+      if (!slot.directRegionBindGroups[panel] || slot.directRegionLutNames[panel] !== "rgb:direct") {
+        slot.directRegionBindGroups[panel] = this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: slot.dataBuffer } },
+          ],
+        });
+        slot.directRegionLutNames[panel] = "rgb:direct";
+      }
+    }
+    const texture = ctx.getCurrentTexture();
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: texture.createView(),
+        loadOp: "clear" as GPULoadOp,
+        storeOp: "store" as GPUStoreOp,
+        clearValue: clearColorFromRgb(opts.bgRgb),
+      }],
+    });
+    pass.setPipeline(pipeline);
+    for (let panel = 0; panel < n; panel++) {
+      const bindGroup = slot.directRegionBindGroups[panel];
+      if (!bindGroup) continue;
+      setPanelViewport(pass, layout, panel);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+    }
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+    return true;
+  }
+
+  /** Queue-safe durable-frame twin of renderRgbPanelRegionsDirectToCanvas. */
+  renderRgbPanelRegionsToImageBitmapAsync(slotIdx: number, opts: PanelRegionOptions): Promise<ImageBitmap | null> {
+    return this.durableFrame(opts.width, opts.height, (context) => this.renderRgbPanelRegionsDirectToCanvas(slotIdx, context, opts));
   }
 }

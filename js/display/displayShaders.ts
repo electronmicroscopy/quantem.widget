@@ -271,7 +271,7 @@ struct Params {
   log_scale: u32,
   bg_rgb: u32,
   shared_source: u32,
-  _pad0: u32,
+  smooth_sample: u32,
   vmin: f32,
   vmax: f32,
   gap: f32,
@@ -312,11 +312,43 @@ ${FULLSCREEN_VERTEX_WGSL}
   }
 
   let src_panel_idx = select(panel_idx, 0u, params.shared_source == 1u);
-  let src_local_x = min(u32(local_x * f32(src_panel_w) / panel_w), src_panel_w - 1u);
-  let src_x = min(src_panel_idx * src_panel_w + src_local_x, params.src_width - 1u);
-  let src_y = min(u32(local_y * f32(params.src_height) / panel_h), params.src_height - 1u);
-  let src_idx = src_y * params.src_width + src_x;
-  var val = data[src_idx];
+  let panel_x0 = src_panel_idx * src_panel_w;
+  var val: f32;
+  if (params.smooth_sample == 1u) {
+    // Bilinear over this panel's source pixels, interpolating values before the colormap,
+    // as the packed-panel shader does, so Smooth looks the same on every WebGPU path.
+    let src_fx = clamp(local_x * f32(src_panel_w) / panel_w - 0.5, 0.0, f32(src_panel_w - 1u));
+    let src_fy = clamp(local_y * f32(params.src_height) / panel_h - 0.5, 0.0, f32(params.src_height - 1u));
+    let x0_local = u32(floor(src_fx));
+    let y0 = u32(floor(src_fy));
+    let x0 = min(panel_x0 + x0_local, params.src_width - 1u);
+    let x1 = min(panel_x0 + min(x0_local + 1u, src_panel_w - 1u), params.src_width - 1u);
+    let y1 = min(y0 + 1u, params.src_height - 1u);
+    let tx = src_fx - f32(x0_local);
+    let ty = src_fy - f32(y0);
+    let row0 = y0 * params.src_width;
+    let row1 = y1 * params.src_width;
+    let v0 = data[row0 + x0] + (data[row0 + x1] - data[row0 + x0]) * tx;
+    let v1 = data[row1 + x0] + (data[row1 + x1] - data[row1 + x0]) * tx;
+    val = v0 + (v1 - v0) * ty;
+  } else {
+    var src_local_x = min(u32(local_x * f32(src_panel_w) / panel_w), src_panel_w - 1u);
+    var src_y = min(u32(local_y * f32(params.src_height) / panel_h), params.src_height - 1u);
+    // Whole-pixel panels (no gap, even split): pick the texel by exact integer arithmetic,
+    // floor((2x+1)·src / 2·out), so a pixel centre exactly on a texel edge always takes the
+    // same texel. Float division picked either side at those edges, row by row and column by
+    // column, at non-integer zooms.
+    if (gap == 0.0 && params.out_width % params.cols == 0u && params.out_height % params.rows == 0u) {
+      let panel_w_px = params.out_width / params.cols;
+      let panel_h_px = params.out_height / params.rows;
+      let lx = out_x - col * panel_w_px;
+      let ly = out_y - row * panel_h_px;
+      src_local_x = min(((2u * lx + 1u) * src_panel_w) / (2u * panel_w_px), src_panel_w - 1u);
+      src_y = min(((2u * ly + 1u) * params.src_height) / (2u * panel_h_px), params.src_height - 1u);
+    }
+    let src_x = min(panel_x0 + src_local_x, params.src_width - 1u);
+    val = data[src_y * params.src_width + src_x];
+  }
   if (params.log_scale == 1u) {
     if (val >= 0.0) { val = log(1.0 + val); } else { val = -log(1.0 - val); }
   }
@@ -638,9 +670,89 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (gid.x >= params.width || gid.y >= params.height) { return; }
   let idx = gid.y * params.width + gid.x;
   let base = idx * 3u;
-  let r = u32(clamp(rgb[base] * 255.0, 0.0, 255.0));
-  let g = u32(clamp(rgb[base + 1u] * 255.0, 0.0, 255.0));
-  let b = u32(clamp(rgb[base + 2u] * 255.0, 0.0, 255.0));
-  rgba[idx] = r | (g << 8u) | (b << 16u) | 0xFF000000u;
+  // round(clamp(v, 0, 1) * 255) per channel, NaN to 0: the CPU pack's bytes.
+  let color = vec3f(rgb[base], rgb[base + 1u], rgb[base + 2u]);
+  let safe = select(vec3f(0.0), color, color == color);
+  let bytes = vec3u(floor(clamp(safe, vec3f(0.0), vec3f(1.0)) * 255.0 + 0.5));
+  rgba[idx] = bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | 0xFF000000u;
+}
+`;
+
+// True-color twin of DIRECT_SLOT_COLORMAP_SHADER: the slot holds interleaved
+// RGB floats in [0, 1] (3 per pixel, the layout of Show3D's `_rgb_data`) and
+// each channel is drawn as is, with no colormap or range. The same params
+// struct places one panel of a column-region grid with its zoom and pan.
+// Channels quantize as round(clamp(v, 0, 1) * 255), the CPU pack's
+// Math.round, so a readback of either path gives the same bytes.
+export const DIRECT_SLOT_RGB_SHADER = /* wgsl */ `
+struct Params {
+  src_width: u32,
+  src_height: u32,
+  src_x0: u32,
+  src_region_width: u32,
+  out_height: u32,
+  out_width: u32,
+  origin_x: f32,
+  origin_y: f32,
+  _unused0: u32,
+  bg_rgb: u32,
+  zoom: f32,
+  smooth_sample: u32,
+  _unused1: f32,
+  _unused2: f32,
+  pan_x: f32,
+  pan_y: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> data: array<f32>;
+
+${FULLSCREEN_VERTEX_WGSL}
+fn texel(x: u32, y: u32) -> vec3f {
+  let base = (y * params.src_width + x) * 3u;
+  return vec3f(data[base], data[base + 1u], data[base + 2u]);
+}
+
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  if (params.src_width == 0u || params.src_height == 0u) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  let region_w = max(1u, min(params.src_region_width, params.src_width));
+  let region_x0 = min(params.src_x0, params.src_width - 1u);
+  let out_w = f32(max(1u, params.out_width));
+  let out_h = f32(max(1u, params.out_height));
+  let local_x = in.pos.x - params.origin_x;
+  let local_y = in.pos.y - params.origin_y;
+  let image_x = (local_x - params.pan_x) / max(params.zoom, 1e-6);
+  let image_y = (local_y - params.pan_y) / max(params.zoom, 1e-6);
+  if (image_x < 0.0 || image_y < 0.0 || image_x >= out_w || image_y >= out_h) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  var color: vec3f;
+  if (params.smooth_sample == 1u) {
+    let src_fx = clamp((image_x + 0.5) * f32(region_w) / out_w - 0.5, 0.0, f32(region_w - 1u));
+    let src_fy = clamp((image_y + 0.5) * f32(params.src_height) / out_h - 0.5, 0.0, f32(params.src_height - 1u));
+    let x0_local = u32(floor(src_fx));
+    let y0 = u32(floor(src_fy));
+    let x1_local = min(x0_local + 1u, region_w - 1u);
+    let y1 = min(y0 + 1u, params.src_height - 1u);
+    let x0 = min(region_x0 + x0_local, params.src_width - 1u);
+    let x1 = min(region_x0 + x1_local, params.src_width - 1u);
+    let tx = src_fx - f32(x0_local);
+    let ty = src_fy - f32(y0);
+    let c0 = mix(texel(x0, y0), texel(x1, y0), tx);
+    let c1 = mix(texel(x0, y1), texel(x1, y1), tx);
+    color = mix(c0, c1, ty);
+  } else {
+    let src_local_x = min(u32(image_x * f32(region_w) / out_w), region_w - 1u);
+    let src_x = min(region_x0 + src_local_x, params.src_width - 1u);
+    let src_y = min(u32(image_y * f32(params.src_height) / out_h), params.src_height - 1u);
+    color = texel(src_x, src_y);
+  }
+  // NaN fails both comparisons in clamp's min/max on some drivers; map it to 0 like the CPU pack.
+  let finite = color == color;
+  let safe = select(vec3f(0.0), color, finite);
+  let bytes = floor(clamp(safe, vec3f(0.0), vec3f(1.0)) * 255.0 + 0.5);
+  return vec4f(bytes / 255.0, 1.0);
 }
 `;

@@ -117,26 +117,17 @@ pip install -i https://test.pypi.org/simple/ \
   x64 Python 3.12 and newer reports the ARM64 processor to pip, so pip skips
   it there too unless it is named.
 
-## Crystal and volume demos
+## Volume demos
 
-Follow the [interactive demo route](tutorials/demo.md) for ShowCIF, Show3D, and
-Show3DSlices. The ShowCIF potential preview takes its Lobato scattering factors
-from quantem, a base dependency:
-
-```bash
-python -m pip install -i https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ quantem.widget
-```
-
-Check that the installed build includes the API you want to demonstrate; the
-new ShowCIF notebook requires a revision containing ShowCIF. For an unpublished
-source revision, use the [developer setup](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md)
-and install `'.'`, then build the JavaScript with `npm run build`.
-Use the same Python environment for installation and the notebook kernel.
+Follow the [interactive demo route](tutorials/demo.md) for Show3D and
+Show3DSlices. For an unpublished source revision, use the
+[developer setup](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md),
+then build the JavaScript with `npm run build`. Use the same Python environment
+for installation and the notebook kernel.
 
 ## Google Colab
 
-Tutorials with a Colab badge can open directly in Colab. The new crystal demo
+Tutorials with a Colab badge can open directly in Colab. The volume demo
 can also be run from a local source checkout as described above. Colab uses the same files that build these docs, so there is no
 separate Colab copy to maintain.
 
@@ -167,8 +158,6 @@ Common entry points:
 | Show3D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) |
 | Show3DSlices | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) |
 | Show4DSTEM | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) |
-| ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
-| Choose Lattice | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) |
 | IO/GPU | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) |
 | HTML and file export | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
 

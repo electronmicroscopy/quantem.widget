@@ -49,10 +49,10 @@ test('clicking a result targets its own rectangle, bounds and refit', async () =
     local_tilt_can_fit: true, local_tilt_stale: false,
     local_tilt_selection_json: JSON.stringify(regions), local_tilt_reply_json: '',
     local_tilt_json: JSON.stringify({ regions, scan_shape: [512, 512], fits: regions.map(region => ({
-      ...region, sample_tilt_mrad: [1, 2], seed_sd_mrad: 0.1,
+      ...region, sample_tilt_mrad: [1, 2], seed_sd_mrad: null,
     })) }),
     local_tilt_images_json: JSON.stringify(regions.map((region, index) => ({
-      label: `${region.label} · SSB`, shape: [2, 2], offset: index * 4, sampling_A: 0.5,
+      label: `${region.label} · Direct`, shape: [2, 2], offset: index * 4, sampling_A: 0.5,
     }))),
     local_tilt_bytes: new DataView(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer),
   });
@@ -60,9 +60,10 @@ test('clicking a result targets its own rectangle, bounds and refit', async () =
   let cleanup: (() => void) | undefined;
   try {
     await act(async () => { cleanup = createRender(Workspace)({ model, el } as never) as () => void; });
+    expect(el.textContent).not.toContain('SD');
     for (const region of regions) {
       const panel = Array.from(el.querySelectorAll('[data-local-tilt-result]'))
-        .find(element => element.textContent?.includes(`${region.label} · SSB`))!;
+        .find(element => element.textContent?.includes(`${region.label} · Direct`))!;
       act(() => panel.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
       expect(model.get('local_tilt_active_region')).toBe(region.id);
       const selected = el.querySelector('svg rect[stroke-width="2"]')!;
@@ -76,6 +77,9 @@ test('clicking a result targets its own rectangle, bounds and refit', async () =
       action: 'fit', only_changed: true, force_region: 'region-3', regions,
     });
     expect((el.querySelector('[aria-label="Delete Region 2"]') as HTMLButtonElement).disabled).toBe(true);
+    act(()=>model.set('local_tilt_reply_json',JSON.stringify({status:'running',stage:'joint_fit',label:'Region 3',trials:200,repeat:1,repeats:1})));
+    expect(el.textContent).toContain('Refitting Region 3 · 200 trials + refinement');
+    expect(el.textContent).not.toContain('repeat 1/');
     act(()=>model.set('local_tilt_reply_json',JSON.stringify({status:'complete',signature:JSON.stringify(regions)})));
     const previousRequest=model.get('local_tilt_request_json');
     // The hover action deletes its own panel without changing another region's controls.

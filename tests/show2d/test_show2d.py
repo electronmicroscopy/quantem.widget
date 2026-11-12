@@ -129,11 +129,27 @@ def test_rgb_panels_bypass_colormap_and_feed_luminance_to_stats():
     gray = _frame(4, (32, 40))
     widget = Show2D([rgb, gray], verbose=False)
     assert widget.is_rgb == [True, False]
-    assert widget.export_enabled is False
+    assert widget.export_enabled is True  # color panels export as true color with encoding="full"
     np.testing.assert_allclose(widget.stats_mean[0], 0.2126, rtol=1e-5)  # Rec. 709 red weight
     assert len(widget.frame_bytes) - 1 == (3 + 1) * 32 * 40 * 4  # padded to a multiple of 3 for unpadded base64
     with pytest.raises(NotImplementedError):
         Show2D([rgb], offline=True, verbose=False)
+
+
+def test_color_panels_export_true_color_and_refuse_uint8(tmp_path):
+    import json
+
+    rgb = np.zeros((32, 40, 3), dtype=np.float32)
+    rgb[..., 0] = 1.0  # pure red
+    widget = Show2D([rgb, _frame(4, (32, 40))], title="Color export", verbose=False)
+    page = widget.export_html(tmp_path / "color.html")
+    text = page.read_text(encoding="utf-8")
+    start = text.index("widget-state+json\">") + len("widget-state+json\">")
+    states = [model["state"] for model in json.loads(text[start:text.index("</script>", start)])["state"].values()]
+    viewer = next(state for state in states if state.get("title") == "Color export")
+    assert viewer["is_rgb"] == [True, False]
+    with pytest.raises(ValueError, match="color panels exports only with the full encoding"):
+        widget.export_html(tmp_path / "color_uint8.html", encoding="uint8")
 
 
 def test_set_image_replaces_the_stack_in_place():
@@ -144,6 +160,26 @@ def test_set_image_replaces_the_stack_in_place():
     assert widget.starred == [0, 0] and widget.roi_list == []
     with pytest.raises(ValueError, match="labels length"):
         widget.set_image(_frame(), labels=["a", "b"])
+
+
+def test_set_image_with_the_same_layout_keeps_what_the_user_drew():
+    # A live acquisition replaces the frame several times a second; a profile or ROI the user drew
+    # on the frame must survive each update, and only a change of panel count or shape resets it.
+    widget = Show2D([_frame(1, (32, 32)), _frame(2, (32, 32))], labels=["live", "sum"], verbose=False)
+    widget.profile_line = [{"row": 2.0, "col": 3.0}, {"row": 20.0, "col": 25.0}]
+    widget.roi_list = [{"row": 10, "col": 12, "radius": 4}]
+    widget.roi_selected_idx = 0
+    widget.starred = [1, 0]
+    widget.vmins, widget.vmaxs = [0.1, None], [0.6, None]
+    widget.zoom_row, widget.zoom_col = 8.0, 9.0
+    widget.set_image([_frame(3, (32, 32)), _frame(4, (32, 32))])
+    assert widget.labels == ["live", "sum"]
+    assert widget.profile_line == [{"row": 2.0, "col": 3.0}, {"row": 20.0, "col": 25.0}]
+    assert widget.roi_list == [{"row": 10, "col": 12, "radius": 4}] and widget.roi_selected_idx == 0
+    assert widget.starred == [1, 0] and widget.vmins == [0.1, None] and widget.vmaxs == [0.6, None]
+    assert (widget.zoom_row, widget.zoom_col) == (8.0, 9.0)
+    widget.set_image([_frame(3, (16, 16)), _frame(4, (16, 16))])
+    assert widget.profile_line == [] and widget.roi_list == [] and widget.vmins is None
 
 
 def test_set_image_owns_its_pixels_like_the_constructor():
@@ -181,10 +217,10 @@ def test_rotating_an_rgb_panel_turns_its_color_block_with_it():
     widget.image_rotations = [0, 0]
     np.testing.assert_array_equal(np.frombuffer(widget.frame_bytes[: 3 * 20 * 40 * 4], dtype=np.float32).reshape(20, 40, 3), rgb)
 
-def test_ui_mode_presets_and_unknown_kwargs():
-    report = Show2D(_frame(), ui_mode="report", verbose=False)
+def test_mode_presets_and_unknown_kwargs():
+    report = Show2D(_frame(), mode="report", verbose=False)
     assert (report.show_controls, report.show_stats, report.show_title) == (False, False, True)
-    presentation = Show2D(_frame(), ui_mode="presentation", show_stats=True, verbose=False)
+    presentation = Show2D(_frame(), mode="presentation", show_stats=True, verbose=False)
     assert presentation.show_controls is True and presentation.controls_collapsed is True
     assert presentation.show_stats is True  # explicit flags beat the preset
     with pytest.raises(TypeError, match="pixel_size_angstrom"):
@@ -195,15 +231,15 @@ def test_drift_plot_keywords_center_and_panel_gap_px(capsys):
     # quantem's drift plots: plot_combined(interactive=True) passes center=,
     # drift.show() passes the panel gap with the calibration.
     image = _frame(0, (256, 256))
-    combined = Show2D([image, image], labels=["0 deg", "90 deg"], ncols=2, panel_width_px=300, display_bin=1, zoom=4,
-                      center=(40, 200), ui_mode="report")
+    combined = Show2D([image, image], labels=["0 deg", "90 deg"], columns=2, panel_width_px=300, display_bin=1, zoom=4,
+                      center=(40, 200), mode="report")
     assert (combined.zoom_row, combined.zoom_col) == (40.0, 200.0)
     # center is in full-resolution pixels; the browser reads the binned preview's pixels
     binned = Show2D(image, zoom=4, center=(40, 200), display_bin=2, verbose=False)
     assert (binned.zoom_row, binned.zoom_col) == (20.0, 100.0)
     assert Show2D(image, center=None).zoom_row is None
-    shown = Show2D([image] * 3, ncols=3, panel_gap_px=0, panel_width_px=200, sampling=0.1, units="nm",
-                   labels=["before", "affine", "nonrigid"], zoom=1, ui_mode="interactive")
+    shown = Show2D([image] * 3, columns=3, panel_gap_px=0, panel_width_px=200, sampling=0.1, units="nm",
+                   labels=["before", "affine", "nonrigid"], zoom=1, mode="interactive")
     assert (shown.panel_gap_px, shown.pixel_size, shown.pixel_unit) == (0, 0.1, "nm")
     assert Show2D([image] * 2, panel_gap_px=6).panel_gap_px == 6
     capsys.readouterr()
@@ -305,28 +341,6 @@ def test_export_html_embeds_the_model_state(tmp_path: Path):
     assert quantized.stat().st_size < path.stat().st_size
     with pytest.raises(ValueError, match="safe limit"):
         Show2D(np.zeros((8, 2048, 2048), dtype=np.float32), display_bin=1, verbose=False).export_html(tmp_path / "big.html")
-
-
-def test_export_svg_writes_vector_chrome_around_png_panels(tmp_path: Path):
-    widget = Show2D(
-        [_frame(1), _frame(2)],
-        labels=["raw", "denoised"],
-        sampling=0.23,
-        units="A",
-        title="figure",
-        marker_colors=["#ff0000", "#00ff00"],
-        panel_annotations={"denoised": {"text": "A", "position": "top-left"}},
-        panel_overlays={"raw": {"shape": "circle", "center": (32, 32), "radius": 8}},
-        verbose=False,
-    )
-    path = widget.export_svg(tmp_path / "figure.svg", include_colorbar=True)
-    svg = path.read_text()
-    assert svg.startswith('<?xml version="1.0"') and svg.count('<image ') == 2
-    assert svg.count("<g id=\"show2d-panel-") == 2 and ">figure</text>" in svg
-    assert ">raw</text>" in svg and ">A</text>" in svg and "<circle " in svg
-    assert svg.count("<linearGradient") == 2 and 'fill="#ff0000"' in svg
-    assert ">2 Å</text>" in svg  # 60 css px on a 300 px gallery panel of 64 px -> 2.9 A -> nice 2 A
-    assert Image.open(widget.save_image(tmp_path / "raw.png", show_scale_bar=True, colorbar=True, title=True)).size[0] > 64
 
 
 def test_save_image_scale_bar_labels_the_pixel_unit(tmp_path: Path, monkeypatch):
@@ -443,21 +457,39 @@ def test_display_ranges_follow_contrast_rules():
     assert lo == pytest.approx(signed_log(noisy.min())) and hi == pytest.approx(signed_log(noisy.max()))
 
 
-def test_scale_bar_label_matches_the_browser_port():
+@pytest.mark.parametrize(
+    "width, physical_label, physical_length, pixel_length, zoomed_label",
+    [(300, "2 nm", 20, 100, "50 px"), (500, "1 nm", 10, 50, "20 px")],
+)
+def test_scale_bar_label_matches_the_browser_port(width, physical_label, physical_length, pixel_length, zoomed_label):
     frame = np.zeros((512, 512), dtype=np.float32)
-    effective_zoom = 500 / 512  # single image -> 500 css px canvas
-    (label, zoom_text, bar_text, bar_px), = Show2D(frame, sampling=0.23, units="A", labels=["cal"], verbose=False)._static_overlay_texts()
-    assert (label, zoom_text, bar_text) == ("cal", "", "1 nm")  # 14.1 A -> nice 10 A -> 1 nm
-    assert bar_px == pytest.approx(10 / 0.23 * effective_zoom)
-    (_, _, bar_text, bar_px), = Show2D(frame, verbose=False)._static_overlay_texts()
-    assert (bar_text, bar_px) == ("50 px", pytest.approx(50 * effective_zoom))
-    (_, zoom_text, bar_text, _), = Show2D(frame, zoom=1.8, show_zoom_indicator=True, verbose=False)._static_overlay_texts()
-    assert (zoom_text, bar_text) == ("1.8×", "20 px")
+    effective_zoom = width / 512
+    (label, zoom_text, bar_text, bar_px), = Show2D(frame, sampling=0.23, units="A", labels=["cal"], panel_width_px=width, verbose=False)._static_overlay_texts()
+    assert (label, zoom_text, bar_text) == ("", "", physical_label)
+    assert bar_px == pytest.approx(physical_length / 0.23 * effective_zoom)
+    (_, _, bar_text, bar_px), = Show2D(frame, panel_width_px=width, verbose=False)._static_overlay_texts()
+    assert (bar_text, bar_px) == (f"{pixel_length} px", pytest.approx(pixel_length * effective_zoom))
+    (_, zoom_text, bar_text, _), = Show2D(frame, zoom=1.8, show_zoom_indicator=True, panel_width_px=width, verbose=False)._static_overlay_texts()
+    assert (zoom_text, bar_text) == ("1.8×", zoomed_label)
     assert format_scale_label(0.5, "nm") == "5 Å"
     assert format_scale_label(13.8, "A") == "1 nm"
     assert format_scale_label(20, "mrad") == "20 mrad"
     fixed = Show2D(frame, sampling=0.23, units="A", scale_bar_length=2.0, scale_bar_label="2 nm", scale_bar_panels=[0], verbose=False)
     assert fixed._static_overlay_texts()[0][2] == "2 nm"
+
+
+def test_saved_single_image_does_not_add_a_gallery_label():
+    frame = _frame()
+    single = Show2D(frame, title="Large", show_stats=False, verbose=False)
+    clean = Show2D(frame, title="Large", show_panel_titles=False, show_stats=False, verbose=False)
+    gallery = Show2D([frame, frame], labels=["BF", "ADF"], verbose=False)
+    try:
+        np.testing.assert_array_equal(_decode_png(single), _decode_png(clean))
+        assert [spec["label"] for spec in gallery._static_panel_specs()] == ["BF", "ADF"]
+    finally:
+        single.close()
+        clean.close()
+        gallery.close()
 
 
 def test_static_png_shows_diff_panel_and_rgb_pixels():
@@ -473,30 +505,6 @@ def test_static_png_shows_diff_panel_and_rgb_pixels():
     png = _decode_png(Show2D([rgb], verbose=False)).astype(int)
     green = (png[..., 1] > 200) & (png[..., 0] < 60) & (png[..., 2] < 60)
     assert green.mean() > 0.5
-
-
-# --- folder watching ----------------------------------------------------------
-
-
-def test_from_folder_pages_and_remaps_state_by_path(tmp_path: Path):
-    for index in range(21):
-        np.save(tmp_path / f"frame_{index:03d}.npy", np.full((6, 8), index, dtype=np.float32))
-    widget = Show2D.from_folder(tmp_path, watch=False)
-    assert widget.page_kind == "items" and widget.labels[:2] == ["frame_000", "frame_001"]
-    assert (widget.n_images, widget.n_pages, widget.panels_per_page) == (21, 2, 20)
-    assert widget.page_labels == ["Images 1–20", "Images 21–21"]
-    widget.page_idx = 1
-    assert widget._visible_panels() == [20]
-    widget.selected_idx = 20
-    widget.starred = [0] * 20 + [1]
-    np.save(tmp_path / "frame_000b.npy", np.full((6, 8), 99, dtype=np.float32))
-    assert widget.poll_folder() == []  # a new file must be stable for one poll
-    assert widget.poll_folder() == [1]
-    assert widget.labels[1] == "frame_000b" and widget.n_images == 22
-    assert widget.selected_idx == 21 and widget.starred[21] == 1  # state follows the path
-    assert widget.page_idx == 1 and len(widget.folder_paths) == 22
-    with pytest.raises(TypeError, match="derives labels"):
-        Show2D.from_folder(tmp_path, labels=["x"])
 
 
 # --- review regressions (each failed on rc41) ---------------------------------
@@ -563,7 +571,7 @@ def test_labels_of_the_wrong_length_raise():
 
 
 def test_col_markers_are_normalized_like_row_markers():
-    # A-15: col_markers was a bare trait, so {'x': None} reached int('x') in export_svg.
+    # A-15: col_markers was a bare trait, so {'x': None} reached int('x').
     widget = Show2D([_frame(1), _frame(2)], col_markers={1: "#ff0000"}, verbose=False)
     assert widget.col_markers == {"1": "#ff0000"}
     assert Show2D([_frame(1), _frame(2)], col_markers={"x": None}, verbose=False).col_markers == {}
@@ -624,9 +632,8 @@ def test_save_image_uses_the_panel_colormap_window_and_native_pixel_size(tmp_pat
     assert drawn == ["2 nm"]  # 20% of 64 native px x 0.2 nm = 2.56 nm -> 2 nm; the binned 0.4 nm drew "5 nm"
 
 
-def test_preview_and_svg_show_the_window_around_center(tmp_path: Path):
-    # A-7: the preview cropped the image center whatever center= or the synced view said, and the SVG
-    # stretched the part of the window inside the image over the whole panel.
+def test_preview_shows_the_window_around_center():
+    # A-7: the preview cropped the image center whatever center= or the synced view said.
     frame = np.zeros((256, 256), dtype=np.float32)
     frame[96:160, 216:256] = 1.0  # bright block around center (128, 250)
     widget = Show2D(frame, cmap="gray", zoom=4, center=(128, 250), verbose=False)
@@ -634,19 +641,14 @@ def test_preview_and_svg_show_the_window_around_center(tmp_path: Path):
     png = _decode_png(widget).max(axis=-1)
     middle = png[png.shape[0] // 2]
     assert middle[len(middle) // 3] > 200 and middle[int(len(middle) * 0.85)] < 30  # block, then past the edge
-    svg = widget.export_svg(tmp_path / "window.svg").read_text()
-    embedded = re.search(r'base64,([^"]+)"', svg).group(1)
-    panel = np.asarray(Image.open(io.BytesIO(base64.b64decode(embedded))).convert("L"))
-    assert panel[panel.shape[0] // 2, panel.shape[1] // 3] > 200 and panel[panel.shape[0] // 2, int(panel.shape[1] * 0.85)] < 30
     widget = Show2D(frame, verbose=False)
     widget.view_box = [0.0, 128.0, 0.0, 128.0]  # the browser zoomed into the top-left quadrant
     (_, _, bar_text, bar_px), = widget._static_overlay_texts()
-    assert bar_px == pytest.approx(float(bar_text.split()[0]) * 500 / 128)
+    assert bar_px == pytest.approx(float(bar_text.split()[0]) * widget.panel_width_px / 128)
 
 
 def test_static_paths_flip_like_the_browser_and_draw_inset_curves(tmp_path: Path):
-    # A-11: flips were applied only in the browser; A-8: the SVG inset curve had stroke="" without
-    # marker colors; A-9: the preview inset margin defaulted to 0.035 CSS px instead of 12.
+    # A-11: flips were applied only in the browser; A-9: the preview inset margin defaulted to 0.035 CSS px instead of 12.
     frame = _frame(0, (16, 24))
     widget = Show2D(frame, cmap="gray", inset_plots=[{"x": [0, 1], "y": [0, 1], "position": "top-left"}], verbose=False)
     widget.image_flips_horizontal = [True]
@@ -654,7 +656,6 @@ def test_static_paths_flip_like_the_browser_and_draw_inset_curves(tmp_path: Path
     (vmin, vmax), = widget._resolve_panel_display_ranges([frame])
     np.testing.assert_array_equal(saved, widget._static_panel_rgb(frame[:, ::-1], vmin, vmax, "gray"))
     np.testing.assert_array_equal(widget._static_panel_specs()[0]["frame"], frame[:, ::-1])
-    assert 'stroke=""' not in widget.export_svg(tmp_path / "inset.svg").read_text()
     figure = matplotlib.figure.Figure()
     axes = figure.add_subplot()
     widget._draw_static_inset_plot(axes, widget.inset_plots[0], panel_index=0, line_color="#ffffff")
@@ -669,7 +670,7 @@ def test_state_loads_from_a_file_and_refuses_another_widgets_envelope(tmp_path: 
     fresh.load_state_dict(tmp_path / "view.json")
     assert fresh.log_scale is True
     with pytest.raises(ValueError, match="'Show3D'"):
-        Show2D(_frame(), state={"schema": "quantem.widget-state/2", "widget_name": "Show3D", "state": {"log_scale": True}}, verbose=False)
+        Show2D(_frame(), state={"schema": "quantem.widget-state/3", "widget_name": "Show3D", "state": {"log_scale": True}}, verbose=False)
 
 
 def test_offline_quantization_announces_itself(capsys):
@@ -711,9 +712,9 @@ def test_the_panel_gap_has_one_name_in_both_gallery_widgets():
 
 
 def test_the_show2d_panel_width_has_one_name():
-    # Show2D took size and panel_width_px for one value and kept it in a trait called size
+    # Named presets use strings; numeric widths have one explicit keyword.
     assert Show2D(_frame(), panel_width_px=300, verbose=False).state_dict()["panel_width_px"] == 300
-    with pytest.raises(TypeError, match="unexpected keyword argument 'size'"):
+    with pytest.raises(TypeError, match="use panel_width_px"):
         Show2D(_frame(), size=300, verbose=False)
 
 
@@ -745,9 +746,9 @@ def test_a_page_dict_carries_its_panels_under_images():
         Show2D([{"label": "iteration 10", "images": [_frame(1), _frame(2)]}], verbose=False)
 
 
-def test_overlay_keys_have_one_spelling(tmp_path: Path):
+def test_overlay_keys_have_one_spelling():
     # an overlay took up to seven spellings per value (stroke, stroke_color, border_color or color; xyxy, xywh, region,
-    # row0..col1 or box; ...) and nine line styles for four; the kept keys reach the state and the SVG export
+    # row0..col1 or box; ...) and nine line styles for four; the kept keys reach the state
     circle = {"shape": "circle", "center": (20, 30), "radius": 5, "color": "#123456", "line_width": 3, "line_dash": [6, 2]}
     rect = {"shape": "rect", "box": (40, 50, 10, 12), "fill_color": "#abcdef", "opacity": 0.5, "line_style": "dotted", "z_order": 1}
     widget = Show2D(_frame(0), display_bin=2, panel_overlays=[circle, rect], verbose=False)
@@ -755,8 +756,6 @@ def test_overlay_keys_have_one_spelling(tmp_path: Path):
     assert widget.panel_overlays[0][0]["center"] == [10.0, 15.0] and widget.panel_overlays[0][1]["box"] == [5.0, 6.0, 20.0, 25.0]
     native_circle, native_rect = widget.state_dict()["panel_overlays"][0]
     assert (native_circle["center"], native_circle["radius"], native_rect["box"]) == ([20.0, 30.0], 5.0, [10.0, 12.0, 40.0, 50.0])
-    svg = widget.export_svg(tmp_path / "overlays.svg").read_text()
-    assert 'stroke="#123456" stroke-width="3"' in svg and 'stroke-dasharray="6 2"' in svg and 'fill="#abcdef"' in svg
     removed = {"type": "rect", "kind": "rect", "coordinate_system": "data", "row": 1, "col": 1, "y": 1, "x": 1, "r": 2,
                "size": 4, "region": (0, 0, 4, 4), "xyxy": (0, 0, 4, 4), "xywh": (0, 0, 4, 4), "row0": 0, "col0": 0, "row1": 4,
                "col1": 4, "stroke": "red", "stroke_color": "red", "border_color": "red", "fill": "red", "stroke_width": 2,
@@ -775,14 +774,12 @@ def test_overlay_keys_have_one_spelling(tmp_path: Path):
         Show2D(_frame(0), panel_overlays={"row": 8, "col": 8, "r": 2}, verbose=False)
 
 
-def test_annotation_keys_have_one_spelling(tmp_path: Path):
+def test_annotation_keys_have_one_spelling():
     # annotation text came from text, label or title, the text color from fg or color, class from class or class_name,
     # the region from box or region
     widget = Show2D(_frame(0), panel_annotations={"text": "A", "color": "#ff4dff", "box": (0.1, 0.2, 0.3, 0.1), "class_name": "tag"}, verbose=False)
     (annotation,) = widget.panel_annotations[0]
     assert (annotation["text"], annotation["color"], annotation["class_name"], annotation["box"]) == ("A", "#ff4dff", "tag", [0.1, 0.2, 0.3, 0.1])
-    svg = widget.export_svg(tmp_path / "annotations.svg").read_text()
-    assert 'fill="#ff4dff">A</text>' in svg
     for key, value in {"label": "A", "title": "A", "fg": "#fff", "class": "tag", "region": (0.1, 0.2, 0.3, 0.1)}.items():
         with pytest.raises(ValueError, match=f"panel_annotations entries only accept keys .*, got '{key}'"):
             Show2D(_frame(0), panel_annotations={"text": "A", key: value}, verbose=False)

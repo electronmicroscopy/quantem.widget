@@ -9,7 +9,6 @@ warning.
 
 import numpy as np
 import pytest
-from ase import Atoms
 
 import quantem.widget as qw
 from quantem.widget.export import write_widget_html
@@ -20,15 +19,12 @@ pytestmark = pytest.mark.browser
 RNG = np.random.default_rng(0)
 IMAGE = RNG.random((32, 32)).astype(np.float32)
 WIDGETS = {
-    "chooselattice": lambda: qw.ChooseLattice(IMAGE),
     "plot2d": lambda: qw.Plot2D(IMAGE[:4, :6], x=np.arange(6), y=np.arange(4)),
     "show1d": lambda: qw.Show1D(RNG.random(64).astype(np.float32)),
     "show2d": lambda: qw.Show2D(IMAGE),
     "show3d": lambda: qw.Show3D(RNG.random((3, 16, 16)).astype(np.float32)),
     "show3dslices": lambda: qw.Show3DSlices(RNG.random((8, 8, 8)).astype(np.float32)),
     "show4dstem": lambda: qw.Show4DSTEM(RNG.integers(0, 50, (4, 4, 16, 16)).astype(np.uint16), device="cpu"),
-    "showcif": lambda: qw.ShowCIF(Atoms("Si2", scaled_positions=[(0, 0, 0), (0.25, 0.25, 0.25)], cell=[5.43] * 3, pbc=True)),
-    "showdiffraction": lambda: qw.ShowDiffraction(RNG.random((32, 32)).astype(np.float32), device="cpu", verbose=False),
     "showptycho": lambda: qw.ShowPtycho(np.exp(1j * IMAGE).astype(np.complex64), sampling=0.2),
 }
 

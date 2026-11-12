@@ -15,7 +15,7 @@ import Select from "@mui/material/Select";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Switch from "@mui/material/Switch";
-import Slider from "@mui/material/Slider";
+import Slider from "../shared/Slider";
 import Button from "@mui/material/Button";
 import TextField from "@mui/material/TextField";
 import ToggleButton from "@mui/material/ToggleButton";
@@ -203,7 +203,7 @@ function DiffSim() {
   const [presets] = useModelState<string[]>("presets");
   const [offlinePresets] = useModelState<Record<string, unknown>>("_offline_presets");
   const [preset, setPreset] = useModelState<string>("preset");
-  const [energy, setEnergy] = useModelState<number>("energy_keV");
+  const [energy, setEnergy] = useModelState<number>("voltage_kV");
   const [orientation, setOrientation] = useModelState<number[]>("orientation");
   const [modeTrait, setMode] = useModelState<string>("mode");
   const mode = normalizeMode(modeTrait); // "kossel" (earlier name) reads as "kikuchi"

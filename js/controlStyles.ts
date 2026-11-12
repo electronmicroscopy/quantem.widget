@@ -91,13 +91,13 @@ export function panelStarButtonSx(starred: boolean) {
   } as const;
 }
 
-/** Shared compact slider geometry for Show3D, Show3DSlices and ShowCIF. */
+/** Shared compact sliders: circular handles, including their focus shadow. */
 export const sliderStyles = {
   small: {
     py: 0,
     borderRadius: 0,
-    "& .MuiSlider-thumb": { width: 10, height: 10, borderRadius: 0 },
-    "& .MuiSlider-thumb::before": { borderRadius: 0 },
+    "& .MuiSlider-thumb": { width: 10, height: 10, borderRadius: "50%" },
+    "& .MuiSlider-thumb::before": { borderRadius: "50%" },
     "& .MuiSlider-rail": { height: 2, borderRadius: 0 },
     "& .MuiSlider-track": { height: 2, borderRadius: 0 },
     "& .MuiSlider-valueLabel": { borderRadius: 0 },

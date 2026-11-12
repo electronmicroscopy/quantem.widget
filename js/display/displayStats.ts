@@ -7,7 +7,9 @@ export type FrameStats = { histogram: PercentileHistogram; displayBins: number[]
 
 /** Both display statistics of one frame: percentileWindow reads any contrast window from `histogram`. */
 export function frameStats(data: ArrayLike<number>): FrameStats {
-  return { histogram: percentileHistogram(data), displayBins: computeHistogramFromBytes(data) };
+  const histogram = percentileHistogram(data);
+  // Both displays use the same finite range; avoid scanning the full frame twice.
+  return { histogram, displayBins: computeHistogramFromBytes(data, 256, histogram.min, histogram.max) };
 }
 
 /** Worker source defining the reference statistics functions verbatim (they call nothing else). */
@@ -17,7 +19,7 @@ export function frameStatsWorkerFunctions(): string {
 
 /** Worker expression for frameStats(`array`), through the functions frameStatsWorkerFunctions defines. */
 export function frameStatsWorkerCall(array: string): string {
-  return `({histogram: ${percentileHistogram.name}(${array}), displayBins: ${computeHistogramFromBytes.name}(${array})})`;
+  return `(() => { const histogram = ${percentileHistogram.name}(${array}); return {histogram, displayBins: ${computeHistogramFromBytes.name}(${array}, 256, histogram.min, histogram.max)}; })()`;
 }
 
 export function displayStatsWorkerSource(): string {

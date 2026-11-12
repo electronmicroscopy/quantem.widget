@@ -17,10 +17,9 @@ exports. The Reset toolbar action restores the initial plot dimensions.
 
 ## Viewer UI
 
-`Show1D` supports the shared `ui_mode`, `show_title`, `show_controls`,
-`controls_collapsed`, `show_stats`, `show_review`, `show_legend`, and
-`show_grid` names. See [Viewer UI controls](viewer-ui). `show_review` is a
-constructor parameter; the other toggles are synced traits and pass through
+`Show1D` supports the shared `mode`, `show_title`, `show_controls`,
+`controls_collapsed`, `show_stats`, `show_legend`, and `show_grid` names. See
+[Viewer UI controls](viewer-ui). The toggles are synced traits and pass through
 the constructor as keywords (`Show1D(data, show_legend=False)`).
 
 ## Live monitors
@@ -38,65 +37,11 @@ widget.extend(
 widget.snapshot(2, label="iter 2", object=obj, probe=probe)
 ```
 
-`Show1D.live` ranks the traces as losses (`review_mode="optimization"`), so the
-Review panel shows the best trial, loss alerts, and the ranking table. A plain
-`Show1D(data)` keeps `review_mode="trace"` and only sorts trials by label.
-
 For joint-time ptychography, add snapshots at checkpoint iterations with
 multiple named images such as `object_t0`, `object_t5`, `object_t11`, and
 `probe`. Each call to `snapshot(...)` is one grouped checkpoint for playback
-and thumbnail inspection. `goto_snapshot(index)` selects a group from Python
-and `star_snapshot_group(...)` marks it in the playback timeline.
-
-## File-backed monitors
-
-For long reconstructions that should survive notebook disconnects, write a
-JSONL monitor beside the run:
-
-```python
-Show1D.append_monitor_event(
-    "run/show1d_monitor.jsonl",
-    {
-        "iteration": i,
-        "losses": {"lambda 1": loss1, "lambda 10": loss10},
-        "snapshots": {"lambda_1": "snapshots/lambda1_i040.npy"},
-        "warnings": ["loss spike on lambda 10"],
-    },
-)
-```
-
-Each event may also carry `metrics` (per-trial values such as `rmse` or
-`flicker` for the ranking table), `starred`, `hidden`, `notes`, and `tags`.
-Reopen the file while the run is still writing:
-
-```python
-widget = Show1D.watch_run("run/show1d_monitor.jsonl", refresh_s=5)
-```
-
-`watch_run(...)` tails the monitor file: each complete appended line is applied
-to the existing widget state, while a partially written trailing line is
-ignored until the writer finishes it. Call `widget.stop_monitor()` when the
-notebook no longer needs to poll. After a disconnect,
-`Show1D.from_monitor_file(...)` rebuilds the same losses, snapshots, warnings,
-stars, hidden trials, notes, and tags from disk. A directory path resolves to
-`show1d_monitor.jsonl` inside it.
-
-## Open the selected snapshot group in Show2D
-
-To inspect the images behind a selected loss point with the full 2D analysis
-toolkit, convert a snapshot group to `Show2D`:
-
-```python
-show1d.goto_snapshot(5)
-show2d = show1d.to_show2d()
-show2d
-```
-
-`to_show2d(group=None, images=None, title=None)` takes a group index or label
-and group-local image indices or labels; hidden trials are left out by default.
-The widget UI exposes the same path through **View -> View selected as 2D**,
-which embeds the `Show2D` below the loss viewer. Image labels, colormap, scale
-bar units, and stars carry over.
+and thumbnail inspection. `star_snapshot_group(...)` marks a group in the
+playback timeline.
 
 Snapshot panels use the same scale-bar convention as `Show3D`: pass
 `sampling=...` and `units=...` for calibrated physical units, or omit them for
@@ -118,25 +63,33 @@ example from the public QuantEM data repository.
 Ducky simulation tutorial: Georgios Varnavides, [*Trademark ducky dataset* (October 23, 2025)](https://github.com/electronmicroscopy/quantem-tutorials/blob/dbadc111734641226ab0454ed988feaf018e65c4/simulation_notebooks/ducky-dataset.ipynb). The viewer files contain subsequent reconstruction results for the synthetic example.
 
 ```python
+import json
+
+import numpy as np
+
 from quantem.widget import Show1D
 from quantem.widget.datasets import show1d_ducky
 
 run = show1d_ducky()
-widget = Show1D.from_monitor_file(
-    run / "show1d_monitor.jsonl",
+events = [json.loads(line) for line in (run / "show1d_monitor.jsonl").read_text().splitlines()]
+widget = Show1D(
+    {name: [event["losses"][name] for event in events] for name in events[0]["losses"]},
+    x=[event["iteration"] for event in events],
     title="Synthetic Ducky reconstructions (tutorial: Georgios Varnavides)",
     x_label="frame",
     y_label="final loss",
-    log_scale=False,
+    x_integer=True,
     snapshot_columns=4,
     show_snapshot_fft=True,
     snapshot_contrast_preset="1-99",
 )
+widget.snapshot(11, label=events[11]["label"], **{name: np.load(run / path) for name, path in events[11]["snapshots"].items()})
 widget
 ```
 
-The default pins `widget/ducky/` in `bobleesj/quantem-data`; all
-monitor-relative snapshot paths stay intact. See [Tutorial datasets](datasets.md)
+The default pins `widget/ducky/` in `bobleesj/quantem-data`; each line of
+`show1d_monitor.jsonl` holds one frame's losses and the snapshot paths relative
+to the folder. See [Tutorial datasets](datasets.md)
 for the exact revision. This helper has one collection and no
 `size` argument. Retain the visible source credit when exporting a notebook,
 report or standalone widget. See [Tutorial datasets](./datasets.md) for the
@@ -193,7 +146,6 @@ no console error, no NaN frame).
 | Grid toggle | `show_grid` | Grid lines show/hide |
 | Log toggle | `log_scale` | Positive y values render on a logarithmic axis |
 | Stats toggle | `show_stats` | Optional stats side table shows/hides; hidden by default |
-| Review toggle | `show_review` | Optional ranking, notes, tags, and alerts UI shows/hides; hidden by default |
 | Legend toggle | `show_legend` | Trace legend shows/hides |
 | Snapshot panel visibility API | `show_snapshots` | Reconstruction snapshot panel is shown by default; set this from Python for plot-only summaries |
 | Plot thumbnail API | `show_snapshot_thumbnails`, `snapshot_thumbnail_size` | Plot thumbnails are shown by default; set size from Python when a notebook needs denser or larger checkpoint previews |
@@ -207,21 +159,8 @@ no console error, no NaN frame).
 | Snapshot FFT overlay position | `snapshot_overlay_position` | FFT inset overlays can sit in any corner; drag the inset to snap it to the nearest corner or set top-left, top-right, bottom-left, or bottom-right from Python |
 | Snapshot panel corner drag | `snapshot_panel_width_px` | Every real snapshot tile has a Show2D-style corner grip; dragging any grip changes one shared tile size, keeps all panels equal, preserves the selected column count, and keeps controls aligned to the grid width |
 | Snapshot playback star | `bookmarked_snapshot_groups`; `star_snapshot_group()` | Marks important reconstruction iterations in the playback timeline; starred positions render as gold timeline marks and persist in widget state/HTML export |
-| Snapshot star button | `starred_snapshot_image_labels` | In Review mode, marks candidate reconstructions to revisit while sweeping lambda or denoising settings |
-| Snapshot hide button | `hidden_snapshot_image_labels` | In Review mode, hides bad trials from the snapshot grid, loss plot, legend, and stats |
-| Show all hidden trials | `hidden_snapshot_image_labels` | In Review mode, restores hidden reconstruction trials |
-| Starred-only toggle | `show_starred_only` | In Review mode, shows only starred candidates, while keeping reference panels visible |
-| Ranking objective menu | `trial_sort_key` | In Review mode, sorts review rows and snapshot panels by final loss, RMSE, flicker, lambda, object/probe quality, alerts, or label |
-| Ranking order toggle | `trial_sort_descending` | In Review mode, reverses candidate ranking order |
-| Top-K menu | `top_trial_count` | In Review mode, restricts visible trials to the top ranked candidates |
-| Trial filter field | `trial_filter_text` | In Review mode, filters trials by label, note, or tag |
-| Trial notes editor toggle | `show_trial_notes` | In Review mode, shows or hides the note/tag editor while preserving stored notes and tags |
-| Star best button | `starred_snapshot_image_labels`, `trial_rankings` | In Review mode, stars the current best ranked visible trial |
-| Hide worst button | `hidden_snapshot_image_labels`, `trial_rankings` | In Review mode, hides the current worst ranked non-starred trial |
-| Trial note field | `trial_notes` | In Review mode, stores per-trial review notes |
-| Trial tag buttons | `trial_tags` | In Review mode, stores quick tags such as best, bad start, probe drift, and object issue |
-| Review table | `trial_rankings`, `trial_alerts`, `best_trial_label` | In Review mode, shows candidate ranking, alerts, and the best trial |
-| View -> View selected as 2D | `handoff_request`, `prepared_view_widget`, `handoff_status` | Builds an embedded Show2D gallery from the selected snapshot group for deeper image analysis |
+| Snapshot hide button | `hidden_snapshot_image_labels` | Hides an image label from the snapshot grid, and the trace of the same name from the loss plot, legend, and stats |
+| Show all | `hidden_snapshot_image_labels` | Shown when every image of the selected group is hidden; restores all hidden labels |
 | Snapshot scale bar API | `pixel_size`, `pixel_unit`, `show_scale_bar` | Snapshot panels show a Show3D-style scale bar and zoom readout |
 | Snapshot real-space view API | `snapshot_real_space_zoom`, `snapshot_real_space_center` | Starts or restores real-space snapshot panels at a given zoom and `(row, col)` center |
 | Snapshot FFT view API | `snapshot_fft_zoom`, `snapshot_fft_center` | Starts or restores FFT panels at a given zoom and `(row, col)` FFT center |

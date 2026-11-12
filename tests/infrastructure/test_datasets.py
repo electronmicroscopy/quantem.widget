@@ -1,6 +1,6 @@
 """One dataset type per machine, and the same numbers from every widget for every input type.
 
-The rule (Bob, 2026-10-08): a 4D-STEM file loads as quantem.gpu's ``Dataset4dstemGPU`` when
+The rule (maintainer, 2026-10-08): a 4D-STEM file loads as quantem.gpu's ``Dataset4dstem`` when
 quantem.gpu is installed and a GPU works, else as quantem core's ``Dataset4dstem``; images and
 stacks load as quantem core ``Dataset2d`` and ``Dataset3d``. Where quantem core cannot install
 (an Intel Mac, Windows on ARM) the widget's stand-in carries the same surface. The machine state
@@ -17,14 +17,12 @@ import pytest
 import torch
 
 from quantem.widget import (
-    ChooseLattice,
     Plot2D,
     Show1D,
     Show2D,
     Show3D,
     Show3DSlices,
     Show4DSTEM,
-    ShowDiffraction,
     ShowPtycho,
     datasets,
     read_4dstem,
@@ -93,13 +91,13 @@ def test_a_4dstem_file_is_a_gpu_dataset_on_a_gpu_and_a_core_dataset_elsewhere(tm
     masters = [_write_master(tmp_path, f"scan_{index}", counts + index) for index in range(2)]
     on_gpu = read_4dstem(masters[0])
     try:
-        assert type(on_gpu).__name__ == "Dataset4dstemGPU"
+        assert type(on_gpu).__name__ == "Dataset4dstem"
         assert on_gpu.shape == counts.shape and on_gpu.dtype == np.uint16
         np.testing.assert_array_equal(on_gpu[:, :].cpu().numpy(), counts)
     finally:
         on_gpu.close()
     pair = read_4dstem(masters)
-    assert [type(item).__name__ for item in pair] == ["Dataset4dstemGPU"] * 2
+    assert [type(item).__name__ for item in pair] == ["Dataset4dstem"] * 2
     for item in pair:
         item.close()
     dense = read_4dstem(masters[0], "cpu", verbose=False)  # device="cpu" reads densely where quantem.gpu runs
@@ -148,7 +146,7 @@ def test_the_4dstem_tutorial_loader_follows_the_machine(tmp_path, monkeypatch, g
                                                   "units": ["A", "A", "mrad", "mrad"]}))
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kwargs: tmp_path)
     dataset = datasets.show4dstem_gold(size="small", verbose=False)
-    assert type(dataset).__name__ == ("Dataset4dstemGPU" if gpu else "Dataset4dstem")
+    assert type(dataset).__name__ == ("Dataset4dstem" if gpu else "Dataset4dstem")
     values = dataset[:, :].cpu().numpy() if gpu else dataset.array
     np.testing.assert_array_equal(values, counts[::4, ::4])
     assert tuple(float(value) for value in dataset.sampling) == (8.0, 8.0, 3.68, 3.68)
@@ -168,7 +166,7 @@ def test_the_4dstem_tutorial_loader_follows_the_machine(tmp_path, monkeypatch, g
 
 def _show4dstem_numbers(widget) -> list[bytes]:
     widget.pos_row, widget.pos_col = 4, 1
-    mean = np.asarray(widget._session(0).mean_dp(), np.float32)
+    mean = np.asarray(widget._session(0).mean_pattern(), np.float32)
     return [bytes(widget.virtual_image_bytes), bytes(widget.frame_bytes), mean.tobytes(),
             np.float64([widget.bright_field_center_row_px, widget.bright_field_center_col_px, widget.bright_field_radius_px]).tobytes()]
 
@@ -190,8 +188,8 @@ def test_show4dstem_shows_the_same_numbers_for_every_input_type(tmp_path, monkey
     if gpu_adapter.accelerator_ready():
         encoded = read_4dstem(tmp_path / "gold.npy")
         metadata = {"name": "gold", "sampling": list(calibration["sampling"]), "units": list(calibration["units"])}
-        inputs["Dataset4dstemGPU, encoded from a file"] = encoded
-        inputs["Dataset4dstemGPU over a tensor"] = gpu_adapter.acquisition_from_tensor(
+        inputs["Dataset4dstem, encoded from a file"] = encoded
+        inputs["Dataset4dstem over a tensor"] = gpu_adapter.acquisition_from_tensor(
             torch.from_numpy(counts).to(encoded.device), metadata)
     numbers = {}
     try:
@@ -201,7 +199,7 @@ def test_show4dstem_shows_the_same_numbers_for_every_input_type(tmp_path, monkey
                 numbers[label] = _show4dstem_numbers(widget)
                 # every dataset names itself (a file by its name); an .npy file carries no calibration
                 assert widget.title == ("" if label in ("numpy", "torch cpu", "torch cuda") else "gold"), label
-                calibrated = label not in ("numpy", "torch cpu", "torch cuda", "Dataset4dstemGPU, encoded from a file")
+                calibrated = label not in ("numpy", "torch cpu", "torch cuda", "Dataset4dstem, encoded from a file")
                 scales = (widget.scan_sampling_A, widget.detector_sampling_mrad, widget.detector_sampling_inv_A)
                 assert scales == (([2.0, 2.0], [3.68, 3.68], []) if calibrated else ([], [], [])), label
             finally:
@@ -301,9 +299,6 @@ def _image_widgets():
          {"title": "gold", "pixel_size": 2.0, "pixel_unit": "A"}),
         ("Show3DSlices", STACK, lambda data: Show3DSlices(data), lambda widget: widget.volume_bytes,
          {"title": "gold", "voxel_size_A": [2.0, 2.0, 2.0]}),
-        ("ShowDiffraction", IMAGE, lambda data: ShowDiffraction(data, device="cpu", verbose=False),
-         lambda widget: widget.frame_bytes, {"title": "gold"}),
-        ("ChooseLattice", IMAGE, lambda data: ChooseLattice(data), lambda widget: widget.frame_bytes, {"title": "gold"}),
         ("ShowPtycho", IMAGE, lambda data: ShowPtycho(data), lambda widget: widget.phase_bytes, {"object_sampling_A": [2.0, 2.0]}),
         # Plot2D's axes are the x and y it is given
         ("Plot2D", IMAGE, lambda data: Plot2D(data, x=np.arange(32.0), y=np.arange(24.0)), lambda widget: widget.data_bytes, {}),

@@ -172,7 +172,10 @@ export function standaloneWidgetStaticHtmlFromDocument(): string {
   const scripts = Array.from(document.body?.querySelectorAll("script") ?? [])
     .filter((script) => {
       const type = script.getAttribute("type") || "";
+      // the offline runtime (gzipped require.js, anywidget, html-manager and their loader) travels inline;
+      // without it a re-saved page opens blank
       return Boolean(script.src)
+        || script.id.startsWith("quantem-widget-runtime-")
         || script.id === "quantem-widget-anywidget-requirejs"
         || type === "application/vnd.jupyter.widget-state+json"
         || type === "application/vnd.jupyter.widget-view+json";

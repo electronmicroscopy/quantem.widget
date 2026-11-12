@@ -1,10 +1,14 @@
 # ShowPtycho in Jupyter
 
-`ShowPtycho` is an interactive **SSB** (single-sideband) aberration explorer for
+`ShowPtycho` is an interactive **direct ptychography** aberration explorer for
 4D-STEM data. You tune defocus (C10), astigmatism (C12 / phi12), and scan-detector
 rotation and watch the reconstructed phase and its FFT update live in the notebook.
 
-SSB is a *direct* (non-iterative) phase retrieval: fast and interactive, but
+For local-data notebooks, see [QuantEM Tutorials: Widget](https://github.com/bobleesj/quantem-tutorials/tree/widget/tutorials/widget).
+Choose Apple MPS or NVIDIA CUDA, with Basic and Advanced workflows. Each
+notebook browses the acquisition with Show4DSTEM and reuses it for ShowPtycho.
+
+Direct ptychography is a *direct* (non-iterative) phase retrieval: fast and interactive, but
 lower quality than iterative multislice ptychography. Use ShowPtycho for quick
 aberration tuning and review, not as a substitute for a full iterative
 reconstruction.
@@ -26,7 +30,7 @@ count and every detector pixel, encoded on the GPU.
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
-from quantem.gpu import SSB, io
+from quantem.gpu import DirectPtycho, io
 import quantem.widget as qw
 
 qw.profile()
@@ -43,7 +47,7 @@ For your own acquisition, pass its `.qem` file or H5 master instead.
 
 ## State the beam
 
-SSB needs the beam energy, the convergence semi-angle and the scan step. The
+Direct ptychography needs the beam energy, the convergence semi-angle and the scan step. The
 file records the energy; set the others on `data.calibration`. The scan step
 cannot be recovered from the patterns. A single number applies to both
 (row, col) axes.
@@ -57,12 +61,12 @@ data.calibration.scan_sampling_A = 0.5
 
 The bright-field disk is the image of the probe aperture, so its edge sits at
 the convergence semi-angle: the semi-angle divided by the disk's edge radius in
-pixels is the detector step in mrad per pixel. `fit_detector_sampling()` fits
+pixels is the detector step in mrad per pixel. `detector_sampling()` fits
 the disk on the mean pattern of the encoded scan and records the step, the disk
-centre and its edge radius on `data.calibration`; SSB and Show4DSTEM read them.
+centre and its edge radius on `data.calibration`; direct ptychography and Show4DSTEM read them.
 
 ```python
-fit = data.calibration.fit_detector_sampling()
+fit = data.calibration.detector_sampling()
 fit.show()
 ```
 
@@ -76,33 +80,30 @@ the file, overridden by you, or fitted from the bright-field disk. A calibrated
 camera length of your own wins: set `data.calibration.detector_sampling_mrad`
 before or after the fit.
 
-## SSB in quantem: model-based by default
+## Direct ptychography in quantem: model-based by default
 
-quantem fits SSB aberrations with a physical model of the measurement, not an image-quality score. For each trial
+The standard workflow uses 200 initial TPE trials, then quantem.gpu's joint
+exact-gradient refinement through fifth-order aberrations with sample tilt and depth.
+`aberrations(search="broad")` adds higher-order exploration.
+
+quantem fits direct ptychography aberrations with a physical model of the measurement, not an image-quality score. For each trial
 set of aberrations, and the sample's tilt and thickness, it predicts the double-overlap data the detector should have
 recorded, then keeps the parameters whose prediction agrees best with the measurement (least squares). This
-model-based, tilt-corrected fit is the default everywhere, and it is where SSB in quantem is heading.
+model-based, tilt-corrected fit is the default everywhere, and it is where direct ptychography in quantem is heading.
 
 | Call | Method | Use it for |
 |---|---|---|
-| `find_aberrations()` | model-based, tilt-corrected | the default: every fit |
-| `find_aberrations(tilt=False)` | model-based, tilt held at 0 | thin, untilted samples, or to see what tilt correction changes |
-| `find_aberrations(tilt=False, objective="phase_variance")` | phase variance, the earlier SSB search | a backup: reproducing older results, cross-checking a fit |
-
-Phase variance chooses the aberrations that make the corrected phases of all bright-field pixels agree best: the
-least variance of the corrected phase across them. It stays as a backup, not an equal alternative: it cannot see
-sample tilt or thickness, it scores only how consistent the bright-field images are rather than how well a model
-explains the measurement, and it is about 10x slower. On simulated crystals with known aberrations, the model-based
-fit lands about 3x closer in C10.
+| `aberrations()` | model-based, tilt-corrected | the default: every fit |
+| `aberrations(search="primary", tilt=False)` | model-based, tilt held at 0 | thin, untilted samples, or to see what tilt correction changes |
 
 ## Reconstruct
 
 ```python
-ssb = SSB(data)
-fit = ssb.reconstruct()
+ptycho = DirectPtycho(data)
+fit = ptycho.run()
 ```
 
-`SSB(data)` estimates the angle between the scan and the detector. The
+`DirectPtycho(data)` estimates the angle between the scan and the detector. The
 centre-of-mass shift of each pattern is a gradient field, and the rotation that
 removes its curl is the scan-detector rotation: about 178 degrees here, not
 flipped. The curl fixes the angle only modulo 180 degrees: at 178 + 180 = 358
@@ -110,21 +111,61 @@ degrees every centre-of-mass vector is reversed and the curl is the same. The
 two branches give conjugate phases, so one shows the gold particles bright and
 the other dark.
 
-`reconstruct()` fits the aberrations on both branches, independently, and keeps
-the one whose atomic columns carry positive phase. On this scan the columns do
-not decide (z +0.0), so the phase tail does: SSB keeps 358 degrees, where the
-phase has the longer positive tail (skewness +0.22 against -0.22), and one line
-says so. The fit gives C10 near -18.4 nm, C12 2.6 nm and phi12 -37.6 degrees.
+`run()` fits the aberrations on both branches, independently, and keeps
+the one whose atomic columns carry positive phase. In an earlier primary-only
+gold run, the columns did not decide (z +0.0), so the phase tail selected
+358 degrees (skewness +0.22 against -0.22). That historical fit gave
+C10 near -18.4 nm, C12 2.6 nm and phi12 -37.6 degrees. These are reference values
+from the earlier model, not
+predictions for the current fifth-order default; inspect `fit.report()` for
+your run.
 
-Look at both branches yourself. The fit stays on the native scan grid; each
-branch's own fit is shown reconstructed at `upsampling_factor="auto"`, the
-smallest factor whose output grid holds the whole SSB bandwidth (4× for the
+### Inspect and export the fitted optics
+
+End a notebook cell on `fit` to see every fitted coefficient, including higher
+orders, with units. The display also includes rotation, tilt and effective
+depth. Effective depth is a model parameter, not a thickness measurement.
+
+```python
+fit
+```
+
+```python
+table = fit.report()                   # optics, objective, timing; full precision
+parameters = fit.report(to_dict=True)  # coefficients and sample geometry
+```
+
+`parameters["aberrations"]` contains coefficients such as `C30_nm` and
+`phi23_deg`. `sample_tilt_mrad` uses `(row, col)` order; rotation and effective
+depth have their own unit-bearing keys. Only the notebook display rounds
+numbers. Editing either report leaves the fitted result unchanged. For values
+changed later in ShowPtycho, use `viewer.calibration()`.
+
+`fit.aberrations` remains a dictionary of optical coefficients. The full report
+also includes recorded elapsed/stage times, model agreement, variance diagnostic
+loss, trial/refinement counts and the stopping reason. Different objectives
+have different scales; an evaluation limit does not prove convergence. Stage
+timings may overlap. To add the recorded convergence figure, use:
+
+```python
+fit.report(show_convergence=True).T  # vertical table beneath the saved curve
+```
+
+This reads the saved history without fitting again. Use `to_dict=True` separately
+when exporting the numerical report. Reporting adds no fit callbacks or image
+transfers. Use `aberrations(show=False)` to disable the live phase preview.
+The fitter still keeps its usual scalar history.
+
+Look at both branches yourself. These are the primary fits used to choose the
+rotation before fifth-order refinement. Fitting stays on the native scan grid;
+each branch's own fit is shown reconstructed at `upsample="auto"`, the
+smallest factor whose output grid holds the whole direct ptychography bandwidth (4× for the
 0.5 Å gold step):
 
 ```python
 branches = fit.rotation_branches
-panels = branches.upsampled_phases()  # each branch's fit at upsampling_factor="auto"
-factor = branches.upsampling_factor
+panels = branches.upsampled_phases()  # each branch's fit at upsample="auto"
+factor = branches.upsample
 qw.Show2D(
     list(panels),
     labels=[f"{branch.scan_detector_rotation_deg:.1f}°, {factor}x auto" + (" kept" if index == branches.kept else "")
@@ -139,39 +180,72 @@ and compare the two histograms. `branches.show()` draws the same panels above
 the evidence the choice used, from the native phases. Polarity is a heuristic,
 not a measurement: on crystals the preferred tail can change with the region, so
 check that a crop of the field agrees before you trust the angle. If you know
-the angle from your microscope, pass it: `SSB(data, scan_detector_rotation_deg=358)`.
+the angle from your microscope, pass it: `DirectPtycho(data, scan_detector_rotation_deg=358)`.
 
-The fit is the default of the table above, model-based and tilt-corrected. To
-constrain it, or to run one of the other two methods, call `find_aberrations`
-before `reconstruct()`; the reconstruction then reuses that fit:
+For an optional primary-only fit with custom bounds, call `aberrations`
+before `run()`; reconstruction then reuses that fit. This replaces the
+standard fifth-order fit with the explicitly selected primary model:
 
 ```python
-# ssb.find_aberrations(search_ranges={"C10_nm": (-50, 50)})  # tilt-corrected, defocus searched in -50..50 nm
-# ssb.find_aberrations(tilt=False)                           # the same model at tilt 0
-# ssb.find_aberrations(tilt=False, objective="phase_variance")  # the phase-variance backup
+search_ranges = {
+    "C10_nm": (-30.0, 30.0),
+    "C12_nm": (0.0, 20.0),
+}
+fit = ptycho.aberrations(search="primary", search_ranges=search_ranges)
 ```
+
+These are the primary joint-fit defaults, written explicitly so you can edit them.
+The astigmatism angle uses its full period internally; the joint fit does not
+accept an independent `phi12_deg` range. The two alternative methods remain
+available through the calls in the method table above.
 
 ## Review in ShowPtycho
 
 ```python
-viewer = ssb.show(local_tilt=True, show_fft=True, save_dir="ssb-results")
+viewer = ptycho.show(local_tilt=True, show_fft=True, save_dir="direct-results")
 viewer
 ```
 
-`ssb.show()` opens ShowPtycho on the fitted session, at 358 degrees and C10
-near -18.4 nm, and shows the phase and its FFT. Output sampling is chosen from
-the calibration: 4x here, 0.125 A per pixel. Drag C10, C12 and phi12 to see the
-phase update live. The launch table identifies saved values, overrides and
-estimates. **Save** restores a matching full-field joint fit and regional state
+`ptycho.show()` opens ShowPtycho on the session's current fit and shows its phase
+and FFT. The launch table gives the angle and aberrations from your run. Output
+sampling is chosen from the calibration: 4x here, 0.125 A per pixel. Drag C10,
+C12 and phi12 to see the phase update live. The launch table identifies saved
+values, overrides and estimates. **Save** restores a matching full-field joint fit and regional state
 on restart.
 
 The [H5/QEM handoff notebook](showptycho_to_myptycho.ipynb) initializes independent
 myptycho runs from these regional models. `viewer.calibration(region="Upper")`
 returns a snapshot of current numerical settings without saving or refitting.
 
+## Compare regularized direct phase on CUDA
+
+After fitting once, keep the optics fixed and compare the direct reconstruction
+methods. Direct ptychography remains the default. The optional CUDA methods are experimental:
+more damping can suppress unstable contrast but can also suppress real
+fine detail, so compare against direct ptychography and retain the fitted model.
+
+```python
+# Optional on CUDA: uncomment to compare with the conventional result.
+# phase = ptycho.run(method="phase", phase_damp=0.03,
+#                    upsample="auto")
+# complex_result = ptycho.run(method="complex", phase_damp=0.03,
+#                            amplitude_damp=0.03,
+#                            upsample="auto")
+# viewer = ShowPtycho(ptycho, method="phase", phase_damp=0.03,
+#                    restore=False)
+# viewer
+```
+
+In the live viewer, switch **Reconstruction** and drag **Phase damping**.
+Amplitude + phase enables its own independent amplitude strength. The same
+backend solves each update using cached fixed optics; the displayed phase is
+not an interpolated gallery. Save preserves the selected method and strengths.
+See [direct reconstruction methods](../api/showptycho.md#direct-reconstruction-methods)
+for reproducibility and the current CUDA, regional-fitting and export limits.
+
 ## View a reconstruction on any computer
 
-To look at a reconstruction you already have, from SSB or any other method,
+To look at a reconstruction you already have, from direct ptychography or any other method,
 pass the array. It needs no GPU and no quantem.gpu: a real array is the phase,
 a complex array is the object wave, shown as its phase and amplitude. NumPy
 arrays and torch tensors on any device work.
@@ -191,13 +265,13 @@ ShowPtycho(object_wave, sampling=0.25, units="Å", show_fft=True)
 The phase, amplitude (Amp), FFT, histograms and the scale bar show the array's
 own numbers; a float64 or complex128 array is drawn in float32 and the widget
 prints the largest change that causes. The aberration sliders, Save, pins and
-sweeps need an SSB session, and the widget says so in one line.
+sweeps need a direct ptychography session, and the widget says so in one line.
 
 ## No detector binning
 
-Build the reconstruction at the **native detector size**. `SSB.open` and
+Build the reconstruction at the **native detector size**. `DirectPtycho.open` and
 `quantem.gpu.io.load` keep every detector pixel; do not bin an array before
-passing it to `SSB(...)`. Native (e.g. 192x192) is what resolves light columns
+passing it to `DirectPtycho(...)`. Native (e.g. 192x192) is what resolves light columns
 such as oxygen in a perovskite; binning throws that away. Binning also breaks
 the HTML export (the browser cannot bin), so keep the whole workflow un-binned.
 
@@ -205,13 +279,13 @@ the HTML export (the browser cannot bin), so keep the whole workflow un-binned.
 
 Enable **Local Tilt** to draw independent rectangular regions on the overview.
 Moving or resizing a region invalidates its previous fit; automatic fitting
-reruns all five repeats of 200 trials plus Newton. Aberrations, tilt and depth
-are fitted together. Select a region to inspect and adjust its own controls.
-The overview and other regional models are retained.
+runs one standard fit with seed 42: 200 initial TPE trials, then joint
+exact-gradient refinement through fifth order with tilt and depth. Select a region to inspect
+and adjust its own controls. The overview and other regional models are retained.
 
 A region estimates a local model, but its displayed phase is a crop of the
 **full-scan reconstruction** using that model. Smaller regions may have weaker
-parameter identifiability; compare repeat variability and the images before
+parameter identifiability; inspect the images and test fit stability separately before
 interpreting tilt as physical bending or a boundary.
 
 Hover over a region's upper-right corner to delete it, or use its durable
@@ -221,9 +295,9 @@ regional model to initialize a separate run.
 
 ## Is your crystal tilted?
 
-**The question.** SSB treats the sample as one thin sheet. A real crystal is a
+**The question.** Direct ptychography treats the sample as one thin sheet. A real crystal is a
 few nanometres thick and rarely sits exactly on the zone axis. If it leans,
-does SSB still see a sharp lattice, and can it tell you how much it leans?
+does direct ptychography still see a sharp lattice, and can it tell you how much it leans?
 
 **Predict first.** A column tilted by 5 mrad through 10 nm of crystal: how far
 does its bottom sit from its top, compared with a 4 A lattice spacing? Does
@@ -236,7 +310,7 @@ for tilt_mrad in (1, 3, 5, 10):
 ```
 
 At 5 mrad the column walks half an angstrom, and only *along* the tilt: the
-lattice blurs in one direction and stays sharp in the other. Standard SSB has
+lattice blurs in one direction and stays sharp in the other. Standard direct ptychography has
 no depth, so it cannot express this.
 
 **The experiment.** Simulate a crystal whose tilt you know: BaTiO3 [001],
@@ -274,7 +348,7 @@ def tilted_crystal(tilt_mrad=(3.0, -4.0), thickness_A=152.0):
     return np.asarray(measurement.array, dtype=np.float32), float(measurement.angular_sampling[0])
 
 data, det_mrad = tilted_crystal()
-ssb = SSB(data, backend="auto", voltage_kV=300.0, semiangle_mrad=30.0,
+ptycho = DirectPtycho(data, backend="auto", voltage_kV=300.0, semiangle_mrad=30.0,
           scan_sampling_A=(0.25, 0.25), detector_sampling_mrad=(det_mrad, det_mrad), scan_detector_rotation_deg=0.0)
 ```
 
@@ -282,44 +356,44 @@ First the thin-sheet model, `tilt=False`. Look at the FFT: are the lattice
 spots equally sharp in every direction?
 
 ```python
-standard = ssb.find_aberrations(tilt=False, verbose=False)
-ssb.show(show_fft=True)
+ordinary = ptycho.aberrations(search="primary", tilt=False, verbose=False)
+ptycho.show(show_fft=True)
 ```
 
-Now let the sample lean. `find_aberrations()`, the default, fits the same aberrations together
-with a tilt and a depth spread. Compare: which spots sharpened, and did the
-defocus move?
+Now let the sample lean, keeping `search="primary"` on both sides so both fits
+use the same aberration order. The second fit also models tilt and depth spread.
+Compare: which spots sharpened, and did the defocus move?
 
 ```python
-tilted = ssb.find_aberrations(verbose=False)
-ssb.show(show_fft=True)                 # opens on the fitted tilt; drag the Sample tilt sliders
+tilted = ptycho.aberrations(search="primary", tilt=True, verbose=False)
+ptycho.show(show_fft=True)                 # opens on the fitted tilt; drag the Sample tilt sliders
 ```
 
 **What the fit found.**
 
 ```python
 import pandas as pd
-pd.concat([standard.report(), tilted.report()])
+pd.concat([ordinary.report(), tilted.report()])
 ```
 
-The tilt comes back as about (3.0, -4.1) mrad, the value built into the
-simulation, and `tilted.tilt_fit_gain` is above 1.2: the leaning model
+An earlier primary-model run recovered about (3.0, -4.1) mrad, near the value
+built into the simulation, with `tilted.tilt_fit_gain` above 1.2: the leaning model
 explains the data better than the thin sheet. An untilted control crystal
-gives (-0.3, -0.1) mrad. Reading the table:
+gave (-0.3, -0.1) mrad in that test. Read the table from your own run:
 
 - `C10` is now the defocus at the middle of the crystal, so it can differ from
-  the standard fit's value. This is why tilt and defocus are fitted together:
-  fitting the tilt after the standard fit leaves C10 behind and stalls.
+  the ordinary fit's value. Tilt and defocus are fitted together so C10 can
+  move to the model's mid-depth value.
 - `depth spread (nm)` is how deep the model's column walk extends, not a
   measured thickness (the 15.2 nm crystal comes back as 10-13 nm).
 - The tilt is in the scan frame. The Sample tilt panel also shows it in the
   ptychography object frame, ready to seed a multislice reconstruction.
 
 **The model in one line.** A slice at depth `z` sees defocus `C10 + z` and is
-shifted by `z * tilt`. Averaging over depth multiplies each SSB overlap term
+shifted by `z * tilt`. Averaging over depth multiplies each direct ptychography overlap term
 by a real `sinc` weight, which falls fastest for spatial frequencies along the
 tilt: the one-directional blur you predicted. With zero depth every weight is 1
-and the model is standard SSB.
+and the model is standard direct ptychography.
 
 **When not to trust it.**
 
@@ -331,15 +405,15 @@ and the model is standard SSB.
 - The tilt slider is interactive on crops; at a full 512 x 512 scan each
   update takes a few hundred ms on CUDA.
 
-See the [SSB API](https://bobleesj.github.io/quantem.gpu/api/ssb.html) for
-`find_aberrations()` (tilt-corrected by default), `preview(sample_tilt_mrad=..., depth_spread_nm=...)` and the
+See the [direct ptychography API](https://bobleesj.github.io/quantem.gpu/api/direct.html) for
+`aberrations()` (tilt-corrected by default), `preview(sample_tilt_mrad=..., depth_spread_nm=...)` and the
 evidence behind the defaults.
 
 ## Workflow checklist
 
 1. Load the native H5 or QEM acquisition with `io.load` and set missing beam values on `data.calibration`.
-2. Open `SSB(data)`, which estimates the rotation, then `reconstruct()`, which fits the aberrations and settles the 180-degree branch.
-3. Open ShowPtycho with `ssb.show()` and review the launch calibration.
+2. Open `DirectPtycho(data)`, which estimates the rotation, then `run()`, which fits the aberrations and settles the 180-degree branch.
+3. Open ShowPtycho with `ptycho.show()` and review the launch calibration.
 4. Jointly fit aberrations, tilt and depth in the widget, or restore a matching saved joint fit.
-5. Inspect the phase, FFT and repeat variability; lower fit loss alone does not establish a physical tilt.
+5. Inspect the phase and FFT; lower fit loss alone does not establish a physical tilt.
 6. Save the review for restart, then use the regional handoff for iterative reconstruction.

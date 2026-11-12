@@ -105,8 +105,9 @@ def test_profile_uses_recorded_install_provenance(
 
 
 @pytest.mark.parametrize("override", [False, True])
-def test_profile_uses_the_imported_checkout_commit(
-    installation, monkeypatch, tmp_path, capsys, override
+@pytest.mark.parametrize("branch", ["workshop", "HEAD"])
+def test_profile_uses_the_imported_checkout_source(
+    installation, monkeypatch, tmp_path, capsys, override, branch
 ):
     _, metadata, origins = installation
     checkout = tmp_path / "current-checkout"
@@ -123,9 +124,10 @@ def test_profile_uses_the_imported_checkout_commit(
         assert command[:3] == ["git", "-C", str(checkout)]
         return {
             "ls-files": "src/quantem/widget/__init__.py",
-            "rev-parse": "0123456789ab",
+            "--short=12": "0123456789ab",
+            "--abbrev-ref": branch,
             "status": " M src/quantem/widget/info.py",
-        }[command[3]]
+        }[command[4] if command[3] == "rev-parse" else command[3]]
 
     monkeypatch.setattr(info.subprocess, "check_output", git)
     qw.profile()
@@ -137,5 +139,57 @@ def test_profile_uses_the_imported_checkout_commit(
     )
     assert f"install       {label}" in text
     assert "commit        0123456789ab (dirty checkout)" in text
+    assert f"branch        {'detached HEAD' if branch == 'HEAD' else branch}" in text
+    assert "workspace     linked worktree" in text
     assert "261a0c69 (version metadata)" not in text
     assert str(tmp_path) not in text
+
+
+def test_profile_reports_each_editable_package_branch(installation, tmp_path, capsys):
+    """A mixed source stack identifies the loaded branch for each package."""
+    versions, metadata, origins = installation
+    versions["quantem"] = "1.0"
+    for name, branch in (
+        ("quantem.widget", "viewer"),
+        ("quantem.gpu", "encoding"),
+        ("quantem", "analysis"),
+    ):
+        checkout = tmp_path / name
+        origin = checkout / "src" / name.replace(".", "/") / "__init__.py"
+        origin.parent.mkdir(parents=True)
+        origin.write_text("# Tracked package source.\n")
+        origins[name] = origin
+        metadata[name] = {"url": checkout.as_uri(), "dir_info": {"editable": True}}
+        commands = (
+            ["init", "--quiet", "--initial-branch", branch],
+            ["add", "src"],
+            ["-c", "user.name=Test", "-c", "user.email=test@example.org",
+             "commit", "--quiet", "-m", "test package"],
+        )
+        for command in commands:
+            info.subprocess.run(["git", "-C", str(checkout), *command], check=True)
+
+    qw.profile()
+    text = capsys.readouterr().out
+    for name, branch in (
+        ("quantem.widget", "viewer"),
+        ("quantem.gpu", "encoding"),
+        ("quantem", "analysis"),
+    ):
+        section = text.split(f"{name:<15}", 1)[1].split("  workspace", 1)[0]
+        assert f"branch        {branch}" in section
+    assert text.count("workspace     checkout") == 3
+    assert str(tmp_path) not in text
+
+
+@pytest.mark.parametrize("location,label", [("local", "Local"), ("remote", "Remote"), (None, "Unknown"), ("invalid", "Unknown")])
+def test_profile_kernel_location_is_private(installation, monkeypatch, capsys, location, label):
+    monkeypatch.setattr(info.platform, "node", lambda: "private-hostname")
+    if location is None:
+        monkeypatch.delenv("QW_KERNEL_LOCATION", raising=False)
+    else:
+        monkeypatch.setenv("QW_KERNEL_LOCATION", location)
+    qw.profile()
+    output = capsys.readouterr().out
+    assert f"Kernel          {label}" in output
+    assert "private-hostname" not in output

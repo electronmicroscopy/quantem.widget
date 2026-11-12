@@ -6,8 +6,7 @@ smooth. These helpers make that readable VIEW without ever touching the stored
 data: every function takes an array in and returns a new float32 array out, so
 the widget buffer keeps its raw counts and ``mode="none"`` returns to them.
 
-ShowDiffraction calls :func:`apply_display_filter` for its detection and
-display views. The same function is the reference that the browser port in
+:func:`apply_display_filter` is the reference that the browser port in
 ``js/display/filter.ts`` (Show2D / Show3D denoise menu) is tested against.
 
 House rule: defaults are lossless (``mode="none"``, ``spatial_bin=1``) and any
@@ -16,7 +15,7 @@ active reduction is announced once through :func:`format_display_filter_banner`.
 
 import numpy as np
 
-DISPLAY_FILTER_MODES = ("none", "gaussian", "anscombe", "nlm")
+DISPLAY_FILTER_MODES = ("none", "gaussian", "anscombe")
 
 
 def _normalize_mode(mode: str) -> str:
@@ -60,31 +59,6 @@ def _bin_passes(image: np.ndarray, spatial_bin: int) -> np.ndarray:
     return image
 
 
-def _nlm(image: np.ndarray) -> np.ndarray:
-    """Poisson non-local means: variance-stabilize, patch-average, invert."""
-    from skimage.restoration import denoise_nl_means
-
-    image = np.asarray(image, dtype=np.float32)
-    positive = image[image > 0]
-    if positive.size == 0:
-        return image.copy()
-
-    # Integer counts times a gain make the smallest positive value one count;
-    # other data gets the 99.5th-percentile pseudo-count scale of _anscombe_gauss.
-    gain = float(positive.min())
-    ratio = positive / gain
-    if not np.allclose(ratio, np.round(ratio), atol=1e-3):
-        gain = float(np.percentile(positive, 99.5)) / 30.0
-
-    counts = np.clip(image, 0.0, None) / gain
-    stabilized = 2.0 * np.sqrt(counts + 3.0 / 8.0)
-    smoothed = denoise_nl_means(
-        stabilized, patch_size=5, patch_distance=6, h=0.8, sigma=1.0, fast_mode=True
-    )
-    inverse = np.clip((smoothed * 0.5) ** 2 - 3.0 / 8.0, 0.0, None)
-    return (inverse * gain).astype(np.float32)
-
-
 def apply_display_filter(
     image: np.ndarray,
     *,
@@ -110,8 +84,6 @@ def apply_display_filter(
         - ``"anscombe"``: Anscombe transform, Gaussian, inverse; respects
           Poisson statistics of count data. With ``spatial_bin`` >= 2 the
           smoothing width becomes ``max(2, sigma*0.75)`` on the binned map.
-        - ``"nlm"``: Poisson non-local means, variance-stabilized patch
-          averaging that keeps spots sharp (requires scikit-image).
     sigma
         Smoothing scale in pixels for the Gaussian/Anscombe modes.
     spatial_bin
@@ -149,11 +121,10 @@ def apply_display_filter(
         # Best practical stack for sparse counts: bin for SNR, then Poisson VST
         binned_sigma = max(2.0, sigma * 0.75) if spatial_bin >= 2 else sigma
         return _anscombe_gauss(_bin_passes(filtered, spatial_bin), binned_sigma)
-    if mode not in ("none", "nlm"):
+    if mode != "none":
         raise ValueError(f"mode must be one of {'|'.join(DISPLAY_FILTER_MODES)}; got {requested!r}")
-    # none and nlm apply the bin knob as plain pre-passes before the method.
-    filtered = _bin_passes(filtered, spatial_bin)
-    return _nlm(filtered) if mode == "nlm" else filtered
+    # none applies the bin knob as plain passes.
+    return _bin_passes(filtered, spatial_bin)
 
 
 def format_display_filter_banner(

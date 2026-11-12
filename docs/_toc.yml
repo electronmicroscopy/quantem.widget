@@ -25,20 +25,15 @@ parts:
           - file: tutorials/show4dstem_multiple
             title: Compare datasets or tilts
       - file: tutorials/showptycho
-      - file: tutorials/ssb_workflow
-        title: End-to-end SSB workflow
+      - file: tutorials/direct_ptycho_workflow
+        title: End-to-end direct ptychography workflow
       - file: tutorials/showptycho_to_myptycho
-        title: SSB to iterative regions
+        title: Direct ptychography to iterative regions
       - file: tutorials/show1d
       - file: tutorials/plot2d
       - file: tutorials/show2d
       - file: tutorials/show3d
       - file: tutorials/show3dslices
-      - file: tutorials/showdiffraction
-      - file: tutorials/choose_lattice
-        title: Choose Lattice
-      - file: tutorials/showcif
-        title: ShowCIF
       - file: tutorials/io_gpu
         title: IO/GPU
   - caption: Exporting
@@ -59,8 +54,6 @@ parts:
             title: Advanced Show2D
           - file: tutorials/memory_management
             title: Memory management
-          - file: tutorials/watch_folder
-            title: Live folder watching
           - file: tutorials/compare_reconstructions
             title: Comparing reconstructions
   # API reference lives under Developers, separate from the tutorials.
@@ -72,20 +65,18 @@ parts:
           - file: api/datasets
           - file: api/viewer-ui
           - file: api/show1d
+          - file: api/showgpu
           - file: api/plot2d
           - file: api/show2d
           - file: api/show3d
           - file: api/show3dslices
           - file: api/show4dstem
           - file: api/showptycho
-          - file: api/showdiffraction
           - file: api/showpdf
-          - file: api/choose-lattice
-          - file: api/showcif
+          - file: api/scan-control
           - file: api/diffractionsim
           - file: api/html-export
           - file: api/io
-          - file: api/load
       - file: developer/widget-creation
         title: Creating a widget
       - file: developer/platforms
@@ -105,11 +96,14 @@ parts:
           - file: changelog
             title: Changelog
           - file: maintainer/widget-release
+          - file: maintainer/direct-ptycho-release-check
             title: Release
           - file: maintainer/viewing-html-on-mobile
             title: Mobile HTML
           - file: maintainer/widget-ui-protocol
             title: UI protocol
+          - file: maintainer/display-api
+            title: Display API standard
           - file: maintainer/widget-performance
             title: Performance
           - file: maintainer/2026-10-20-mps-performance

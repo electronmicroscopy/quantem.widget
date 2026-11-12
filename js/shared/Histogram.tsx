@@ -1,6 +1,6 @@
 import * as React from "react";
 import Box from "@mui/material/Box";
-import Slider from "@mui/material/Slider";
+import Slider from "./Slider";
 import Typography from "@mui/material/Typography";
 import { computeHistogramFromBytes } from "../display/stats";
 import { formatNumber } from "../format";

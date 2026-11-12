@@ -117,6 +117,8 @@ class Show3DExport:
             fps=self.fps,
             avg_window=self.avg_window,
             show_title=self.show_title,
+            thumbnails=self.thumbnails,
+            thumbnail_columns=self.thumbnail_columns,
             show_fft=self.show_fft,
             fft_layout=self.fft_layout,
             fft_overlay_zoom=self.fft_overlay_zoom,
@@ -124,7 +126,7 @@ class Show3DExport:
             panel_width_px=self.panel_width_px,
             dim_label=self.dim_label,
             display_bin=1,
-            max_cols=self.max_cols,
+            columns=self.columns,
             panel_gap_px=self.panel_gap_px,
             show_scale_bar=self.show_scale_bar,
             panel_annotations=list(self.panel_annotations),
@@ -147,6 +149,11 @@ class Show3DExport:
             clone._pack_offline_u8_stack()
         else:
             clone._pack_exact_offline_stack()
+        # The page header names the original stack and the mean bin between it and these pixels
+        # (the live display bin times the export's image bin), not the binned stack as if it were the source.
+        clone.source_height = int(self.source_height or self.height)
+        clone.source_panel_width = int(self.source_panel_width or self.num_panel_cols or self.width)
+        clone.display_bin = max(1, int(self.display_bin)) * image_bin
         clone.playing = bool(self.playing)
         clone.export_enabled = False
         clone.export_status = ""
@@ -344,7 +351,7 @@ class Show3DExport:
                     panel_titles=[self._static_panel_title(panel, frame_idx) for panel in panel_indices] if show_frame_labels else panel_titles,
                     show_panel_titles=include_panel_titles,
                     title_font_size=max(gif_utils.MIN_TITLE_FONT_SIZE, int(round(11 * scale))),
-                    max_cols=int(self.max_cols),
+                    columns=int(self.columns),
                     panel_gap=panel_gap,
                     background=background,
                 )

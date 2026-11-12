@@ -8,34 +8,35 @@ recipe, and keep the reduction choices explicit.
 
 | Goal | Recommended path | Output | Opens without Python? | Contains raw 4D data? |
 |---|---|---|---:|---:|
-| Continue analysis | `Show4DSTEM(load(...))` or `quantem show4dstem ...` | Live notebook | no | yes, in the Python session |
+| Continue analysis | `Show4DSTEM(load(...))` or `quantem-widget show4dstem ...` | Live notebook | no | yes, in the Python session |
 | Share a compact screening result | `export_html(export_kind="report")` | One HTML report | yes | no |
 | Share an offline detector-ROI browser | `Show4DSTEM(array).export_html(export_kind="interactive")` | WebGPU HTML/folder | yes | yes, binned/encoded |
-| Export quickly from a terminal | `quantem show4dstem ... --backend webgpu --html --count N` | WebGPU HDF5 folder | yes | yes, in source HDF5 files |
-| Export full native detector sampling from a terminal | `quantem show4dstem ... --backend webgpu --html --detector-bin 1 --dtype uint8` | WebGPU HDF5 folder | yes | yes, native detector sampling |
+| Export quickly from a terminal | `quantem-widget show4dstem ... --backend webgpu --html --count N` | WebGPU HDF5 folder | yes | yes, in source HDF5 files |
+| Export full native detector sampling from a terminal | `quantem-widget show4dstem ... --backend webgpu --html --detector-bin 1 --dtype uint8` | WebGPU HDF5 folder | yes | yes, native detector sampling |
 | Preserve compressed HDF5 beside the viewer | WebGPU HDF5 folder | `index.html` + `Show4DSTEM.command` + `.viewer/` + `tilt_NN_master.h5` + `tilt_NN_data_*.h5` | yes, via folder grant or local server | yes, in source HDF5 files |
 
-Default recommendation: use `export_kind="report"` for large folders, many
-datasets, or collaborator screening. Use `export_kind="interactive"` only when
-the recipient must drag detector ROIs in the exported browser.
+Default recommendation: use `export_kind="report"` for many datasets or
+collaborator screening. Use `export_kind="interactive"` only when the recipient
+must drag detector ROIs in the exported browser.
 
 ## Minimal Report Export
 
 Report export writes a compact, self-contained HTML file. It contains rendered
 virtual-image PNG pages and a representative diffraction pattern, not raw 4D
-detector data. This is the safest default for large folder viewers, and the
+detector data. This is the safest default for viewers over many masters, and the
 only HTML export from a live viewer over encoded acquisitions.
 
 ```python
-from quantem.widget import Show4DSTEM
+from pathlib import Path
+from quantem.widget import Show4DSTEM, read_4dstem
 
-viewer = Show4DSTEM.from_folder(
-    "/data/session",
-    page_size=12,
+masters = sorted(Path("/data/session").glob("*_master.h5"))
+viewer = Show4DSTEM(
+    read_4dstem(masters),   # returns after every master is loaded
+    compare_max_panels=12,
     compare_group_mode="paged",
     compare_dp_mode="selected",
 )
-viewer.wait_for_folder()  # every opening master is loaded before the export
 
 path = viewer.export_html(
     "show4dstem_report.html",
@@ -99,20 +100,20 @@ non-notebook user. It writes a folder-backed browser viewer rather than copying
 raw HDF5 into one huge HTML file:
 
 ```bash
-quantem show4dstem /data/session --backend webgpu --html --count 1 --out ~/Downloads
+quantem-widget show4dstem /data/session --backend webgpu --html --count 1 --save-dir ~/Downloads
 ```
 
 Useful variants:
 
 ```bash
 # One master, full detector sampling, browser WebGPU HDF5 folder.
-quantem show4dstem scan_001_master.h5 --backend webgpu --html --detector-bin 1
+quantem-widget show4dstem scan_001_master.h5 --backend webgpu --html --detector-bin 1
 
 # Seven compatible masters in one comparison viewer.
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1
 
 # Write without opening a browser.
-quantem show4dstem /data/session --backend webgpu --html --count 7 --no-open
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --no-open
 ```
 
 The `--backend webgpu` folder keeps full detector sampling and requires
@@ -128,14 +129,14 @@ sampling. Use the CLI with `--html --detector-bin 1`:
 
 ```bash
 # Native detector sampling, browser WebGPU HDF5 folder.
-quantem show4dstem scan_001_master.h5 --backend webgpu --html --detector-bin 1 --dtype uint8 --out ~/Downloads
+quantem-widget show4dstem scan_001_master.h5 --backend webgpu --html --detector-bin 1 --dtype uint8 --save-dir ~/Downloads
 
 # Native detector sampling for every master in a folder.
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8 --out ~/Downloads
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8 --save-dir ~/Downloads
 
 # Several native-sampling masters in one Dataset-slider viewer.
-quantem show4dstem scan_001_master.h5 scan_002_master.h5 \
-  --backend webgpu --html --detector-bin 1 --dtype uint8 --out ~/Downloads
+quantem-widget show4dstem scan_001_master.h5 scan_002_master.h5 \
+  --backend webgpu --html --detector-bin 1 --dtype uint8 --save-dir ~/Downloads
 ```
 
 This is the no-notebook path for a full interactive browser artifact. It keeps
@@ -185,13 +186,13 @@ The dtype choice is separate from the binning choice:
 Use `uint8` for the common full-detector WebGPU browse path:
 
 ```bash
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8
 ```
 
 Use `uint16` when the browser artifact must preserve the wider integer range:
 
 ```bash
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint16
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint16
 ```
 
 Use `uint16` from Python when the exported browser must preserve the wider

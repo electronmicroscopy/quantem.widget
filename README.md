@@ -89,17 +89,17 @@ ds = io.read_image("overview.emd")          # quantem core Dataset2d
 arr = ds.array                               # the pixels; ds.sampling and ds.units carry the calibration
 Show2D(ds)
 
-data = io.read_4dstem("scan_master.h5")      # Dataset4dstemGPU on a GPU, quantem core Dataset4dstem elsewhere
+data = io.read_4dstem("scan_master.h5")      # Dataset4dstem on a GPU, quantem core Dataset4dstem elsewhere
 Show4DSTEM(data)
 ```
 
 | Data | quantem.gpu and a GPU | No GPU route | Intel Mac, Windows on ARM |
 |---|---|---|---|
-| 4D-STEM file (`read_4dstem`, `datasets.show4dstem_gold`) | `quantem.gpu.io.Dataset4dstemGPU` | quantem core `Dataset4dstem` | stand-in |
+| 4D-STEM file (`read_4dstem`, `datasets.show4dstem_gold`) | `quantem.gpu.io.Dataset4dstem` | quantem core `Dataset4dstem` | stand-in |
 | Image (`read_image`, `read_images`, `datasets.show2d_gold`) | quantem core `Dataset2d` | quantem core `Dataset2d` | stand-in |
 | Image stack (`read_image_stack`, `datasets.show3d_gold`) | quantem core `Dataset3d` | quantem core `Dataset3d` | stand-in |
 
-On a GPU, a 4D-STEM file is a `Dataset4dstemGPU`, not a torch tensor:
+On a GPU, a 4D-STEM file is a `Dataset4dstem`, not a torch tensor:
 
 - counts are unsigned (uint16, uint32), and torch cannot add, multiply or
   take the max of those;
@@ -118,10 +118,9 @@ tensors on any device.
 
 ## Try the interactive demos
 
-Follow the [crystal-to-volume demo route](docs/tutorials/demo.md): inspect a
-crystal with **ShowCIF**, then explore depth using **Show3D** and **Show3DSlices**.
-The notebooks include runnable models, physical units, and controls to try.
-New APIs require a source build containing them. The guide includes setup and browser requirements.
+Follow the [volume demo route](docs/tutorials/demo.md): explore depth using **Show3D** and
+**Show3DSlices**. The notebooks include runnable models, physical units, and controls to try.
+The guide includes setup and browser requirements.
 
 ## Widgets
 
@@ -133,11 +132,9 @@ New APIs require a source build containing them. The guide includes setup and br
 | `Show3D` | Scrub and play through image or volume stacks | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3d.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3d.html) |
 | `Show3DSlices` | Inspect linked top and oblique cuts through a 3D volume | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3dslices.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3dslices.html) |
 | `Show4DSTEM` | Live virtual detectors, multi-dataset review, and WebGPU HTML export | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem.html) · [export guide](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem_export.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show4dstem.html) |
-| `ShowPtycho` | Interactive SSB phase and aberration review | [API](https://electronmicroscopy.github.io/quantem.widget/api/showptycho.html) |
-| `ShowDiffraction` | Measure diffraction spots, rings, spacing, and angles | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/showdiffraction.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/showdiffraction.html) |
+| `ShowPtycho` | Interactive direct phase and aberration review | [API](https://electronmicroscopy.github.io/quantem.widget/api/showptycho.html) |
 | `ShowPDF` | Pair distribution function analysis of 4D-STEM data by scan region | [API](https://electronmicroscopy.github.io/quantem.widget/api/showpdf.html) |
-| `ChooseLattice` | Select an origin and lattice vectors | [API](https://electronmicroscopy.github.io/quantem.widget/api/choose-lattice.html) |
-| `ShowCIF` | Crystal repeats, columns, tilt, and projected potential/phase previews | [tutorial](docs/tutorials/showcif.ipynb) · [API](docs/api/showcif.md) |
+| `ScanControl` | Connect, set up and run scans; detector files | [API](docs/api/scan-control.md) |
 | `DiffractionSim` | Rotate a crystal and see its nanobeam, CBED, or Kikuchi pattern, computed in the browser | [API](docs/api/diffractionsim.md) |
 
 ## Documentation

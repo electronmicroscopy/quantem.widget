@@ -6,9 +6,7 @@ holds, and stepping through every group must not leave one behind. Zooming a
 snapshot panel, or hovering the plot beside it, redraws the panel without
 colouring its pixels again (no putImageData). With ten trials in a group the
 histogram cells are narrow, and each keeps its Full / 1-99% / Reset buttons
-inside its own cell without overlapping. In a live kernel, View selected as 2D
-embeds a Show2D below the plot, a colormap change on the Show1D reaches the
-embedded Show2D's model in the kernel, and Hide removes the view.
+inside its own cell without overlapping.
 """
 
 import numpy as np
@@ -141,28 +139,3 @@ def test_narrow_histograms_keep_their_buttons_inside(ten_trials, serve, open_pag
             assert overlap_x <= 0 or overlap_y <= 0, (index, cell)
     assert page.errors == [], page.errors
 
-
-def test_view_selected_as_2d_embeds_a_linked_show2d(jupyter, open_page, hardware_adapter, browser_out):
-    jupyter.write_notebook("show1d_handoff.ipynb", (
-        "import numpy as np\nfrom quantem.widget import Show1D\n\n"
-        "rng = np.random.default_rng(0)\nmonitor = Show1D(rng.random((2, 6)).astype(np.float32), labels=['a', 'b'])\n"
-        "monitor.snapshot(3, a=rng.random((64, 64)).astype(np.float32), b=rng.random((64, 64)).astype(np.float32))\nmonitor"))
-    page = jupyter.open(open_page, "show1d_handoff.ipynb", "show1d-handoff", webgpu=True,
-                        ready='[data-testid="show1d-snapshot-grid"]', out=browser_out)
-    hardware_adapter(page.adapter())
-    page.get_by_label("Open view options").click()
-    page.get_by_role("menuitem", name="View selected as 2D").click()
-    region = page.get_by_role("region", name="2D view")
-    region.locator('canvas[data-quantem-scientific-output="show2d-image-0"]').wait_for(timeout=60_000)
-    page.wait_for_timeout(2_000)
-    jupyter.run_in_kernel("show1d_handoff.ipynb", "monitor.image_cmap = 'magma'")
-    page.wait_for_timeout(2_000)
-    linked = jupyter.run_in_kernel("show1d_handoff.ipynb", "print(monitor.prepared_view.cmap, len(monitor.prepared_view.labels))")
-    page.screenshot(path=str(browser_out / "show1d_handoff.png"), full_page=True)
-    region.get_by_role("button", name="Hide", exact=True).click()
-    region.wait_for(state="detached", timeout=30_000)
-    cleared = jupyter.run_in_kernel("show1d_handoff.ipynb", "print(monitor.prepared_view)")
-    assert linked == "magma 2", linked
-    assert cleared == "None", cleared
-    # JupyterLab's debugger extension reports a missing session on its own.
-    assert [error for error in page.errors if "debugger session" not in error] == [], page.errors

@@ -2,13 +2,14 @@ import {
   applyHannWindow2D, computeMagnitude, displayFFTInput, fftshift, interleavedShiftedMagnitude, nextPow2, shiftedMagnitude,
 } from '../display/fft';
 import { frameStats, frameStatsWorkerCall, frameStatsWorkerFunctions, type FrameStats } from '../display/displayStats';
+import { cropGridRegion, type GridRegion } from './fftFraming';
 
 export { displayFFTInput, interleavedShiftedMagnitude };
 
 /** Reuse the display reference verbatim, including both float32 roundings. */
 export function fftMagnitudeWorkerSource(): string {
   const functions = [applyHannWindow2D, nextPow2, computeMagnitude, fftshift, shiftedMagnitude,
-    displayFFTInput, interleavedShiftedMagnitude];
+    displayFFTInput, interleavedShiftedMagnitude, cropGridRegion];
   return `${functions.map(fn => fn.toString()).join('\n')}
 ${frameStatsWorkerFunctions()}
 self.onmessage = ({data}) => {
@@ -20,8 +21,10 @@ self.onmessage = ({data}) => {
   const magnitude = data.kind === 'interleaved'
     ? ${interleavedShiftedMagnitude.name}(data.complex, data.width, data.height)
     : ${shiftedMagnitude.name}(data.real, data.imag, data.width, data.height, true);
-  // The panel's contrast window and histogram bins, binned here instead of on the input thread.
-  const stats = data.kind === 'interleaved' ? ${frameStatsWorkerCall('magnitude')} : null;
+  // The panel's contrast window and histogram bins, binned here instead of on the input thread,
+  // from the framed block only when a region is given.
+  const statsInput = data.region ? ${cropGridRegion.name}(magnitude, data.width, data.region) : magnitude;
+  const stats = data.kind === 'interleaved' ? ${frameStatsWorkerCall('statsInput')} : null;
   const moved = [magnitude.buffer];
   if (stats && stats.histogram.bins) moved.push(stats.histogram.bins.buffer);
   self.postMessage({id: data.id, magnitude, stats}, moved);
@@ -82,17 +85,17 @@ export class FFTMagnitudeDisplay {
   }
 
   /** interleavedShiftedMagnitude and its display statistics off the input thread; the spectrum
-   *  buffer moves to the worker. */
-  magnitudeInterleaved(complex: Float32Array, width: number, height: number): Promise<{ magnitude: Float32Array; stats: FrameStats }> {
+   *  buffer moves to the worker. The statistics cover `region` of the magnitude when given. */
+  magnitudeInterleaved(complex: Float32Array, width: number, height: number, region: GridRegion | null = null): Promise<{ magnitude: Float32Array; stats: FrameStats }> {
     if (this.disposed) return Promise.reject(new Error('FFT display is closed.'));
     if (!this.worker) {
       const magnitude = interleavedShiftedMagnitude(complex, width, height);
-      return Promise.resolve({ magnitude, stats: frameStats(magnitude) });
+      return Promise.resolve({ magnitude, stats: frameStats(region ? cropGridRegion(magnitude, width, region) : magnitude) });
     }
     const id = ++this.serial;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: reply => resolve({ magnitude: reply.magnitude, stats: reply.stats }), reject });
-      this.worker!.postMessage({ id, kind: 'interleaved', complex, width, height }, [complex.buffer]);
+      this.worker!.postMessage({ id, kind: 'interleaved', complex, width, height, region }, [complex.buffer]);
     });
   }
 

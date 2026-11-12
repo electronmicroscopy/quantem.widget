@@ -64,7 +64,7 @@ def test_panels_slice_the_concatenated_frame_and_keep_native_sources():
 
 def test_paged_input_visits_one_page_of_panels_at_a_time():
     pages = np.stack([_ramp(5, 16, offset=10.0 * page) for page in range(3)]).reshape(3, 1, 5, 16, 16).repeat(4, axis=1)
-    widget = Show3D(pages, panel_titles=["raw", "f", "r", "p"], page_labels=["a", "b", "c"], max_cols=4, verbose=False)
+    widget = Show3D(pages, panel_titles=["raw", "f", "r", "p"], page_labels=["a", "b", "c"], columns=4, verbose=False)
     assert (widget.n_pages, widget.panels_per_page, widget.n_panels, widget.n_slices) == (3, 4, 12, 5)
     assert widget.panel_titles[:4] == ["raw", "f", "r", "p"] and widget._visible_panels == [0, 1, 2, 3]
     widget.page_idx = 2
@@ -219,6 +219,8 @@ def test_export_clone_carries_view_state_and_embeds_pixels():
     assert (clone.n_slices, clone.height, clone.width) == (6, 8, 8)
     assert clone.pixel_size == pytest.approx(widget.pixel_size * 4)
     assert clone.playing is True and clone.cmap == "inferno" and clone._save_state is True
+    # the page header names the 128 x 128 source and the 16x mean bin (display 4 x export 4), not 8 x 8 as the original
+    assert (clone.source_height, clone.source_panel_width, clone.display_bin) == (128, 128, 16)
     state = clone.get_state()
     assert len(state["_offline_stack"]) == 6 * 8 * 8 and state["_offline_float_stack"] == b""
     clone.free()
@@ -289,13 +291,13 @@ def test_saved_notebook_state_keeps_a_preview_instead_of_pixels():
 def test_static_preview_matches_a_show2d_gallery_pixel_for_pixel():
     rng = np.random.default_rng(18)
     stacks = [rng.random((4, 96, 112), dtype=np.float32) + panel * 0.1 for panel in range(4)]
-    widget = Show3D(*stacks, panel_titles=[f"P{p + 1}" for p in range(4)], max_cols=2, panel_gap_px=3, panel_width_px=180, sampling=0.12, units="nm", verbose=False)
+    widget = Show3D(*stacks, panel_titles=[f"P{p + 1}" for p in range(4)], columns=2, panel_gap_px=3, panel_width_px=180, sampling=0.12, units="nm", verbose=False)
     widget.slice_idx = 2
     widget.hidden_panels = [1]
     reference = Show2D(
         [widget._get_display_panel_frame(panel, 2) for panel in (0, 2, 3)],
         labels=[widget._static_panel_title(panel, 2) for panel in (0, 2, 3)],
-        ncols=2,
+        columns=2,
         panel_gap_px=3,
         panel_width_px=180,
         sampling=widget.pixel_size,
@@ -316,50 +318,6 @@ def test_static_preview_matches_a_show2d_gallery_pixel_for_pixel():
     np.testing.assert_array_equal(_decode_png(widget._static_png_b64(max_px=220)), _decode_png(reference._static_png_b64(max_px=220)))
     assert widget.state_dict()["panel_gap_px"] == 9
     widget.free()
-
-
-# --- folders --------------------------------------------------------------------
-
-
-def _save(path: pathlib.Path, value: float) -> None:
-    np.save(path, np.full((6, 8), value, dtype=np.float32))
-
-
-def test_from_folder_appends_files_and_remaps_frame_state(tmp_path: pathlib.Path):
-    _save(tmp_path / "frame_2.npy", 2)
-    _save(tmp_path / "frame_10.npy", 10)
-    widget = Show3D.from_folder(tmp_path, watch=False, show_fft=True)
-    try:
-        assert widget.labels == ["frame_2", "frame_10"] and widget.title == tmp_path.name
-        widget.slice_idx = 1
-        widget.bookmarked_frames = [0, 1]
-        widget.loop_end = 1
-        widget.starred = [1]
-        widget.playing = True
-        _save(tmp_path / "frame_1.npy", 1)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [0]
-        assert widget.labels == ["frame_1", "frame_2", "frame_10"]
-        np.testing.assert_array_equal(widget._data[:, 0, 0], [1, 2, 10])
-        assert (widget.slice_idx, widget.bookmarked_frames, widget.loop_end, widget.starred) == (2, [1, 2], 2, [2])
-        assert widget.playing is True and widget.show_fft is True
-    finally:
-        widget.close()
-
-
-def test_watched_folder_is_created_and_fills_on_the_first_stable_frame(tmp_path: pathlib.Path):
-    folder = tmp_path / "session" / "frames"
-    widget = Show3D.from_folder(folder, file_types=".PNG", watch=True, watch_interval=60)
-    try:
-        assert folder.is_dir() and widget.n_slices == 0 and widget.folder_waiting is True
-        widget.stop_folder_watch()
-        Image.fromarray(np.arange(48, dtype=np.uint8).reshape(6, 8)).save(folder / "frame_001.png")
-        _save(folder / "ignored.npy", 3)
-        assert widget.poll_folder() == []
-        assert widget.poll_folder() == [0]
-        assert widget.n_slices == 1 and widget.labels == ["frame_001"]
-    finally:
-        widget.close()
 
 
 def test_horizontal_scale_bar_uses_the_column_sampling():
@@ -397,3 +355,100 @@ def test_paged_input_of_any_array_type_opens_as_pages():
     widget = Show3D(cupy.asarray(pages))
     assert (widget.n_pages, widget.panels_per_page, widget.n_panels) == (2, 3, 6)
     widget.free()
+
+
+def test_thumbnails_follow_mode_stream_and_explicit_keywords(tmp_path):
+    import json
+
+    stack = np.random.default_rng(0).random((6, 16, 16)).astype(np.float32)
+    assert Show3D(stack, verbose=False).thumbnails is False
+    assert Show3D(stack, mode="stream", verbose=False).thumbnails is True
+    assert Show3D(stack, mode="stream", thumbnails=False, verbose=False).thumbnails is False
+    assert Show3D.stream(stack).thumbnails is True
+    widget = Show3D(stack, thumbnails=True, thumbnail_columns=3, title="Strip", verbose=False)
+    assert widget.state_dict()["thumbnails"] is True and widget.state_dict()["thumbnail_columns"] == 3
+    restored = Show3D(stack, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert (restored.thumbnails, restored.thumbnail_columns) == (True, 3)
+    page = widget.export_html(tmp_path / "strip.html").read_text(encoding="utf-8")
+    start = page.index('widget-state+json">') + len('widget-state+json">')
+    states = [model["state"] for model in json.loads(page[start:page.index("</script>", start)])["state"].values()]
+    exported = next(state for state in states if state.get("title") == "Strip")
+    assert (exported["thumbnails"], exported["thumbnail_columns"]) == (True, 3)
+
+
+@pytest.mark.parametrize("columns", [0, 4, 2.5, True])
+def test_thumbnail_columns_accepts_one_to_three_only(columns):
+    stack = np.zeros((3, 8, 8), np.float32)
+    with pytest.raises(Exception, match="thumbnail_columns"):
+        Show3D(stack, thumbnail_columns=columns, verbose=False)
+
+
+def test_mode_names_stream_among_the_presets():
+    with pytest.raises(ValueError, match="'stream'"):
+        Show3D(np.zeros((3, 8, 8), np.float32), mode="bogus", verbose=False)
+
+
+def test_find_drift_result_adds_a_drift_corrected_panel_that_undoes_the_shift():
+    """The browser's Find drift writes `drift`; Python adds the frames moved back as a second panel."""
+    from quantem.widget.show3d.widget import drift_corrected
+
+    rng = np.random.default_rng(0)
+    rows = np.fft.fftfreq(64)[:, None]
+    cols = np.fft.fftfreq(64)[None, :]
+    # a smooth specimen, as a HAADF frame is: no power at Nyquist, so a fractional shift round-trips
+    base = np.fft.ifft2(np.fft.fft2(rng.random((64, 64))) * np.exp(-(rows**2 + cols**2) * 200)).real
+
+    def moved(shift):
+        return np.fft.ifft2(np.fft.fft2(base) * np.exp(-2j * np.pi * (rows * shift[0] + cols * shift[1]))).real
+
+    shifts = [(0.0, 0.0), (0.4, -0.3), (0.8, -0.6), (1.2, -0.9)]
+    stack = np.stack([moved(shift) for shift in shifts]).astype(np.float32)
+    widget = Show3D(stack, sampling=0.5, units="nm")
+    widget.dim_sampling, widget.dim_unit = 2.0, "s"
+    assert widget.drift == {} and widget.drift_frames == [] and widget.n_panels == 1
+    widget.drift = {"frames": [0, 1, 3], "shift_px": [[0, 0], list(shifts[1]), list(shifts[3])],
+                    "velocity_px_per_frame": [0.4, -0.3], "fit_r2": [1, 1]}
+    assert widget.n_panels == 2 and widget.panel_titles == ["frames", "drift corrected"]
+    assert len(widget._offline_float_stack) == 2 * stack.nbytes and widget.frame_seq >= 1   # the browser gets both panels
+    assert len(widget.denoise_modes) == 2 and widget.columns == 2
+    assert (widget.dim_sampling, widget.dim_unit) == (2.0, "s") and widget.pixel_size == pytest.approx(0.5)
+    corrected = drift_corrected(stack, widget.drift)
+    for frame in range(4):   # measured (0, 1, 3) and fitted (2): every frame back on frame 0
+        np.testing.assert_allclose(corrected[frame], base, atol=1e-4)
+    widget.drift = dict(widget.drift)   # a second result corrects the original frames again, not the panels
+    assert widget.n_panels == 2
+
+
+def test_frame_times_s_are_one_increasing_time_per_frame_and_time_the_corrected_frames():
+    """Unevenly taken frames: the corrected panel moves an unpicked frame by the velocity at its own time."""
+    from quantem.widget.show3d.widget import drift_corrected
+
+    rng = np.random.default_rng(0)
+    rows = np.fft.fftfreq(64)[:, None]
+    cols = np.fft.fftfreq(64)[None, :]
+    base = np.fft.ifft2(np.fft.fft2(rng.random((64, 64))) * np.exp(-(rows**2 + cols**2) * 200)).real
+    times = [0.0, 10.0, 15.0, 40.0]
+    per_second = (0.04, -0.03)
+
+    def moved(t):
+        return np.fft.ifft2(np.fft.fft2(base) * np.exp(-2j * np.pi * (rows * per_second[0] * t + cols * per_second[1] * t))).real
+
+    stack = np.stack([moved(t) for t in times]).astype(np.float32)
+    with pytest.raises(Exception, match="one time per frame"):
+        Show3D(stack, frame_times_s=[0, 1, 2], verbose=False)
+    with pytest.raises(Exception, match="increase"):
+        Show3D(stack, frame_times_s=[0, 2, 1, 3], verbose=False)
+    widget = Show3D(stack, sampling=0.5, units="nm", frame_times_s=times, verbose=False)
+    assert widget.frame_times_s == times
+    # Find drift on frames 1, 2 and 4 (stack 0, 1, 3): frame 3 (stack 2) is placed by its time, 15 s
+    drift = {"frames": [0, 1, 3], "shift_px": [[0, 0], [0.4, -0.3], [1.6, -1.2]],
+             "velocity_px_per_frame": [0.53, -0.4], "velocity_px_per_s": list(per_second), "fit_r2": [1, 1],
+             "times_s": [0, 10, 40]}
+    corrected = drift_corrected(stack, drift, frame_times_s=times)
+    for frame in range(4):
+        np.testing.assert_allclose(corrected[frame], base, atol=1e-4)
+    by_index = drift_corrected(stack, drift)          # without times the velocity per frame index misplaces it
+    assert np.abs(by_index[2] - base).max() > 1e-2
+    widget.drift = drift
+    assert widget.n_panels == 2 and widget.frame_times_s == times   # the corrected panel keeps the times

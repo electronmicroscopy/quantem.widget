@@ -262,7 +262,7 @@ def test_widget_modules_do_not_redefine_shared_helpers():
 
 
 def test_export_traits_come_from_the_mixin():
-    for name in ("show2d", "show3d", "show4dstem", "show1d", "showdiffraction", "show3dslices", "diffraction_sim"):
+    for name in ("show2d", "show3d", "show4dstem", "show1d", "show3dslices", "diffraction_sim"):
         for path in widget_sources(name):
             text = path.read_text()
             assert not re.search(r"^    export_(request|status|enabled|payload|payload_id|filename) = traitlets", text, re.M), path.name
@@ -274,7 +274,7 @@ def test_every_widget_bundle_is_an_anywidget_default_export():
     entries = sorted((WIDGETS.parents[2] / "js").glob("*/index.tsx"))
     named = [entry.parent.name for entry in entries if re.search(r"^export (const|function) render\b", entry.read_text(), re.M)]
     missing = [entry.parent.name for entry in entries if not re.search(r"^export default \{", entry.read_text(), re.M)]
-    assert len(entries) == 12 and named == [] and missing == [], (named, missing)
+    assert len(entries) == 11 and named == [] and missing == [], (named, missing)
 
 RNG = np.random.default_rng(0)
 PREVIEW_WIDGETS = {

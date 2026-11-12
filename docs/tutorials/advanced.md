@@ -7,8 +7,6 @@ around a real question from the microscope room:
   figure, or a full report package.
 - **Memory management** - know what a load will cost in RAM/VRAM, pick the
   GPU, and give the memory back.
-- **Live folder watching** - keep one widget open at the scope and let new
-  acquisitions appear in it.
 - **Comparing reconstructions** - panels with independent frame stacks for
   regularization sweeps, convergence checks, and slice-count comparisons.
 - **Advanced Show2D** - configure dense comparison galleries with rich math
@@ -102,7 +100,7 @@ images = np.stack(
 Show2D(
     images,
     labels=["raw", "filtered", "residual"],
-    ncols=3,
+    columns=3,
     marker_colors=["#60a5fa", "#34d399", "#f87171"],
     marker_style="around",
     panel_annotations={
@@ -417,7 +415,7 @@ rich_titles = [
 Show2D(
     [raw, denoised, residual],
     panel_title_spans=rich_titles,
-    ncols=3,
+    columns=3,
     show_stats=True,
 )
 
@@ -475,7 +473,7 @@ w = Show3D(
         [{"math": r"\lambda=0.03"}, {"text": " raw"}],
         [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
     ],
-    ui_mode="presentation",
+    mode="presentation",
 )
 w.export_html("regularization_review.html", encoding="uint8")
 ```
@@ -576,7 +574,7 @@ for i, sigma in enumerate([0, 2, 4, 6]):
 Show2D(
     images,
     labels=labels,
-    ncols=2,
+    columns=2,
     cmap="inferno",
     inset_plots=insets,
     scale_bar_position="bottom-left",

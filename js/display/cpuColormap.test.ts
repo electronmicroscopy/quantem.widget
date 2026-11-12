@@ -4,7 +4,7 @@
 // whichever paint ran or started in between.
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { applyColormap, COLORMAPS, displayLog } from "./colormaps";
-import { colormapSampledPixels, createColormapEngine } from "./cpuColormap";
+import { colormapSampledPixels, createColormapEngine, packRgbPixels } from "./cpuColormap";
 
 class TestImageData {
   constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
@@ -100,4 +100,9 @@ it("refuses an image whose dimensions do not match its pixel count", async () =>
   // a guessed near-square shape painted a non-square image as noise
   const engine = await createColormapEngine();
   expect(() => engine.uploadData(0, new Float32Array(12), 4, 2)).toThrow("display dimensions 4x2 do not match 12 pixels");
+});
+
+it("packs true color as round(clamp(v, 0, 1) * 255), NaN to 0, the WGSL true-color passes' bytes", () => {
+  const rgb = Float32Array.from([0, 0.5, 1, -0.2, 1.7, Number.NaN, 1 / 255, 0.6, 0.0019]);
+  expect(Array.from(packRgbPixels(rgb, 3))).toEqual([0, 128, 255, 255, 0, 255, 0, 255, 1, 153, 0, 255]);
 });

@@ -44,7 +44,7 @@ class Show1DExport:
         """An export-only copy: same traces and view state, linked images mean-binned by ``image_bin``.
 
         The clone embeds everything (``_save_state``), paints with the offline
-        theme and has no export or hand-off buttons, since there is no kernel
+        theme and has no export button, since there is no kernel
         behind the exported page.
         """
         clone = type(self)(
@@ -61,8 +61,6 @@ class Show1DExport:
         clone.snapshot_group_iterations = list(self.snapshot_group_iterations)
         clone.snapshot_group_labels = list(self.snapshot_group_labels)
         clone.n_snapshot_groups = self.n_snapshot_groups
-        clone._trial_metrics = {label: dict(values) for label, values in self._trial_metrics.items()}
-        clone._monitor_warnings = list(self._monitor_warnings)
         clone._update_snapshot_bytes()
         clone.load_state_dict(self.state_dict())
         if self._profile_image is not None:
@@ -77,7 +75,6 @@ class Show1DExport:
         clone._save_state = True
         clone._export_light = True
         clone.export_enabled = False
-        clone.handoff_enabled = False
         return clone
 
     def save_image(self, path: str | pathlib.Path, *, format: str | None = None, dpi: int = 150) -> pathlib.Path:

@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  testpypi:
-    name: Build and publish quantem.widget
+  build:
+    name: Build quantem.widget
     runs-on: ubuntu-latest
     environment: testpypi
     defaults:
@@ -123,7 +123,7 @@ jobs:
               raise SystemExit(f"expected one wheel, found {wheels}")
           wheel = wheels[0]
           required = {
-              "quantem/widget/static/chooselattice.js",
+              "quantem/widget/static/scancontrol.js",
               "quantem/widget/static/diffractionsim.js",
               "quantem/widget/static/engine-manifest.json",
               "quantem/widget/static/show1d.js",
@@ -132,8 +132,6 @@ jobs:
               "quantem/widget/static/show3d.js",
               "quantem/widget/static/show3dslices.js",
               "quantem/widget/static/show4dstem.js",
-              "quantem/widget/static/showcif.js",
-              "quantem/widget/static/showdiffraction.js",
               "quantem/widget/static/showpdf.js",
               "quantem/widget/static/showptycho.js",
           }
@@ -145,6 +143,89 @@ jobs:
           print(f"wheel ok: {wheel}")
           PY
 
+      - name: Keep the exact candidate wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-wheel
+          path: dist/widget/*.whl
+          if-no-files-found: error
+
+  hardware:
+    name: Direct ptychography acceptance (${{ matrix.backend }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, mps]
+    runs-on: [self-hosted, "quantem-${{ matrix.backend }}"]
+    timeout-minutes: 45
+    env:
+      PYTHONPATH: ""
+      PYTORCH_ENABLE_MPS_FALLBACK: "0"
+      PYTORCH_MPS_FAST_MATH: "0"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-wheel
+          path: candidate
+      - name: Fresh wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHECK_ENV="$RUNNER_TEMP/direct-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}"
+          python3 -m venv "$CHECK_ENV"
+          echo "$CHECK_ENV/bin" >> "$GITHUB_PATH"
+          WHEEL=$(find "$PWD/candidate" -name '*.whl')
+          "$CHECK_ENV/bin/python" -m pip install "$WHEEL[${{ matrix.backend }}]" \
+            --extra-index-url https://test.pypi.org/simple/ \
+            huggingface_hub pytest playwright jupyterlab nbclient
+      - name: Fetch the public benchmark acquisition
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          import os
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          root = snapshot_download("bobleesj/quantem-data", repo_type="dataset",
+              revision="5925e4b49b2ca28ff82d6d5a6b9a8bfea9edfb20",
+              allow_patterns="4dstem/gold_512/*")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              print("QUANTEM_DIRECT_RELEASE_SOURCE=" + str(Path(root) / "4dstem/gold_512/gold_004_master.h5"), file=output)
+          PYCODE
+      - name: Fresh-kernel ShowPtycho drawing, refitting and restore
+        shell: bash
+        env:
+          QUANTEM_WIDGET_BROWSER: "1"
+          QUANTEM_WIDGET_HEADLESS: "1"
+          # the installed wheel's bundles are the release under test, not a stale build of this checkout
+          QUANTEM_WIDGET_ALLOW_STALE_BUNDLE: "1"
+          QUANTEM_DIRECT_RELEASE: "1"
+          QUANTEM_DIRECT_RELEASE_BACKEND: ${{ matrix.backend }}
+          QUANTEM_DIRECT_RELEASE_CALIBRATION: '{"semiangle_mrad":30,"scan_sampling_A":0.5,"detector_sampling_mrad":0.46}'
+          QUANTEM_WIDGET_BROWSER_OUT: ${{ runner.temp }}/direct-widget-${{ matrix.backend }}
+        run: python -m pytest -q -s tests/browser/test_showptycho_release.py
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: direct-widget-${{ matrix.backend }}
+          path: |
+            ${{ runner.temp }}/direct-widget-${{ matrix.backend }}/showptycho_release_*.png
+            ${{ runner.temp }}/direct-widget-${{ matrix.backend }}/showptycho_release_timings.json
+          if-no-files-found: error
+
+  testpypi:
+    name: Publish qualified quantem.widget
+    needs: [build, hardware]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-wheel
+          path: dist/widget
       - name: Publish widget to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

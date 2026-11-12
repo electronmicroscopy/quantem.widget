@@ -13,7 +13,6 @@ from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget import Show4DSTEM
-from quantem.widget.showdiffraction import ShowDiffraction
 
 from quantem.widget.showpdf import ShowPDF, _pdf_class
 
@@ -22,7 +21,7 @@ try:  # ShowPDF needs quantem's PairDistributionFunction API (quantem pull reque
 except ImportError:
     ShowPDF = None
 
-EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction) + (
+EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM) + (
     (ShowPDF,) if ShowPDF is not None else ()
 )
 
@@ -85,11 +84,6 @@ def _show4dstem() -> Show4DSTEM:
     return Show4DSTEM(data, title="Protocol Show4DSTEM", verbose=False)
 
 
-def _showdiffraction() -> ShowDiffraction:
-    data = np.random.rand(48, 48).astype(np.float32)
-    return ShowDiffraction(data, title="Protocol ShowDiffraction", verbose=False)
-
-
 def _diffractionsim() -> DiffractionSim:
     return DiffractionSim("Al (fcc)", zone_axis=[0, 0, 1], title="Protocol DiffractionSim")
 
@@ -110,7 +104,6 @@ EXPORT_WIDGET_CASES = (
     pytest.param(_show3dslices, {"encoding": "full"}, {"encoding": "uint8"}, "uint8", "Protocol Show3DSlices", id="show3dslices"),
     pytest.param(_show4dstem, {"dtype": "uint8"}, {"export_kind": "interactive", "dtype": "uint8", "detector_bin": 1, "scan_bin": 1, "dataset_scope": "unhidden"},
                  "uint8", "Protocol Show4DSTEM", id="show4dstem"),
-    pytest.param(_showdiffraction, {}, {}, "full float32", "Protocol ShowDiffraction", id="showdiffraction"),
 ) + (
     (pytest.param(_showpdf, {"encoding": "uint8"}, {"mode": "single", "encoding": "uint8"},
                   "exact float32 curves + quantized uint8 profiles", "Protocol ShowPDF", id="showpdf"),)

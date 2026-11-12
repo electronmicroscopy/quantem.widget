@@ -1,7 +1,7 @@
 """Widget readers and the tutorial-data download helper.
 
 Every reader returns the dataset type of this machine: ``read_4dstem`` a
-``quantem.gpu.io.Dataset4dstemGPU`` when quantem.gpu is installed and a GPU is
+``quantem.gpu.io.Dataset4dstem`` when quantem.gpu is installed and a GPU is
 present (it loads through ``quantem.gpu.io.load``), else a quantem core
 ``Dataset4dstem``; ``read_image`` and ``read_images`` quantem core
 ``Dataset2d``; ``read_image_stack`` a quantem core ``Dataset3d``. Where quantem

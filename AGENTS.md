@@ -3,6 +3,15 @@
 This repository is public. Everything committed here, and everything in its
 history, can be read by anyone. These rules apply to coding agents and humans.
 
+## WebGPU: always, and say so loudly when it is missing (maintainer, 2026-10-25)
+
+- Viewers (Show4DSTEM, ShowPtycho, Show2D, ...) always render with WebGPU on the real GPU. Before trusting or
+  reporting anything a viewer shows, check the adapter in the page: `navigator.gpu.requestAdapter()` must give
+  real hardware (e.g. `nvidia blackwell`, subgroup size 32), in a secure context (`localhost` or https).
+- If WebGPU cannot be used (no adapter, insecure context, `swiftshader` CPU fallback), state it explicitly and
+  prominently to the maintainer, first thing, with the reason. Never silently fall back, and never report timings or
+  results from a fallback renderer as if they came from the GPU.
+
 ## Never commit
 
 - Raw experiment or benchmark logs, manifests, JSONL, profiler dumps, browser
@@ -39,7 +48,20 @@ PYTHONPATH=src python -m pytest -q tests/infrastructure/test_public_repository.p
 
 If unsure whether something is private, leave it out and ask.
 
+## Display API naming
+
+Before designing or changing a public display API, read the
+[Display API standard](docs/maintainer/display-api.md). Use named `size` presets
+and plain `rows` / `columns` for new layout controls. A rename keeps no alias,
+deprecated keyword or old-key reader: it updates every caller, and a saved record
+gets a schema bump and a rewrite script.
+
 ## Tests
+
+For a release, additionally run the installed-wheel CUDA and MPS
+[ShowPtycho acceptance gate](docs/maintainer/direct-ptycho-release-check.md).
+Build-only checks do not qualify a release. The release workflow requires both
+hardware jobs before publication.
 
 `PYTHONPATH=src python -m pytest -q` runs the test suite and must pass before
 every push. Browser tests need the built JS bundle (`npm ci && npm run build`)

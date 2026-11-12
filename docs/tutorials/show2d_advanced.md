@@ -98,7 +98,7 @@ around-panel identity frames when the text refers to "blue", "green", or
 w = Show2D(
     [raw, denoised, residual],
     labels=["raw", "denoised", "residual"],
-    ncols=3,
+    columns=3,
     marker_style="around",
     marker_colors=["#60a5fa", "#34d399", "#f87171"],
     link_pan=True,
@@ -108,15 +108,15 @@ w = Show2D(
 w
 ```
 
-Use `ui_mode="presentation"` when the first view should be clean but still
+Use `mode="presentation"` when the first view should be clean but still
 recoverable. The exported HTML keeps the same state.
 
 ```{code-cell} python
 w = Show2D(
     [raw, denoised, residual],
     labels=["raw", "denoised", "residual"],
-    ncols=3,
-    ui_mode="presentation",
+    columns=3,
+    mode="presentation",
     show_stats=True,
 )
 w
@@ -414,7 +414,7 @@ font and placement:
 w = Show2D(
     panels,
     labels=labels,
-    ncols=3,
+    columns=3,
     show_panel_titles=True,
     panel_title_font_size=16,
     panel_title_style=TITLE_STYLE,
@@ -446,7 +446,7 @@ annotation_labels = [
 w = Show2D(
     panels,
     labels=annotation_labels,
-    ncols=3,
+    columns=3,
     panel_title_font_size=16,
     panel_title_style=TITLE_STYLE,
     panel_annotations={
@@ -500,7 +500,7 @@ gallery frame, and the per-panel inner stroke independently:
 w = Show2D(
     panels,
     labels=labels,
-    ncols=3,
+    columns=3,
     panel_gap_px=2,
     inter_panel_gap_color="#000000",
     gallery_outer_border_px=2,
@@ -543,8 +543,9 @@ for example `"500 pm"` instead of an automatically formatted label.
 
 ### Export to Illustrator
 
+For Illustrator, use the Export menu's `SVG` item; from Python, write the standalone page:
+
 ```python
-svg_path = w.export_svg("figure2_show2d.svg")
 html_path = w.export_html("figure2_show2d.html", encoding="uint8")
 ```
 
@@ -577,7 +578,7 @@ w = Show2D(
     [coarse_stack, medium_stack, fine_stack],
     labels=["coarse z", "medium z", "fine z"],
     panel_playback_fps=6,
-    ncols=3,
+    columns=3,
 )
 w.set_panel_frame("fine z", 8)
 w
@@ -593,7 +594,7 @@ w = Show2D(
     ]),
     page_labels=["frame 001", "frame 002"],
     labels=["raw", "denoised", "residual"],
-    ncols=3,
+    columns=3,
 )
 w
 ```
@@ -606,7 +607,7 @@ Before sharing a Show2D report, check these items:
 - Use `marker_style="around"` or group markers when text refers to panel color.
 - Keep local annotations and overlays reproducible through `panel_annotations`
   and `panel_overlays`.
-- Use `ui_mode="presentation"` when the exported first view should be clean.
+- Use `mode="presentation"` when the exported first view should be clean.
 - State any `image_bin` or `encoding="uint8"` choice in the surrounding report
   when scientific interpretation depends on exact pixels.
 - For interactive proof, drive the exported HTML in a headed browser: zoom,

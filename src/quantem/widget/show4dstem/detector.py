@@ -4,7 +4,7 @@ The widget owns the geometry of every virtual detector (``detector_mask``);
 ``quantem.gpu.detector`` uses the same definitions, which the parity tests
 check, so a viewer ROI and ``detector.bf`` / ``detector.adf`` are
 pixel-identical. The bright-field disk is quantem.gpu's
-``detector.fit_bright_field_disk``, the disk SSB reads. This module turns the
+``detector.bright_field_disk``, the disk direct ptychography reads. This module turns the
 widget's ROI traits into masks and hands them to a detector session.
 """
 
@@ -117,18 +117,18 @@ def scan_indices(
     return np.flatnonzero(inside)
 
 
-def fit_disk(mean_dp: np.ndarray, det_shape: tuple[int, int], default_ratio: float) -> tuple[float, float, float]:
-    """Bright-field disk ``(center_row, center_col, edge_radius)`` from the mean pattern (``fit_bright_field_disk``).
+def fit_disk(mean_pattern: np.ndarray, det_shape: tuple[int, int], default_ratio: float) -> tuple[float, float, float]:
+    """Bright-field disk ``(center_row, center_col, edge_radius)`` from the mean pattern (``bright_field_disk``).
 
     When no pixel stands above mean plus one standard deviation (a blank or
     uniform pattern) the viewer keeps the detector midpoint and
     ``default_ratio`` of the smaller detector side, which is what the untouched
     traits already hold.
     """
-    pattern = np.asarray(mean_dp, dtype=np.float64)
+    pattern = np.asarray(mean_pattern, dtype=np.float64)
     if not np.any(pattern > pattern.mean() + pattern.std()):
         return det_shape[0] / 2, det_shape[1] / 2, min(det_shape) * default_ratio
-    (center_row, center_col), radius = fit_bright_field_disk(pattern)
+    (center_row, center_col), radius = bright_field_disk(pattern)
     return center_row, center_col, radius
 
 
@@ -147,10 +147,10 @@ def detector_mask(center: tuple[float, float], inner_px: float, outer_px: float,
     return (distance >= inner_px) & (distance <= outer_px)
 
 
-def fit_bright_field_disk(mean_dp: np.ndarray) -> tuple[tuple[float, float], float]:
+def bright_field_disk(mean_pattern: np.ndarray) -> tuple[tuple[float, float], float]:
     """Bright-field disk ``((center_row, center_col), edge_radius)`` of a mean pattern, in detector pixels.
 
-    quantem.gpu's ``detector.fit_bright_field_disk``: the centre is the
+    quantem.gpu's ``detector.bright_field_disk``: the centre is the
     centroid of the pixels above ``mean + std`` (population standard
     deviation) and the radius the one at which the disk falls to half its
     plateau, where the convergence semiangle sits. An install without
@@ -158,8 +158,8 @@ def fit_bright_field_disk(mean_dp: np.ndarray) -> tuple[tuple[float, float], flo
     float64; ``tests/infrastructure/test_platform.py`` checks the two agree.
     """
     if gpu_adapter.available():
-        return gpu_adapter.fit_bright_field_disk(mean_dp)
-    pattern = np.asarray(mean_dp, dtype=np.float64)
+        return gpu_adapter.bright_field_disk(mean_pattern)
+    pattern = np.asarray(mean_pattern, dtype=np.float64)
     disk = pattern > pattern.mean() + pattern.std()
     if not disk.any():
         raise ValueError("The mean diffraction pattern has no bright-field disk: no pixel exceeds its mean plus one "

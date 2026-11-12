@@ -1,5 +1,5 @@
 // Copy the WebGPU science kernels that Show4DSTEM and ShowPtycho bundle
-// (detector reductions, HDF5/bslz4 browser IO, SSB, QEM tables) from
+// (detector reductions, HDF5/bslz4 browser IO, direct ptychography, QEM tables) from
 // quantem.gpu into js/.generated/engine. Display kernels (colormaps, display
 // FFT, statistics, display geometry) are widget source under js/display and
 // are not synced. The science kernels share the widget's WebGPU device: the
@@ -27,7 +27,7 @@ const repoRoot = path.resolve(scriptDir, "..");
 // quantem.gpu domains the widget bundles take as-is. Everything else listed in
 // quantem.gpu's webgpu/sources.json (display, device, geometry, parity) is
 // either widget-owned or unused by the widget.
-export const SCIENCE_DOMAINS = ["detector/", "dpc/", "formats/", "io/", "ssb/"];
+export const SCIENCE_DOMAINS = ["detector/", "dpc/", "formats/", "io/", "direct_ptycho/"];
 export const PINNED_GPU_REF = readFileSync(path.join(repoRoot, "gpu-ref.txt"), "utf8").trim();
 
 /** quantem.gpu's src directory beside this checkout (``../quantem.gpu/src``), or null. */

@@ -10,12 +10,14 @@
 import * as React from "react";
 import { useLocalTiltWorkspace } from "./localTilt";
 import { idleDiagnostic, latestFrame } from "./interaction";
+import { GPUFrameDisplay, GPUPanelPainter, gpuPanelSources, type GPUPanelSource } from "./gpuFrame";
 import { FFTMagnitudeDisplay } from "./fftDisplay";
+import { fftAutoFrameZoom, fftFrameRegion, type GridRegion } from "./fftFraming";
 import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import Slider from "@mui/material/Slider";
+import Slider from "../shared/Slider";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Switch from "@mui/material/Switch";
@@ -38,6 +40,7 @@ import { SPACING, switchStyles } from "../controlStyles";
 import { downloadBlob, extractFloat32, formatNumber } from "../format";
 import { computeHistogramFromBytes, percentileClip, percentileWindow } from "../display/stats";
 import { DisplayStatsWorker, frameStats, type FrameStats } from "../display/displayStats";
+import { histogramBarHeights } from "./histogram";
 import { createPanelFrames, type PanelFrame } from "./panelFrames";
 import { useChangedState, useStoreValue, type ValueStore } from "../shared/valueStore";
 import { RenderPathBadge } from "../shared/RenderPathBadge";
@@ -48,7 +51,7 @@ import { findFFTPeakBrowser } from "../display/geometry";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, strokePeakMarker } from "../figure";
 import { degreesWithin, wrapDegrees } from "../units";
 import { type SampleValues, SNAPSHOTS_SCHEMA, higherOrderAzimuthKey, higherOrderMagnitudeKey, reconstruct } from "./engineAdapter";
-import { WebGPUSSBBackend, deleteSSBFolderFile, readSSBFolderBytes, readSSBFolderJson, setSSBLocalDirectory, setSSBLocalFiles, ssbFolderWritable, ssbNeedsLocalSource, writeSSBFolderFile, type WebGPULoadProgress, type WebGPUSSBResult } from "../.generated/engine/ssb/webgpu/backend";
+import { WebGPUDirectBackend, deleteDirectFolderFile, readDirectFolderBytes, readDirectFolderJson, setDirectLocalDirectory, setDirectLocalFiles, directFolderWritable, directNeedsLocalSource, writeDirectFolderFile, type WebGPULoadProgress, type WebGPUDirectResult } from "../.generated/engine/direct_ptycho/webgpu/backend";
 
 /* ================================================================
    Design tokens (matching Live / Show2D)
@@ -188,7 +191,7 @@ function compactRuntimeStatus(status: string): string {
 
 /** Status line after a browser WebGPU reconstruction, naming the adapter (and whether it is software), the path, the BF
  *  count and the aberrations it ran with, so a slow or wrong frame can be traced to its configuration. */
-function webgpuRunStatus(result: WebGPUSSBResult, modeLabel: string, totalBf: number, c10Nm: number, hoLabel: string): string {
+function webgpuRunStatus(result: WebGPUDirectResult, modeLabel: string, totalBf: number, c10Nm: number, hoLabel: string): string {
   return `${result.adapterInfo}${result.softwareAdapter ? " software" : ""} WebGPU folder ${modeLabel} (${result.numBrightFieldPixels}/${totalBf} BF, C10=${c10Nm.toFixed(1)} nm, rot=${result.scanDetectorRotationDeg.toFixed(1)}°${hoLabel})`;
 }
 
@@ -217,7 +220,7 @@ const MAX_ZOOM = 20;
 const ZOOM_FACTOR = 1.15;
 const MIN_PANEL = 200;
 const DEFAULT_PANEL = 800;
-// C12 (nm) and phi12 (degrees) slider spans: the SSB fit's default search range
+// C12 (nm) and phi12 (degrees) slider spans: the direct ptychography fit's default search range
 const C12_RANGE: [number, number] = [-10, 10];
 const PHI12_RANGE: [number, number] = [-90, 90];
 const MAX_PINS = 20;
@@ -242,7 +245,7 @@ const STATUS_BAD = "#f44336";
 
 type ZoomState = { zoom: number; panX: number; panY: number };
 const ZOOM_RESET: ZoomState = { zoom: 1, panX: 0, panY: 0 };
-// Amplitude and complex views exist only for an object-wave array: SSB recovers the phase alone.
+// Amplitude and complex views exist only for an object-wave array: direct ptychography recovers the phase alone.
 type ExtraRealViewMode = "amp" | "complex";
 type FFTPlacement = "panel" | "inset";
 type FFTInsetBox = { x: number; y: number };
@@ -255,9 +258,10 @@ interface PinnedEntry {
   phi12_deg: number;
   scan_detector_rotation_deg: number;
   display_negate_phase: boolean;
-  loss: number;
+  loss: number | null;
   starred: boolean;
   generated_at_utc: string;
+  reconstruction: Record<string, string | number>;
   phaseData: Float32Array;
   w: number;
   h: number;
@@ -332,13 +336,14 @@ const FFT_SNAP_RADIUS = 5;
 async function computeFFTMagnitude(
   fft: DisplayFFT, magnitudeDisplay: FFTMagnitudeDisplay,
   data: Float32Array, w: number, h: number,
+  statsRegion: (pw: number, ph: number) => GridRegion | null = () => null,
 ): Promise<{ mag: Float32Array; pw: number; ph: number; stats: FrameStats }> {
   // Windowing, padding, the magnitude and its display statistics run in the display worker; the
   // input thread only uploads the interleaved grid and reads the spectrum back, so phase frames
   // keep arriving.
   const { complex, pw, ph } = await magnitudeDisplay.prepare(data, w, h);
   const spectrum = await fft.fft2DInterleaved(complex, pw, ph, false);
-  const { magnitude, stats } = await magnitudeDisplay.magnitudeInterleaved(spectrum, pw, ph);
+  const { magnitude, stats } = await magnitudeDisplay.magnitudeInterleaved(spectrum, pw, ph, statsRegion(pw, ph));
   return { mag: magnitude, pw, ph, stats };
 }
 
@@ -377,8 +382,20 @@ function drawCanvas(
   bgColor: string,
   textColor: string,
   smooth: boolean = false,
+  gpuCanvas: HTMLCanvasElement | null = null,
 ) {
   if (!canvas) return;
+  // A GPU-resident frame paints into the panel's WebGPU canvas, layered over this one.
+  const source = offscreen ? gpuPanelSources.get(offscreen) : undefined;
+  if (source && gpuCanvas && source.painter.paint(gpuCanvas, source, size, zoom, bgColor, smooth)) {
+    gpuCanvas.style.visibility = "visible";
+    const dpr = window.devicePixelRatio || 1;
+    const target = Math.round(size * dpr);
+    if (canvas.width !== target || canvas.height !== target) { canvas.width = target; canvas.height = target; }
+    stampFrame(canvas, offscreen!);
+    return;
+  }
+  if (gpuCanvas) gpuCanvas.style.visibility = "hidden";
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -422,6 +439,18 @@ function drawCanvas(
   }
   ctx.drawImage(offscreen, (size - drawW) / 2 + panX, (size - drawH) / 2 + panY, drawW, drawH);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+  stampFrame(canvas, offscreen);
+}
+
+/** Passive timing evidence for real image updates. Zoom, layout and contrast redraws of the
+ *  same data do not count as new scientific frames. */
+function stampFrame(canvas: HTMLCanvasElement, offscreen: HTMLCanvasElement) {
+  const frame = offscreen.dataset.quantemDataFrame;
+  if (frame && canvas.dataset.quantemDataFrame !== frame) {
+    canvas.dataset.quantemDataFrame = frame;
+    canvas.dataset.quantemPaintedAt = String(performance.now());
+    canvas.dataset.quantemPaintCount = String(Number(canvas.dataset.quantemPaintCount || 0) + 1);
+  }
 }
 
 /** Paint completed pixels immediately; React still owns layout and controls. */
@@ -481,12 +510,13 @@ interface HistogramProps {
   onRangeChange: (min: number, max: number) => void;
   width?: number;
   height?: number;
+  logCounts?: boolean;
   tc: ThemeColors;
 }
 
 function Histogram({
   frame: frameStore, vminPct, vmaxPct, onRangeChange,
-  width = 110, height = 40, tc,
+  width = 110, height = 40, logCounts = false, tc,
 }: HistogramProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const frame = useStoreValue(frameStore);
@@ -507,30 +537,27 @@ function Histogram({
     ctx.fillRect(0, 0, width, height);
 
     const displayBins = 64;
-    const binRatio = Math.floor(bins.length / displayBins);
-    const reduced: number[] = [];
-    for (let i = 0; i < displayBins; i++) {
-      let sum = 0;
-      for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
-      reduced.push(sum / binRatio);
-    }
-    const maxVal = Math.max(...reduced, 0.001);
+    const heights = histogramBarHeights(
+      bins, displayBins, logCounts ? "log" : "linear", frame.finiteCount ?? frame.data?.length ?? 0,
+    );
     const barWidth = width / displayBins;
     const vminBin = Math.floor((vminPct / 100) * displayBins);
     const vmaxBin = Math.floor((vmaxPct / 100) * displayBins);
 
     for (let i = 0; i < displayBins; i++) {
-      const barH = (reduced[i] / maxVal) * (height - 2);
+      const barH = heights[i] * (height - 2);
       const inRange = i >= vminBin && i <= vmaxBin;
       ctx.fillStyle = inRange ? tc.textMuted : tc.border;
       ctx.fillRect(i * barWidth + 0.5, height - barH, Math.max(1, barWidth - 1), barH);
     }
-  }, [bins, vminPct, vmaxPct, width, height, tc]);
+  }, [bins, frame.finiteCount, frame.data, logCounts, vminPct, vmaxPct, width, height, tc]);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
       <canvas
         ref={canvasRef}
+        role="img"
+        aria-label={logCounts ? "FFT intensity histogram with logarithmic counts" : "Intensity histogram with linear counts"}
         onDoubleClick={() => onRangeChange(1, 99)}
         style={{ width, height, border: `1px solid ${tc.border}`, cursor: "pointer" }}
       />
@@ -567,6 +594,100 @@ function Histogram({
   );
 }
 
+/** A damping strength on a log10 slider that shows its own value while dragged, so a drag
+ *  re-renders this slider alone; the widget takes the strength on release. */
+function DampingSlider({ name, value, onDrag, onCommit }: {
+  name: string; value: number; onDrag: (value: number) => void; onCommit: (value: number) => void;
+}) {
+  const [dragged, setDragged] = React.useState<number | null>(null);
+  const shown = dragged ?? value;
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 230 }}>
+      <Typography sx={{ ...typography.label, whiteSpace: "nowrap" }}>{name} damping {formatNumber(shown, 4)}</Typography>
+      <Slider size="small" aria-label={`${name} damping`}
+        min={-4} max={0} step={0.01} value={Math.log10(Math.max(1e-4, shown))}
+        onChange={(_, next) => { const strength = 10 ** (next as number); setDragged(strength); onDrag(strength); }}
+        onChangeCommitted={(_, next) => { setDragged(null); onCommit(10 ** (next as number)); }}
+        sx={{ minWidth: 90, width: 130 }} />
+    </Box>
+  );
+}
+
+type HeldStatListeners = Map<string, (value: number | null) => void>;
+
+/** A stats-row value that follows its slider while it is held, re-rendering only itself;
+ *  null (the release) returns it to the widget's value. */
+function HeldStatValue({ statKey, value, precision, listeners, color }: {
+  statKey: string; value: number; precision: number; listeners: HeldStatListeners; color: string;
+}) {
+  const [held, setHeld] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    listeners.set(statKey, setHeld);
+    return () => { listeners.delete(statKey); };
+  }, [listeners, statKey]);
+  return <Box component="span" sx={{ color }}>{(held ?? value).toFixed(precision)}</Box>;
+}
+
+/** A three-thumb aberration slider (outer thumbs: sweep stoppers, middle: the value). While the
+ *  middle thumb is dragged the slider shows its own value, so each pointer move re-renders this
+ *  slider and not the whole widget; the widget takes the value on release. */
+function AberrationSlider({
+  label, unit, value, displayPrec, tip, min, max, step, range, isActiveSweep, isAtFull, disabled, tc,
+  onDrag, onCommit, onRange,
+}: {
+  label: string; unit: string; value: number; displayPrec: number; tip: string;
+  min: number; max: number; step: number; range: [number, number];
+  isActiveSweep: boolean; isAtFull: boolean; disabled: boolean; tc: ThemeColors;
+  onDrag: (value: number) => void; onCommit: (value: number) => void; onRange: (range: [number, number]) => void;
+}) {
+  const [dragged, setDragged] = React.useState<number | null>(null);
+  const shown = dragged ?? value;
+  const visibleValue = Math.max(min, Math.min(max, shown));
+  return (
+    <>
+      <Tooltip title={tip} placement="top" arrow>
+        <Typography sx={{ ...typography.labelSmall, color: tc.textMuted, mb: -0.5, cursor: "help" }}>
+          {label} <b>{shown.toFixed(displayPrec)}</b> {unit}
+          {!isAtFull && (
+            <span style={{ color: isActiveSweep ? tc.accent : tc.textMuted, opacity: 0.65 }}>
+              {" ["}{range[0].toFixed(displayPrec)}, {range[1].toFixed(displayPrec)}{"]"}
+            </span>
+          )}
+        </Typography>
+      </Tooltip>
+      {/* Show3D-style 3-thumb slider: disableSwap keeps order stable; to push the value outside
+          the stopper window, drag the relevant stopper first. */}
+      <Slider
+        value={[range[0], visibleValue, range[1]]}
+        min={min} max={max} step={step}
+        disabled={disabled}
+        disableSwap
+        onChange={(_, next, activeThumb) => {
+          const thumbs = next as number[];
+          if (activeThumb === 1) {
+            setDragged(thumbs[1]);
+            onDrag(thumbs[1]);
+          } else {
+            onRange([thumbs[0], thumbs[2]]);
+          }
+        }}
+        onChangeCommitted={(_, next) => {
+          const thumbs = next as number[];
+          setDragged(null);
+          onCommit(thumbs[1]);
+        }}
+        size="small"
+        sx={{
+          py: 0.5,
+          "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: tc.textMuted, opacity: isActiveSweep ? 1 : 0.7 },
+          "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 },
+          "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: tc.textMuted, opacity: isActiveSweep ? 1 : 0.7 },
+        }}
+      />
+    </>
+  );
+}
+
 /* ================================================================
    ImagePanel: canvas with zoom/pan, cursor readout and scale bar overlay
    ================================================================ */
@@ -579,7 +700,7 @@ const readRawPanelData = (raw: RawPanelData) => (typeof raw === "function" ? raw
 function ImagePanel({
   offscreen, label, size, tc, zoom, onZoomChange,
   showResize, onResizeStart,
-  pixelSize, realSpacePixelSize, imageWidth, isFFT,
+  pixelSize, realSpacePixelSize, imageWidth, isFFT, resetZoom = ZOOM_RESET,
   rawData, smooth, inset, cropRegion, cropSelecting, onCropChange,
 }: {
   offscreen: HTMLCanvasElement | null;
@@ -596,12 +717,14 @@ function ImagePanel({
   smooth?: boolean;
   imageWidth?: number;
   isFFT?: boolean;
+  resetZoom?: ZoomState;
   rawData?: RawPanelData;
   inset?: React.ReactNode;
   cropRegion?: [number, number, number, number] | null;
   cropSelecting?: boolean;
   onCropChange?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
 }) {
+  const imageBoxRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const overlayRef = React.useRef<HTMLCanvasElement>(null);
   const zoomRef = React.useRef(zoom); zoomRef.current = zoom;
@@ -613,9 +736,11 @@ function ImagePanel({
   // FFT d-spacing measurement (only used when isFFT)
   const fftClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const [fftClickInfo, setFftClickInfo] = React.useState<FFTPeakMark | null>(null);
+  const peakRequest = React.useRef(0);
 
+  const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
   useCanvasFrame(offscreen, React.useCallback(() => {
-    drawCanvas(canvasRef.current, offscreen, size, zoom, tc.bgAlt, tc.textMuted, !!smooth);
+    drawCanvas(canvasRef.current, offscreen, size, zoom, tc.bgAlt, tc.textMuted, !!smooth, gpuCanvasRef.current);
   }, [offscreen, size, zoom, tc, smooth]));
 
   // Scale bar overlay
@@ -671,26 +796,43 @@ function ImagePanel({
   const onZoomChangeRef = React.useRef(onZoomChange); onZoomChangeRef.current = onZoomChange;
   React.useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const imageBox = imageBoxRef.current;
+    if (!canvas || !imageBox) return;
+    let frame: number | null = null;
+    let pendingZoom: ZoomState | null = null;
     const handler = (e: WheelEvent) => {
+      // Region-editing overlays are siblings of the canvas. Listen on their
+      // shared container so Draw and Move modes can zoom without changing ROIs.
+      // The FFT inset is a separate view and must not zoom its parent image.
+      if (e.target instanceof Element && e.target.closest('[data-showptycho-fft-inset]')) return;
+      if (!offscreenRef.current || e.deltaY === 0) return;
       e.preventDefault();
-      if (!offscreenRef.current) return;
+      e.stopPropagation();
       const rect = canvas.getBoundingClientRect();
       const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
-      const prev = zoomRef.current;
+      const prev = pendingZoom ?? zoomRef.current;
       const factor = e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
       const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev.zoom * factor));
       const ratio = newZoom / prev.zoom;
       const centerX = sizeRef.current / 2 + prev.panX;
       const centerY = sizeRef.current / 2 + prev.panY;
-      onZoomChangeRef.current({
+      pendingZoom = {
         zoom: newZoom,
         panX: prev.panX - (mouseX - centerX) * (ratio - 1),
         panY: prev.panY - (mouseY - centerY) * (ratio - 1),
+      };
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (pendingZoom) onZoomChangeRef.current(pendingZoom);
+        pendingZoom = null;
       });
     };
-    canvas.addEventListener("wheel", handler, { passive: false });
-    return () => canvas.removeEventListener("wheel", handler);
+    imageBox.addEventListener("wheel", handler, { passive: false });
+    return () => {
+      imageBox.removeEventListener("wheel", handler);
+      if (frame != null) cancelAnimationFrame(frame);
+    };
   }, []);
 
   const imageCoordinate = React.useCallback((clientX: number, clientY: number) => {
@@ -743,6 +885,7 @@ function ImagePanel({
     const point = clientToImage(canvasRef.current!, e.clientX, e.clientY, offscreen, size, zoomRef.current);
     const fftW = offscreen.width, fftH = offscreen.height;
     if (point.col < 0 || point.col >= fftW || point.row < 0 || point.row >= fftH) return;
+    const request = ++peakRequest.current;
     // Snap to the nearest local maximum, as Show3D's findFFTPeak does.
     let snapped: { row: number; col: number };
     try {
@@ -751,7 +894,9 @@ function ImagePanel({
       console.error("[ShowPtycho] WebGPU FFT peak refinement failed", error);
       return;
     }
-    setFftClickInfo(measureFFTPeak(snapped.row, snapped.col, fftW, fftH, realSpacePixelSize));
+    if (request === peakRequest.current) {
+      setFftClickInfo(measureFFTPeak(snapped.row, snapped.col, fftW, fftH, realSpacePixelSize));
+    }
   }, [isFFT, offscreen, rawData, size, realSpacePixelSize]);
   const onLeaveFFT = React.useCallback(() => { fftClickStartRef.current = null; }, []);
 
@@ -812,9 +957,10 @@ function ImagePanel({
 
   return (
     <Box sx={{ width: size, flexShrink: 0, display: "flex", flexDirection: "column" }}>
-      <Box sx={{ ...container.imageBox, bgcolor: tc.bgAlt, border: `1px solid ${tc.border}`, width: size, height: size }}>
+      <Box ref={imageBoxRef} sx={{ ...container.imageBox, bgcolor: tc.bgAlt, border: `1px solid ${tc.border}`, width: size, height: size }}>
         <canvas
           data-quantem-scientific-output={label}
+          data-view-zoom={zoom.zoom}
           data-source-width={offscreen?.width}
           data-source-height={offscreen?.height}
           aria-label={label}
@@ -823,9 +969,11 @@ function ImagePanel({
           onMouseMove={onMove}
           onMouseUp={onUp}
           onMouseLeave={() => { onLeave(); if (isFFT) onLeaveFFT(); }}
-          onDoubleClick={() => { onZoomChange(ZOOM_RESET); if (isFFT) setFftClickInfo(null); }}
+          onDoubleClick={() => { onZoomChange(resetZoom); if (isFFT) { ++peakRequest.current; setFftClickInfo(null); } }}
           style={{ width: size, height: size, cursor: isFFT || cropSelecting ? "crosshair" : "grab", display: "block", imageRendering: smooth ? "auto" : "pixelated" }}
         />
+        <canvas ref={gpuCanvasRef} aria-hidden
+          style={{ position: "absolute", top: 0, left: 0, width: size, height: size, pointerEvents: "none", visibility: "hidden" }} />
         <Typography sx={{ position: "absolute", top: 4, left: 5, px: 0.5,
           fontSize: 10, fontFamily: "monospace", color: "#fff",
           bgcolor: "rgba(0,0,0,0.5)", pointerEvents: "none" }}>{label}</Typography>
@@ -876,7 +1024,7 @@ function ImagePanel({
 }
 
 function FFTInset({
-  offscreen, rawData, size, panelSize, box, onBoxChange, tc, smooth, pixelSize,
+  offscreen, rawData, size, panelSize, box, onBoxChange, tc, smooth, pixelSize, autoZoom,
 }: {
   offscreen: HTMLCanvasElement | null;
   offscreenVersion?: number;
@@ -884,18 +1032,44 @@ function FFTInset({
   size: number;
   panelSize: number;
   box: FFTInsetBox;
+  autoZoom: number;
   onBoxChange: React.Dispatch<React.SetStateAction<FFTInsetBox>>;
   tc: ThemeColors;
   smooth?: boolean;
   pixelSize?: number;
 }) {
+  const boxRef = React.useRef<HTMLDivElement>(null);
+  const [relativeZoom, setRelativeZoom] = React.useState(1);
+  const view = { zoom: autoZoom * relativeZoom, panX: 0, panY: 0 };
+  const autoZoomRef = React.useRef(autoZoom); autoZoomRef.current = autoZoom;
+  React.useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    let pending = 0;
+    let frame: number | null = null;
+    const wheel = (event: WheelEvent) => {
+      if (!event.deltaY) return;
+      event.preventDefault(); event.stopPropagation();
+      pending += event.deltaY < 0 ? 1 : -1;
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        const factor = ZOOM_FACTOR ** pending; pending = 0;
+        setRelativeZoom(value => Math.max(MIN_ZOOM / autoZoomRef.current, Math.min(MAX_ZOOM, value * factor)));
+      });
+    };
+    box.addEventListener("wheel", wheel, { passive: false });
+    return () => { box.removeEventListener("wheel", wheel); if (frame !== null) cancelAnimationFrame(frame); };
+  }, []);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const overlayRef = React.useRef<HTMLCanvasElement>(null);
   const [fftClickInfo, setFftClickInfo] = React.useState<FFTPeakMark | null>(null);
+  const peakRequest = React.useRef(0);
 
+  const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
   useCanvasFrame(offscreen, React.useCallback(() => {
-    drawCanvas(canvasRef.current, offscreen, size, ZOOM_RESET, "#000", "#fff", !!smooth);
-  }, [offscreen, size, smooth]));
+    drawCanvas(canvasRef.current, offscreen, size, view, "#000", "#fff", !!smooth, gpuCanvasRef.current);
+  }, [offscreen, size, smooth, autoZoom, relativeZoom]));
 
   React.useEffect(() => {
     const overlay = overlayRef.current;
@@ -907,7 +1081,7 @@ function FFTInset({
     if (!ctx) return;
     ctx.clearRect(0, 0, overlay.width, overlay.height);
     if (!fftClickInfo || !offscreen) return;
-    const scale = size / Math.max(offscreen.width, offscreen.height);
+    const scale = size / Math.max(offscreen.width, offscreen.height) * view.zoom;
     const cssX = (size - offscreen.width * scale) / 2 + fftClickInfo.col * scale;
     const cssY = (size - offscreen.height * scale) / 2 + fftClickInfo.row * scale;
     ctx.save();
@@ -927,16 +1101,17 @@ function FFTInset({
       ctx.fillText(label, Math.min(size - 54, cssX + 8), Math.max(14, cssY - 4));
     }
     ctx.restore();
-  }, [fftClickInfo, offscreen, size]);
+  }, [fftClickInfo, offscreen, size, autoZoom, relativeZoom]);
 
   const measurePeak = React.useCallback(async (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     const values = readRawPanelData(rawData);
     if (!canvas || !offscreen || !values) return;
-    // the inset draws unzoomed, so the panel mapping at ZOOM_RESET is the inset's own
-    const point = clientToImage(canvas, clientX, clientY, offscreen, size, ZOOM_RESET);
+    // Pick through the same auto-frame and user zoom used to paint the full FFT.
+    const point = clientToImage(canvas, clientX, clientY, offscreen, size, view);
     const fftW = offscreen.width;
     const fftH = offscreen.height;
+    const request = ++peakRequest.current;
     if (point.col < 0 || point.col >= fftW || point.row < 0 || point.row >= fftH) return;
     let snapped: { row: number; col: number };
     try {
@@ -945,8 +1120,10 @@ function FFTInset({
       console.error("[ShowPtycho] WebGPU inset peak refinement failed", error);
       return;
     }
-    setFftClickInfo(measureFFTPeak(snapped.row, snapped.col, fftW, fftH, pixelSize));
-  }, [offscreen, rawData, size, pixelSize]);
+    if (request === peakRequest.current) {
+      setFftClickInfo(measureFFTPeak(snapped.row, snapped.col, fftW, fftH, pixelSize));
+    }
+  }, [offscreen, rawData, size, pixelSize, autoZoom, relativeZoom]);
 
   const onMouseDown = React.useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -981,10 +1158,15 @@ function FFTInset({
 
   return (
     <Box
+      ref={boxRef}
+      data-showptycho-fft-inset
+      data-auto-zoom={autoZoom}
+      data-view-zoom={view.zoom}
       onMouseDown={onMouseDown}
-      onDoubleClick={(e) => { e.stopPropagation(); setFftClickInfo(null); }}
+      onDoubleClick={(e) => { e.stopPropagation(); ++peakRequest.current; setFftClickInfo(null); setRelativeZoom(1); }}
       sx={{
         position: "absolute",
+        overflow: "hidden",
         top: `${topPct}%`,
         left: `${leftPct}%`,
         width: size,
@@ -995,13 +1177,15 @@ function FFTInset({
         pointerEvents: "auto",
         userSelect: "none",
       }}
-      title="Drag FFT inset. Click a peak to measure d-spacing. Double-click to clear marker."
+      title="Drag FFT inset. Scroll to zoom independently. Click a peak to measure d-spacing. Double-click to auto-frame."
     >
       <canvas
         ref={canvasRef}
         aria-label="FFT inset"
         style={{ width: size, height: size, display: "block", imageRendering: smooth ? "auto" : "pixelated", pointerEvents: "none" }}
       />
+      <canvas ref={gpuCanvasRef} aria-hidden
+        style={{ position: "absolute", inset: 0, width: size, height: size, pointerEvents: "none", visibility: "hidden" }} />
       <canvas
         ref={overlayRef}
         aria-label="FFT inset peak marker"
@@ -1119,10 +1303,10 @@ function formatHOValue(valueNm: number, maxNm: number, displayScale: number): st
   return value.toFixed(4);
 }
 
-/* Sample panel: thick-sample SSB.  A crystal tilted by theta changes how strongly each
+/* Sample panel: thick-sample direct ptychography.  A crystal tilted by theta changes how strongly each
    bright-field pixel carries each spatial frequency; the kernel averages every pixel's correction
-   over a depth spread with the columns leaning by the tilt.  Depth spread 0 = standard SSB.
-   Joint fit solves C10, C12, phi12, tilt and depth spread together in the SSB session. */
+   over a depth spread with the columns leaning by the tilt.  Depth spread 0 = standard direct ptychography.
+   Joint fit solves C10, C12, phi12, tilt and depth spread together in the direct ptychography session. */
 const SAMPLE_ZERO: SampleValues = { tiltRowMrad: 0, tiltColMrad: 0, depthSpreadNm: 0 };
 
 function SamplePanel({
@@ -1148,7 +1332,7 @@ function SamplePanel({
     { key: "tiltColMrad", label: "tilt col", unit: "mrad", min: -25, max: 25, step: 0.1,
       tip: "Sample tilt along the scan columns.  Only acts when the depth spread > 0." },
     { key: "depthSpreadNm", label: "depth spread", unit: "nm", min: 0, max: 60, step: 0.5,
-      tip: "Depth over which the correction is averaged.  0 = standard SSB.  A model depth spread, not a measured sample thickness." },
+      tip: "Depth over which the correction is averaged.  0 = standard direct ptychography.  A model depth spread, not a measured sample thickness." },
   ];
   return (
     <Box sx={{
@@ -1163,7 +1347,7 @@ function SamplePanel({
         onClick={onToggle}
       >
         <Typography sx={{ ...typography.label, color: tc.accent }}>
-          {open ? "▾" : "▸"} Sample tilt (thick SSB)
+          {open ? "▾" : "▸"} Sample tilt
         </Typography>
         {active && (
           <Box sx={{ fontSize: 10, px: 0.8, py: 0.1, borderRadius: 0, bgcolor: STATUS_GOOD, color: "#fff", fontFamily: "monospace" }}>
@@ -1209,7 +1393,7 @@ function SamplePanel({
                 {fitBusy ? "Fitting…" : "Joint fit"}
               </Button>
               <Typography sx={{ ...typography.labelSmall, color: /failed|ignored/.test(fitStatus) ? STATUS_BAD : tc.textMuted, maxWidth: 520 }}>
-                {fitStatus || "The default fit, model-based and tilt-corrected: defocus, astigmatism, tilt and depth together. C10 is the mid-depth defocus."}
+                {fitStatus || "The default fit refines optics through fifth order with tilt and depth. C10 is the mid-depth defocus."}
               </Typography>
             </Box>
           ) : (
@@ -1224,7 +1408,7 @@ function SamplePanel({
 }
 
 function HigherOrderPanel({
-  tc, open, onToggle, activeCount, values, setValues, onCommit, disabled = false,
+  tc, open, onToggle, activeCount, values: committedValues, setValues, onDrag, onCommit, disabled = false,
 }: {
   tc: ThemeColors;
   open: boolean;
@@ -1234,13 +1418,23 @@ function HigherOrderPanel({
   disabled?: boolean;
   values: Record<string, number>;
   setValues: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  /** A dragged coefficient, before release: the panel shows it, the widget requests its phase. */
+  onDrag: (key: string, value: number) => void;
 }) {
-  const updateMag = React.useCallback((name: string, value: number) => {
-    setValues(prev => ({ ...prev, [name]: value }));
-  }, [setValues]);
-  const updateAngle = React.useCallback((name: string, deg: number) => {
-    setValues(prev => ({ ...prev, [higherOrderAzimuthKey(name)]: deg }));
-  }, [setValues]);
+  // Dragged coefficients live here until release, so a drag re-renders this panel, not the widget.
+  const [dragged, setDragged] = React.useState<Record<string, number>>({});
+  const values = React.useMemo(() => ({ ...committedValues, ...dragged }), [committedValues, dragged]);
+  const drag = React.useCallback((key: string, value: number) => {
+    setDragged(previous => ({ ...previous, [key]: value }));
+    onDrag(key, value);
+  }, [onDrag]);
+  const release = React.useCallback((key: string, value: number) => {
+    setDragged({});
+    setValues(prev => ({ ...prev, [key]: value }));
+    onCommit();
+  }, [setValues, onCommit]);
+  const updateMag = React.useCallback((name: string, value: number) => drag(name, value), [drag]);
+  const updateAngle = React.useCallback((name: string, deg: number) => drag(higherOrderAzimuthKey(name), deg), [drag]);
   const resetAll = React.useCallback(() => { onCommit(); setValues({}); }, [setValues, onCommit]);
   const resetMag = React.useCallback((name: string) => {
     onCommit();
@@ -1291,7 +1485,7 @@ function HigherOrderPanel({
             value={mag} min={-entry.mag_max} max={entry.mag_max} step={entry.step_nm}
             aria-label={`${entry.name} magnitude`}
             onChange={(_, value) => updateMag(magKey, value as number)}
-            onChangeCommitted={onCommit}
+            onChangeCommitted={(_, value) => release(magKey, value as number)}
             size="small" sx={{ py: 0.5 }}
           />
         </Box>
@@ -1317,7 +1511,7 @@ function HigherOrderPanel({
                 value={angle} min={-180} max={180} step={1}
                 aria-label={`${entry.name} angle`}
                 onChange={(_, value) => updateAngle(entry.name, value as number)}
-                onChangeCommitted={onCommit}
+                onChangeCommitted={(_, value) => release(higherOrderAzimuthKey(entry.name), value as number)}
                 size="small" sx={{ py: 0.5 }}
                 disabled={disabled || !isActive}
               />
@@ -1346,7 +1540,7 @@ function HigherOrderPanel({
         )}
       </Box>
     );
-  }, [disabled, resetAngle, resetMag, tc, updateAngle, updateMag, values]);
+  }, [disabled, resetAngle, resetMag, tc, updateAngle, updateMag, release, values]);
 
   return (
     <Box sx={{
@@ -1370,7 +1564,7 @@ function HigherOrderPanel({
           {open ? "▾" : "▸"} Higher-order (n=2..5)
         </Typography>
         {activeCount > 0 && (
-          <Tooltip title={`${activeCount} higher-order magnitude(s) non-zero.  The reconstruction and its loss use the full 14-coefficient kernel; the automatic fit searches only C10, C12 and phi12.`} placement="top" arrow>
+          <Tooltip title={`${activeCount} higher-order magnitude(s) non-zero. Reconstruction uses all 14 coefficients. Automatic fitting initializes with 200 trials, then jointly refines through fifth order with tilt and depth.`} placement="top" arrow>
             <Box sx={{
               fontSize: 10, px: 0.8, py: 0.1, borderRadius: 0,
               bgcolor: STATUS_GOOD, color: "#fff", fontFamily: "monospace", cursor: "help",
@@ -1453,7 +1647,7 @@ function Explore() {
   const [localSelectionJson] = useModelState<string>("local_tilt_selection_json");
   const [localReplyJson] = useModelState<string>("local_tilt_reply_json");
   const [localTiltStale] = useModelState<boolean>("local_tilt_stale");
-  const regionalMode = localTiltEnabled && !!activeRegionId && !!model.get('ssb_session');
+  const regionalMode = localTiltEnabled && !!activeRegionId && !!model.get('ptycho_session');
   const localConfig = React.useMemo(() => JSON.parse(localTiltJson || '{}'), [localTiltJson]);
   const activeFit = regionalMode ? localConfig.fits?.find((fit:any) => fit.id === activeRegionId) : null;
   const selectedRegions = JSON.parse(localSelectionJson || 'null') || localConfig.regions || [];
@@ -1479,25 +1673,48 @@ function Explore() {
   const [overviewAutoC12] = useModelState<number>("fitted_C12_nm");
   const [overviewAutoPhi12] = useModelState<number>("fitted_phi12_deg");
   const [fittedSampleJson] = useModelState<string>("fitted_sample_json");
+  const [fittedHigherOrderJson] = useModelState<string>("fitted_higher_order_aberrations_json");
   const regionalReference = activeFit?.fitted_parameters || activeFit;
   const autoC10 = regionalReference?.aberrations?.C10_nm ?? overviewAutoC10;
   const autoC12 = regionalReference?.aberrations?.C12_nm ?? overviewAutoC12;
   const autoPhi12 = regionalReference?.aberrations?.phi12_deg ?? overviewAutoPhi12;
   const [autoRotation] = useModelState<number>("fitted_scan_detector_rotation_deg");
-  const [autoLoss] = useModelState<number>("fitted_loss");
+  const [computeLoss] = useModelState<boolean>("compute_loss");
+  const [autoLoss] = useModelState<number | null>("fitted_loss");
+  const [fitAgreement] = useModelState<number | null>("fitted_sample_agreement");
+  const [tiltFitGain] = useModelState<number | null>("fitted_tilt_fit_gain");
   // an array carries the pixel size of its image; a session the scan step, which the output sampling divides
   const [objectSamplingA] = useModelState<number[]>("object_sampling_A");
   const [scanSamplingA] = useModelState<number[]>("scan_sampling_A");
-  const [sampling] = useModelState<number | "auto">("upsampling_factor");
-  const [autoFactor] = useModelState<number>("auto_upsampling_factor");
-  const upsamplingFactor = sampling === "auto" ? (autoFactor || 1) : (sampling || 1);
-  const upsamplingFactorRef = React.useRef(upsamplingFactor || 1); upsamplingFactorRef.current = upsamplingFactor || 1;
+  const [sampling, setSampling] = useModelState<number | "auto">("upsample");
+  const [upsampleAvailable] = useModelState<boolean>("upsample_available");
+  const [autoSamplingNote] = useModelState<string>("auto_sampling_note");
+  const [samplingLimitNote] = useModelState<string>("sampling_limit_note");
+  const [methodModel] = useModelState<string>("method");
+  const [phaseDampModel] = useModelState<number>("phase_damp");
+  const [amplitudeDampModel] = useModelState<number>("amplitude_damp");
+  const [smoothnessModel] = useModelState<number>("smoothness_inv_A");
+  const [weightingModel] = useModelState<string>("detector_weighting");
+  const [regularizationAvailable] = useModelState<boolean>("regularization_available");
+  type ReconstructionControls = { method: string; phase_damp: number; amplitude_damp: number; smoothness_inv_A: number; detector_weighting: string };
+  const [reconstructionControls, setReconstructionControls] = React.useState<ReconstructionControls>(() => ({
+    method: methodModel || "phase_of_mean", phase_damp: phaseDampModel ?? 0.03,
+    amplitude_damp: amplitudeDampModel ?? 0.03, smoothness_inv_A: smoothnessModel ?? 1.0,
+    detector_weighting: weightingModel ?? "uniform",
+  }));
+  const reconstructionRef = React.useRef(reconstructionControls);
+  // The launch settings Reset All returns to: what the viewer opened with, not hard-coded values.
+  const launchReconstructionRef = React.useRef(reconstructionControls);
+  const launchSamplingRef = React.useRef(sampling);
+  const [autoFactor] = useModelState<number>("auto_upsample");
+  // Auto never exceeds 4× on any path (the browser WebGPU path included); 8× is only an explicit choice.
+  const upsample = sampling === "auto" ? Math.min(autoFactor || 1, 4) : (sampling || 1);
+  const upsampleRef = React.useRef(upsample || 1); upsampleRef.current = upsample || 1;
 
   const [phaseWidth] = useModelState<number>("phase_width");
   const [phaseHeight] = useModelState<number>("phase_height");
 
   const [, setPinJson] = useModelState<string>("pin_json");
-  const [dragBfTrait, setDragBfTrait] = useModelState<number>("num_drag_bright_field_pixels");
   const [totalBf] = useModelState<number>("num_bright_field_pixels");
   const [starsPath] = useModelState<string>("stars_path");
   const [saveTrigger, setSaveTrigger] = useModelState<number>("save_trigger");
@@ -1524,11 +1741,11 @@ function Explore() {
   const [sampleFitRequest, setSampleFitRequest] = useModelState<number>("sample_fit_request");
   const [sampleFitStatus] = useModelState<string>("sample_fit_status");
   const [sampleFitJson] = useModelState<string>("sample_fit_json");
-  const [ssbSession] = useModelState<boolean>("ssb_session");
+  const [ptychoSession] = useModelState<boolean>("ptycho_session");
   const [sessionNote] = useModelState<string>("session_note");
   const [amplitudeBytes] = useModelState<DataView>("amplitude_bytes");
-  // An array input has no SSB session: only the views, FFT and display controls apply.
-  const tuning = ssbSession;
+  // An array input has no direct ptychography session: only the views, FFT and display controls apply.
+  const tuning = ptychoSession;
   const objectAmplitude = React.useMemo(
     () => (amplitudeBytes && amplitudeBytes.byteLength > 0 ? extractFloat32(amplitudeBytes) : null),
     [amplitudeBytes],
@@ -1614,7 +1831,9 @@ function Explore() {
   const hoActiveCountRef = React.useRef(0);
   hoActiveCountRef.current = hoActiveCount;
   const higherOrderRef = React.useRef<Record<string, number>>({});
-  higherOrderRef.current = higherOrder;
+  // A dragged higher-order coefficient, not yet released into `higherOrder`.
+  const higherOrderDragRef = React.useRef<Record<string, number>>({});
+  higherOrderRef.current = { ...higherOrder, ...higherOrderDragRef.current };
   const [loss, setLoss] = React.useState<number | null>(null);
   // Set on every request and reply; an unchanged value must not re-render the widget per frame.
   const [busy, setBusy] = useChangedState(false);
@@ -1637,14 +1856,8 @@ function Explore() {
     ? webgpuCalLogicalBf
     : Math.max(0, Math.round(totalBf || 0));
   // Use the full logical BF set for both live and exported reconstruction.
-  // Synchronize older saved widgets that still carry an explicit drag subset.
-  const dragBfRef = React.useRef(effectiveTotalBf);
-  dragBfRef.current = effectiveTotalBf;
-  React.useEffect(() => {
-    if (effectiveTotalBf > 0 && dragBfTrait !== effectiveTotalBf) {
-      setDragBfTrait(effectiveTotalBf);
-    }
-  }, [dragBfTrait, effectiveTotalBf, setDragBfTrait]);
+  const effectiveTotalBfRef = React.useRef(effectiveTotalBf);
+  effectiveTotalBfRef.current = effectiveTotalBf;
   const [pinned, setPinned] = React.useState<PinnedEntry[]>([]);
   const [viewPin, setViewPin] = React.useState<number | null>(null);
   const viewPinRef = React.useRef(viewPin); viewPinRef.current = viewPin;
@@ -1666,7 +1879,10 @@ function Explore() {
   const [phaseZoom, setPhaseZoom] = React.useState(ZOOM_RESET);
   const [ampZoom, setAmpZoom] = React.useState(ZOOM_RESET);
   const [complexZoom, setComplexZoom] = React.useState(ZOOM_RESET);
+  // User zoom is relative to calibrated framing, so changes in output sampling preserve the view.
   const [fftZoom, setFFTZoom] = React.useState(ZOOM_RESET);
+  const [fftSourceShape, setFFTSourceShape] = React.useState<[number, number]>([0, 0]);
+  const fftSourceShapeRef = React.useRef(fftSourceShape); fftSourceShapeRef.current = fftSourceShape;
   // Every phase clears the panels it does not show; an unchanged null must not re-render the widget.
   const [phaseOff, setPhaseOff] = useChangedState<HTMLCanvasElement | null>(null);
   const [ampOff, setAmpOff] = useChangedState<HTMLCanvasElement | null>(null);
@@ -1727,7 +1943,7 @@ function Explore() {
     setCropSelecting(false);
     setCropRefitPending(true);
     setCropRefitRequestJson(JSON.stringify({
-      id: Date.now(), scan_region: scanCrop, num_trials: 200,
+      id: Date.now(), scan_region: scanCrop, trials: 200,
     }));
   }, [cropRefitAvailable, scanCrop, setCropRefitRequestJson]);
   const cropSummary = React.useMemo(() => {
@@ -1748,7 +1964,12 @@ function Explore() {
   const [fftInsetBox, setFFTInsetBox] = React.useState<FFTInsetBox>({ x: 0.72, y: 0.02 });
   const [extraRealViews, setExtraRealViews] = React.useState<Record<ExtraRealViewMode, boolean>>({ amp: false, complex: false });
   const [smooth, setSmooth] = React.useState<boolean>(false);
-  const [cmap, setCmap] = React.useState("inferno");
+  // Synced so Save can write the phase PNG with the colormap and window shown here.
+  const [cmapModel, setCmap] = useModelState<string>("cmap");
+  const cmap = cmapModel || "inferno";
+  const launchCmapRef = React.useRef(cmap);
+  const [, setSavedVmin] = useModelState<number | null>("vmin");
+  const [, setSavedVmax] = useModelState<number | null>("vmax");
   const [fftCmap, setFftCmap] = React.useState("inferno");
   const [contrastRange, setContrastRange] = React.useState<[number, number]>([1, 99]);
   const [fftContrastRange, setFftContrastRange] = React.useState<[number, number]>([1, 99]);
@@ -1766,7 +1987,10 @@ function Explore() {
   const fftAutoContrastRef = React.useRef(fftAutoContrast); fftAutoContrastRef.current = fftAutoContrast;
   const showFFTRef = React.useRef(showFFT); showFFTRef.current = showFFT;
   const extraRealViewsRef = React.useRef(extraRealViews); extraRealViewsRef.current = extraRealViews;
-  const rotationDegRef = React.useRef(rotationDeg ?? 0); rotationDegRef.current = rotationDeg ?? 0;
+  // A dragged rotation is held here until release: drags travel on the preview channel, not as a
+  // trait sync per frame, so the widget does not re-render (or wait for kernel idle) per move.
+  const rotationHeldRef = React.useRef<number | null>(null);
+  const rotationDegRef = React.useRef(rotationDeg ?? 0); rotationDegRef.current = rotationHeldRef.current ?? rotationDeg ?? 0;
   const negatePhaseRef = React.useRef(displayNegatePhase);
   negatePhaseRef.current = !!displayNegatePhase;
   const ampDataRef = React.useRef<{ data: Float32Array; w: number; h: number } | null>(null);
@@ -1808,7 +2032,7 @@ function Explore() {
   const shouldCommitOnReleaseRef = React.useRef(false);
   const [webgpuRuntimeStatus, setWebgpuRuntimeStatus] = React.useState("");
   const [webgpuLoadProgress, setWebgpuLoadProgress] = React.useState<WebGPULoadProgress | null>(null);
-  const webgpuSsbRef = React.useRef<WebGPUSSBBackend | null>(null);
+  const webgpuDirectRef = React.useRef<WebGPUDirectBackend | null>(null);
   const webgpuInFlightRef = React.useRef(false);
   const webgpuPendingRef = React.useRef<[number, number, number, number] | null>(null);
   const webgpuPendingFullRef = React.useRef(false);
@@ -1821,7 +2045,7 @@ function Explore() {
   // No-server mode: on file:// the sibling data files cannot be fetch()ed, so
   // the folder must be granted once (picker or webkitdirectory input) before
   // the engine is created. HTTP-served folders skip this entirely.
-  const [localSourceGranted, setLocalSourceGranted] = React.useState(() => !ssbNeedsLocalSource());
+  const [localSourceGranted, setLocalSourceGranted] = React.useState(() => !directNeedsLocalSource());
   const [localSourceError, setLocalSourceError] = React.useState("");
   const localDirInputRef = React.useRef<HTMLInputElement | null>(null);
   // Name of the folder this HTML lives in, so the banner can say exactly what
@@ -1852,7 +2076,7 @@ function Explore() {
           );
           return;
         }
-        setSSBLocalDirectory(handle);
+        setDirectLocalDirectory(handle);
         setLocalSourceError("");
         setLocalSourceGranted(true);
         return;
@@ -1879,7 +2103,7 @@ function Explore() {
   const [folderSaves, setFolderSaves] = React.useState<FolderSaveRecord[]>([]);
   const [folderSaveStatus, setFolderSaveStatus] = React.useState("");
   const refreshFolderSaves = React.useCallback(async () => {
-    const current = await readSSBFolderJson<{ schema?: string; snapshots?: FolderSaveRecord[] }>("snapshots/snapshots.json");
+    const current = await readDirectFolderJson<{ schema?: string; snapshots?: FolderSaveRecord[] }>("snapshots/snapshots.json");
     const readable = current?.schema === SNAPSHOTS_SCHEMA && Array.isArray(current.snapshots);
     // a file of another layout (an earlier release) is not converted: it is left on disk and reported
     if (current && !readable) setFolderSaveStatus(`snapshots/snapshots.json is not ${SNAPSHOTS_SCHEMA}; its snapshots are not listed`);
@@ -1902,7 +2126,7 @@ function Explore() {
         );
         return;
       }
-      setSSBLocalFiles(Array.from(files));
+      setDirectLocalFiles(Array.from(files));
       setLocalSourceError("");
       setLocalSourceGranted(true);
     }
@@ -1912,35 +2136,35 @@ function Explore() {
     webgpuDiagnostic.cancel();
     const hasH5Source = !!webgpuH5SourceJson && webgpuH5SourceJson.trim() !== "" && webgpuH5SourceJson.trim() !== "{}";
     if (!webgpuPreviewEnabled || !webgpuCalJson || !hasH5Source) {
-      webgpuSsbRef.current = null;
+      webgpuDirectRef.current = null;
       setWebgpuRuntimeStatus(webgpuPreviewStatus || "");
       setWebgpuLoadProgress(null);
       return;
     }
     if (!localSourceGranted) {
-      webgpuSsbRef.current = null;
+      webgpuDirectRef.current = null;
       setWebgpuRuntimeStatus("No-server mode: grant the folder containing this HTML to start");
       setWebgpuLoadProgress(null);
       return;
     }
     try {
       // the engine reads the calibration and the bright-field source as ShowPtycho.export wrote them
-      const engine = new WebGPUSSBBackend(webgpuCalJson, { json: webgpuH5SourceJson });
+      const engine = new WebGPUDirectBackend(webgpuCalJson, { json: webgpuH5SourceJson });
       engine.setProgressHandler((progress) => {
         setWebgpuLoadProgress(progress.stage === "ready" ? null : progress);
         setWebgpuRuntimeStatus(webgpuProgressLabel(progress));
       });
-      webgpuSsbRef.current = engine;
+      webgpuDirectRef.current = engine;
       setWebgpuRuntimeStatus(engine.readyLabel);
       setWebgpuLoadProgress(null);
       return () => {
         webgpuDiagnostic.cancel();
         engine.setProgressHandler(null);
-        if (webgpuSsbRef.current === engine) webgpuSsbRef.current = null;
+        if (webgpuDirectRef.current === engine) webgpuDirectRef.current = null;
         engine.close();
       };
     } catch (err) {
-      webgpuSsbRef.current = null;
+      webgpuDirectRef.current = null;
       setWebgpuRuntimeStatus(err instanceof Error ? err.message : String(err));
       setWebgpuLoadProgress({
         stage: "error",
@@ -1977,6 +2201,7 @@ function Explore() {
   const gpuSlotCanvasRef = React.useRef<Record<GPUColormapSlot, HTMLCanvasElement | null>>({ 0: null, 1: null, 2: null });
   const gpuCmapBusyRef = React.useRef<Record<GPUColormapSlot, boolean>>({ 0: false, 1: false, 2: false });
   const gpuCmapPendingRef = React.useRef<Record<GPUColormapSlot, (() => void) | null>>({ 0: null, 1: null, 2: null });
+  const gpuCmapPendingSettleRef = React.useRef<Record<GPUColormapSlot, (() => void) | null>>({ 0: null, 1: null, 2: null });
   // The frame each panel shows, read by the histograms and the cursor readouts: painting a new
   // phase re-renders those, not this component.
   const panelFrames = React.useMemo(createPanelFrames, []);
@@ -1985,6 +2210,9 @@ function Explore() {
   const ampFrameData = React.useCallback(() => panelFrames[2].get().data, [panelFrames]);
   // Percentile histograms and histogram bins of each slot's newest frame, from the display worker.
   const statsWorkerRef = React.useRef<DisplayStatsWorker | null>(null);
+  // The block of a pw x ph display spectrum (of a w x h phase) that the FFT auto frame shows; its
+  // contrast window comes from that block alone. Set each render from the current calibration.
+  const fftStatsRegionRef = React.useRef<(pw: number, ph: number, w: number, h: number) => GridRegion | null>(() => null);
   const slotStatsRef = React.useRef<Record<GPUColormapSlot, { data: Float32Array; stats: FrameStats } | null>>({ 0: null, 1: null, 2: null });
   const paintedGenRef = React.useRef<Record<GPUColormapSlot, number>>({ 0: 0, 1: 0, 2: 0 });
   React.useEffect(() => {
@@ -1993,6 +2221,10 @@ function Explore() {
     return () => { worker.dispose(); statsWorkerRef.current = null; };
   }, []);
   const gpuCmapReadyRef = React.useRef(false);
+  // Statistics and the Fourier panel of each new phase on the colormap engine's device.
+  const gpuFrameRef = React.useRef<GPUFrameDisplay | null>(null);
+  // Paints each panel's slot into its own WebGPU canvas (colormap, window, zoom, pan in one pass).
+  const gpuPainterRef = React.useRef<GPUPanelPainter | null>(null);
   // Track the data uploaded to each slot so we only re-upload on real data change.
   const gpuSlotDataRef = React.useRef<Record<GPUColormapSlot, Float32Array | null>>({ 0: null, 1: null, 2: null });
   // This view's own engine, so its slots 0-2 never hold another view's images; destroyed on unmount.
@@ -2002,10 +2234,14 @@ function Explore() {
       if (!engine) return;
       if (cancelled) { engine.destroy(); return; }
       gpuCmapRef.current = engine;
+      gpuPainterRef.current = new GPUPanelPainter(engine);
       gpuCmapReadyRef.current = true;
     });
     return () => {
       cancelled = true;
+      gpuFrameRef.current?.destroy();
+      gpuFrameRef.current = null;
+      gpuPainterRef.current = null;
       gpuCmapRef.current?.destroy();
       gpuCmapRef.current = null;
       gpuCmapReadyRef.current = false;
@@ -2024,7 +2260,7 @@ function Explore() {
     }
   }, [autoC10, autoC12, autoPhi12]);
 
-  /* --- Sample panel (thick SSB): push slider values to Python; apply a finished tilt fit to the
+  /* --- Sample panel (thick-sample direct ptychography): push slider values to Python; apply a finished tilt fit to the
          aberration sliders and the panel (the sample_json push then re-renders). --- */
   // Seed once from Python (a restored calibration sets sample_json before the widget mounts); afterwards the panel owns it.
   const [sample, setSample] = React.useState<SampleValues>(() => {
@@ -2059,7 +2295,7 @@ function Explore() {
   const [sampleOpen, setSampleOpen] = React.useState(false);
   const [sampleFitBusy, setSampleFitBusy] = React.useState(false);
   React.useEffect(() => {
-    if (/^Tilt fit(:| failed)/.test(sampleFitStatus || "")) setSampleFitBusy(false);
+    if (/^(Tilt fit(:| failed)|Fifth-order fit:)/.test(sampleFitStatus || "")) setSampleFitBusy(false);
   }, [sampleFitStatus]);
   const requestSampleFit = React.useCallback(() => {
     if (regionContextRef.current) {
@@ -2082,35 +2318,57 @@ function Explore() {
   const inflightDragRef = React.useRef(false);
   const pendingDragRef = React.useRef<{ values: [number, number, number]; committed: boolean } | null>(null);
   // The outstanding requests, oldest first: a reply releases its own request and any older one.
-  const sentRequestsRef = React.useRef<{ id: number; regionId: string | null }[]>([]);
+  const sentRequestsRef = React.useRef<{ id: number; regionId: string | null; key: string }[]>([]);
   const [previewError, setPreviewError] = useChangedState('');
   const requestCapacity = () => (regionContextRef.current ? 1 : PREVIEW_REQUESTS_IN_FLIGHT);
+
+  /** Everything a preview request reconstructs from, so an identical one can be recognised. */
+  const requestKey = (c10Val: number, c12Val: number, phi12Val: number) => JSON.stringify([
+    c10Val, c12Val, phi12Val, regionContextRef.current?.id ?? null, sampleRef.current, higherOrderRef.current,
+    reconstructionRef.current, model.get("tilt_correction"), rotationDegRef.current,
+  ]);
+
+  // The busy mark shows at once and clears only after a short quiet spell: a drag answered faster
+  // than the next pointer move would otherwise re-render the widget twice per frame.
+  const busyTimerRef = React.useRef<number | null>(null);
+  const showBusy = React.useCallback((value: boolean) => {
+    if (busyTimerRef.current !== null) { window.clearTimeout(busyTimerRef.current); busyTimerRef.current = null; }
+    if (value) { setBusy(true); return; }
+    busyTimerRef.current = window.setTimeout(() => { busyTimerRef.current = null; setBusy(false); }, 200);
+  }, [setBusy]);
+  React.useEffect(() => () => { if (busyTimerRef.current !== null) window.clearTimeout(busyTimerRef.current); }, []);
 
   const fireRequest = React.useCallback((c10Val: number, c12Val: number, phi12Val: number, committed: boolean) => {
     const region = regionContextRef.current;
     if (region && !region.ready) {
       inflightDragRef.current = sentRequestsRef.current.length > 0;
-      setBusy(inflightDragRef.current);
+      showBusy(inflightDragRef.current);
       return;
     }
     const id = ++requestIdRef.current;
-    sentRequestsRef.current = [...sentRequestsRef.current, { id, regionId: region ? region.id : null }];
+    sentRequestsRef.current = [...sentRequestsRef.current, { id, regionId: region ? region.id : null, key: requestKey(c10Val, c12Val, phi12Val) }];
     inflightDragRef.current = true;
-    setBusy(true);
+    showBusy(true);
     if (viewPinRef.current !== null) setViewPin(null);
     const sample = sampleRef.current;
     // Our bounded in-flight queue already supplies backpressure. A custom command
     // can start as soon as a previous result arrives, without the notebook's
     // generic trait throttle waiting for a later kernel-idle notification.
-    model.send({ type: "ssb-preview", request: { id, C10_nm: c10Val, C12_nm: c12Val, phi12_deg: phi12Val, committed,
+    model.send({ type: "direct-preview", request: { id, C10_nm: c10Val, C12_nm: c12Val, phi12_deg: phi12Val, committed,
       ...(region ? {region_id:region.id,region_bounds:region.bounds} : {}),
       sample: { sample_tilt_mrad: [sample.tiltRowMrad, sample.tiltColMrad], depth_spread_nm: sample.depthSpreadNm },
       higher_order: higherOrderRef.current,
+      ...reconstructionRef.current,
+      tilt_correction: model.get("tilt_correction") !== false,
+      scan_detector_rotation_deg: rotationDegRef.current,
     }});
-  }, [model]);
+  }, [model, showBusy]);
 
   const sendDrag = React.useCallback((c10Val: number, c12Val: number, phi12Val: number, rotationVal = rotationDegRef.current) => {
-    if (!regionContextRef.current && frontendPreviewRef.current?.(c10Val, c12Val, phi12Val, rotationVal)) return;
+    if (reconstructionRef.current.method === "phase_of_mean" && !regionContextRef.current && frontendPreviewRef.current?.(c10Val, c12Val, phi12Val, rotationVal)) return;
+    // The same complete state already on its way gives the same phase: one input event can report a value twice.
+    const latest = sentRequestsRef.current[sentRequestsRef.current.length - 1];
+    if (!pendingDragRef.current && latest && latest.key === requestKey(c10Val, c12Val, phi12Val)) return;
     if (sentRequestsRef.current.length >= requestCapacity()) {
       pendingDragRef.current = { values: [c10Val, c12Val, phi12Val], committed: false };
       return;
@@ -2120,7 +2378,7 @@ function Explore() {
 
   const sendCommit = React.useCallback((c10Val: number, c12Val: number, phi12Val: number, rotationVal = rotationDegRef.current) => {
     pendingDragRef.current = null;
-    if (!regionContextRef.current && frontendFullRef.current?.(c10Val, c12Val, phi12Val, rotationVal)) return;
+    if (reconstructionRef.current.method === "phase_of_mean" && !regionContextRef.current && frontendFullRef.current?.(c10Val, c12Val, phi12Val, rotationVal)) return;
     if (sentRequestsRef.current.length >= requestCapacity()) {
       pendingDragRef.current = { values: [c10Val, c12Val, phi12Val], committed: true };
       return;
@@ -2130,8 +2388,8 @@ function Explore() {
 
   /* --- Slider values ref (so callbacks read fresh values without re-creating) --- */
   const sliderVals = React.useRef({ c10: 0, c12: 0, phi12: 0 });
-  // A dragged aberration thumb and its label re-render once per animation frame; every pointer
-  // event still sends its request with its own value, and the ref always holds the newest values.
+  // A dragged value waits here (its slider shows it) until release; every pointer event still
+  // sends its request with its own value, and the ref always holds the newest values.
   const sliderPendingRef = React.useRef<Partial<Record<"c10" | "c12" | "phi12", number>>>({});
   sliderVals.current = {
     c10: sliderPendingRef.current.c10 ?? c10,
@@ -2145,19 +2403,49 @@ function Explore() {
     if (next.c12 !== undefined) setC12(next.c12);
     if (next.phi12 !== undefined) setPhi12(next.phi12);
   }, []);
-  const sliderStateFrame = React.useMemo(() => latestFrame(flushSliderState), [flushSliderState]);
-  React.useEffect(() => () => sliderStateFrame.cancel(), [sliderStateFrame]);
-  const dragSliderValue = React.useCallback((key: "c10" | "c12" | "phi12", value: number) => {
+  // A slider showing its own dragged value: the widget adopts the value on release, so a drag
+  // re-renders that slider alone instead of the whole widget per animation frame.
+  // The stats row's C10, C12 and φ12 follow a held slider without re-rendering the widget.
+  const heldStatListeners = React.useMemo<HeldStatListeners>(() => new Map(), []);
+  const holdSliderValue = React.useCallback((key: "c10" | "c12" | "phi12", value: number) => {
     sliderPendingRef.current[key] = value;
     sliderVals.current = { ...sliderVals.current, [key]: value };
-    sliderStateFrame.schedule();
-  }, [sliderStateFrame]);
+    heldStatListeners.get(key)?.(value);
+  }, [heldStatListeners]);
   // A release shows its committed value at once.
   const commitSliderValue = React.useCallback((key: "c10" | "c12" | "phi12", value: number) => {
-    sliderStateFrame.cancel();
     sliderPendingRef.current[key] = value;
+    heldStatListeners.get(key)?.(null);
     flushSliderState();
-  }, [sliderStateFrame, flushSliderState]);
+  }, [flushSliderState]);
+  // Damping uses the same latest-wins queue as optics. Only the small
+  // reconstructed phase travels back; each strength is solved by quantem.gpu.
+  const reconstructionFrame = React.useMemo(() => latestFrame(() => {
+    setReconstructionControls({ ...reconstructionRef.current });
+  }), []);
+  React.useEffect(() => () => reconstructionFrame.cancel(), [reconstructionFrame]);
+  React.useEffect(() => {
+    if (sentRequestsRef.current.length || pendingDragRef.current) return;
+    reconstructionRef.current = {
+      method: methodModel || "phase_of_mean", phase_damp: phaseDampModel ?? 0.03,
+      amplitude_damp: amplitudeDampModel ?? 0.03, smoothness_inv_A: smoothnessModel ?? 1.0,
+      detector_weighting: weightingModel ?? "uniform",
+    };
+    setReconstructionControls({ ...reconstructionRef.current });
+  }, [methodModel, phaseDampModel, amplitudeDampModel, smoothnessModel, weightingModel]);
+  // `render` false: the control shows its own value while dragged; the widget renders on release.
+  const changeReconstruction = (next: Partial<ReconstructionControls>, committed: boolean, render = true) => {
+    reconstructionRef.current = { ...reconstructionRef.current, ...next };
+    if (render) reconstructionFrame.schedule();
+    // Python does not echo a strength the browser sent; the browser's model takes it on release.
+    if (committed) {
+      for (const key of ["phase_damp", "amplitude_damp", "smoothness_inv_A"] as const) {
+        if (next[key] !== undefined) model.set(key, next[key]);
+      }
+    }
+    const current = sliderVals.current;
+    (committed ? sendCommit : sendDrag)(current.c10, current.c12, current.phi12);
+  };
   /* Panel changes share the one-in-flight request path with the primary sliders.
      Frames read the latest values; continuous input never restarts a debounce. */
   const sampleCommitPendingRef = React.useRef(false);
@@ -2190,9 +2478,15 @@ function Explore() {
     if (webgpuStandalone) panelFrame.schedule();
   }, [tiltCorrection, webgpuStandalone, panelFrame]);
   const commitSample = React.useCallback(() => {
+    higherOrderDragRef.current = {};
     sampleCommitPendingRef.current = true;
     setSample(prev => ({ ...prev }));
   }, []);
+  const dragHigherOrder = React.useCallback((key: string, value: number) => {
+    higherOrderDragRef.current = { ...higherOrderDragRef.current, [key]: value };
+    higherOrderRef.current = { ...higherOrderRef.current, [key]: value };
+    panelFrame.schedule();
+  }, [panelFrame]);
 
   /* --- Play control: sweep one parameter over its range ---
      Like Show3D playback: pick which aberration to sweep, set FPS, hit play.
@@ -2215,6 +2509,7 @@ function Explore() {
   interface OptunaTrial {
     rank: number; C10_nm: number; C12_nm: number; phi12_deg: number; loss: number;
     objective?: "agreement" | "phase_variance"; sample_tilt_mrad?: [number, number]; depth_spread_nm?: number;
+    higher_order?: Record<string, number>; scan_detector_rotation_deg?: number | null;
   }
   const trials: OptunaTrial[] = React.useMemo(() => {
     if (!trialsJson) return [];
@@ -2227,24 +2522,35 @@ function Explore() {
   const trialObjectiveText = Array.from(new Set(trials.map(trial => trial.objective ?? "phase_variance")))
     .map(objective => objective === "agreement" ? "model agreement" : "phase variance").join(", ");
   const trialScoreText = (trial: OptunaTrial) => trial.objective === "agreement"
-    ? `agr ${formatNumber(-trial.loss, 4)}` : `pv ${formatNumber(trial.loss, 8)}`;
+    ? `score ${formatNumber(-trial.loss, 4)}` : `pv ${formatNumber(trial.loss, 8)}`;
   const [trialsExpanded, setTrialsExpanded] = React.useState(false);
   const [activeTrialRank, setActiveTrialRank] = React.useState<number | null>(null);
 
   const doViewTrial = React.useCallback((trial: OptunaTrial) => {
     setActiveTrialRank(trial.rank);
     setViewPin(null);   // trials + pins are mutually exclusive selections
+    higherOrderRef.current = trial.higher_order || {};
+    adoptingPanelRef.current = true;
+    setHigherOrder(higherOrderRef.current);
+    if (!regionContextRef.current && trial.scan_detector_rotation_deg != null) {
+      rotationDegRef.current = trial.scan_detector_rotation_deg;
+      model.set("scan_detector_rotation_deg", trial.scan_detector_rotation_deg);
+    }
     if (trial.sample_tilt_mrad && trial.depth_spread_nm != null && !regionContextRef.current) {
       // a trial is its optics with its own sample model (tilt 0 and no depth for a tilt-0 or phase-variance trial)
       const trialSample = { tiltRowMrad: trial.sample_tilt_mrad[0], tiltColMrad: trial.sample_tilt_mrad[1],
                             depthSpreadNm: trial.depth_spread_nm };
       sampleRef.current = trialSample;
+      samplePreviewRef.current = trialSample;
       adoptingPanelRef.current = true;
       setSample(trialSample);
     }
+    previousTiltCorrectionRef.current = true;
+    model.set("tilt_correction", true);
+    if (webgpuStandalone) model.save_changes();
     setC10(trial.C10_nm); setC12(trial.C12_nm); setPhi12(trial.phi12_deg);
     sendCommit(trial.C10_nm, trial.C12_nm, trial.phi12_deg);
-  }, [sendCommit]);
+  }, [sendCommit, model, webgpuStandalone]);
   const [sweepParam, setSweepParam] = React.useState<SweepParam>("c10");
   const sweepIdxRef = React.useRef(0);
   const sweepDirRef = React.useRef<1 | -1>(1);  // boomerang direction
@@ -2395,7 +2701,7 @@ function Explore() {
         setPhi12(value); sendDrag(sliderVals.current.c10, sliderVals.current.c12, value);
       } else if (sweepParam === "rot") {
         setRotationDeg(value);
-        if (webgpuSsbRef.current) sendDrag(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, value);
+        if (webgpuDirectRef.current) sendDrag(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, value);
       }
       // Advance index (boomerang: bounces between 0 and SWEEP_STEPS-1)
       sweepIdxRef.current += sweepDirRef.current;
@@ -2429,13 +2735,13 @@ function Explore() {
       const sent = sentRequestsRef.current;
       const answered = sent.findIndex(request => request.id === result.id && request.regionId === regionId);
       if (sent.length && answered < 0) {
-        if (regionId === shown && !regional && result.loss != null) setLoss(result.loss);  // a Python-side redraw
+        if (regionId === shown && !regional) setLoss(result.loss ?? null);  // a Python-side redraw
         return;
       }
       // Replies arrive in request order: this one also retires any older request.
       sentRequestsRef.current = sent.slice(answered + 1);
       inflightDragRef.current = sentRequestsRef.current.length > 0;
-      setBusy(inflightDragRef.current);
+      showBusy(inflightDragRef.current);
       if (result.error) {
         // Queued values were relative to the failed request; drop them and say why.
         pendingDragRef.current = null;
@@ -2443,7 +2749,7 @@ function Explore() {
         return;
       }
       setPreviewError('');
-      if (result.loss != null && regionId === shown) setLoss(result.loss);
+      if (regionId === shown) setLoss(result.loss ?? null);
 
       // Drain pending drag value if user moved the slider while we were busy.
       const pending = pendingDragRef.current;
@@ -2478,9 +2784,11 @@ function Explore() {
    *  JS applyColormap with the same float32 window math, so both paths paint the same pixels.
    *  The percentile window comes from the frame's histogram, binned once per frame in the
    *  display worker; painting publishes the frame to its histogram without a widget render. */
-  const renderPanel = React.useCallback((data: Float32Array, w: number, h: number, slot: GPUColormapSlot, cmapName: string, pctLo: number, pctHi: number, given?: FrameStats) => {
+  const renderPanel = React.useCallback((data: Float32Array, w: number, h: number, slot: GPUColormapSlot, cmapName: string, pctLo: number, pctHi: number, given?: FrameStats): Promise<void> => {
     const gen = ++gpuCmapGenRef.current[slot];
-    const paint = (pixels: Uint8ClampedArray | ImageBitmap, min: number, max: number, stats: FrameStats) => {
+    // `pixels` null: the panel paints the slot straight from the GPU (`source`); the canvas only
+    // carries the frame's size and its frame event.
+    const paint = (pixels: Uint8ClampedArray | ImageBitmap | null, min: number, max: number, stats: FrameStats, source?: GPUPanelSource) => {
       // Launches run one at a time per slot, so a later generation never paints before an earlier one.
       if (gen < paintedGenRef.current[slot]) return;
       paintedGenRef.current[slot] = gen;
@@ -2491,16 +2799,24 @@ function Explore() {
         canvas.width = w; canvas.height = h;
         gpuSlotCanvasRef.current[slot] = canvas;
       }
-      const ctx = canvas!.getContext("2d");
-      if (!ctx) return;
-      if (pixels instanceof ImageBitmap) {
-        ctx.drawImage(pixels, 0, 0);
+      if (pixels === null && source) {
+        gpuPanelSources.set(canvas!, source);
       } else {
-        const image = ctx.createImageData(w, h);
-        image.data.set(pixels);
-        ctx.putImageData(image, 0, 0);
+        gpuPanelSources.delete(canvas!);
+        const ctx = canvas!.getContext("2d");
+        if (!ctx) return;
+        if (pixels instanceof ImageBitmap) {
+          ctx.drawImage(pixels, 0, 0);
+        } else if (pixels) {
+          const image = ctx.createImageData(w, h);
+          image.data.set(pixels);
+          ctx.putImageData(image, 0, 0);
+        }
       }
-      panelFrames[slot].set({ data, min, max, displayBins: stats.displayBins });
+      if (panelFrames[slot].get().data !== data) {
+        canvas!.dataset.quantemDataFrame = String(gen);
+      }
+      panelFrames[slot].set({ data, min, max, displayBins: stats.displayBins, finiteCount: stats.histogram.finiteCount });
       canvas!.dispatchEvent(new Event("quantem-frame"));
       // A new canvas (first frame or new dimensions) re-renders the widget for its panels and labels.
       if (fresh) {
@@ -2519,10 +2835,12 @@ function Explore() {
         paint(rgba, min, max, stats);
       };
       const stats = slotStats(slot, data, given);
-      if (stats instanceof Promise) void stats.then(cpuPaint);
-      else cpuPaint(stats);
-      return;
+      if (stats instanceof Promise) return stats.then(cpuPaint);
+      cpuPaint(stats);
+      return Promise.resolve();
     }
+    let settle = () => {};
+    const settled = new Promise<void>(resolve => { settle = resolve; });
     const launch = () => {
       gpuCmapBusyRef.current[slot] = true;
       // Upload data only if it actually changed (new reconstruction), not on every contrast tick.
@@ -2535,6 +2853,11 @@ function Explore() {
       // completed GPU image transfers directly, without reading RGBA into JS.
       Promise.resolve(slotStats(slot, data, given)).then(stats => {
         const { vmin, vmax, min, max } = percentileWindow(stats.histogram, pctLo, pctHi);
+        const painter = gpuPainterRef.current;
+        if (painter) {
+          paint(null, min, max, stats, { painter, slot, vmin, vmax, lutName: cmapName, lut });
+          return;
+        }
         return engine.renderSlotsToImageBitmapAsync([slot], [{ vmin, vmax }], false, cmapName, lut).then(bitmaps => {
           const bitmap = bitmaps?.[0];
           if (!bitmap) return;
@@ -2546,24 +2869,29 @@ function Explore() {
         }
       }).finally(() => {
         gpuCmapBusyRef.current[slot] = false;
+        settle();
         const pending = gpuCmapPendingRef.current[slot];
         gpuCmapPendingRef.current[slot] = null;
         pending?.();
       });
     };
     if (gpuCmapBusyRef.current[slot]) {
+      // a replaced pending launch never runs: its caller is released now
+      gpuCmapPendingSettleRef.current[slot]?.();
       gpuCmapPendingRef.current[slot] = launch;
+      gpuCmapPendingSettleRef.current[slot] = settle;
     } else {
       launch();
     }
+    return settled;
   }, [panelFrames, slotStats]);
 
   /* --- Re-render real-space displays when additive views/contrast/cmap changes. --- */
-  const renderRealDisplay = React.useCallback((phase: Float32Array, w: number, h: number) => {
-    renderPanel(phase, w, h, 0, cmapRef.current, contrastRange[0], contrastRange[1]);
+  const renderRealDisplay = React.useCallback((phase: Float32Array, w: number, h: number, given?: FrameStats): Promise<void> => {
+    const painted = renderPanel(phase, w, h, 0, cmapRef.current, contrastRange[0], contrastRange[1], given);
     const extras = extraRealViewsRef.current;
     const objectAmp = objectAmplitudeRef.current;
-    // only an object-wave array carries an amplitude (SSB recovers the phase alone)
+    // only an object-wave array carries an amplitude (direct ptychography recovers the phase alone)
     const amp = objectAmp && objectAmp.length === phase.length && (extras.amp || extras.complex) ? objectAmp : null;
     ampDataRef.current = amp ? { data: amp, w, h } : null;
     if (amp && extras.amp) {
@@ -2572,7 +2900,10 @@ function Explore() {
       setAmpOff(null);
     }
     setComplexOff(amp && extras.complex ? renderComplexPhaseOffscreen(phase, w, h, contrastRange[0], contrastRange[1], amp).canvas : null);
+    return painted;
   }, [contrastRange, renderPanel]);
+  const renderRealDisplayRef = React.useRef(renderRealDisplay);
+  renderRealDisplayRef.current = renderRealDisplay;
 
   /* --- Re-render FFT when its contrast/cmap changes (no FFT recompute).
          Uses the user-selected FFT colormap
@@ -2580,6 +2911,8 @@ function Explore() {
   const rerenderFFT = React.useCallback(() => {
     const fft = fftMagRef.current;
     if (!fft) return;
+    // A spectrum still being computed on the GPU paints with its own statistics when it lands.
+    if (gpuFrameRef.current && slotStatsRef.current[1]?.data !== fft.mag) return;
     // Slot 1 holds the FFT magnitude.
     renderPanel(fft.mag, fft.w, fft.h, 1, fftCmap, fftContrastRange[0], fftContrastRange[1]);
   }, [fftContrastRange, fftCmap, renderPanel]);
@@ -2594,6 +2927,77 @@ function Explore() {
     renderRealDisplay(data, w, h);
   }, [renderRealDisplay]);
 
+  /* --- GPU frame: one upload of the phase, then its statistics, the Fourier panel and both
+         colormaps on the device; one frame at a time, only the newest waiting phase kept. --- */
+  const gpuFrameBusyRef = React.useRef(false);
+  const gpuFrameQueuedRef = React.useRef<{ data: Float32Array; w: number; h: number } | null>(null);
+  const fftReadbackTimerRef = React.useRef<number | null>(null);
+  const gpuFrameCountRef = React.useRef(0);
+  const fftHostRef = React.useRef<[Float32Array, Float32Array] | null>(null);
+  const renderFrameOnGPU = React.useCallback((data: Float32Array, w: number, h: number): boolean => {
+    const engine = gpuCmapRef.current;
+    const fft = displayFFTRef.current;
+    if (!engine || !gpuCmapReadyRef.current || !fft) return false;
+    if (!gpuFrameRef.current) {
+      if (!GPUFrameDisplay.compatible(engine, fft as unknown as { path: string })) return false;
+      gpuFrameRef.current = new GPUFrameDisplay(engine, fft as never);
+    }
+    if (gpuFrameBusyRef.current) {
+      gpuFrameQueuedRef.current = { data, w, h };
+      return true;
+    }
+    const gpuFrame = gpuFrameRef.current;
+    gpuFrameBusyRef.current = true;
+    const frame = ++gpuFrameCountRef.current;
+    const withFFT = showFFTRef.current;
+    engine.uploadData(0, data, w, h);
+    gpuSlotDataRef.current[0] = data;
+    let magnitude: Float32Array | null = null;
+    const [pw, ph] = GPUFrameDisplay.fftShape(w, h);
+    if (withFFT) {
+      // Host copy of the spectrum, filled from the device only when the panel is idle (cursor readout,
+      // peak picks). Two buffers alternate: each frame needs its own identity, not a fresh 16 MB array.
+      let pair = fftHostRef.current;
+      if (!pair || pair[0].length !== pw * ph) pair = fftHostRef.current = [new Float32Array(pw * ph), new Float32Array(pw * ph)];
+      magnitude = pair[frame % 2];
+      const slot = engine.slots[1];
+      if (!slot || slot.width !== pw || slot.height !== ph) engine.uploadData(1, magnitude, pw, ph);
+      gpuSlotDataRef.current[1] = magnitude;
+      fftMagRef.current = { mag: magnitude, w: pw, h: ph };
+    } else {
+      fftMagRef.current = null;
+    }
+    const paints: Promise<unknown>[] = [];
+    void gpuFrame.process(0, w, h, withFFT ? 1 : null, phaseStats => {
+      slotStatsRef.current[0] = { data, stats: phaseStats };
+      paints.push(renderRealDisplayRef.current(data, w, h, phaseStats));
+    }, withFFT ? fftStatsRegionRef.current(pw, ph, w, h) : null).then(result => {
+      if (result.fft && magnitude) {
+        // an unchanged shape must not re-render the widget on every frame
+        if (fftSourceShapeRef.current[0] !== h || fftSourceShapeRef.current[1] !== w) setFFTSourceShape([h, w]);
+        slotStatsRef.current[1] = { data: magnitude, stats: result.fft.stats };
+        const range = fftAutoContrastRef.current ? [1, 99] : fftContrastRef.current;
+        paints.push(renderPanel(magnitude, pw, ph, 1, fftCmapRef.current, range[0], range[1], result.fft.stats));
+        if (fftReadbackTimerRef.current !== null) window.clearTimeout(fftReadbackTimerRef.current);
+        const spectrum = magnitude;
+        fftReadbackTimerRef.current = window.setTimeout(() => {
+          fftReadbackTimerRef.current = null;
+          if (gpuFrameCountRef.current !== frame || gpuFrameBusyRef.current || gpuFrameRef.current !== gpuFrame) return;
+          void gpuFrame.readSlot(1, spectrum).catch(() => {});
+        }, 150);
+      }
+      return Promise.all(paints);
+    }).catch(error => {
+      setWebgpuRuntimeStatus(`WebGPU display failed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      gpuFrameBusyRef.current = false;
+      const queued = gpuFrameQueuedRef.current;
+      gpuFrameQueuedRef.current = null;
+      if (queued) renderAllRef.current(queued.data, queued.w, queued.h);
+    });
+    return true;
+  }, [renderPanel]);
+
   const renderAll = React.useCallback((data: Float32Array, w: number, h: number) => {
     rawPhaseRef.current = { data, w, h };
     // Auto-contrast: new data snaps clip back to 1-99 percentile on every
@@ -2607,6 +3011,7 @@ function Explore() {
       const fftRange = fftContrastRef.current;
       if (fftRange[0] !== 1 || fftRange[1] !== 99) setFftContrastRange([1, 99]);
     }
+    if (renderFrameOnGPU(data, w, h)) return;
     renderRealDisplay(data, w, h);
 
     // Skip the FFT entirely when hidden: saves 30-80 ms/frame.
@@ -2615,7 +3020,8 @@ function Explore() {
       return;
     }
 
-    const applyFFT = (fftResult: { mag: Float32Array; pw: number; ph: number; stats: FrameStats }) => {
+    const applyFFT = (fftResult: { mag: Float32Array; pw: number; ph: number; stats: FrameStats }, width: number, height: number) => {
+      setFFTSourceShape(previous => previous[0] === height && previous[1] === width ? previous : [height, width]);
       fftMagRef.current = { mag: fftResult.mag, w: fftResult.pw, h: fftResult.ph };
       const fftRange = fftContrastRef.current;
       const fftCmapName = fftCmapRef.current;
@@ -2634,10 +3040,11 @@ function Explore() {
         displayFFTRef.current = fft;
         const display = fftMagnitudeDisplayRef.current;
         if (!display) throw new Error("FFT display is closed.");
-        return computeFFTMagnitude(fft, display, phase, width, height);
+        return computeFFTMagnitude(fft, display, phase, width, height,
+          (pw, ph) => fftStatsRegionRef.current(pw, ph, width, height));
       }).then(fftResult => {
         if (gen !== fftGenRef.current) return;  // stale: newer data already rendered
-        applyFFT(fftResult);
+        applyFFT(fftResult, width, height);
       }).catch(error => {
         if (gen !== fftGenRef.current) return;
         setFFTOff(null);
@@ -2654,17 +3061,17 @@ function Explore() {
       return;
     }
     launchFFT(data, w, h);
-  }, [renderPanel, renderRealDisplay]);
+  }, [renderPanel, renderRealDisplay, renderFrameOnGPU]);
 
   const renderAllRef = React.useRef(renderAll);
   renderAllRef.current = renderAll;
   const pendingWebgpuDisplay = React.useRef<{
-    engine: WebGPUSSBBackend; phase: Float32Array; width: number; height: number;
+    engine: WebGPUDirectBackend; phase: Float32Array; width: number; height: number;
   } | null>(null);
   const webgpuDisplayFrame = React.useMemo(() => latestFrame(() => {
     const next = pendingWebgpuDisplay.current;
     pendingWebgpuDisplay.current = null;
-    if (!next || webgpuSsbRef.current !== next.engine) return;
+    if (!next || webgpuDirectRef.current !== next.engine) return;
     if (negatePhaseRef.current) {
       for (let i = 0; i < next.phase.length; i++) next.phase[i] = -next.phase[i];
     }
@@ -2687,7 +3094,7 @@ function Explore() {
     }
   };
   const runFrontendPreview = React.useCallback((c10Val: number, c12Val: number, phi12Val: number, rotationVal: number): boolean => {
-    const engine = webgpuSsbRef.current;
+    const engine = webgpuDirectRef.current;
     if (!engine) return false;
     webgpuDiagnostic.cancel();
     setLoss(null);
@@ -2706,7 +3113,7 @@ function Explore() {
       aberrations: { C10_nm: c10Val, C12_nm: c12Val, phi12_deg: phi12Val },
       higherOrderAberrations: higherOrderRef.current,
       scanDetectorRotationDeg: rotationVal,
-      upsamplingFactor: upsamplingFactorRef.current,
+      upsample: upsampleRef.current,
       numBrightFieldPixels: bfCount,
       reducedBrightField: !isFull,
       computeLoss: false,
@@ -2714,7 +3121,7 @@ function Explore() {
     };
     const phaseKey = JSON.stringify(request);
     reconstruct(engine, request).then(result => {
-      if (webgpuSsbRef.current !== engine) return;
+      if (webgpuDirectRef.current !== engine) return;
       webgpuPhaseKeyRef.current = phaseKey;
       if (result.loss != null) {
         setLoss(result.loss);
@@ -2738,7 +3145,7 @@ function Explore() {
         renderPreviewPhase(phase, result.width, result.height);
       }
     }).catch(err => {
-      if (webgpuSsbRef.current !== engine) return;
+      if (webgpuDirectRef.current !== engine) return;
       const message = err instanceof Error ? err.message : String(err);
       console.error("[showptycho] WebGPU preview failed", err);
       if (webgpuStandalone) {
@@ -2750,7 +3157,7 @@ function Explore() {
         });
         setWebgpuRuntimeStatus(`WebGPU folder failed: ${message}`);
       } else {
-        webgpuSsbRef.current = null;
+        webgpuDirectRef.current = null;
         setWebgpuLoadProgress({ stage: "error", message: "WebGPU ptychography failed", detail: message, percent: 0 });
         setWebgpuRuntimeStatus(`WebGPU preview failed: ${message}`);
       }
@@ -2760,7 +3167,7 @@ function Explore() {
 
   frontendPreviewRef.current = runFrontendPreview;
   const runFrontendFull = React.useCallback((c10Val: number, c12Val: number, phi12Val: number, rotationVal: number): boolean => {
-    const engine = webgpuSsbRef.current;
+    const engine = webgpuDirectRef.current;
     if (!webgpuStandalone || !engine) return false;
     webgpuDiagnostic.cancel();
     if (webgpuInFlightRef.current) {
@@ -2775,7 +3182,7 @@ function Explore() {
       aberrations: { C10_nm: c10Val, C12_nm: c12Val, phi12_deg: phi12Val },
       higherOrderAberrations: higherOrderRef.current,
       scanDetectorRotationDeg: rotationVal,
-      upsamplingFactor: upsamplingFactorRef.current,
+      upsample: upsampleRef.current,
       numBrightFieldPixels: bfCount,
       reducedBrightField: !isFull,
       computeLoss: false,
@@ -2790,13 +3197,13 @@ function Explore() {
       runFrontendPreview(c10Val, c12Val, phi12Val, rotationVal);
       return true;
     }
-    if (!isFull) return true;
+    if (!isFull || !computeLoss) return true;
     webgpuDiagnostic.schedule(signal => {
-      if (webgpuSsbRef.current !== engine) return;
+      if (webgpuDirectRef.current !== engine) return;
       webgpuInFlightRef.current = true;
       setBusy(true);
       reconstruct(engine, { ...request, computeLoss: true, diagnosticOnly: true, signal }).then(result => {
-        if (signal.aborted || webgpuSsbRef.current !== engine || webgpuPhaseKeyRef.current !== phaseKey) return;
+        if (signal.aborted || webgpuDirectRef.current !== engine || webgpuPhaseKeyRef.current !== phaseKey) return;
         setLoss(result.loss);
       }).catch(err => {
         if (signal.aborted) return;
@@ -2805,20 +3212,20 @@ function Explore() {
       }).finally(drainWebgpuQueue);
     });
     return true;
-  }, [effectiveTotalBf, runFrontendPreview, fullBrightFieldCount, webgpuStandalone, webgpuDiagnostic]);
+  }, [effectiveTotalBf, runFrontendPreview, fullBrightFieldCount, webgpuStandalone, webgpuDiagnostic, computeLoss]);
 
   frontendFullRef.current = runFrontendFull;
-  const previousUpsamplingFactorRef = React.useRef(upsamplingFactor);
+  const previousUpsampleRef = React.useRef(upsample);
   React.useEffect(() => {
-    if (previousUpsamplingFactorRef.current === upsamplingFactor) return;
-    previousUpsamplingFactorRef.current = upsamplingFactor;
+    if (previousUpsampleRef.current === upsample) return;
+    previousUpsampleRef.current = upsample;
     if (webgpuStandalone) frontendPreviewRef.current?.(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, rotationDegRef.current);
-  }, [upsamplingFactor, webgpuStandalone]);
-  shouldCommitOnReleaseRef.current = dragBfRef.current > 0 || !!webgpuSsbRef.current;
+  }, [upsample, webgpuStandalone]);
+  shouldCommitOnReleaseRef.current = effectiveTotalBf > 0 || !!webgpuDirectRef.current;
   const standaloneInitialRenderRef = React.useRef(false);
   React.useEffect(() => {
     if (!webgpuStandalone || standaloneInitialRenderRef.current) return;
-    if (!webgpuSsbRef.current || !initRef.current) return;
+    if (!webgpuDirectRef.current || !initRef.current) return;
     if (rawPhaseRef.current) return;
     standaloneInitialRenderRef.current = true;
     const total = Math.max(1, effectiveTotalBf || 1);
@@ -2843,14 +3250,14 @@ function Explore() {
          without throttling those pile up and arrive interleaved, which makes the
          phase and histogram flicker/jitter while dragging. --- */
   const contrastRafRef = React.useRef<number | null>(null);
-  const renderRealDisplayRef = React.useRef(renderRealDisplay);
-  renderRealDisplayRef.current = renderRealDisplay;
   React.useEffect(() => {
     if (!rawPhaseRef.current || contrastRafRef.current !== null) return;
     contrastRafRef.current = requestAnimationFrame(() => {
       contrastRafRef.current = null;
       const latest = rawPhaseRef.current;
-      if (latest) renderRealDisplayRef.current(latest.data, latest.w, latest.h);
+      // A phase still on its way through the GPU frame paints with the current contrast when it lands.
+      if (latest && gpuFrameRef.current && slotStatsRef.current[0]?.data !== latest.data) return;
+      if (latest) void renderRealDisplayRef.current(latest.data, latest.w, latest.h);
     });
   }, [cmap, contrastRange, extraRealViews]);
   React.useEffect(() => {
@@ -2929,7 +3336,7 @@ function Explore() {
     if (regionContextRef.current) return;
     if (!sampleFitJson || sampleFitJson === appliedSampleFitRef.current) return;
     appliedSampleFitRef.current = sampleFitJson;
-    let fit: { C10_nm: number; C12_nm: number; phi12_deg: number; sample_tilt_mrad: [number, number]; depth_spread_nm: number };
+    let fit: { C10_nm: number; C12_nm: number; phi12_deg: number; sample_tilt_mrad: [number, number]; depth_spread_nm: number; phase_ready?: boolean };
     try { fit = JSON.parse(sampleFitJson); } catch { return; }
     const fittedSample = { tiltRowMrad: fit.sample_tilt_mrad[0], tiltColMrad: fit.sample_tilt_mrad[1], depthSpreadNm: fit.depth_spread_nm };
     sampleRef.current = fittedSample;
@@ -2937,7 +3344,7 @@ function Explore() {
     setSample(fittedSample);
     setSampleOpen(true);
     setC10(fit.C10_nm); setC12(fit.C12_nm); setPhi12(fit.phi12_deg);
-    sendCommit(fit.C10_nm, fit.C12_nm, fit.phi12_deg);
+    if (!fit.phase_ready) sendCommit(fit.C10_nm, fit.C12_nm, fit.phi12_deg);
   }, [sampleFitJson, sendCommit, regionalMode]);
 
   const fitIdentity = JSON.stringify(activeFit?.fit_record || null);
@@ -2950,13 +3357,13 @@ function Explore() {
     const values = context ? (activeFit ? {
       c10:activeFit.aberrations.C10_nm,c12:activeFit.aberrations.C12_nm,phi12:activeFit.aberrations.phi12_deg,
       sample:{tiltRowMrad:activeFit.sample_tilt_mrad[0],tiltColMrad:activeFit.sample_tilt_mrad[1],depthSpreadNm:activeFit.depth_spread_nm},
-      higher:{},loss:null,
+      higher:Object.fromEntries(Object.entries(activeFit.aberrations).filter(([key]) => !['C10_nm','C12_nm','phi12_deg'].includes(key))),loss:null,
     } : null) : {
       c10:overview.C10_nm ?? overviewAutoC10,c12:overview.C12_nm ?? overviewAutoC12,
       phi12:overview.phi12_deg ?? overviewAutoPhi12,
       sample:{tiltRowMrad:overviewSample.sample_tilt_mrad?.[0] || 0,
         tiltColMrad:overviewSample.sample_tilt_mrad?.[1] || 0,depthSpreadNm:overviewSample.depth_spread_nm || 0},
-      higher:JSON.parse(model.get('higher_order_aberrations_json') || '{}'),loss:overview.loss ?? autoLoss,
+      higher:JSON.parse(model.get('higher_order_aberrations_json') || '{}'),loss:'loss' in overview ? overview.loss : autoLoss,
     };
     if (!values) return;
     adoptingPanelRef.current=true;
@@ -2972,6 +3379,19 @@ function Explore() {
   const doReset = () => {
     // auto values arrive asynchronously from Python; skip until init landed
     if (!initRef.current) return;
+    // The reset is the latest intent: drop queued drag values and scheduled panel or strength frames, and
+    // make the fitted values current now, so nothing sent before React re-renders carries pre-reset values.
+    pendingDragRef.current = null;
+    panelFrame.cancel();
+    reconstructionFrame.cancel();
+    sliderPendingRef.current = {};
+    sliderVals.current = { c10: autoC10, c12: autoC12, phi12: autoPhi12 };
+    const fittedHigher = regionalMode && regionalReference
+      ? Object.fromEntries(Object.entries(regionalReference.aberrations).filter(([key]) => !['C10_nm', 'C12_nm', 'phi12_deg'].includes(key))) as Record<string, number>
+      : JSON.parse(fittedHigherOrderJson || '{}');
+    higherOrderRef.current = fittedHigher;
+    adoptingPanelRef.current = true;
+    setHigherOrder(fittedHigher);
     setC10(autoC10); setC12(autoC12); setPhi12(autoPhi12);
     if (regionalMode && regionalReference) {
       const restored={tiltRowMrad:regionalReference.sample_tilt_mrad[0],tiltColMrad:regionalReference.sample_tilt_mrad[1],depthSpreadNm:regionalReference.depth_spread_nm};
@@ -2982,8 +3402,17 @@ function Explore() {
         const restored={tiltRowMrad:fittedSample.sample_tilt_mrad[0],tiltColMrad:fittedSample.sample_tilt_mrad[1],depthSpreadNm:fittedSample.depth_spread_nm};
         sampleRef.current=restored; adoptingPanelRef.current=true; setSample(restored);
       }
-      if(autoRotation != null) setRotationDeg(autoRotation);
+      if(autoRotation != null) {
+        rotationDegRef.current = autoRotation;
+        model.set("scan_detector_rotation_deg", autoRotation);
+      }
     }
+    // Restore the corrected model, including the preview toggle. The live
+    // request carries it with the optics so Python reconstructs only once.
+    previousTiltCorrectionRef.current = true;
+    samplePreviewRef.current = sampleRef.current;
+    model.set("tilt_correction", true);
+    if (webgpuStandalone) model.save_changes();
     sendCommit(autoC10, autoC12, autoPhi12, autoRotation ?? rotationDegRef.current);
   };
   const resetZoom = () => {
@@ -3055,9 +3484,17 @@ function Explore() {
       // the pin message and the manifest hold the physical angle in [0, 360); the slider may run below 0
       scan_detector_rotation_deg: wrapDegrees(rotationDeg ?? 0),
       display_negate_phase: !!displayNegatePhase,
-      loss: loss ?? 0,
+      loss: loss ?? null,
       starred: false,
       generated_at_utc: new Date().toISOString(),
+      reconstruction: reconstructionRef.current.method === "phase_of_mean" ? { method: "phase_of_mean" } : {
+        method: reconstructionRef.current.method,
+        phase_damp: reconstructionRef.current.phase_damp,
+        smoothness_inv_A: reconstructionRef.current.smoothness_inv_A,
+        detector_weighting: reconstructionRef.current.detector_weighting,
+        ...(reconstructionRef.current.method === "complex"
+          ? { amplitude_damp: reconstructionRef.current.amplitude_damp } : {}),
+      },
       phaseData: new Float32Array(phase.data),
       w: phase.w, h: phase.h,
       thumb: makeThumbnail(phase.data, phase.w, phase.h, cmapRef.current),
@@ -3107,14 +3544,14 @@ function Explore() {
         scan_detector_rotation_deg: wrapDegrees(rotationDeg ?? 0),
         display_negate_phase: !!displayNegatePhase,
         loss: loss ?? null,
-        num_bright_field_pixels: Math.round(dragBfRef.current || 0),
+        num_bright_field_pixels: Math.round(effectiveTotalBfRef.current || 0),
         notes: String(notes ?? ""),
         image: `snapshots/snapshot_${stamp}_C10_${slugPart(sliderVals.current.c10.toFixed(0))}.jpg`,
       };
       const next = [...folderSaves, record];
-      if (ssbFolderWritable()) {
-        await writeSSBFolderFile(record.image, jpeg);
-        await writeSSBFolderFile("snapshots/snapshots.json", JSON.stringify({ schema: SNAPSHOTS_SCHEMA, snapshots: next }, null, 2));
+      if (directFolderWritable()) {
+        await writeDirectFolderFile(record.image, jpeg);
+        await writeDirectFolderFile("snapshots/snapshots.json", JSON.stringify({ schema: SNAPSHOTS_SCHEMA, snapshots: next }, null, 2));
         setFolderSaves(next);
         setFolderSaveStatus(`Snapshot saved (${next.length})`);
       } else {
@@ -3137,7 +3574,7 @@ function Explore() {
   }, [setRotationDeg, setDisplayNegatePhase, rotationUiMin, rotationUiMax]);
   const downloadFolderSave = React.useCallback(async (record: FolderSaveRecord) => {
     try {
-      const bytes = await readSSBFolderBytes(record.image);
+      const bytes = await readDirectFolderBytes(record.image);
       downloadBlob(new Blob([bytes as unknown as BlobPart], { type: "image/jpeg" }), record.image.split("/").pop() || "save.jpg");
     } catch (err) {
       setFolderSaveStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3146,8 +3583,8 @@ function Explore() {
   const deleteFolderSave = React.useCallback(async (record: FolderSaveRecord) => {
     try {
       const next = folderSaves.filter((save) => save.id !== record.id);
-      await writeSSBFolderFile("snapshots/snapshots.json", JSON.stringify({ schema: SNAPSHOTS_SCHEMA, snapshots: next }, null, 2));
-      try { await deleteSSBFolderFile(record.image); } catch { /* image may already be gone */ }
+      await writeDirectFolderFile("snapshots/snapshots.json", JSON.stringify({ schema: SNAPSHOTS_SCHEMA, snapshots: next }, null, 2));
+      try { await deleteDirectFolderFile(record.image); } catch { /* image may already be gone */ }
       setFolderSaves(next);
       setFolderSaveStatus(`Deleted snapshot (${next.length} left)`);
     } catch (err) {
@@ -3176,6 +3613,7 @@ function Explore() {
           display_negate_phase: pin.display_negate_phase,
           loss: pin.loss,
           starred: pin.starred,
+          reconstruction: pin.reconstruction,
           generated_at_utc: pin.generated_at_utc,
           shape: [pin.h, pin.w],
         })),
@@ -3287,7 +3725,7 @@ function Explore() {
     if (shouldIgnoreWidgetShortcut(e.target, e.key)) return;
     let handled = true;
     if (e.key === "r" || e.key === "R") resetZoom();
-    // pins, sweeps and trials belong to an SSB session
+    // pins, sweeps and trials belong to a direct ptychography session
     else if (!tuning) handled = false;
     // P pins the current snapshot (the oldest is evicted once MAX_PINS is hit)
     else if (e.key === "p" || e.key === "P") doPin();
@@ -3343,21 +3781,29 @@ function Explore() {
     resizeDrag.current = { on: true, startY: e.clientY, startSize: shownPanelRef.current };
   }, []);
 
-  /* --- Scale bar: reciprocal pixel size for FFT --- */
-  const fftPixelSize = React.useMemo(() => {
-    const fft = fftMagRef.current;
-    if (!fft || !pixelSize || pixelSize <= 0) return 0;
-    // Reciprocal pixel size of the complete padded Fourier grid.
-    return 1.0 / (fft.w * pixelSize);
-  }, [pixelSize, fftOff]);
+  /* --- Frame the full FFT by physical frequency, independently of the phase zoom. --- */
+  const fftSampling = ptychoSession && scanSamplingA?.length === 2 && fftSourceShape.every(value => value > 0)
+    ? [scanSamplingA[0] * scanRows / fftSourceShape[0], scanSamplingA[1] * scanCols / fftSourceShape[1]]
+    : objectSamplingA;
+  const fftAutoZoom = fftAutoFrameZoom(fftOff?.width || 0, fftOff?.height || 0,
+    fftSampling || [], scanSamplingA || []);
+  fftStatsRegionRef.current = (pw, ph, w, h) => {
+    const sampling = ptychoSession && scanSamplingA?.length === 2
+      ? [scanSamplingA[0] * scanRows / h, scanSamplingA[1] * scanCols / w] : objectSamplingA;
+    return fftFrameRegion(pw, ph, fftAutoFrameZoom(pw, ph, sampling || [], scanSamplingA || []));
+  };
+  const fftView = { ...fftZoom, zoom: fftZoom.zoom * fftAutoZoom };
+  const fftReset = { ...ZOOM_RESET, zoom: fftAutoZoom };
+  const fftRealPixelSize = fftSampling?.[1] || pixelSize;
+  const fftPixelSize = fftOff && fftRealPixelSize > 0 ? 1 / (fftOff.width * fftRealPixelSize) : 0;
 
   /* --- Derived --- */
-  const delta = loss != null && autoLoss > 0 ? loss - autoLoss : null;
+  const delta = loss != null && autoLoss != null ? loss - autoLoss : null;
   const fftAsPanel = showFFT && fftPlacement === "panel";
   const fftAsInset = showFFT && fftPlacement === "inset";
   const realPanelCount = 1 + (extraRealViews.amp ? 1 : 0) + (extraRealViews.complex ? 1 : 0);
   const localPanelCount = localTiltEnabled ? JSON.parse(localImagesJson || "[]").filter((image:any)=>{
-    const fit=localConfig.fits?.find((fit:any)=>`${fit.label} · SSB`===image.label);
+    const fit=localConfig.fits?.find((fit:any)=>`${fit.label} · Direct`===image.label);
     return !fit||selectedRegions.some((region:any)=>region.id===fit.id);
   }).length : 0;
   const visiblePanelCount = realPanelCount + (fftAsPanel ? 1 : 0) + localPanelCount;
@@ -3521,6 +3967,34 @@ function Explore() {
             </Box>
           </Tooltip>
         )}
+        {tuning && (
+          <Tooltip title="Restore the fitted aberrations, rotation, tilt and depth, turn Tilt correction on, and return colormaps, contrast, method, damping and output sampling to the launch settings. Zoom is kept." placement="top" arrow>
+            <span>
+              <Button
+                size="small"
+                disabled={busy}
+                onClick={() => {
+                  doReset();
+                  updateSweepRange("c10", [c10UiMin, c10UiMax]);
+                  updateSweepRange("c12", [c12UiMin, c12UiMax]);
+                  updateSweepRange("phi12", [phi12UiMin, phi12UiMax]);
+                  updateSweepRange("rot", [rotationUiMin, rotationUiMax]);
+                  setCmap(launchCmapRef.current);
+                  setFftCmap("inferno");
+                  setContrastRange([1, 99]);
+                  setFftContrastRange([1, 99]);
+                  setAutoContrast(true);
+                  setFftAutoContrast(true);
+                  setSampling(launchSamplingRef.current);
+                  changeReconstruction({ ...launchReconstructionRef.current }, true);
+                }}
+                sx={compactButton(tc)}
+              >
+                Reset All
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {objectAmplitude && <>
         <Button
           size="small"
@@ -3554,7 +4028,7 @@ function Explore() {
           </Typography>
         )}
         {(cropRefitStatus || "").startsWith("Refit complete:") && (
-          <Typography sx={{ ...typography.value, color: STATUS_GOOD }}>SSB refit complete</Typography>
+          <Typography sx={{ ...typography.value, color: STATUS_GOOD }}>Refit complete</Typography>
         )}
         <Badge variant="dot" invisible={!showFFT && !cropSelecting && !scanCrop && editedRangeCount === 0}
           sx={{ "& .MuiBadge-badge": { bgcolor: tc.accent, right: 4, top: 4 } }}>
@@ -3572,6 +4046,24 @@ function Explore() {
           slotProps={{ paper: { ...themedMenuPaper, sx: { ...themedMenuPaper.sx, p: 1.25, maxWidth: "calc(100vw - 32px)" } } }}>
           <Box role="dialog" aria-label="View settings"
             sx={{ display: "flex", flexDirection: "column", gap: 1, fontFamily: WIDGET_UI_FONT, width: 280, maxWidth: "100%" }}>
+            {(upsampleAvailable || webgpuStandalone) && <Box component="label"
+              sx={{ ...typography.label, display: "inline-flex", alignItems: "center", gap: 1 }}>
+              Upsampling
+              <Select value={sampling ?? "auto"}
+                onChange={(event) => setSampling(event.target.value === "auto" ? "auto" : Number(event.target.value))}
+                size="small" sx={{ ...actionSelect, minWidth: 116 }}
+                MenuProps={themedMenuProps} inputProps={{ "aria-label": "Upsampling" }}
+                title="Reconstruct at the selected output sampling using the current fit.">
+                <MenuItem value="auto" disabled={Boolean(autoSamplingNote)}
+                  title={autoSamplingNote || "Choose from the acquisition calibration, up to 4×"}>
+                  Auto ({Math.min(autoFactor || 1, 4)}×)
+                </MenuItem>
+                {(webgpuStandalone ? [1, 2, 4, 8] : [1, 2, 3, 4, 8]).map(factor =>
+                  <MenuItem key={factor} value={factor}>{factor}×</MenuItem>)}
+              </Select>
+            </Box>}
+            {sampling === "auto" && samplingLimitNote && <Box role="status"
+              sx={{ ...typography.label, color: tc.textMuted }}>{samplingLimitNote}</Box>}
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <Box component="label" sx={{ ...typography.label, display: "inline-flex", alignItems: "center", gap: .5 }}>
                 Show FFT
@@ -3604,10 +4096,6 @@ function Explore() {
                     slotProps={{ input: { "aria-label": "FFT auto contrast" } }} size="small" sx={switchStyles.small} />
                 </Box>
               </Box>
-              <Histogram frame={panelFrames[1]}
-                vminPct={fftContrastRange[0]} vmaxPct={fftContrastRange[1]}
-                onRangeChange={(lo, hi) => { setFftContrastRange([lo, hi]); setFftAutoContrast(false); }}
-                width={240} height={48} tc={tc} />
             </>}
             {localTilt?.enabled && <Box component="details" onToggle={() => settingsPopover.current?.updatePosition()}
               sx={{ borderTop: `1px solid ${tc.border}`, pt: 1 }}>
@@ -3636,7 +4124,7 @@ function Explore() {
             </Box>}
             {tuning && cropRefitAvailable && <Box component="details" onToggle={() => settingsPopover.current?.updatePosition()}
               sx={{ borderTop: `1px solid ${tc.border}`, pt: 1 }}>
-              <Box component="summary" sx={{ ...typography.label, cursor: "pointer", color: cropSelecting || scanCrop ? tc.accent : tc.text }}>SSB Crop</Box>
+              <Box component="summary" sx={{ ...typography.label, cursor: "pointer", color: cropSelecting || scanCrop ? tc.accent : tc.text }}>Direct ptycho crop</Box>
               <Box component="label" sx={{ ...typography.label, display: "flex", alignItems: "center", justifyContent: "space-between", mt: 1 }}>
                 Draw Crop Region
                 <Switch checked={cropSelecting} size="small" sx={switchStyles.small}
@@ -3649,7 +4137,7 @@ function Explore() {
                   onClick={() => { resetCrop(); setSettingsAnchor(null); }}>Crop Reset</Button>
                 <Button size="small" sx={compactButton(tc)} disabled={busy || cropRefitPending || !scanCrop}
                   title="Refit the crop with the default fit, model-based and tilt-corrected"
-                  onClick={() => { requestCropRefit(); setSettingsAnchor(null); }}>Refit SSB (200 trials)</Button>
+                  onClick={() => { requestCropRefit(); setSettingsAnchor(null); }}>Refit (200 trials)</Button>
               </Box>
             </Box>}
           </Box>
@@ -3692,7 +4180,8 @@ function Explore() {
               onBoxChange={setFFTInsetBox}
               tc={tc}
               smooth={smooth}
-              pixelSize={pixelSize}
+              pixelSize={fftRealPixelSize}
+              autoZoom={fftAutoZoom}
             />
           ) : null}</>}
         />
@@ -3719,9 +4208,10 @@ function Explore() {
         {fftAsPanel && (
           <ImagePanel
             offscreen={fftOff} label="FFT" size={shownPanel} tc={tc}
-            zoom={fftZoom} onZoomChange={setFFTZoom}
+            zoom={fftView} resetZoom={fftReset}
+            onZoomChange={view => setFFTZoom({ ...view, zoom: view.zoom / fftAutoZoom })}
             showResize onResizeStart={startResize}
-            pixelSize={fftPixelSize} realSpacePixelSize={pixelSize}
+            pixelSize={fftPixelSize} realSpacePixelSize={fftRealPixelSize}
             imageWidth={fftMagRef.current?.w} isFFT
             rawData={fftFrameData}
           />
@@ -3738,32 +4228,53 @@ function Explore() {
           {previewError && <Box component="span" role="alert" sx={{ color: "#ef4444" }}> · {previewError}</Box>}
         </Typography>}
 
+        {tuning && <Box sx={controlBand(tc)}>
+          <Typography sx={typography.label}>Reconstruction</Typography>
+          <Select size="small" value={reconstructionControls.method}
+            inputProps={{ "aria-label": "Reconstruction method" }}
+            onChange={event => changeReconstruction({ method: event.target.value }, true)}
+            sx={{ ...typography.label, height: 28 }}>
+            <MenuItem value="phase_of_mean">Phase of mean</MenuItem>
+            <MenuItem value="phase" disabled={!regularizationAvailable || webgpuStandalone || !!localTiltJson}>Phase · experimental</MenuItem>
+            <MenuItem value="complex" disabled={!regularizationAvailable || webgpuStandalone || !!localTiltJson}>Amplitude + phase · experimental</MenuItem>
+          </Select>
+          {reconstructionControls.method !== "phase_of_mean" && <>
+            {(["phase_damp", ...(reconstructionControls.method === "complex" ? ["amplitude_damp"] : [])] as const).map(key => {
+              const name = key as "phase_damp" | "amplitude_damp";
+              const value = reconstructionControls[name];
+              return <DampingSlider key={name} name={name === "phase_damp" ? "Phase" : "Amplitude"} value={value}
+                onDrag={next => changeReconstruction({ [name]: next }, false, false)}
+                onCommit={next => changeReconstruction({ [name]: next }, true)} />;
+            })}
+            <Typography sx={typography.labelSmall}>Live CUDA reconstruction · phase image</Typography>
+          </>}
+          {previewError && <Typography role="alert" sx={{ ...typography.label, color: "#ef4444" }}>{previewError}</Typography>}
+        </Box>}
+
         {/* Controls + Histogram row */}
-        <Box sx={{ display: "flex", gap: `${SPACING.SM}px`, width: "100%" }}>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%" }}>
           {/* Left: stats + controls */}
-          <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
+          <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 280px", minWidth: 0, justifyContent: "center" }}>
             {/* Stats row: each readout gets a hover tooltip so new users know what the numbers mean */}
             <Box sx={controlBand(tc)}>
               {tuning && <>
               <Tooltip title="Defocus in nanometers.  Primary aberration: sets the probe's axial focus point relative to the sample.  Usually the first knob to get right." placement="top" arrow>
                 <Typography sx={{ ...typography.label, ...statChip(tc, Math.abs(c10) > 0), cursor: "help" }}>
-                  C10 <Box component="span" sx={{ color: tc.accent }}>{c10.toFixed(1)}</Box> nm
+                  C10 <HeldStatValue statKey="c10" value={c10} precision={1} listeners={heldStatListeners} color={tc.accent} /> nm
                 </Typography>
               </Tooltip>
               <Tooltip title="2-fold astigmatism magnitude in nanometers.  How asymmetric the probe is.  Paired with φ₁₂ (angle)." placement="top" arrow>
                 <Typography sx={{ ...typography.label, ...statChip(tc, Math.abs(c12) > 0), cursor: "help" }}>
-                  C12 <Box component="span" sx={{ color: tc.accent }}>{c12.toFixed(1)}</Box> nm
+                  C12 <HeldStatValue statKey="c12" value={c12} precision={1} listeners={heldStatListeners} color={tc.accent} /> nm
                 </Typography>
               </Tooltip>
               <Tooltip title="Angle of 2-fold astigmatism in degrees.  Only meaningful when C12 ≠ 0." placement="top" arrow>
                 <Typography sx={{ ...typography.label, ...statChip(tc, Math.abs(phi12) > 0), cursor: "help" }}>
-                  φ₁₂ <Box component="span" sx={{ color: tc.accent }}>{phi12.toFixed(1)}</Box>°
+                  φ₁₂ <HeldStatValue statKey="phi12" value={phi12} precision={1} listeners={heldStatListeners} color={tc.accent} />°
                 </Typography>
               </Tooltip>
               {loss != null && !regionalMode && (
-                <Tooltip title={hoActive
-                  ? "BF-disk phase variance from the full 14-coef kernel, a diagnostic: the default fit maximises the tilt-corrected model's agreement with the data, not this number.  Drag a higher-order slider and watch this number: lower = sharper reconstruction.  Compare to the HO=0 baseline to confirm your tuning actually helps."
-                  : "Variance of the reconstructed phase inside the BF (brightfield) disk, the central region of the diffraction pattern where the direct beam lands.  SSB uses that region's scattered intensity to recover phase; lower loss ≈ sharper reconstruction.  A diagnostic: the default fit maximises the tilt-corrected model's agreement with the data instead."} placement="top" arrow>
+                <Tooltip title={reconstructionControls.method === "phase_of_mean" ? "Phase variance across the corrected bright-field pixel images. Lower values indicate closer agreement between those images, not a guarantee of sharper or more accurate phase. The default fit optimizes model agreement; this is a separate diagnostic." : "Measurement disagreement for the selected direct model. Damping trades data agreement against stability. This value is not an independent resolution measurement."} placement="top" arrow>
                   <Typography sx={{ ...typography.label, ...statChip(tc, true), cursor: "help" }}>
                     loss <Box component="span" sx={{ color: tc.accent }}>{formatNumber(loss, 8)}</Box>
                     {delta != null && (
@@ -3811,7 +4322,7 @@ function Explore() {
                 <Typography
                   sx={{
                     ...typography.value,
-                    ...statChip(tc, !!webgpuSsbRef.current && !/failed|unavailable/i.test(webgpuRuntimeStatus)),
+                    ...statChip(tc, !!webgpuDirectRef.current && !/failed|unavailable/i.test(webgpuRuntimeStatus)),
                     maxWidth: 520,
                     whiteSpace: "nowrap",
                     overflow: "visible",
@@ -3824,7 +4335,7 @@ function Explore() {
               <Box sx={{ flex: 1 }} />
               {tuning && (
                 <Typography sx={{ ...typography.value, color: tc.textMuted, opacity: 0.7 }}>
-                  auto {autoC10?.toFixed(1)} / {autoC12?.toFixed(1)} / {autoPhi12?.toFixed(0)}°{!regionalMode ? ` = ${autoLoss?.toFixed(8)}` : ''}
+                  auto {autoC10?.toFixed(1)} / {autoC12?.toFixed(1)} / {autoPhi12?.toFixed(0)}°{!regionalMode && fitAgreement != null ? ` · agreement ${formatNumber(fitAgreement, 4)}` : ''}
                 </Typography>
               )}
             </Box>
@@ -3937,9 +4448,9 @@ function Explore() {
             </Box>
           </Box>
 
-          {/* Phase contrast stays beside the image controls; FFT contrast lives in Settings. */}
-          <Box sx={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 1, flexShrink: 0 }}>
-            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.25 }}>
+          {/* Keep contrast for every visible image together, including an inset FFT. */}
+          <Box sx={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 1, flexShrink: 0, ml: "auto" }}>
+            <Box role="group" aria-label="Phase contrast" sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.25 }}>
               <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>
                 Phase
               </Typography>
@@ -3953,6 +4464,22 @@ function Explore() {
                 tc={tc}
               />
             </Box>
+            {showFFT && <Box role="group" aria-label="FFT contrast"
+              sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.25 }}>
+              <Tooltip title="FFT intensity is log(1 + magnitude). Bar heights use log(1 + pixel count) to reveal smaller peaks. Contrast limits are unchanged; double-click the histogram to reset them.">
+                <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>FFT · log counts</Typography>
+              </Tooltip>
+              <Histogram
+                frame={panelFrames[1]}
+                logCounts
+                vminPct={fftContrastRange[0]}
+                vmaxPct={fftContrastRange[1]}
+                onRangeChange={(lo, hi) => { setFftContrastRange([lo, hi]); setFftAutoContrast(false); }}
+                width={110}
+                height={48}
+                tc={tc}
+              />
+            </Box>}
           </Box>
         </Box>
 
@@ -3996,21 +4523,21 @@ function Explore() {
               key: "c10" as AberKey, label: "C10", unit: "nm", value: c10, displayPrec: 1,
               tipFull: "C10: defocus.  Positive = overfocus, negative = underfocus.  The dominant aberration.",
               min: c10UiMin, max: c10UiMax, step: 0.1,
-              setValue: (value: number) => { dragSliderValue("c10", value); sendDrag(value, sliderVals.current.c12, sliderVals.current.phi12); },
+              setValue: (value: number) => { holdSliderValue("c10", value); sendDrag(value, sliderVals.current.c12, sliderVals.current.phi12); },
               commitValue: (value: number) => { commitSliderValue("c10", value); if (shouldCommitOnReleaseRef.current) sendCommit(value, sliderVals.current.c12, sliderVals.current.phi12); },
             },
             {
               key: "c12" as AberKey, label: "C12", unit: "nm", value: c12, displayPrec: 1,
               tipFull: "C12: 2-fold astigmatism magnitude.  Paired with φ₁₂.",
               min: c12UiMin, max: c12UiMax, step: 0.1,
-              setValue: (value: number) => { dragSliderValue("c12", value); sendDrag(sliderVals.current.c10, value, sliderVals.current.phi12); },
+              setValue: (value: number) => { holdSliderValue("c12", value); sendDrag(sliderVals.current.c10, value, sliderVals.current.phi12); },
               commitValue: (value: number) => { commitSliderValue("c12", value); if (shouldCommitOnReleaseRef.current) sendCommit(sliderVals.current.c10, value, sliderVals.current.phi12); },
             },
             {
               key: "phi12" as AberKey, label: "φ₁₂", unit: "°", value: phi12, displayPrec: 0,
               tipFull: "φ₁₂: angle of 2-fold astigmatism.  Meaningful when C12 ≠ 0.",
               min: phi12UiMin, max: phi12UiMax, step: 1,
-              setValue: (value: number) => { dragSliderValue("phi12", value); sendDrag(sliderVals.current.c10, sliderVals.current.c12, value); },
+              setValue: (value: number) => { holdSliderValue("phi12", value); sendDrag(sliderVals.current.c10, sliderVals.current.c12, value); },
               commitValue: (value: number) => { commitSliderValue("phi12", value); if (shouldCommitOnReleaseRef.current) sendCommit(sliderVals.current.c10, sliderVals.current.c12, value); },
             },
             {
@@ -4018,11 +4545,15 @@ function Explore() {
               tipFull: "Scan-detector rotation: angle between scan axes and detector axes.  Sweep to find the sharpest reconstruction.",
               min: rotationUiMin, max: rotationUiMax, step: 0.1,
               setValue: (value: number) => {
-                setRotationDeg(value);
-                if (webgpuSsbRef.current) sendDrag(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, value);
+                rotationHeldRef.current = value; rotationDegRef.current = value;
+                sendDrag(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, value);
               },
               commitValue: (value: number) => {
+                rotationHeldRef.current = value; rotationDegRef.current = value;
                 if (shouldCommitOnReleaseRef.current) sendCommit(sliderVals.current.c10, sliderVals.current.c12, sliderVals.current.phi12, value);
+                // after the request: Python already holds this value, so the sync changes nothing there
+                rotationHeldRef.current = null;
+                setRotationDeg(value);
               },
             },
           ] as const).filter(aberration => !regionalMode || aberration.key !== 'rot').map(aberration => {
@@ -4030,56 +4561,19 @@ function Explore() {
             const isActiveSweep = sweepMainKeys(sweepParam).includes(aberration.key);
             const isAtFull = range[0] === aberration.min && range[1] === aberration.max;
             const sliderWidth = aberration.key === "rot" ? ROTATION_SLIDER_WIDTH : ABERRATION_SLIDER_WIDTH;
-            const visibleValue = Math.max(aberration.min, Math.min(aberration.max, aberration.value));
             return (
               <Box key={aberration.key} sx={{ flex: `0 0 ${sliderWidth}px`, width: sliderWidth, minWidth: 0 }}>
-                <Tooltip title={aberration.tipFull} placement="top" arrow>
-                  <Typography sx={{ ...typography.labelSmall, color: tc.textMuted, mb: -0.5, cursor: "help" }}>
-                    {aberration.label} <b>{aberration.value.toFixed(aberration.displayPrec)}</b> {aberration.unit}
-                    {!isAtFull && (
-                      <span style={{ color: isActiveSweep ? tc.accent : tc.textMuted, opacity: 0.65 }}>
-                        {" ["}{range[0].toFixed(aberration.displayPrec)}, {range[1].toFixed(aberration.displayPrec)}{"]"}
-                      </span>
-                    )}
-                  </Typography>
-                </Tooltip>
-                {/* Show3D-style 3-thumb slider: outer thumbs = sweep stoppers,
-                    middle thumb = current value.  disableSwap keeps order stable;
-                    to push the value outside the stopper window, drag the relevant
-                    stopper first. */}
-                <Slider
-                  value={[range[0], visibleValue, range[1]]}
-                  min={aberration.min} max={aberration.max} step={aberration.step}
-                  disabled={controlsLocked}
-                  disableSwap
-                  onChange={(_, value, activeThumb) => {
-                    const thumbs = value as number[];
-                    if (activeThumb === 1) {
-                      aberration.setValue(thumbs[1]);
-                    } else {
-                      updateSweepRange(aberration.key, [thumbs[0], thumbs[2]]);
-                    }
-                  }}
-                  onChangeCommitted={(_, value) => {
-                    const thumbs = value as number[];
-                    aberration.commitValue(thumbs[1]);
-                  }}
-                  size="small"
-                  sx={{
-                    py: 0.5,
-                    "& .MuiSlider-thumb[data-index='0']": {
-                      width: 8, height: 8, bgcolor: tc.textMuted, opacity: isActiveSweep ? 1 : 0.7,
-                    },
-                    "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 },
-                    "& .MuiSlider-thumb[data-index='2']": {
-                      width: 8, height: 8, bgcolor: tc.textMuted, opacity: isActiveSweep ? 1 : 0.7,
-                    },
-                  }}
+                <AberrationSlider
+                  label={aberration.label} unit={aberration.unit} value={aberration.value} displayPrec={aberration.displayPrec}
+                  tip={aberration.tipFull} min={aberration.min} max={aberration.max} step={aberration.step}
+                  range={range} isActiveSweep={isActiveSweep} isAtFull={isAtFull} disabled={controlsLocked} tc={tc}
+                  onDrag={aberration.setValue} onCommit={aberration.commitValue}
+                  onRange={(next) => updateSweepRange(aberration.key, next)}
                 />
               </Box>
             );
           })}
-          <Tooltip title="Negate the displayed phase.  SSB's phase is defined only up to ± (sign-ambiguous).  Use this to match the expected contrast of your sample.  Display only: it does not re-run reconstruction or change any fitted number (display_negate_phase)." placement="top" arrow>
+          <Tooltip title="Negate the displayed phase.  The direct ptychography phase is defined only up to ± (sign-ambiguous).  Use this to match the expected contrast of your sample.  Display only: it does not re-run reconstruction or change any fitted number (display_negate_phase)." placement="top" arrow>
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, cursor: "help" }}>
               <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>Negate phase (display)</Typography>
               <Switch disabled={regionalMode} checked={!!displayNegatePhase} onChange={(_, checked) => setDisplayNegatePhase(checked)} size="small" />
@@ -4114,6 +4608,7 @@ function Explore() {
           activeCount={hoActiveCount}
           values={higherOrder}
           setValues={setHigherOrder}
+          onDrag={dragHigherOrder}
           onCommit={commitSample}
         />}
 
@@ -4186,11 +4681,21 @@ function Explore() {
           </Tooltip>
           <Box sx={{ width: "1px", height: 20, bgcolor: tc.border, mx: 0.5, alignSelf: "center" }} />
 
-          <Tooltip title="Save calibration.json in this ShowPtycho project for later sessions and downstream analysis." placement="top" arrow>
+          <Tooltip title="Save calibration.json and the displayed phase as calibration_phase.png in this ShowPtycho project for later sessions and downstream analysis." placement="top" arrow>
             <Button
               size="small" variant="outlined"
               startIcon={<SaveIcon sx={{ fontSize: 14 }} />}
-              onClick={() => { if (webgpuStandalone) { void doFolderSave(); } else { setSaveTrigger((saveTrigger ?? 0) + 1); } }}
+              onClick={() => {
+                if (webgpuStandalone) { void doFolderSave(); return; }
+                // the PNG takes the window the phase panel paints with, sent before the trigger
+                const phase = rawPhaseRef.current;
+                if (phase) {
+                  const { vmin, vmax } = percentileClip(phase.data, contrastRange[0], contrastRange[1]);
+                  setSavedVmin(vmin);
+                  setSavedVmax(vmax);
+                }
+                setSaveTrigger((saveTrigger ?? 0) + 1);
+              }}
               sx={{ ...compactButton(tc), height: ACTION_CONTROL_HEIGHT, color: STATUS_GOOD, borderColor: STATUS_GOOD, width: 76, minWidth: 76 }}
             >
               Save
@@ -4253,10 +4758,8 @@ function Explore() {
           </Box>
         )}
 
-        {/* Optuna trials strip: scrollable, loss-ranked.  Click any tile to
-            preview that trial's aberrations.  Best-loss tile is highlighted so
-            the user can immediately verify that Nelder-Mead's refined point is near
-            (or past) Optuna's best. */}
+        {/* Retained search candidates carry their own optics and sample model.
+            The fitted reference includes the later local refinement. */}
         {trials.length > 0 && (
           <Box sx={{ pt: `${SPACING.XS}px`, borderTop: `1px solid ${tc.border}` }}>
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ mb: `${SPACING.XS}px` }}>
@@ -4264,32 +4767,27 @@ function Explore() {
                 onClick={() => setTrialsExpanded(expanded => !expanded)}
                 sx={{ cursor: "pointer", userSelect: "none", color: tc.textMuted, fontSize: 10, fontFamily: "monospace" }}
               >
-                {trialsExpanded ? "▼" : "▶"} Search trials ({trials.length}) · {trialObjectiveText} · best first · click to preview
+                {trialsExpanded ? "▼" : "▶"} Trial previews ({trials.length}) · {trialObjectiveText} · best first · click to preview
               </Box>
               <Box sx={{ flex: 1 }} />
               {trials.length > 0 && (
-                <Tooltip title={`The search scored ${trials.length} trials on ${trialObjectiveText}, then the local solver refined the best one. The refined fit's loss is the phase-variance diagnostic (${autoLoss?.toFixed(8) ?? '-'}); a trial shows its own objective's score: agreement (higher is better) for the default model fit, phase variance (lower is better) for the backup.`} placement="top" arrow>
+                <Tooltip title={`Showing ${trials.length} retained trial previews ranked by ${trialObjectiveText}; this is not the total search budget. The refined fit's model agreement is ${fitAgreement == null ? 'not measured' : formatNumber(fitAgreement, 4)} (higher is better)${tiltFitGain != null ? `; the tilt fit gains ${tiltFitGain.toFixed(2)}× over standard direct ptychography` : ''}. A trial shows its own objective's score: model agreement (higher is better) or phase variance (lower is better). Different objectives cannot be compared directly.`} placement="top" arrow>
                   <Typography sx={{ ...typography.value, color: tc.textMuted, cursor: "help" }}>
-                    Refined fit {autoLoss?.toFixed(8) ?? '-'}  ·  best trial {trialScoreText(trials[0])}
+                    Fit agreement {fitAgreement == null ? 'not measured' : formatNumber(fitAgreement, 4)}{tiltFitGain != null ? `  ·  tilt gain ${tiltFitGain.toFixed(2)}×` : ''}
                   </Typography>
                 </Tooltip>
               )}
             </Stack>
             {trialsExpanded && (
               <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ overflowX: "auto", pb: 0.5 }}>
-                {/* First tile: the Nelder-Mead refined result.  This is what
-                    ssb.aberrations contains after ssb.refine() and what the
-                    widget's "auto" reference is set to.  Visually distinct from
-                    the Optuna tiles so users know it's the refined winner, not
-                    a raw trial. */}
+                {/* The complete fitted reference, including higher-order terms. */}
                 {autoC10 != null && autoC12 != null && autoPhi12 != null && (
                   <Tooltip title="The local solver refined the best Optuna trial.  Click to jump sliders back to this result.  This is what 'auto' in the stats bar refers to." placement="top" arrow>
                     <Box
                       onClick={() => {
                         setActiveTrialRank(null);
                         setViewPin(null);
-                        setC10(autoC10); setC12(autoC12); setPhi12(autoPhi12);
-                        sendCommit(autoC10, autoC12, autoPhi12);
+                        doReset();
                       }}
                       sx={{
                         flexShrink: 0, cursor: "pointer", userSelect: "none",
@@ -4305,7 +4803,7 @@ function Explore() {
                           Refined fit
                         </Typography>
                         <Typography sx={{ fontSize: 11, color: STATUS_GOOD, fontFamily: "monospace", fontWeight: "bold" }}>
-                          {autoLoss?.toFixed(8) ?? '-'}
+                          {fitAgreement == null ? '' : `agr ${formatNumber(fitAgreement, 4)}`}
                         </Typography>
                       </Stack>
                       <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: tc.textMuted, whiteSpace: "nowrap" }}>
@@ -4338,7 +4836,7 @@ function Explore() {
                           #{trial.rank + 1}
                         </Typography>
                         <Typography sx={{ fontSize: 11, color: tc.accent, fontFamily: "monospace", fontWeight: "bold" }}
-                          title={trial.objective === "agreement" ? "Model agreement (the default fit), higher is better" : "Phase variance (the backup search), lower is better"}>
+                          title={trial.objective === "agreement" ? "Raw search objective of the default fit (unnormalised model agreement), higher is better; it ranks trials and is not the fit agreement" : "Phase variance (the backup search), lower is better"}>
                           {trialScoreText(trial)}
                         </Typography>
                       </Stack>

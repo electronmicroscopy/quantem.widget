@@ -1,6 +1,6 @@
 # quantem.widget dead code and hygiene pass (2026-10-08)
 
-Branch `hygiene`, from `platform` (`afbe104`). Bob: "remove dead code and do code
+Branch `hygiene`, from `platform` (`afbe104`). The maintainer: "remove dead code and do code
 hygiene a lot as you know my preferences". Order of work: correctness bugs, dead
 code with evidence, hygiene to the lab's code style, then proof that numbers and
 pixels did not change.
@@ -65,7 +65,7 @@ Not dead after all: the Show3D `!offline` / per-frame `frame_bytes` branches the
 2026-10-07 record listed were already removed on `platform`. knip's ten "unused
 exports" are all used inside their own module and exported for tests.
 
-Debug instrumentation shipped to users, kept pending Bob's decision (the perf
+Debug instrumentation shipped to users, kept pending the maintainer's decision (the perf
 measurements read it): `window.__quantemShow2DPerf` (Show2D, about 110 lines),
 `window.__quantemShow3DPerf` (Show3D, about 370 lines, and 8 lines in
 `display/colormaps.ts`), `window.__quantemShow3DSlicesPerf` (Show3DSlices, about
@@ -116,7 +116,7 @@ key or signature changed.
 | browser tier (headed Chrome, NVIDIA adapter, WebGPU on and removed) | 24 passed | 26 tests: 24 passed, 2 intermittent (the Show3D inset-wheel image check, the Show4DSTEM live panel sizes); both files rerun twice: 12 of 12, as on the base |
 | all-widget driver, 10 widgets, WebGPU on and off | every widget passes on and off (Plot2D and Show3DSlices on a rerun: a hover lost to pointer activity on the display, a kernel-connection race) | every widget passes on and off (ShowDiffraction off on a rerun: the same kernel-connection race); every checked step and panel equal to the before run (32 x 32 luminance grids: 0 difference, at most 0.06 of 255 on ShowCIF and Show3DSlices) except one Show2D hover step on WebGPU, 242 pixels along the readout box edge, which the base commit reproduces exactly when run again now: the display, not the code |
 
-## 5. For Bob: proposed public renames (not done)
+## 5. For the maintainer: proposed public renames (not done)
 
 - Show3DSlices traits `slice_x`, `slice_y`, `nx`, `ny`, `nz` (x/y for array axes);
   the JS oblique segment points `{x, y}` that feed them.

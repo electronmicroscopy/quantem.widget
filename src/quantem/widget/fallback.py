@@ -1,13 +1,21 @@
 """Static-preview fallback machinery shared by the display widgets.
 
-JupyterLab never rehydrates a widget from saved state on a cold reopen: the
-widget-view output renders "Error displaying widget: model not found" and the
-cell goes black. Each widget therefore publishes a SEPARATE display_data
-sibling carrying an encoded static render (generated from its
-``_static_png_b64``); the live frontend hides the sibling while the interactive
-view is mounted, and a cold reopen (no widget JS) shows the image instead of
-nothing. ``save_state=True`` embeds the full interactive state, so no sibling
-is emitted.
+What a cold reopen shows depends on JupyterLab's "Save Widget State
+Automatically" setting (measured 2026-11-10, JupyterLab 4.6.3 and
+jupyterlab_widgets 3.0.16, docs/2026-11-10-static-preview-cold-reopen.md):
+
+- off (the default): no widget state is saved, every widget-view output renders
+  "Error displaying widget: model not found", and only a SEPARATE display_data
+  sibling shows an image. Each widget therefore publishes that sibling, an
+  encoded static render from its ``_static_png_b64``; the live frontend hides it
+  while the interactive view is mounted.
+- on: the saved model is rehydrated. ``save_state=False`` strips the pixel
+  traits, so the model carries a compact preview (``_static_fallback_image``)
+  and mounts showing it; ``save_state=True`` reopens fully interactive and emits
+  no sibling.
+
+The image MIME inside the widget-view bundle is never shown by JupyterLab; it is
+for viewers without a widget renderer.
 
 Mixed into every widget with a static preview ahead of AnyWidget. Each
 class supplies ``_static_png_b64()`` (its own widget-format render) and
@@ -91,8 +99,8 @@ class StaticFallbackMixin:
     def _store_static_fallback_preview(self, png_b64: str) -> None:
         """Keep a compact preview in the model so a saved notebook reopens with an image.
 
-        JupyterLab can rehydrate a saved anywidget model even when ``save_state=False``
-        stripped the pixel traits; without this in-model preview the widget mounts blank.
+        With "Save Widget State Automatically" on, JupyterLab rehydrates the saved model even when
+        ``save_state=False`` stripped the pixel traits; without this in-model preview the widget mounts blank.
         """
         if self._save_state:
             return

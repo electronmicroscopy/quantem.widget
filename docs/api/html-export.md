@@ -4,12 +4,12 @@
 
 1. **Widget-level HTML**: `widget.export_html(...)` writes one standalone widget
    viewer. Use this when a single Show1D / Show2D / Show3D / Show3DSlices /
-   Show4DSTEM / ShowDiffraction / ShowPDF view is the artifact.
+   Show4DSTEM / ShowPDF view is the artifact.
 2. **Notebook-level HTML**: `jupyter nbconvert --to html notebook.ipynb`
    exports a whole notebook with its saved widget state (add `--execute` to
    rerun it first). Use this for reports and
    tutorials that combine text, figures, and multiple widgets.
-3. **GitHub preview notebook**: `quantem github notebook.ipynb --no-execute`
+3. **GitHub preview notebook**: `quantem-widget github notebook.ipynb --no-execute`
    keeps a notebook readable on GitHub by replacing live widgets with compressed
    images of the widget UI.
 
@@ -47,7 +47,6 @@ not write back to the `.ipynb` or `.html` file.
 | Show3D | `export_html(path=None, *, title=None, encoding="full", image_bin=None, max_mb=80)` |
 | Show3DSlices | `export_html(path=None, *, title=None, encoding="full")` |
 | Show4DSTEM | `export_html(path=None, *, title=None, dtype="uint8", detector_bin=1, scan_bin=1, export_kind="interactive", dataset_scope="unhidden")` |
-| ShowDiffraction | `export_html(path=None, *, title=None)` |
 | ShowPDF | `export_html(path=None, *, title=None, mode="single", encoding="full", downsample=None)` |
 | ShowPtycho | `export(path)` writes a folder: the widget page over exact bright-field counts; the browser builds transient BF-indexed reducers in WebGPU |
 
@@ -70,7 +69,7 @@ Widgets that expose an in-widget **Export** button share these synced traits
 | `export_filename` | Python -> JS | Suggested download filename |
 
 The Show2D, Show3D and Show3DSlices menus send `{"encoding": "full" | "uint8", "id": ..., "filename": ..., "download": true}`
-(Show3D adds `image_bin`), the names `export_html(encoding=)` takes; Show1D and ShowDiffraction send only the id, the file name
+(Show3D adds `image_bin`), the names `export_html(encoding=)` takes; Show1D sends only the id, the file name
 and the download flag. A Show3D GIF request carries `"mode": "gif"` and, once the browser has saved a payload, every widget sends
 `{"mode": "clear"}` to release it. ShowPDF sends `{"mode": "single", "encoding": "full" | "uint8", ...}` with the
 download flag. Python checks the packing as an `export_html` call is, builds the page bytes into
@@ -86,7 +85,6 @@ the kernel's working directory instead, as `export_html()` does.
 | Show3D | `full`, `uint8` | `1`, `2`, `4`, `8` (uint8 only) | `uint8` stores display-scaled volume data; image_bin is a mean bin |
 | Show3DSlices | `full`, `uint8` | none | `uint8` packs against the global range |
 | Show4DSTEM | `dtype="uint8"`, `"uint16"` | `detector_bin`, `scan_bin`: `1`, `2`, `4`, `8` | mean bin; `uint8` clips counts above 255 and says how many; `export_kind="interactive"` packs the counts into the page and refuses above 2 GiB, naming the least binning that fits; `export_kind="report"` writes static PNG virtual-image pages with no raw 4D |
-| ShowDiffraction | `full` (float32) | none | exact float32 frames |
 | ShowPDF | `full`, `uint8` | none | `full` stores the float32 curves; `uint8` adds every scan position's radial profile (8 bits per k bin) so mask, probe and line selections recompute in the browser |
 | DiffractionSim | `full` | none | no image data; embeds the crystal reflection list, the settings and the Kikuchi reference when computed; `presets=` embeds more structures for the crystal menu |
 
@@ -97,7 +95,7 @@ When the exact data is too large for one file, Show2D and Show3D refuse above
 `max_mb` and name the smaller options (`encoding="uint8"`, `image_bin=2` or
 `4`); pass `max_mb=None` to force the size. Show4DSTEM interactive exports
 also stay one file, with the packed counts inside the page. The CLI WebGPU
-route (`quantem show4dstem ... --backend webgpu --html`) instead keeps the data
+route (`quantem-widget show4dstem ... --backend webgpu --html`) instead keeps the data
 beside the page and serves it with `Show4DSTEM.command`: `index.html`,
 `Show4DSTEM.command`, `.viewer/`, and
 anonymous `dataset_NN_master.h5` / `dataset_NN_data_*.h5` links. Double-click
@@ -127,15 +125,15 @@ Use `export_kind="interactive"` when the reader must keep changing detector ROIs
 offline in the browser. It embeds a binned raw-4D payload and runs the
 virtual-detector math in WebGPU. This can be much larger than a report. The
 payload is the viewer's 4D array. A live viewer over `quantem.gpu.io.load`
-acquisitions, including `Show4DSTEM.from_folder(...)`, reads that array in small
-scan windows, so the export copies every acquisition to host memory at the
-chosen dtype and binning while the GPU keeps only the encoded storage.
+acquisitions reads that array in small scan windows, so the export copies every
+acquisition to host memory at the chosen dtype and binning while the GPU keeps
+only the encoded storage.
 
 For raw HDF5 masters, prefer the CLI WebGPU folder route when the user wants
 native detector sampling without a notebook:
 
 ```bash
-quantem show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8
+quantem-widget show4dstem /data/session --backend webgpu --html --count 7 --detector-bin 1 --dtype uint8
 ```
 
 Choose `dtype="uint8"` for compact browse payloads and `dtype="uint16"` when
@@ -187,10 +185,10 @@ HTML export and GitHub preview solve different problems:
 |---|---|---:|---|
 | normal `.ipynb` saved from Jupyter | notebook with widget state | yes, in Jupyter | continuing work |
 | `jupyter nbconvert --to html notebook.ipynb` | standalone HTML page | yes, in a browser | sharing an interactive report |
-| `quantem github notebook.ipynb --no-execute` | optional notebook copy with compressed widget pictures | no | GitHub notebook preview |
+| `quantem-widget github notebook.ipynb --no-execute` | optional notebook copy with compressed widget pictures | no | GitHub notebook preview |
 
 GitHub does not run widget JavaScript. Use the hosted documentation, Colab,
-Jupyter, or the nbconvert HTML for real interaction. The `quantem github` command is
+Jupyter, or the nbconvert HTML for real interaction. The `quantem-widget github` command is
 only for a separate non-interactive notebook copy for GitHub's native renderer;
 never run it in place on the canonical tutorial notebooks.
 

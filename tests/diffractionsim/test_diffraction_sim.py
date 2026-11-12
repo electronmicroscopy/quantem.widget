@@ -91,7 +91,7 @@ def test_constructor_is_keyword_only_after_crystal():
     assert params[0].name == "crystal"
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[1:])
     names = {p.name for p in params}
-    assert {"energy_keV", "semiangle_mrad", "panel_width_px", "save_state", "state"} <= names
+    assert {"voltage_kV", "semiangle_mrad", "panel_width_px", "save_state", "state"} <= names
     assert not {"energy_ev", "semiconv_mrad", "size"} & names
 
 
@@ -156,7 +156,7 @@ def test_defaults_and_zone_axis():
     assert widget.crystal.name == "Si"
     assert widget.presets == DiffractionSim.presets_available()
     assert widget.pattern_range_inv_A == pytest.approx(3.0)
-    assert widget.energy_keV == 200.0
+    assert widget.voltage_kV == 200.0
     assert widget.title == "Diffraction Simulator"
     assert widget.widget_version == resolve_widget_version()
     assert json.loads(widget.crystal_json)["n_reflections"] > 0
@@ -189,7 +189,7 @@ def test_k_max_change_recomputes_reflections():
 @needs_crystal
 def test_energy_change_recomputes_wavelength():
     widget = _sim("Al (fcc)")
-    widget.energy_keV = 300
+    widget.voltage_kV = 300
     data = json.loads(widget.crystal_json)
     assert data["energy_ev"] == 300e3
     assert data["wavelength"] == pytest.approx(0.0196875, abs=1e-6)
@@ -203,8 +203,8 @@ def test_energy_change_recomputes_wavelength():
 @pytest.mark.parametrize(
     ("trait", "value", "match"),
     [
-        ("energy_keV", 0.0, "energy_keV"),
-        ("energy_keV", float("nan"), "energy_keV"),
+        ("voltage_kV", 0.0, "voltage_kV"),
+        ("voltage_kV", float("nan"), "voltage_kV"),
         ("k_max_inv_A", 20.0, "k_max_inv_A"),
         ("thickness_A", -5.0, "thickness_A"),
         ("thickness_A", float("inf"), "thickness_A"),
@@ -318,7 +318,7 @@ def test_save_and_load_roundtrip(tmp_path):
     from quantem.widget import DiffractionSim
 
     widget = _sim(
-        "Ti (hcp)", zone_axis=[1, 0, 0], mode="cbed", energy_keV=120, k_max_inv_A=3.0,
+        "Ti (hcp)", zone_axis=[1, 0, 0], mode="cbed", voltage_kV=120, k_max_inv_A=3.0,
         pattern_range_inv_A=2.5, thickness_A=640, cmap="viridis", n_cells=[2, 1, 3],
     )
     path = tmp_path / "nested" / "ti.json"
@@ -366,7 +366,7 @@ def test_state_from_other_widget_is_rejected(tmp_path):
     from quantem.widget.utils.state_io import save_state_file
 
     path = tmp_path / "other.json"
-    save_state_file(path, "ShowDiffraction", {"title": "x"})
+    save_state_file(path, "Show2D", {"title": "x"})
     with pytest.raises(ValueError, match="cannot load into 'DiffractionSim'"):
         _sim(state=path)
 

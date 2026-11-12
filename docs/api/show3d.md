@@ -6,6 +6,18 @@ panels, paged galleries and standalone HTML and GIF exports. See the
 
 ## Reference
 
+Use the same layout keywords as Show2D:
+
+```python
+viewer = Show3D(stacks, size="medium", columns=2)
+viewer.columns = 3
+```
+
+Use `rows=2` instead to calculate columns from the panel count on each page.
+When both are supplied, the grid must hold every panel. Sizes are per image:
+small 300, medium 450, large 600 or xlarge 900 CSS pixels. The default remains
+four columns; `rows=1` puts every panel in one row.
+
 ```{eval-rst}
 .. autoclass:: quantem.widget.show3d.Show3D
    :members:
@@ -17,6 +29,7 @@ panels, paged galleries and standalone HTML and GIF exports. See the
 | Control | Trait | Expected effect |
 | --- | --- | --- |
 | Slice slider, arrow keys | `slice_idx` | Canvas shows that frame |
+| Frame thumbnails | `thumbnails`, `thumbnail_columns`; on with `mode="stream"` | A scrollable strip of square thumbnails left of the viewer, as tall as the image. Hovering one shows that frame; clicking it moves the slider there; the header switches 1, 2 or 3 across. The highlight follows playback |
 | Play / pause, reverse, boomerang | `playing`, `reverse`, `boomerang` | Auto-advances at `fps`, flips direction, ping-pongs at the ends |
 | FPS field | `fps` | Playback rate, capped at 60 fps |
 | Loop range, bookmarks, custom path | `loop`, `loop_start`, `loop_end`, `bookmarked_frames`, `playback_path` | Playback confined to a range or an explicit frame order |
@@ -24,13 +37,13 @@ panels, paged galleries and standalone HTML and GIF exports. See the
 | Colormap dropdown | `cmap`, `panel_cmaps` | Shared by default; More > Color shared unlocks per-panel colormaps |
 | Smooth toggle | `smooth` | Off by default: each data pixel is drawn as a sharp block (nearest neighbour). On: bilinear interpolation wherever the canvas enlarges a frame, its FFT or the kymograph. Display only; the data are unchanged |
 | Contrast | `auto_contrast`, `percentile_low`, `percentile_high`, `vmin`, `vmax`, `vmin_per_panel`, `vmax_per_panel`, `contrast_preset`, `log_scale` | Percentile or fixed ranges, per stack or per panel |
-| Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols`, `panel_gap_px` | Panels arrange in rows; linked zoom and pan move all |
+| Panel layout (multi-panel) | `n_panels`, `link_panels`, `columns`, `panel_gap_px` | Panels arrange in rows; linked zoom and pan move all |
 | Panel visibility and order | `hidden_panels`, `selected_panels`, `panel_order` | Hover actions collapse or reorder panels without touching data |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()` | Shows and stars one page of panels at a time |
 | Local panel annotations | `panel_annotations` | In-image labels per panel, placed by corner, point or box |
 | Geometric panel overlays | `panel_overlays` | Circle and rectangle overlays in data or relative coordinates; More > Overlay Edit moves them live |
 | Rich panel titles | `panel_titles`, `panel_title_spans` | Titles may carry `text` / `math` / `color` spans such as `λ` and `χ²` |
-| Viewer chrome preset | `ui_mode` plus `show_title`, `show_stats`, `show_scale_bar` | Shared display presets; see [Viewer UI controls](viewer-ui) |
+| Viewer chrome preset | `mode` plus `show_title`, `show_stats`, `show_scale_bar` | Shared display presets; see [Viewer UI controls](viewer-ui) |
 | Scale bar | `pixel_size`, `pixel_unit`, `show_scale_bar` | Physical scale bar from `sampling` / `units` or a `Dataset3d`; the ROI preview scale bar, line-profile axis and FFT d-spacing use the same unit |
 | Statistics | `show_stats` | Optional mean/min/max/std readout. Like the ROI statistics, line profile, FFT and cursor value it describes the frame as analysed (moving average, alignment, compare and difference applied), never the denoised or frequency-filtered image |
 | FFT | `show_fft`, `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom`, `fft_window` | FFT of the current frame below, beside or inside every panel |
@@ -41,6 +54,32 @@ panels, paged galleries and standalone HTML and GIF exports. See the
 | More menu: Sub-pixel align, Kymograph | `subpixel_align_enabled`, `subpixel_align_reference`, `show_kymograph` | Browser-side drift alignment and a space-time view of the drawn profile |
 | ROI and line profile | `roi_active`, `roi_list`, `roi_selected_idx`, `profile_line`, `profile_width` | Single-panel ROI with a per-frame mean plot; line profile across the frame |
 | Export button | `export_request`, `export_status` | Writes standalone HTML or GIF from the live widget |
+
+## Frame thumbnails
+
+To see a whole recording at a glance, open the strip of frame thumbnails beside
+the viewer:
+
+```python
+from quantem.widget import Show3D
+
+Show3D([images, images.cumsum(axis=0)], panel_titles=["frame", "sum so far"],
+       title="HAADF", link_contrast=False, mode="stream")
+```
+
+`mode="stream"` is the interactive layout plus the strip, and
+`Show3D.stream()` opens in it. Any other mode takes `thumbnails=True`, and
+`thumbnail_columns=1`, `2` (default) or `3` sets how many go across.
+`thumbnails=False` turns the strip off in stream mode.
+
+The thumbnails are drawn on the GPU from the frames the viewer already holds
+there, so a large stack gets no second full-size copy: each visible thumbnail
+needs about a third of a megabyte, and thumbnails scrolled far out of view give
+their memory back. Each thumbnail shows the first visible panel, averaged down
+from every source pixel and stretched to its own mean ± 3 standard deviations,
+so a few bright pixels do not flatten the rest. The viewer and the data keep
+their native pixels. A thumbnail needs the WebGPU display; without it, the strip
+says why instead of drawing on the CPU.
 
 ## Large stacks
 
@@ -71,27 +110,6 @@ for next_frame in acquisition:
     w.set_image(np.stack(frames), labels=[f"frame {i + 1}" for i in range(len(frames))])
     w.slice_idx = len(frames) - 1
 ```
-
-## Watch a growing frame folder
-
-`Show3D.from_folder(...)` plays every matching image file as the next frame of
-one stack and appends new files in place. `file_types` accepts one extension
-or a list; `pattern` filters names; both apply when given. A missing folder is
-created when `watch=True`. Supported files include EMD, TIFF, PNG, NumPy,
-DM3/DM4, JPEG, BMP and GIF.
-
-```python
-w = Show3D.from_folder("/data/session/reconstruction", file_types="tif", pattern="frame_*", watch_interval=2.0)
-new_frames = w.poll_folder()   # scan now; return newly appended indices
-w.stop_folder_watch()          # pause background scans
-w.watch_folder(interval=1.0)   # resume
-w.close()                      # stop watching and close the widget
-```
-
-Folder watching is append-only: existing frames are never duplicated or
-rewritten, incomplete files wait for a later poll, and an incompatible shape is
-reported without blocking later frames. Use `Show2D.from_folder` when each file
-should be its own gallery panel.
 
 ## Paged galleries
 

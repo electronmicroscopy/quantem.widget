@@ -20,7 +20,7 @@ counts exactly and is still much smaller than `float32`.
 Use `uint8` only when you want a lightweight preview or tutorial copy. It is
 fast and small, but it can saturate real counts above 255. `load` always keeps
 the detector's own dtype; `uint8` appears only where you choose it, such as
-`export_html(dtype="uint8")` or `quantem show4dstem ... --html --dtype uint8`.
+`export_html(dtype="uint8")` or `quantem-widget show4dstem ... --html --dtype uint8`.
 
 ## Size estimates
 
@@ -60,7 +60,7 @@ Show4DSTEM(loaded)
 
 The same call fits every common GPU size, because the encoded acquisition is a
 small fraction of the dense array. Memory pressure comes from what you read or
-reconstruct from it, such as large bounded reads or SSB workspaces.
+reconstruct from it, such as large bounded reads or direct ptychography workspaces.
 
 Check the GPU before and after a large load with `quantem.widget.profile()`:
 
@@ -205,8 +205,8 @@ viewer.close()   # closes the ipywidget comm/model
 loaded.close()   # returns the encoded storage to the GPU
 ```
 
-A viewer from `Show4DSTEM.from_folder(...)` owns the acquisitions it loaded;
-`viewer.free()` or `viewer.close()` closes them.
+A viewer opened from a path, `Show4DSTEM("scan_master.h5")`, owns the
+acquisition it loaded; `viewer.free()` or `viewer.close()` closes it.
 
 If memory is still occupied after this pattern, another variable, notebook, or
 kernel still owns it. A small residual allocation can remain because CUDA keeps

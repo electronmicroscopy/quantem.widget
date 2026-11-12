@@ -1,4 +1,4 @@
-"""Tests for the ``quantem`` CLI: Show4DSTEM routing and the GitHub notebook copy.
+"""Tests for the ``quantem`` CLI: Show2D/Show3D pages, Show4DSTEM routing and the GitHub notebook copy.
 
 4D-STEM rendering needs a GPU + real master files, so it is exercised manually
 (see docs); here we cover the routing logic, which runs on CPU.
@@ -377,8 +377,8 @@ def test_github_prepare_prefers_static_scientific_preview(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_cli_exposes_only_show4dstem_and_github(capsys):
-    """Top-level help, expect exactly the two kept subcommands; no command is a usage error."""
+def test_cli_exposes_the_page_viewer_and_github_commands(capsys):
+    """Top-level help lists show2d, show3d, show4dstem and github; no command is a usage error."""
 
     with pytest.raises(SystemExit) as missing:
         cli.main([])
@@ -389,9 +389,9 @@ def test_cli_exposes_only_show4dstem_and_github(capsys):
     assert shown.value.code == 0
     output = capsys.readouterr().out
 
-    assert "show4dstem" in output
-    assert "github" in output
-    for retired in ("showptycho", "show2d", "show3d", "showdiffraction", "html"):
+    for command in ("show2d", "show3d", "show4dstem", "github"):
+        assert command in output
+    for retired in ("showptycho", "showdiffraction", "html"):
         assert f" {retired} " not in output
 
 
@@ -403,24 +403,24 @@ def test_user_errors_print_one_line_and_bugs_keep_their_traceback(tmp_path, monk
     np.save(tmp_path / "scan.npy", np.ones((4, 4, 8, 8), np.uint16))
     monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
     monkeypatch.setattr(reader, "ceiling", lambda device=None: 1000)
-    assert cli.main(["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--out", str(tmp_path / "out")]) == 1
+    assert cli.main(["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--save-dir", str(tmp_path / "out")]) == 1
     lines = capsys.readouterr().err.splitlines()
-    assert lines[0].startswith("quantem: skipped scan: scan.npy: the dense (4, 4, 8, 8) array needs")
-    assert lines[1:] == ["quantem: every master failed to export (see messages above)"]
+    assert lines[0].startswith("quantem-widget: skipped scan: scan.npy: the dense (4, 4, 8, 8) array needs")
+    assert lines[1:] == ["quantem-widget: every master failed to export (see messages above)"]
     assert cli.main(["show4dstem", str(tmp_path / "missing_master.h5"), "--no-open"]) == 1
-    assert capsys.readouterr().err.startswith("quantem: ")
+    assert capsys.readouterr().err.startswith("quantem-widget: ")
 
     def raises(error):
         def command(args):
             raise error
         return command
 
-    monkeypatch.setattr(cli, "_prepare_github", raises(ImportError("quantem github needs Playwright: pip install playwright")))
+    monkeypatch.setattr(cli, "_prepare_github", raises(ImportError("quantem-widget github needs Playwright: pip install playwright")))
     assert cli.main(["github", str(tmp_path / "x.ipynb")]) == 1
-    assert capsys.readouterr().err == "quantem: quantem github needs Playwright: pip install playwright\n"
+    assert capsys.readouterr().err == "quantem-widget: quantem-widget github needs Playwright: pip install playwright\n"
     monkeypatch.setattr(cli, "_prepare_github", raises(MemoryError()))
     assert cli.main(["github", str(tmp_path / "x.ipynb")]) == 1
-    assert capsys.readouterr().err == "quantem: MemoryError\n"
+    assert capsys.readouterr().err == "quantem-widget: MemoryError\n"
     for bug in (TypeError("unsupported operand"), ImportError("cannot import name 'x'", name="quantem.widget.show2d")):
         monkeypatch.setattr(cli, "_prepare_github", raises(bug))
         with pytest.raises(type(bug)):
@@ -437,12 +437,11 @@ def test_show4dstem_cli_count_defaults_to_full_detector(tmp_path, monkeypatch):
         seen["discover_path"] = str(path)
         return [str(tmp_path / "scan_0_master.h5"), str(tmp_path / "scan_1_master.h5")]
 
-    def fake_render(masters, label, args, *, source_path=None):
+    def fake_render(masters, label, args):
         seen["masters"] = masters
         seen["label"] = label
         seen["detector_bin"] = args.detector_bin
         seen["backend"] = args.backend
-        seen["source_path"] = source_path
         return tmp_path / "viewer.ipynb"
 
     def fake_launch(notebook, *, no_open):
@@ -460,7 +459,6 @@ def test_show4dstem_cli_count_defaults_to_full_detector(tmp_path, monkeypatch):
     assert seen["label"] == tmp_path.name
     assert seen["detector_bin"] == 1
     assert seen["backend"] == "auto"
-    assert seen["source_path"] == tmp_path.resolve()
     assert seen["notebook"] == tmp_path / "viewer.ipynb"
     assert seen["no_open"] is True
 
@@ -552,7 +550,7 @@ def test_show4dstem_html_over_qem_files_writes_the_streaming_folder(tmp_path, mo
 
     monkeypatch.setattr("quantem.widget.show4dstem.export.write_qem_bundle", fake_bundle)
     monkeypatch.setattr(cli, "_open_show4dstem_command", lambda command, *, no_open: seen.update(opened=command))
-    assert cli.main(["show4dstem", *map(str, paths), "--html", "--out", str(tmp_path / "out"), "--no-open"]) == 0
+    assert cli.main(["show4dstem", *map(str, paths), "--html", "--save-dir", str(tmp_path / "out"), "--no-open"]) == 0
     assert seen["files"] == paths
     assert seen["out_dir"] == tmp_path / "out" / "2_datasets_show4dstem_webgpu" and seen["title"] == "2_datasets"
     assert seen["opened"] == seen["out_dir"] / "Show4DSTEM.command"
@@ -597,7 +595,7 @@ def test_render_show4dstem_webgpu_h5_uses_anonymous_h5_urls(
     monkeypatch.setattr("quantem.widget.show4dstem.widget.master_contract", fake_contract)
     monkeypatch.setattr("quantem.widget.show4dstem.export.write_webgpu_bundle", fake_export)
     monkeypatch.setattr(qw, "Show4DSTEM", FakeShow4DSTEM)
-    args = SimpleNamespace(detector_bin=1, dtype="uint8", out=str(tmp_path / "out"), title=None, verbose=False)
+    args = SimpleNamespace(detector_bin=1, dtype="uint8", save_dir=str(tmp_path / "out"), title=None, verbose=False)
 
     html = cli._render_4dstem_webgpu_h5(masters, "private_folder", args)
 
@@ -644,71 +642,25 @@ def test_show4dstem_dataset_label_uses_coordinates_when_available():
     assert cli._show4dstem_dataset_label("unknown_master.h5", 2) == "Dataset 3"
 
 
-def test_render_show4dstem_folder_notebook_records_the_count(tmp_path):
-    """C7: generated folder notebooks preserve the seven-entry gate options."""
-    args = SimpleNamespace(backend="auto", detector_bin=1, out=str(tmp_path))
+def test_render_show4dstem_notebook_reads_every_selected_master(tmp_path):
+    """C7: a generated notebook opens exactly the seven selected masters."""
+    args = SimpleNamespace(backend="auto", detector_bin=1, save_dir=str(tmp_path))
+    masters = [str(tmp_path / f"tilt_{idx:02d}_master.h5") for idx in range(7)]
 
-    notebook = cli._render_4dstem_notebook(
-        [str(tmp_path / f"tilt_{idx:02d}_master.h5") for idx in range(7)],
-        "seven",
-        args,
-        source_path=tmp_path,
-    )
+    notebook = cli._render_4dstem_notebook(masters, "seven", args)
 
-    text = notebook.read_text(encoding="utf-8")
-    assert "Show4DSTEM.from_folder(" in text
-    assert "backend=" not in text
-    assert "max_masters=7" in text
-    assert "min_masters=7" in text
-    assert "watch=False" in text
-    assert "detector_bin" not in text and "dtype" not in text
+    code = "".join(json.loads(notebook.read_text(encoding="utf-8"))["cells"][1]["source"])
+    assert f"masters = {masters!r}" in code and "read_4dstem(masters)" in code
+    assert "backend=" not in code
+    assert "detector_bin" not in code and "dtype" not in code
 
 
 
 def test_show4dstem_subcommand_writes_notebook(tmp_path):
     (tmp_path / "scan_master.h5").write_bytes(b"\x00")
     dest = tmp_path / "out"
-    assert cli.main(["show4dstem", str(tmp_path / "scan_master.h5"), "--no-open", "--out", str(dest)]) == 0
+    assert cli.main(["show4dstem", str(tmp_path / "scan_master.h5"), "--no-open", "--save-dir", str(dest)]) == 0
     assert list(dest.glob("*.ipynb"))
-
-
-def test_show4dstem_folder_watch_writes_live_notebook(tmp_path):
-    source = tmp_path / "live"
-    source.mkdir()
-    (source / "scan_000_master.h5").write_bytes(b"\x00")
-    dest = tmp_path / "out"
-
-    assert cli.main([
-        "show4dstem",
-        str(source),
-        "--watch",
-        "--scan-size",
-        "512",
-        "--watch-interval",
-        "1.5",
-        "--no-open",
-        "--out",
-        str(dest),
-    ]) == 0
-
-    notebooks = list(dest.glob("*_live.ipynb"))
-    assert len(notebooks) == 1
-    import json
-
-    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
-    assert "Show4DSTEM.from_folder(" in code
-    assert "scan_size=512" in code
-    assert "backend=" not in code
-    assert "watch=True, watch_interval=1.5" in code
-
-
-def test_show4dstem_watch_requires_live_folder_notebook(tmp_path):
-    master = tmp_path / "scan_master.h5"
-    master.write_bytes(b"\x00")
-
-    assert cli.main(["show4dstem", str(master), "--watch", "--no-open"]) == 1
-    assert cli.main(["show4dstem", str(tmp_path), "--watch", "--html", "--no-open"]) == 1
-
 
 
 def test_show4dstem_html_cli_threads_export_dtype(tmp_path, monkeypatch) -> None:
@@ -721,7 +673,7 @@ def test_show4dstem_html_cli_threads_export_dtype(tmp_path, monkeypatch) -> None
     seen = []
     export = Show4DSTEM.export_html
     monkeypatch.setattr(Show4DSTEM, "export_html", lambda self, path, **kwargs: seen.append(kwargs["dtype"]) or export(self, path, **kwargs))
-    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--out", str(tmp_path / "out")]
+    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--save-dir", str(tmp_path / "out")]
     assert cli.main([*command, "--dtype", "uint16"]) == 0 and seen == ["uint16"]
     with pytest.raises(SystemExit):
         cli.main([*command, "--dtype", "u16"])
@@ -777,7 +729,7 @@ def test_show4dstem_html_refuses_a_payload_no_page_can_hold_before_reading(tmp_p
         handle.require_group("entry/data")["data_000001"] = h5py.ExternalLink("scan_data_000001.h5", "entry/data/data")
     monkeypatch.setattr(cli, "_HTML_PAYLOAD_LIMIT", 16 * 8 * 8 - 1)
     monkeypatch.setattr(cli, "_master_to_binned_numpy", lambda *args, **kwargs: pytest.fail("read before refusing"))
-    command = ["show4dstem", str(tmp_path / "scan_master.h5"), "--html", "--no-open", "--out", str(tmp_path / "out")]
+    command = ["show4dstem", str(tmp_path / "scan_master.h5"), "--html", "--no-open", "--save-dir", str(tmp_path / "out")]
 
     assert cli.main(command) == 1
     err = capsys.readouterr().err
@@ -794,7 +746,7 @@ def test_show4dstem_cli_max_gb_reads_what_the_ceiling_refused(tmp_path, monkeypa
     monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
     real_ceiling = reader.ceiling  # the dense file read sees a tiny ceiling; the viewer's GPU copy the real one
     monkeypatch.setattr(reader, "ceiling", lambda device=None: 1000 if str(device or "cpu") == "cpu" else real_ceiling(device))
-    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--out", str(tmp_path / "out")]
+    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--save-dir", str(tmp_path / "out")]
     assert cli.main(command) == 1
     assert "--max-gb for the quantem command" in capsys.readouterr().err
     assert cli.main([*command, "--max-gb", "1"]) == 0
@@ -840,7 +792,7 @@ def test_show4dstem_html_serve_reports_every_file_and_the_url_before_blocking(tm
 def test_show4dstem_serve_without_html_is_refused_in_one_line(tmp_path, capsys):
     """--serve only applies to an --html export; a notebook run must not ignore it silently."""
     assert cli.main(["show4dstem", str(tmp_path), "--serve", "--no-open"]) == 1
-    assert capsys.readouterr().err == "quantem: --serve opens an --html export over HTTP; add --html.\n"
+    assert capsys.readouterr().err == "quantem-widget: --serve opens an --html export over HTTP; add --html.\n"
 
 
 def test_show4dstem_cli_html_bin_announces_the_detector_binning(tmp_path, monkeypatch, capsys):
@@ -849,7 +801,7 @@ def test_show4dstem_cli_html_bin_announces_the_detector_binning(tmp_path, monkey
 
     np.save(tmp_path / "scan.npy", np.ones((4, 4, 8, 8), np.uint16))
     monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
-    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--detector-bin", "2", "--no-open", "--out", str(tmp_path / "out")]
+    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--detector-bin", "2", "--no-open", "--save-dir", str(tmp_path / "out")]
     assert cli.main(command) == 0
     assert "detector binned 2x2 (mean of each block), 8x8 -> 4x4; pass --detector-bin 1 for the full detector" in capsys.readouterr().out
 
@@ -862,7 +814,7 @@ def test_show4dstem_cli_html_auto_dtype_keeps_counts_above_255(tmp_path, monkeyp
     counts[..., 3:5, 3:5] = np.arange(16, dtype=np.uint16).reshape(4, 4)[..., None, None] + 400
     np.save(tmp_path / "binned.npy", counts)
     monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
-    command = ["show4dstem", str(tmp_path / "binned.npy"), "--html", "--no-open", "--out", str(tmp_path / "out")]
+    command = ["show4dstem", str(tmp_path / "binned.npy"), "--html", "--no-open", "--save-dir", str(tmp_path / "out")]
     assert cli.main(command) == 0
     out = capsys.readouterr().out
     assert "counts reach 415, packed as uint16" in out
@@ -872,11 +824,11 @@ def test_show4dstem_cli_html_auto_dtype_keeps_counts_above_255(tmp_path, monkeyp
 
 
 def test_show4dstem_cli_out_refuses_a_file_name(tmp_path, capsys):
-    """--out is a folder; `--out x.html` used to create a folder named x.html."""
+    """--save-dir is a folder; `--save-dir x.html` used to create a folder named x.html."""
     np.save(tmp_path / "scan.npy", np.ones((4, 4, 8, 8), np.uint16))
-    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--out", str(tmp_path / "x.html")]
+    command = ["show4dstem", str(tmp_path / "scan.npy"), "--html", "--no-open", "--save-dir", str(tmp_path / "x.html")]
     assert cli.main(command) == 1
-    assert "--out is the output folder; x.html looks like a file name" in capsys.readouterr().err
+    assert "--save-dir is the output folder; x.html looks like a file name" in capsys.readouterr().err
     assert not (tmp_path / "x.html").exists()
 
 
@@ -888,6 +840,123 @@ def test_show4dstem_backend_takes_auto_or_webgpu_only(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["show4dstem", str(master), "--backend", "cuda", "--no-open"])
     assert "invalid choice: 'cuda'" in capsys.readouterr().err
-    assert cli.main(["show4dstem", str(master), "--no-open", "--out", str(tmp_path / "out")]) == 0
+    assert cli.main(["show4dstem", str(master), "--no-open", "--save-dir", str(tmp_path / "out")]) == 0
     notebook = json.loads(next((tmp_path / "out").glob("*.ipynb")).read_text())
     assert "backend" not in json.dumps(notebook).replace(str(tmp_path), "")
+
+
+# --- show2d / show3d -------------------------------------------------------
+def _widget_state(page: pathlib.Path) -> dict:
+    """The model states embedded in an exported page, keyed by model id."""
+    text = page.read_text(encoding="utf-8")
+    start = text.index('<script type="application/vnd.jupyter.widget-state+json">') + len(
+        '<script type="application/vnd.jupyter.widget-state+json">')
+    state = json.loads(text[start:text.index("</script>", start)])["state"]
+    return {key: value["state"] for key, value in state.items()}
+
+
+def _viewer_state(page: pathlib.Path, name: str) -> dict:
+    """The exported widget's own model state (the one carrying ``title``)."""
+    return next(state for state in _widget_state(page).values() if state.get("title") == name)
+
+
+def _images(folder: pathlib.Path, count: int = 3, shape=(16, 20)) -> list[pathlib.Path]:
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index in range(count):
+        path = folder / f"image_{index}.npy"
+        np.save(path, np.full(shape, float(index), np.float32) + np.arange(shape[1], dtype=np.float32))
+        paths.append(path)
+    return paths
+
+
+def test_show2d_files_write_one_exact_page_with_labels_title_and_calibration(tmp_path, capsys):
+    paths = _images(tmp_path / "in")
+    out = tmp_path / "out"
+    code = cli.main(["show2d", *map(str, paths), "--labels", "low", "mid", "high", "--title", "Noise series",
+                     "--sampling", "0.05", "--units", "nm", "--columns", "2", "--no-open", "--save-dir", str(out)])
+    assert code == 0
+    page = out / "noise_series_3x16x20_exact.html"
+    assert capsys.readouterr().out.startswith(f"wrote {page} (")
+    state = _viewer_state(page, "Noise series")
+    assert state["labels"] == ["low", "mid", "high"]
+    assert state["offline"] is False  # exact float32 pixels, not a uint8 pack
+
+
+def test_show2d_folder_labels_by_file_name_and_packs_uint8(tmp_path):
+    _images(tmp_path / "survey")
+    out = tmp_path / "out"
+    assert cli.main(["show2d", str(tmp_path / "survey"), "--encoding", "uint8", "--no-open", "--save-dir", str(out)]) == 0
+    page = out / "survey_3x16x20_quantized.html"
+    state = _viewer_state(page, "survey")
+    assert state["offline"] is True
+    assert state["labels"] == ["image_0", "image_1", "image_2"]
+
+
+def test_show3d_stack_file_frames_files_and_several_stacks(tmp_path):
+    out = tmp_path / "out"
+    np.save(tmp_path / "stack.npy", np.random.rand(5, 12, 14).astype(np.float32))
+    assert cli.main(["show3d", str(tmp_path / "stack.npy"), "--fps", "12", "--no-open", "--save-dir", str(out)]) == 0
+    state = _viewer_state(out / "stack_5x12x14_exact.html", "stack")
+    assert state["fps"] == 12
+
+    frames = _images(tmp_path / "frames", count=4)
+    assert cli.main(["show3d", *map(str, frames), "--title", "Frames", "--no-open", "--save-dir", str(out)]) == 0
+    state = _viewer_state(out / "frames_4x16x20_exact.html", "Frames")
+    assert state["labels"] == ["image_0", "image_1", "image_2", "image_3"]
+
+    np.save(tmp_path / "other.npy", np.random.rand(5, 12, 14).astype(np.float32))
+    assert cli.main(["show3d", str(tmp_path / "stack.npy"), str(tmp_path / "other.npy"), "--title", "Pair",
+                     "--encoding", "uint8", "--image-bin", "2", "--no-open", "--save-dir", str(out)]) == 0
+    assert len(list(out.glob("pair_*_quantized_2xbin.html"))) == 1
+
+
+def test_show3d_folder_of_frames(tmp_path):
+    _images(tmp_path / "series", count=3)
+    out = tmp_path / "out"
+    assert cli.main(["show3d", str(tmp_path / "series"), "--no-open", "--save-dir", str(out)]) == 0
+    assert (out / "series_3x16x20_exact.html").exists()
+
+
+@pytest.mark.parametrize(("argv", "message"), [
+    (["show3d", "{in}/image_0.npy"], "image_0.npy is one 2D image; Show3D needs a stack file"),
+    (["show2d", "{in}/image_0.npy", "--labels", "a", "b"], "--labels gives 2 for 1 image; give one per image"),
+    (["show2d", "{in}", "--labels", "a", "b"], "--labels gives 2 for 1 image"),
+    (["show2d", "{in}", "--pattern", "*.tif"], "no readable images in"),
+    (["show2d", "{in}/image_0.npy", "--image-bin", "2"], "--image-bin needs --encoding uint8"),
+    (["show2d", "{in}/image_0.npy", "--max-mb", "0.5"], "above --max-mb 0.5"),
+    (["show2d", "{in}/missing.npy"], "not found: "),
+    (["show2d", "{in}", "{in}/image_0.npy"], "pass one folder, or image files"),
+])
+def test_page_commands_refuse_in_one_line_naming_the_flag(tmp_path, capsys, argv, message):
+    _images(tmp_path / "in", count=1)
+    argv = [arg.replace("{in}", str(tmp_path / "in")) for arg in argv]
+    assert cli.main([*argv, "--no-open", "--save-dir", str(tmp_path / "out")]) == 1
+    error = capsys.readouterr().err
+    assert error.startswith("quantem-widget: ") and message in error and error.count("\n") == 1
+    assert not list((tmp_path / "out").glob("*.html")) if (tmp_path / "out").exists() else True
+
+
+def test_page_max_mb_none_writes_any_size():
+    assert cli._max_mb("none") is None
+    assert cli._max_mb("12.5") == 12.5
+
+
+def test_show2d_no_link_contrast_gives_each_panel_its_own_range(tmp_path):
+    paths = _images(tmp_path / "in", count=2)
+    out = tmp_path / "out"
+    assert cli.main(["show2d", *map(str, paths), "--title", "Unlinked", "--no-link-contrast",
+                     "--no-open", "--save-dir", str(out)]) == 0
+    assert _viewer_state(out / "unlinked_2x16x20_exact.html", "Unlinked")["link_contrast"] is False
+    assert cli.main(["show2d", *map(str, paths), "--title", "Linked", "--no-open", "--save-dir", str(out)]) == 0
+    assert _viewer_state(out / "linked_2x16x20_exact.html", "Linked")["link_contrast"] is True
+
+
+def test_show2d_writes_color_images_and_refuses_them_as_uint8(tmp_path, capsys):
+    rgb = tmp_path / "color.png"
+    Image.fromarray(np.zeros((8, 8, 3), np.uint8) + np.array([255, 0, 0], np.uint8)).save(rgb)
+    out = tmp_path / "out"
+    assert cli.main(["show2d", str(rgb), "--no-open", "--save-dir", str(out)]) == 0
+    assert _viewer_state(out / "color_8x8_exact.html", "color")["is_rgb"] == [True]
+    assert cli.main(["show2d", str(rgb), "--encoding", "uint8", "--no-open", "--save-dir", str(out)]) == 1
+    assert "full encoding (true color)" in capsys.readouterr().err

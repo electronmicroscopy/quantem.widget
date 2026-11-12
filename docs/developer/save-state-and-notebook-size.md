@@ -20,11 +20,11 @@ Show2D, Show3D, Show4DSTEM and ShowPDF, support these choices:
   are available through `notebook_preview_format`.
 - **`save_state=True`:** retain the synchronized state and omit the static
   preview. A compatible widget manager can restore interactions supported by
-  the embedded data. This does not restart a Python folder watcher, preserve a
+  the embedded data. This does not restart a Python stream, preserve a
   GPU acquisition owner, or provide computations that require a live kernel.
 
 These are opt-in protocols, not parameters guaranteed on every widget.
-ChooseLattice has no `save_state` argument. Show3DSlices and ShowDiffraction use
+Show3DSlices uses
 state-file and HTML-export protocols without the static-preview mixins. Plot2D
 uses the shared mixins with a fixed PNG preview. Check the widget's current
 constructor and export API before choosing a persistence mode.
@@ -68,7 +68,7 @@ state capture during the docs build can leave blank or static-only tutorials.
 
 For a separate static GitHub preview, make a copy outside `docs/tutorials/` and
 follow [GitHub preview copy](../cli.md#github-preview-copy). Never run
-`quantem github` in place on canonical documentation notebooks.
+`quantem-widget github` in place on canonical documentation notebooks.
 
 For a local execution that deliberately needs only static previews, copy the
 notebook first. Clear any existing `metadata.widgets` from that copy before

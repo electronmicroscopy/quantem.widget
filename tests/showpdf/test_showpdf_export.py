@@ -162,7 +162,7 @@ def test_showpdf_export_keeps_what_a_saved_notebook_leaves_out(small_pdf, tmp_pa
     assert "nav_image_bytes" not in w.get_state()
     entry = _export_entry(w, tmp_path / "scan.html")
     buffers = _buffers(entry)
-    for name in ("nav_image_bytes", "mask_bytes", "linescan_bytes"):
+    for name in ("nav_image_bytes", "linescan_bytes"):
         assert buffers.get(name), name
     assert entry["state"]["mask_b64"] == w.mask_b64 != ""
     assert entry["state"]["_static_fallback_image"] == ""
@@ -322,8 +322,7 @@ def test_showpdf_export_html_has_no_curves_of_another_selection(small_pdf, tmp_p
     ids=["nan", "nan and inf", "all nan"],
 )
 def test_showpdf_export_with_nonfinite_nav_pixels(small_pdf, tmp_path, pixels, expected):
-    # nav_data_min and nav_data_max are the range of the finite pixels (as findDataRange in the
-    # frontend computes it), so the state JSON stays valid; the pixels are exported unchanged.
+    # nav_data_min and nav_data_max are the range of the finite pixels; the pixels are exported unchanged.
     nav = np.arange(16, dtype=np.float32).reshape(4, 4)
     if pixels is None:
         nav[:] = np.nan
@@ -334,7 +333,6 @@ def test_showpdf_export_with_nonfinite_nav_pixels(small_pdf, tmp_path, pixels, e
     assert (w.nav_data_min, w.nav_data_max) == expected
     for encoding in ("full", "uint8"):
         entry = _export_entry(w, tmp_path / f"{encoding}.html", encoding=encoding)
-        assert (entry["state"]["nav_data_min"], entry["state"]["nav_data_max"]) == expected
         exported = np.frombuffer(_buffers(entry)["nav_image_bytes"], np.float32)
         np.testing.assert_array_equal(exported, nav.ravel())
     w.set_data(small_pdf, nav_image=nav[::-1])
@@ -367,8 +365,7 @@ def test_showpdf_export_refuses_nonfinite_float_traits(small_pdf, tmp_path):
             setattr(w, name, old)
             refused.append(name)
     assert sorted(set(refused)) == [
-        "k_max_available", "k_min_available", "mask_fraction", "nav_data_max", "nav_data_min",
-        "nav_pixel_size",
+        "k_max_available", "k_min_available", "mask_fraction", "nav_pixel_size",
     ]
     # With every trait finite again, the export's JSON parses strictly.
     _export_entry(w, tmp_path / "finite.html")

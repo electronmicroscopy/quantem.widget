@@ -13,7 +13,7 @@ import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
-import Slider from "@mui/material/Slider";
+import Slider, { LiveNumberSlider } from "../shared/Slider";
 import Select from "@mui/material/Select";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
@@ -459,6 +459,10 @@ function trackSliderPress(
   event.preventDefault();
   event.stopPropagation();
   event.nativeEvent.stopImmediatePropagation();
+  // preventDefault also stops MUI focusing a thumb; focus the value thumb (the middle one of a
+  // start / value / end slider) so Left / Right keep stepping it after a track press.
+  const inputs = event.currentTarget.querySelectorAll<HTMLInputElement>(".MuiSlider-thumb input");
+  inputs[inputs.length === 3 ? 1 : 0]?.focus({ preventScroll: true });
   apply(valueFromClientX(event.clientX), false);
   const onMove = (moveEvent: PointerEvent) => {
     moveEvent.preventDefault();
@@ -473,48 +477,6 @@ function trackSliderPress(
   window.addEventListener("pointermove", onMove, true);
   window.addEventListener("pointerup", onUp, true);
 }
-
-interface LiveNumberSliderProps {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onLiveChange: (value: number) => void;
-  onCommit: (value: number) => void;
-  size?: "small" | "medium";
-  valueLabelDisplay?: "auto" | "on" | "off";
-  sx?: React.ComponentProps<typeof Slider>["sx"];
-  ariaLabel: string;
-}
-
-const LiveNumberSlider = React.memo(function LiveNumberSlider({
-  value, min, max, step, onLiveChange, onCommit, size = "small", valueLabelDisplay = "auto", sx, ariaLabel,
-}: LiveNumberSliderProps) {
-  const [liveValue, setLiveValue] = React.useState(value);
-  React.useEffect(() => { setLiveValue(value); }, [value]);
-  return (
-    <Slider
-      value={liveValue}
-      min={min}
-      max={max}
-      step={step}
-      onChange={(_, sliderValue) => {
-        const next = sliderValue as number;
-        setLiveValue(next);
-        onLiveChange(next);
-      }}
-      onChangeCommitted={(_, sliderValue) => {
-        const next = sliderValue as number;
-        setLiveValue(next);
-        onCommit(next);
-      }}
-      size={size}
-      valueLabelDisplay={valueLabelDisplay}
-      sx={sx}
-      aria-label={ariaLabel}
-    />
-  );
-});
 
 interface NumberCommitInputProps {
   value: number;
@@ -1856,13 +1818,15 @@ function Show3DSlices() {
     bgColorRef.current = [r, g, b];
   }, [themeColors.bg]);
 
-  // Render 3D volume (non-interactive: triggered by React state changes)
+  // Render 3D volume (non-interactive: triggered by React state changes). The contrast range is a
+  // fresh object each render, so the effect keys on its two numbers: keyed on the object it redrew
+  // the volume at full resolution on every playback step, on top of the live draft draw.
   React.useEffect(() => {
     if (volumeDrag) return; // Skip during drag - rAF handles it directly
     const renderer = volumeRendererRef.current;
     if (!renderer || !panelFloats || panelFloats.length === 0) return;
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current, { sliceStretch, orthographic });
-  }, [panelFloats, colIndex, rowIndex, sliceIndex, obliqueAngle, obliqueSegment, numCols, numRows, numSlices, cmap, camera, volumeCanvasSize, themeColors.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, sliceStretch, orthographic, flip, gpuSliceParams]);
+  }, [panelFloats, colIndex, rowIndex, sliceIndex, obliqueAngle, obliqueSegment, numCols, numRows, numSlices, cmap, camera, volumeCanvasSize, themeColors.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange.vmin, volTexRange.vmax, opacityA, sliceStretch, orthographic, flip, gpuSliceParams]);
 
   // First-frame paint guard: the very first synchronous render after the renderer
   // mounts can land before the canvas swapchain is ready (flush race) and commit a

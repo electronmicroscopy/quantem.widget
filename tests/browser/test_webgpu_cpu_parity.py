@@ -21,10 +21,12 @@ from PIL import Image
 
 pytestmark = pytest.mark.browser
 
+# Only the canvases on screen: Show3D keeps its WebGPU presentation canvas at opacity 0 while an idle
+# frame sits on the 2D canvas, and what that hidden canvas still holds is up to the browser.
 READ_CANVASES = """
 () => Array.from(document.querySelectorAll('canvas')).filter(canvas => {
   const rect = canvas.getBoundingClientRect();
-  return canvas.width && canvas.height && rect.width && rect.height;
+  return canvas.width && canvas.height && rect.width && rect.height && getComputedStyle(canvas).opacity !== '0';
 }).map(canvas => {
   let context = canvas.getContext('2d');
   if (!context) {

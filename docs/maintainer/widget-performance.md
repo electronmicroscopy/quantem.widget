@@ -178,15 +178,8 @@ evidence.
 | Show2D | Compare one image or many related images, often 4K microscopy outputs, with zoom, pan, histogram, FFT, profile, pages, and export. | Zoom/pan, histogram controls, page slider/play, hidden panels, FFT redraws after first compute, and HTML reopen. | `tests/browser` tier for exported HTML; a real-data notebook run for 4K panels. |
 | Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, remote-tunnel drag preview with native restoration, page slider/play, hidden panels, independent panel contrast, FFT return-scrub cache, FFT metric labels, GIF/HTML export. | `tests/browser` tier; a live Jupyter tunnel run; exported HTML profile for existing reports; animation smoke for GIF. |
 | Show3DSlices | Browse volume slices and orthogonal views with synchronized crosshair/plane controls. | Slice sliders, crosshair movement, oblique line endpoint/body drags, side-plane redraw, oblique FFT redraw during line drag, FFT return-scrub cache hits for slice/oblique sliders, histogram controls, FFT/log/smooth toggles, and export reopen. | Browser smoke plus focused visual story when slice/crosshair/oblique-line behavior changes. |
-| Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, folder sessions over encoded acquisitions, and export reopen. | `tests/browser/test_show4dstem_live.py` drives a live kernel on the gold dataset; `scripts/e2e_fresh.py` checks a fresh wheel on a real master. Folder watching additionally needs a live-arrival run. Lightweight CI checks only the protocol. |
-| ShowDiffraction | Inspect diffraction-like 2D patterns when a full 4D-STEM session is not needed. | Zoom/pan, histogram/contrast, peak/FFT-style overlays when present, and export reopen. | Lightweight export/browser smoke; use Show4DSTEM heavy signoff for full detector workflows. |
+| Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, multi-master sessions over encoded acquisitions, and export reopen. | `tests/browser/test_show4dstem_live.py` drives a live kernel on the gold dataset; `scripts/e2e_fresh.py` checks a fresh wheel on a real master. Lightweight CI checks only the protocol. |
 | ShowPDF | Compute pair distribution functions for scan regions of an amorphous 4D-STEM dataset and tune the reduction. | Mask paint, probe drag, line drag, slider commits (each reruns the background fit and transform), line-scan stack rebuilds, and the exported file's in-browser recompute. | Focused pytest plus the NumPy parity Vitest; the `tests/browser` tier for exported HTML when export or the in-browser recompute changes. |
-
-## Folder-watching performance contract
-
-`Show2D.from_folder(...)`, `Show3D.from_folder(...)`, and
-`Show4DSTEM.from_folder(...)` start watching by default. Treat their watcher as
-an append path, not as a periodic full rebuild.
 
 ## Show3D remote tunnel scrub contract
 
@@ -252,45 +245,6 @@ Frame scrub, playback, contrast, colormap, Smooth, log/linear, zoom, and pan
 must select or repaint resident WebGPU data without another Jupyter Comm
 transfer. A software adapter is not treated as hardware WebGPU; the existing
 on-demand CPU/canvas renderer is the functional fallback.
-
-| Viewer | Required append behavior | Work that must not repeat |
-|---|---|---|
-| Show2D | Add each new full-resolution image as one panel; automatically render folder pages of at most `page_size` panels (default 20) | Reread existing source files; rebuild the widget; replace full-resolution data with thumbnails; render every folder panel at once after paging activates |
-| Show3D | Add each new full-resolution image as a frame in one unpaged stack | Reread existing source files; rebuild the widget; infer Show2D-style pages from frame count |
-| Show4DSTEM | Load each ready master into encoded GPU storage at full detector resolution and add one comparison panel | Reload existing acquisitions; rebuild the widget; bin or narrow the new master |
-
-For the folder-watch workflows, measure page acknowledgement, first panel, half page, full
-page, and warm return separately. A full-page number alone hides whether the UI
-waited unnecessarily for its slowest file.
-
-Folder-watching signoff must measure initial scan, idle poll, and
-return-to-warm-page latency. Split append latency into two stages instead of
-reporting one ambiguous number:
-
-- stable/readiness-confirmed file to Python/model append and visible label,
-  count, page control, or reserved-placeholder paint
-- user selection or page request to the first scientific canvas paint; for
-  Show4DSTEM this means both virtual-image and diffraction pixels
-
-It must also verify:
-
-- an idle poll performs no decode, transfer, render, or cache invalidation
-- incomplete files are retried without killing the watcher
-- each stable file appends exactly once and in deterministic order
-- the Python widget identity and existing panel/frame state remain unchanged
-- Show2D and Show3D pixels match the full-resolution source, not thumbnails
-- Show4DSTEM loads each arrival once, keeps existing acquisitions loaded, and
-  records encoded bytes per master as masters accumulate
-- `stop_folder_watch()` is idempotent and `close()` leaves no watcher or cache
-  worker running
-- the mounted Jupyter widget and browser container remain the same, and a real
-  browser canvas repaint—not only a Python trait change—is captured
-
-Keep test folders temporary and add files through an atomic rename when
-possible. Report source shape, dtype, append count, cache hits/misses, encoded
-bytes, both append latency stages, and browser console errors. Use genuine
-microscope data in live JupyterLab for scientific signoff; CI can use small
-generated files only to prove lifecycle and cache invariants.
 
 ### Show2D local-panel stack signoff (2026-07-09)
 
@@ -416,7 +370,7 @@ Current fix:
   unavailable, draw the requested frame on demand through the existing
   CPU/canvas fallback.
 - Preserve per-panel contrast during playback. Do not fall back to a global
-  packed-frame range for BF/DF/DPC/SSB/COM panels with different physical
+  packed-frame range for BF/DF/DPC/direct ptychography/COM panels with different physical
   scales.
 - Test both visible play controls: page playback (`Play pages`) and frame
   playback (`Play`, `Play forward`, or reverse controls).
@@ -452,13 +406,11 @@ a bounded view. Scientific detector compute must fail clearly instead of
 falling back to CPU.
 
 Multi-master `load([masters])` returns one encoded acquisition per master after
-all of them have loaded; `Show4DSTEM.from_folder(...)` opens after the first
-master and appends the rest from a background thread. Performance reports for
-multi-master sessions must say which of the two paths ran.
+all of them have loaded.
 
 GPU memory belongs to the backend data object and Python session, not the
-visual widget alone; a `from_folder` viewer owns and closes the acquisitions it
-loaded. The viewer should avoid leaking buffers and should keep
+visual widget alone; a viewer opened from a path owns and closes the
+acquisition it loaded. The viewer should avoid leaking buffers and should keep
 saved state compact, but freeing GPU memory should be handled by backend/session
 lifecycle: delete or replace the loaded data object, clear references, use a
 backend-specific cache cleanup utility if one exists, or restart the kernel. Do
@@ -572,7 +524,7 @@ Real-data stress input used for the audit:
 
 - Source: local real ptychography reconstruction arrays from an ignored lab
   data directory. Keep the exact private path out of shared documentation.
-- Show2D: eight real-derived 4096 x 4096 panels, tiled from ADF/SSB/WDD arrays
+- Show2D: eight real-derived 4096 x 4096 panels, tiled from ADF/direct ptychography/WDD arrays
   to preserve real lattice/noise structure while stressing the browser path.
 - Show3D: twelve real-derived panels, 32 frames each, 2048 x 2048 native source
   per panel.

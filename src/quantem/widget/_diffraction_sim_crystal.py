@@ -11,7 +11,7 @@ when either is missing. ``Crystal`` and ``bloch`` are in quantem 0.1.10 and
 later, which is not installed on Intel Macs or Windows on ARM.
 
 Energies in this module are in eV (``energy_ev``), the unit of the quantem
-Bloch-wave functions; the widget trait is ``energy_keV``.
+Bloch-wave functions; the widget trait is ``voltage_kV``.
 """
 
 from __future__ import annotations

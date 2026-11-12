@@ -23,7 +23,7 @@ Show4DSTEM(data)
 
 | Reader | quantem.gpu and a GPU | No GPU route (`[cpu]`, or `device="cpu"`) | Intel Mac, Windows on ARM |
 |---|---|---|---|
-| `read_4dstem(path)` | `quantem.gpu.io.Dataset4dstemGPU`, encoded on the GPU | quantem core `Dataset4dstem`, read densely into host memory | stand-in, read densely |
+| `read_4dstem(path)` | `quantem.gpu.io.Dataset4dstem`, encoded on the GPU | quantem core `Dataset4dstem`, read densely into host memory | stand-in, read densely |
 | `read_image(path)`, `read_images(folder)` | quantem core `Dataset2d` | quantem core `Dataset2d` | stand-in |
 | `read_image_stack(folder)` | quantem core `Dataset3d` | quantem core `Dataset3d` | stand-in |
 
@@ -44,7 +44,7 @@ dataset. A color PNG, JPEG or TIFF reads as an `RgbImage` with `array`,
 accepts each of these, NumPy arrays and torch tensors on any device, and shows
 the same numbers for each.
 
-On a GPU, a 4D-STEM file is a `Dataset4dstemGPU`, not a torch tensor:
+On a GPU, a 4D-STEM file is a `Dataset4dstem`, not a torch tensor:
 
 - counts are unsigned (uint16, uint32), and torch cannot add, multiply or
   take the max of those;
@@ -56,20 +56,20 @@ Indexing and `read(scan_region=...)` still return torch tensors.
 
 Every 4D dataset has `shape`, `dtype`, `ndim`, `sampling`, `units` and
 `metadata`, and `Show4DSTEM` takes any of them, with `scan_region=` for part of
-the scan. A `Dataset4dstemGPU` reports an uncalibrated axis as `None` in
+the scan. A `Dataset4dstem` reports an uncalibrated axis as `None` in
 `sampling` and `units` where a dense dataset has `1.0` and `"pixels"`; the
 widgets read both as an axis without a calibration. A dense dataset's
 `metadata` names the file (`source_path`) and records the replacement of the
-detector pixels the master flags (`hot_pixel_correction`). `read_4dstem`,
-`Show4DSTEM(path)` and `Show4DSTEM.from_folder` replace them with the median of
+detector pixels the master flags (`hot_pixel_correction`). `read_4dstem` and
+`Show4DSTEM(path)` replace them with the median of
 their unflagged 3x3 neighbours by default (the smallest larger window inside a
 flagged cluster, a .5 median rounded half to even, as quantem.gpu's `io.load`
 does) and print how many;
 `hot_pixel_correction="none"` keeps the stored values and `"zero"` sets them
-to 0. A `Dataset4dstemGPU`
+to 0. A `Dataset4dstem`
 holds a
 float64 file that float32 holds exactly as float32. A dense `Dataset4dstem`
-also has `array` (a NumPy array) and `name`; a `Dataset4dstemGPU` keeps its
+also has `array` (a NumPy array) and `name`; a `Dataset4dstem` keeps its
 counts on the GPU, returns them as torch tensors from indexing
 (`data[10, 12]`) and `read(scan_region=...)`, and has `close()`.
 
@@ -83,7 +83,7 @@ data = io.load("scan_master.h5")   # what read_4dstem does on a GPU
 Show4DSTEM(data)
 ```
 
-`data` is a `quantem.gpu.io.Dataset4dstemGPU`, ANS encoded on the CUDA device or
+`data` is a `quantem.gpu.io.Dataset4dstem`, ANS encoded on the CUDA device or
 the Apple GPU at native detector sampling and count dtype: a 512 x 512 x 192 x 192
 uint16 scan, 18 GiB as a dense array, occupies about 0.1 to 2 GiB. Keep it open
 while viewers or calculations use its encoded buffers. Array-style selection
@@ -111,9 +111,9 @@ Call `data.close()` after the last use. Scripted jobs can use
 `with io.load(path) as data:` for automatic cleanup. A list of paths loads as a
 list of encoded acquisitions, one per file; `Show4DSTEM(io.load(paths))` opens
 them as a comparison grid labelled by file, and `Show4DSTEM(series[1])` opens
-one of them. `io.load(path, backend="cuda", device=1)` selects a CUDA device; a
-Mac loads onto MPS. See [load](load.md) for the function reference and the GPU
-guide for multi-device storage policies.
+one of them. `io.load(path, device=1)` selects a CUDA device; a
+Mac loads onto MPS. The QuantEM.GPU I/O guide is the function reference and
+describes multi-device storage policies.
 
 ## Read a scan region
 
@@ -144,8 +144,8 @@ Show4DSTEM(io.load(files[0]))
 
 `io.discover(path, scan_shape=(512, 512))` keeps only matching acquisitions when
 a folder mixes scan sizes. `io.inspect(path)` reads readiness and calibration
-headers without decoding measurements. Use `Show4DSTEM.from_folder(path)` for a
-live acquisition viewer.
+headers without decoding measurements. Pass several discovered files to
+`Show4DSTEM(read_4dstem(files))` to compare them in one viewer.
 
 For named sample data, see [Tutorial datasets](datasets.md). The [IO/GPU
 notebook](../tutorials/io_gpu.ipynb) demonstrates a real Gold image session.

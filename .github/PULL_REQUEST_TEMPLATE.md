@@ -181,7 +181,7 @@ evidence in the three visible sections above.
 - [ ] The widget exposes `export_html(path=None, *, title=None, ...) -> pathlib.Path`
   when it can be exported, with the options its data needs (Show2D, Show3D:
   `mode`, `encoding`, `downsample`; Show4DSTEM: `dtype`, `det_bin`, `scan_bin`,
-  `export_kind`; Show3DSlices: `encoding`; ShowDiffraction: none). Follow the
+  `export_kind`; Show3DSlices: `encoding`). Follow the
   [HTML export protocol](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/api/html-export.md).
 - [ ] If the widget has an in-widget **Export** button, it uses the standard
   export traits and reports filename, mode, encoding/downsample choice, and
@@ -194,7 +194,7 @@ evidence in the three visible sections above.
   state.
 - [ ] GitHub sharing is treated separately from live HTML: GitHub notebook
   previews should use static compressed widget pictures, never heavy live widget
-  state (`quantem github`, see [the command line](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/cli.md)).
+  state (`quantem-widget github`, see [the command line](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/cli.md)).
 
 </details>
 -->

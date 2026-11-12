@@ -2,8 +2,11 @@
 (() => {
   const state = window.scientificStress = {
     active: false, frameBytes: 0, stackBytes: 0, count: 0, revision: 0,
-    uploads: [], presentations: [], frames: [], inputs: [], errors: [],
+    uploads: [], presentations: [], frames: [], inputs: [], errors: [], pageErrors: [],
   };
+  // Playwright disconnects while timing: retain uncaught errors in the page.
+  addEventListener('error', event => state.pageErrors.push(String(event.message).slice(0, 300)));
+  addEventListener('unhandledrejection', event => state.pageErrors.push(String(event.reason?.stack || event.reason).slice(0, 1000)));
   const buffers = new WeakMap();
   let latest = null;
   // Hash outside the timed interval; retain a view of only the newest stack.

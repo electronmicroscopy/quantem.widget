@@ -203,6 +203,11 @@ export class WebGPUFFT implements DisplayFFT {
   readonly path = "WebGPU" as const;
   private device: GPUDevice;
   private pipelines2D: { bitReverseRows: GPUComputePipeline; bitReverseCols: GPUComputePipeline; butterflyRows: GPUComputePipeline; butterflyCols: GPUComputePipeline; normalize: GPUComputePipeline };
+  private interleavedWorkspace: {
+    width: number; height: number; inverse: boolean; busy: boolean;
+    data: GPUBuffer; read: GPUBuffer;
+    params: ReturnType<WebGPUFFT['fftPassParams']>;
+  } | null = null;
   constructor(device: GPUDevice) {
     this.device = device;
     const module2D = device.createShaderModule({ code: FFT_2D_SHADER });
@@ -283,19 +288,44 @@ export class WebGPUFFT implements DisplayFFT {
   async fft2DInterleaved(complexData: Float32Array, width: number, height: number, inverse: boolean = false): Promise<Float32Array> {
     requirePow2(width, height);
     const byteSize = width * height * 2 * 4;
-    const dataBuffer = this.device.createBuffer({ size: byteSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(dataBuffer, 0, complexData.buffer, complexData.byteOffset, byteSize);
-    const readBuffer = this.device.createBuffer({ size: byteSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const params = this.fftPassParams(width, height, inverse);
-    const encoder = this.device.createCommandEncoder();
-    this.encodeFFT2D(encoder, dataBuffer, width, height, params);
-    encoder.copyBufferToBuffer(dataBuffer, 0, readBuffer, 0, byteSize);
-    this.device.queue.submit([encoder.finish()]);
-    dataBuffer.destroy(); params.buffer.destroy();
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const spectrum = new Float32Array(readBuffer.getMappedRange()).slice();
-    readBuffer.unmap(); readBuffer.destroy();
-    return spectrum;
+    let workspace = this.interleavedWorkspace;
+    if (workspace?.busy) workspace = null;
+    if (workspace && (workspace.width !== width || workspace.height !== height || workspace.inverse !== inverse)) {
+      workspace.data.destroy(); workspace.read.destroy(); workspace.params.buffer.destroy();
+      this.interleavedWorkspace = null;
+      workspace = null;
+    }
+    if (!workspace) {
+      workspace = {
+        width, height, inverse, busy: false,
+        data: this.device.createBuffer({ size: byteSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
+        read: this.device.createBuffer({ size: byteSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+        params: this.fftPassParams(width, height, inverse),
+      };
+      // Keep one latest idle workspace. Overlapping callers own independent buffers.
+      if (!this.interleavedWorkspace) this.interleavedWorkspace = workspace;
+    }
+    workspace.busy = true;
+    let mapped = false, completed = false;
+    try {
+      this.device.queue.writeBuffer(workspace.data, 0, complexData.buffer, complexData.byteOffset, byteSize);
+      const encoder = this.device.createCommandEncoder();
+      this.encodeFFT2D(encoder, workspace.data, width, height, workspace.params);
+      encoder.copyBufferToBuffer(workspace.data, 0, workspace.read, 0, byteSize);
+      this.device.queue.submit([encoder.finish()]);
+      await workspace.read.mapAsync(GPUMapMode.READ);
+      mapped = true;
+      const spectrum = new Float32Array(workspace.read.getMappedRange()).slice();
+      completed = true;
+      return spectrum;
+    } finally {
+      if (mapped) workspace.read.unmap();
+      workspace.busy = false;
+      if (!completed || workspace !== this.interleavedWorkspace) {
+        workspace.data.destroy(); workspace.read.destroy(); workspace.params.buffer.destroy();
+        if (workspace === this.interleavedWorkspace) this.interleavedWorkspace = null;
+      }
+    }
   }
 
   /**
@@ -440,26 +470,39 @@ export function displayFFTInput(data: Float32Array, w: number, h: number): { com
   let sum = 0;
   for (let i = 0; i < data.length; i++) sum += data[i];
   const mean = sum / data.length;
-  const centered = new Float32Array(data.length);
-  for (let i = 0; i < data.length; i++) centered[i] = data[i] - mean;
-  applyHannWindow2D(centered, w, h);
+  const hannW = new Float32Array(w), hannH = new Float32Array(h);
+  for (let col = 0; col < w; col++) hannW[col] = 0.5 * (1 - Math.cos((2 * Math.PI * col) / Math.max(1, w - 1)));
+  for (let row = 0; row < h; row++) hannH[row] = 0.5 * (1 - Math.cos((2 * Math.PI * row) / Math.max(1, h - 1)));
   const pw = nextPow2(w), ph = nextPow2(h);
   const complex = new Float32Array(pw * ph * 2);
-  for (let row = 0; row < h; row++)
-    for (let col = 0; col < w; col++)
-      complex[2 * (row * pw + col)] = centered[row * w + col];
+  for (let row = 0; row < h; row++) {
+    const weight = hannH[row];
+    for (let col = 0; col < w; col++) {
+      // Preserve the reference's float32 centering before its double-precision
+      // window product, without allocating and copying a full centered image.
+      const centered = Math.fround(data[row * w + col] - mean);
+      complex[2 * (row * pw + col)] = centered * (weight * hannW[col]);
+    }
+  }
   return { complex, pw, ph };
 }
 
-/** shiftedMagnitude (log scale) of an interleaved spectrum, split into the same real and imag planes first. */
+/** Shifted log magnitude without materializing separate real/imaginary and shift buffers. */
 export function interleavedShiftedMagnitude(complex: Float32Array, width: number, height: number): Float32Array {
   const count = width * height;
-  const real = new Float32Array(count), imag = new Float32Array(count);
-  for (let i = 0; i < count; i++) {
-    real[i] = complex[2 * i];
-    imag[i] = complex[2 * i + 1];
+  if (complex.length < count * 2) throw new Error("interleavedShiftedMagnitude input is shorter than width * height * 2");
+  const magnitude = new Float32Array(count);
+  const halfW = width >> 1, halfH = height >> 1;
+  for (let row = 0; row < height; row++) {
+    const outputRow = ((row + halfH) % height) * width;
+    for (let col = 0; col < width; col++) {
+      const i = 2 * (row * width + col), real = complex[i], imag = complex[i + 1];
+      // computeMagnitude writes float32 before log1p; keep that rounding exactly.
+      const value = Math.fround(Math.sqrt(real * real + imag * imag));
+      magnitude[outputRow + (col + halfW) % width] = Math.log1p(value);
+    }
   }
-  return shiftedMagnitude(real, imag, width, height, true);
+  return magnitude;
 }
 
 type ReciprocalCoordinates = {

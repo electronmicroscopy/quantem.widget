@@ -19,7 +19,7 @@ viewer
 The default keeps native detector sampling and the source count dtype. With
 quantem.gpu installed, the reader selects CUDA on an NVIDIA workstation or
 Metal/MPS on Apple Silicon and keeps the acquisition encoded on the GPU as a
-`Dataset4dstemGPU`; without a GPU it reads the counts into a quantem core
+`Dataset4dstem`; without a GPU it reads the counts into a quantem core
 `Dataset4dstem` in host memory, and the same cell runs. On the GPU: a 512 x 512 x 192 x 192 uint16 scan,
 18 GiB as a dense array, occupies about 0.1 to 2 GiB. Virtual images are summed
 on the encoded storage, and each diffraction pattern is decoded as you move the
@@ -40,7 +40,7 @@ Use the CLI when you want the same dataset in a local browser without keeping
 a notebook kernel alive:
 
 ```bash
-quantem show4dstem /data/session/scan_001_master.h5 --backend webgpu --html
+quantem-widget show4dstem /data/session/scan_001_master.h5 --backend webgpu --html
 ```
 
 This keeps native detector sampling and uses the compact browser browse dtype.

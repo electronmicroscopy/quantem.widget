@@ -19,7 +19,7 @@ from quantem.widget.datasets import (
 
 Images and stacks come back as quantem core `Dataset2d` and `Dataset3d`
 (`show2d_gold`, `show3d_gold`), and the 4D-STEM scan
-as every 4D-STEM file reads (`read_4dstem`): a `quantem.gpu.io.Dataset4dstemGPU`
+as every 4D-STEM file reads (`read_4dstem`): a `quantem.gpu.io.Dataset4dstem`
 when quantem.gpu is installed and a GPU is present, else a quantem core
 `Dataset4dstem` (`show4dstem_gold`). `showpdf_ta` returns a quantem core
 `Dataset4dstem` with its detector calibrated in 1/Å, and
@@ -38,24 +38,11 @@ widget's stand-in carries the same `array`, `name`, `sampling`, `units`,
 | `large` | Local workstation review |
 | `full` | Full available tutorial source where practical |
 
-For Show1D, the synthetic Ducky example is a file-backed monitor run.
+For Show1D, the synthetic Ducky example is a run of reconstruction losses with snapshots.
 
 Ducky simulation tutorial: Georgios Varnavides, [*Trademark ducky dataset* (October 23, 2025)](https://github.com/electronmicroscopy/quantem-tutorials/blob/dbadc111734641226ab0454ed988feaf018e65c4/simulation_notebooks/ducky-dataset.ipynb). The viewer files contain subsequent reconstruction results for the synthetic example.
 
-```python
-from quantem.widget import Show1D
-from quantem.widget.datasets import show1d_ducky
-
-run = show1d_ducky()
-widget = Show1D.from_monitor_file(
-    run / "show1d_monitor.jsonl",
-    title="Synthetic Ducky reconstructions (tutorial: Georgios Varnavides)",
-    x_label="frame",
-    y_label="final loss",
-    log_scale=False,
-)
-widget
-```
+See [Show1D](show1d.md#built-in-ducky-example) for the widget built from it.
 
 ## Shared inputs and revisions
 
@@ -69,7 +56,7 @@ then makes its documented preview locally. The default is immutable revision
 | Show2D, widget export / `show2d_gold` | `haadf/gold_haadf_npy` | Explicit image stride; sampling multiplied by that stride |
 | Show3D / `show3d_gold` | Same HAADF input | Moving crops for demonstration, not measured time/depth frames |
 | Show4DSTEM / `show4dstem_gold` | `4dstem/gold_128_npy_bin8` | Scan stride only; detector sampling and uint16 counts preserved |
-| Image readers, folder watching / `gold_session` | `widget/gold_session` | Existing 26 EMDs; original acquisition names |
+| Image readers / `gold_session` | `widget/gold_session` | Existing 26 EMDs; original acquisition names |
 | Show1D, reconstruction comparison / `show1d_ducky` | `widget/ducky` | Monitor JSONL and every relative snapshot path retained |
 | ShowPDF / `showpdf_ta`, `showpdf_ta_ground_truth` | `4dstem/ta_amorphous_sim` | None; simulated scan and its model's g(r), pinned at the revision that adds them |
 
@@ -103,7 +90,7 @@ without that new resolver. Native detector acquisitions are opened with
 `quantem.gpu.io.load`; the Ducky monitor and EMD image session are different
 input types, not raw 4D-STEM acquisitions.
 
-Show3DSlices, ShowCIF and Plot2D generate their small
+Show3DSlices and Plot2D generate their small
 teaching inputs locally. Keep those recipes in the software repository.
 Use Hugging Face for reusable input data, numeric metadata, checksums, credit
 and minimal data cards. Keep notebook code, helpers, training overrides,
@@ -111,12 +98,6 @@ checkpoints and rendered reports in their owning software or private results
 repository. This migration reuses existing public inputs; it adds no new
 scientific data or private files.
 See [Contribute tutorial data](../tutorials/contribute_data.md).
-
-## Diffraction example
-
-The ShowDiffraction notebook uses a labeled deterministic synthetic magnetite
-control. No measured Fe3O4 pattern is published, so there is no download helper
-for that missing input. Open your own measured image with `ShowDiffraction`.
 
 ## Pair distribution function example
 

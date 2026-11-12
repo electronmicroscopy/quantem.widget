@@ -5,8 +5,8 @@ import * as React from "react";
  *
  * Python's StaticFallbackMixin publishes a fallback <img> as a SEPARATE
  * display_data output because JupyterLab never falls back to an in-bundle
- * image/png when the widget renderer claims the output ("model not found"
- * on cold reopen). Live, both would show; the img carries the widget's
+ * image when the widget renderer claims the output: with widget state not
+ * saved (Lab's default) a cold reopen reads "model not found". Live, both would show; the img carries the widget's
  * model id, so hide exactly ours. On a cold reopen this code never runs
  * (no kernel, no widget mount) and the fallback stays visible.
  *

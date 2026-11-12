@@ -1,7 +1,7 @@
 """Where widget computations run: one ``device=`` rule for every widget, and the GPU notice.
 
 ``resolve_device`` gives ``device=`` the same meaning everywhere, and the same
-strings as ``quantem.gpu.device.resolve_device``: ``"auto"`` (CUDA, then Apple
+strings as ``quantem.gpu.device.resolve``: ``"auto"`` (CUDA, then Apple
 MPS, then CPU), ``"cuda"``, ``"cuda:N"``, ``"mps"`` or ``"cpu"``. Data that is
 already a torch tensor stays where it is unless an explicit device moves it.
 Every choice the user did not spell out is printed once, so CPU is never picked
@@ -35,11 +35,11 @@ NO_GPU_PATH = (
 _printed: set[str] = set()
 
 
-def resolve_device(device: str | torch.device | None = "auto", data=None) -> str:
+def resolve_device(device: int | str | torch.device | None = "auto", data=None) -> str:
     """Resolve ``device=`` to the device a widget computes on, as a torch device string.
 
     The strings, order and announcement are those of
-    ``quantem.gpu.device.resolve_device``, in torch alone so they hold without
+    ``quantem.gpu.device.resolve``, in torch alone so they hold without
     quantem.gpu. ``"auto"`` (or ``None``) picks ``"cuda:0"``, then ``"mps"``,
     then ``"cpu"`` and prints one line naming the choice, once per process.
     ``"cuda"``, ``"cuda:N"``, ``"mps"`` and ``"cpu"`` select that device quietly
@@ -64,6 +64,10 @@ def resolve_device(device: str | torch.device | None = "auto", data=None) -> str
     >>> resolve_device("cpu")
     'cpu'
     """
+    if isinstance(device, int) and not isinstance(device, bool):
+        # device=0 or 1 names a visible GPU: CUDA device N, or on a Mac the one Apple GPU.
+        apple = device == 0 and torch.backends.mps.is_available() and not torch.cuda.is_available()
+        device = "mps" if apple else f"cuda:{device}"
     requested = "auto" if device is None else str(device).strip().lower()
     if isinstance(data, torch.Tensor) and requested in ("", "auto"):
         return device_name(data.device)

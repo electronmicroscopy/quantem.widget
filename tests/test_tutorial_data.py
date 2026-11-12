@@ -101,7 +101,7 @@ def test_show4dstem_gold_uses_widget_tutorial_source(tmp_path, monkeypatch, caps
 
     dataset = datasets.show4dstem_gold(size="small", verbose=False)
 
-    assert dataset.shape == (2, 2, 2, 2)  # a Dataset4dstemGPU on a GPU, a core Dataset4dstem elsewhere
+    assert dataset.shape == (2, 2, 2, 2)  # a Dataset4dstem on a GPU, a core Dataset4dstem elsewhere
     assert tuple(dataset.sampling) == (8.0, 8.0, 3.68, 3.68)
     assert "keeps every 4th scan position of the 8x8 scan" in capsys.readouterr().out
     assert calls[0]["allow_patterns"] == ["4dstem/gold_128_npy_bin8/*"]

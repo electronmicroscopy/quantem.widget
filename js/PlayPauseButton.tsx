@@ -2,7 +2,7 @@ import { IconButton } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PauseIcon from "@mui/icons-material/Pause";
 
-/** Play/pause button of Show3D and ShowCIF playback, with keyboard and accessible labels. */
+/** Play/pause button of Show3D playback, with keyboard and accessible labels. */
 export function PlayPauseButton({
   playing,
   onToggle,

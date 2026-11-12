@@ -1,6 +1,7 @@
 """Comparison batching preserves each acquisition's encoded query layout."""
 
 from types import SimpleNamespace
+import threading
 
 import pytest
 import torch
@@ -57,7 +58,10 @@ def test_comparison_preserves_each_source_query_layout(monkeypatch, layouts):
     viewer = SimpleNamespace(
         _data=series, _session=session,
         _compare_session=None, _compare_session_indices=(),
+        _compare_lock=threading.RLock(),
     )
+    viewer._joint_session = lambda selected: Show4DSTEM._joint_session(viewer, selected)
+    viewer._compare_query = lambda selected, method, *args: Show4DSTEM._compare_query(viewer, selected, method, *args)
     mask = torch.tensor([[True, False], [False, True]]).numpy()
     actual = Show4DSTEM._compare_images(viewer, (1, 0), mask)
     expected = torch.tensor([

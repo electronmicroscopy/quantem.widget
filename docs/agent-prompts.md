@@ -7,6 +7,59 @@ insight. These copyable prompts give an agent the scientific and repository
 context needed to work without guessing. Replace text in angle brackets before
 sending a prompt. Do not paste credentials or private data into the prompt.
 
+## Turn images into a shareable HTML page
+
+The most common request: "make these images into a page I can send or embed."
+`quantem-widget show2d` (separate images, one panel each) and
+`quantem-widget show3d` (a stack or frames to scrub) do it in one command,
+with no notebook. The page is one self-contained `.html` file that opens
+offline, on a phone, or inside an `<iframe>`.
+
+```bash
+quantem-widget show2d before.dm4 after.dm4 --labels before after --title "Anneal 300C" --no-open --save-dir ./share
+quantem-widget show3d ./drift_frames/ --title "Drift series" --no-open --save-dir ./share
+# wrote ./share/drift_series_40x512x512_exact.html (55.4 MB, full float32)
+```
+
+Already have a widget in a notebook? `viewer.export_html("page.html")` writes
+the same page. See [Command line](cli.md) for every input and flag.
+
+Copy this prompt to have an agent do it and check the result:
+
+```text
+Make a shareable quantem.widget HTML page of these images:
+
+<absolute paths to image files, one stack file, or one folder>
+
+What they are and what the reader should compare:
+<e.g. "before/after anneal, same area" or "drift series, 1 s per frame">
+
+Embed it in a page? <no, or the host page / report it goes into>
+
+Read docs/cli.md first. Use `quantem-widget show2d` for separate images (one
+panel each) and `quantem-widget show3d` for a stack or frames to scrub. Run it
+with --no-open and --save-dir <a folder outside any source checkout>, set --title
+(it names the file) and --labels when the file names are not meaningful. Pass
+--sampling and --units when the files carry no calibration (TIFF, PNG, NPY),
+and --no-link-contrast when the images have different value ranges. Keep the
+lossless default (--encoding full, no --image-bin). If the command refuses the
+size, tell me the full and uint8 sizes it names and ask before packing uint8
+or binning. Never crop, filter or bin to make it fit.
+
+Report the exact command and the "wrote <path> (<size> MB, <packing>)" line.
+Then serve the folder on localhost, open the page in a real browser, check
+that navigator.gpu.requestAdapter() gives real hardware (not swiftshader),
+and confirm every panel shows image pixels (not blank), the scale bar matches
+the calibration, and for Show3D that stepping or playing frames changes the
+picture. If I asked for an embed, add an <iframe> of the page to the host page,
+check it renders there too, and give me the <iframe> snippet. Say plainly what
+you verified and what you did not.
+```
+
+For many pages from a script, loop over the command: each run exits 0 with
+one `wrote ...` line, or exits 1 with one `quantem-widget: ...` line naming the
+flag that fixes the problem.
+
 ## Open an ARINA H5 file in Show4DSTEM
 
 Use this when you have an ARINA `*_master.h5` file and want a live Jupyter
@@ -43,7 +96,7 @@ console error. Leave the tested notebook open for me and summarize exactly what
 was verified and what was not.
 ```
 
-See [Loading data](api/load.md) and the
+See [IO](api/io.md) and the
 [Show4DSTEM API](api/show4dstem.md) for the underlying interfaces.
 
 ## Create a widget from a notebook or description

@@ -51,14 +51,8 @@ def test_widget_has_no_duplicate_gpu_or_io_public_api() -> None:
         assert not hasattr(widget_io, name)
 
 
-def test_live_gpu_status_hook_remains_available() -> None:
-    from quantem.widget.gpu import vram_status
-
-    assert callable(vram_status)
-
-
 def test_public_docs_use_the_canonical_gpu_api() -> None:
-    """Tutorials must not revive widget-owned IO or retired SSB fit calls."""
+    """Tutorials must not revive widget-owned IO or retired direct ptychography fit calls."""
 
     repo = Path(__file__).resolve().parents[2]
     docs = repo / "docs"
@@ -66,8 +60,8 @@ def test_public_docs_use_the_canonical_gpu_api() -> None:
     retired_widget_load = re.compile(
         r"from\s+quantem\.widget\s+import\s+(?:\([^)]*\)|[^\n]*)"
     )
-    retired_ssb_member = re.compile(
-        r"\b(?:ssb|workflow)\.(?:optimize|refine|result|explore)\b"
+    retired_direct_member = re.compile(
+        r"\b(?:direct|workflow)\.(?:optimize|refine|result|explore)\b"
     )
     offenders: list[str] = []
     for path in documents:
@@ -79,14 +73,14 @@ def test_public_docs_use_the_canonical_gpu_api() -> None:
             offenders.append(path.relative_to(repo).as_posix())
         if "quantem.widget.load" in source:
             offenders.append(path.relative_to(repo).as_posix())
-        if retired_ssb_member.search(source):
+        if retired_direct_member.search(source):
             offenders.append(path.relative_to(repo).as_posix())
 
     showptycho_docs = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted((docs / "tutorials").glob("showptycho*.md"))
     )
-    assert re.search(r"\bSSB\.open\s*\(", showptycho_docs)
+    assert re.search(r"\bDirectPtycho\.open\s*\(", showptycho_docs)
     assert offenders == []
 
 
@@ -98,8 +92,8 @@ def test_tutorial_notebook_code_is_valid_and_uses_gpu_owned_io() -> None:
     retired_widget_load = re.compile(
         r"from\s+quantem\.widget\s+import\s+(?:\([^)]*\)|[^\n]*)"
     )
-    retired_ssb_member = re.compile(
-        r"\b(?:ssb|workflow)\.(?:optimize|refine|result|explore)\b"
+    retired_direct_member = re.compile(
+        r"\b(?:direct|workflow)\.(?:optimize|refine|result|explore)\b"
     )
     for path in sorted((repo / "docs" / "tutorials").glob("*.ipynb")):
         notebook = json.loads(path.read_text(encoding="utf-8"))
@@ -108,7 +102,7 @@ def test_tutorial_notebook_code_is_valid_and_uses_gpu_owned_io() -> None:
             if any(
                 re.search(r"\bload\b", match.group(0))
                 for match in retired_widget_load.finditer(source)
-            ) or "quantem.widget.load" in source or retired_ssb_member.search(source):
+            ) or "quantem.widget.load" in source or retired_direct_member.search(source):
                 offenders.append(f"{path.name}:cell-{cell_index}")
             if cell.get("cell_type") != "code":
                 continue
@@ -194,7 +188,7 @@ def test_widget_owns_display_kernels_and_syncs_only_science() -> None:
     for name in ("colormaps.ts", "fft.ts", "stats.ts", "geometry.ts", "device.ts"):
         assert ".generated" not in (display / name).read_text(encoding="utf-8")
     assert 'targetDir = "js/.generated/engine"' in sync_script
-    assert 'SCIENCE_DOMAINS = ["detector/", "dpc/", "formats/", "io/", "ssb/"]' in sync_script
+    assert 'SCIENCE_DOMAINS = ["detector/", "dpc/", "formats/", "io/", "direct_ptycho/"]' in sync_script
     assert 'export * from "../../../display/device"' in sync_script
     assert "display/webgpu/borrowed-image" not in sync_script
     # one borrowed-image contract: quantem.gpu's, which every bundle drawing through js/display needs
@@ -213,7 +207,7 @@ def test_widget_owns_display_kernels_and_syncs_only_science() -> None:
     assert offenders == []
     assert "../.generated/engine/io/hdf5/webgpu/bslz4" in show4dstem
     assert "../.generated/engine/io/hdf5/webgpu/local-h5" in show4dstem
-    assert "../.generated/engine/ssb/webgpu/backend" in showptycho
+    assert "../.generated/engine/direct_ptycho/webgpu/backend" in showptycho
 
 
 def test_every_build_bundles_the_quantem_gpu_ref_in_gpu_ref_txt() -> None:
@@ -240,7 +234,7 @@ def test_every_build_bundles_the_quantem_gpu_ref_in_gpu_ref_txt() -> None:
     # the next quantem.gpu rc may change the kernels and API this release bundles
     for floor, ceiling in bounds:
         prefix, number = floor.split("rc")
-        assert ceiling == f"{prefix}rc{int(number) + 1}"
+        assert ceiling == f"{prefix}rc{int(number.split('.', 1)[0]) + 1}"
 
 def test_sync_writes_a_manifest_of_the_pinned_ref_and_every_file(tmp_path) -> None:
     """MANIFEST.json names the ref in gpu-ref.txt and the commit synced, and the sha256 of every file written."""
@@ -264,7 +258,7 @@ def test_sync_writes_a_manifest_of_the_pinned_ref_and_every_file(tmp_path) -> No
     recorded = {**manifest["files"], **manifest["generated"]}
     assert sorted(recorded) == sorted(on_disk)
     assert {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in on_disk.items()} == recorded
-    assert all(name.startswith(("detector/", "dpc/", "formats/", "io/", "ssb/")) for name in manifest["files"])
+    assert all(name.startswith(("detector/", "dpc/", "formats/", "io/", "direct_ptycho/")) for name in manifest["files"])
     assert sorted(manifest["generated"]) == ["device/webgpu.ts"]
     assert "detector/webgpu/borrowed-image.ts" in manifest["files"]
     # one line names the source and the commit it synced from; a checkout found beside this one is named first

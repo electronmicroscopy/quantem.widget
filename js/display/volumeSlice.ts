@@ -182,11 +182,6 @@ export class VolumeSlices {
   private volParams = new ArrayBuffer(VOLUME_PARAMS_BYTES);
   private volParamsU32 = new Uint32Array(this.volParams);
   private volParamsF32 = new Float32Array(this.volParams);
-  private volBlitCanvas: OffscreenCanvas | null = null;
-  private volBlitContext: GPUCanvasContext | null = null;
-  private volBlitFormat: GPUTextureFormat | null = null;
-  private volBlitWidth = 0;
-  private volBlitHeight = 0;
   private volBlitParamsBuffer: GPUBuffer | null = null;
   private volBlitParams = new Uint32Array(2);
   private volBlitBindGroup: GPUBindGroup | null = null;
@@ -408,17 +403,10 @@ export class VolumeSlices {
     }
     computePass.dispatchWorkgroups(Math.ceil(outW / 16), Math.ceil(outH / 16));
     computePass.end();
-    const sizeChanged = !this.volBlitCanvas || this.volBlitWidth !== outW || this.volBlitHeight !== outH;
-    const formatChanged = this.volBlitFormat !== format;
-    if (sizeChanged || formatChanged || !this.volBlitContext) {
-      this.volBlitCanvas = new OffscreenCanvas(outW, outH);
-      this.volBlitContext = this.volBlitCanvas.getContext("webgpu") as GPUCanvasContext | null;
-      if (!this.volBlitContext) return null;
-      this.volBlitContext.configure({ device: this.device, format, alphaMode: "opaque" });
-      this.volBlitWidth = outW;
-      this.volBlitHeight = outH;
-      this.volBlitFormat = format;
-    }
+    // The engine pools a configured canvas per size, so planes of different sizes (top, oblique)
+    // painted in turn do not reconfigure one canvas back and forth.
+    const target = this.engine.acquireOffscreen(outW, outH, format);
+    if (!target) return null;
     if (!this.volBlitParamsBuffer) {
       this.volBlitParamsBuffer = this.device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     }
@@ -434,18 +422,15 @@ export class VolumeSlices {
         ],
       });
     }
-    const blitContext = this.volBlitContext;
-    const blitCanvas = this.volBlitCanvas;
-    if (!blitContext || !blitCanvas) return null;
     const renderPass = encoder.beginRenderPass({
-      colorAttachments: [{ view: blitContext.getCurrentTexture().createView(), loadOp: "clear" as GPULoadOp, storeOp: "store" as GPUStoreOp, clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      colorAttachments: [{ view: target.context.getCurrentTexture().createView(), loadOp: "clear" as GPULoadOp, storeOp: "store" as GPUStoreOp, clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
     });
     renderPass.setPipeline(this.engine.blitPipeline);
     renderPass.setBindGroup(0, this.volBlitBindGroup);
     renderPass.draw(3);
     renderPass.end();
     this.device.queue.submit([encoder.finish()]);
-    return blitCanvas.transferToImageBitmap();
+    return this.engine.transferOffscreen(target.canvas);
   }
 
   /** Release the volume and its slice buffers; the engine's destroy calls this. */
@@ -455,8 +440,7 @@ export class VolumeSlices {
     this.volParamsBuffer?.destroy(); this.volParamsBuffer = null;
     this.volRgbaBuffer?.destroy(); this.volRgbaBuffer = null;
     this.volBlitParamsBuffer?.destroy(); this.volBlitParamsBuffer = null;
-    this.volBlitCanvas = null; this.volBlitContext = null; this.volBlitFormat = null;
-    this.volBlitBindGroup = null; this.volComputeBindGroup = null; this.volTextureBindGroup = null; this.volBlitWidth = 0; this.volBlitHeight = 0;
+    this.volBlitBindGroup = null; this.volComputeBindGroup = null; this.volTextureBindGroup = null;
     this.volUseTexture = false;
     this.volCount = 0; this.volRgbaCapacity = 0; this.volTextureWidth = 0;
   }

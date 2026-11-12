@@ -1,11 +1,26 @@
-"""Headed-Chrome fixtures for the opt-in browser tier (WebGPU on and off).
+"""Chrome fixtures for the opt-in browser tier (WebGPU on and off).
 
-Run on a machine with a display and a GPU:
+Run on a Mac: WebGPU uses the Apple GPU through Metal, headless too, so the tier runs headless
+there by default and no window opens:
 
-    QUANTEM_WIDGET_BROWSER=1 DISPLAY=:0 python -m pytest tests/browser -s
+    QUANTEM_WIDGET_BROWSER=1 python -m pytest tests/browser -s
+
+A headed window on a Mac becomes the key window when it opens, so typing meant for another
+app lands in the test page: a space starts Show3D playback, ". " and Return search the
+omnibox. QUANTEM_WIDGET_HEADLESS=0 still opens windows, for watching a run with hands off
+the keyboard.
+
+On Linux, run headed on a display with an NVIDIA GPU (headless Chrome there falls back to
+its CPU renderer, which `hardware_adapter` rejects):
+
+    QUANTEM_WIDGET_BROWSER=1 DISPLAY=:1 python -m pytest tests/browser -s
 
 Chrome is pointed at the NVIDIA Vulkan driver when it exists, so WebGPU runs
-on the hardware adapter instead of Chrome's bundled CPU renderer.
+on the hardware adapter instead of Chrome's bundled CPU renderer. The tier
+refuses to start on a stale frontend: a widget bundle older than the js/
+sources, or a quantem.widget imported from outside this checkout, by the
+tests or by the notebook kernel (a relative PYTHONPATH is made absolute
+for the kernel, which starts in another directory).
 """
 
 import functools
@@ -32,6 +47,10 @@ CHROME_ARGS = [
     "--no-first-run",
     "--window-size=1700,1100",
 ]
+# QUANTEM_WIDGET_WINDOW_POSITION="X,Y" places the headed window, e.g. on a second monitor so the
+# test windows do not cover the screen someone is working on.
+if os.environ.get("QUANTEM_WIDGET_WINDOW_POSITION"):
+    CHROME_ARGS.append(f"--window-position={os.environ['QUANTEM_WIDGET_WINDOW_POSITION']}")
 # Removing the accessor makes a widget see a browser without WebGPU.
 NO_WEBGPU_SCRIPT = (
     "Object.defineProperty(Navigator.prototype, 'gpu', {get: () => undefined, configurable: true});"
@@ -44,6 +63,43 @@ async () => {
 }
 """
 RENDER_PATHS = "() => Array.from(document.querySelectorAll('[data-render-path]')).map(e => e.dataset.renderPath)"
+JS_SOURCES = Path(__file__).resolve().parents[2] / "js"
+
+
+def stale_bundles() -> list[str]:
+    """Widget bundles older than the newest frontend source, in the quantem.widget the tests import.
+
+    The tests must import this checkout's quantem.widget: another checkout's or an installed copy's
+    bundles were built from other sources. A bundle built before a pull or merge still loads and
+    draws through the code it was built from, so a headed run would test old frontend code against
+    new tests. Git gives every file a checkout changes the current time, so a changed source is
+    newer than a bundle built before it.
+    """
+    import quantem.widget
+
+    package = Path(quantem.widget.__file__).resolve().parent
+    if not package.is_relative_to(JS_SOURCES.parent / "src"):
+        return [f"quantem.widget is imported from {package}, not this checkout's src/ (set PYTHONPATH=src)"]
+    static = package / "static"
+    sources = [path for path in JS_SOURCES.rglob("*") if path.suffix in (".ts", ".tsx")
+               and ".test." not in path.name and ".generated" not in path.parts]
+    if not sources:
+        return []
+    newest = max(path.stat().st_mtime for path in sources)
+    bundles = sorted(static.glob("*.js"))
+    if not bundles:
+        return [f"no bundles in {static.name}/"]
+    return [bundle.name for bundle in bundles if bundle.stat().st_mtime < newest]
+
+
+def headless() -> bool:
+    """Headless on a Mac (Metal WebGPU either way, and no window to catch the desktop's typing); headed elsewhere.
+
+    QUANTEM_WIDGET_HEADLESS=1 or 0 overrides. Linux stays headed: headless Chrome there falls back to its
+    CPU renderer, which ``hardware_adapter`` rejects.
+    """
+    choice = os.environ.get("QUANTEM_WIDGET_HEADLESS")
+    return choice == "1" if choice in ("0", "1") else sys.platform == "darwin"
 
 
 def pytest_configure(config):
@@ -55,7 +111,7 @@ def pytest_collection_modifyitems(config, items):
         return
     skip = pytest.mark.skip(reason="opt-in: set QUANTEM_WIDGET_BROWSER=1 (headed Chrome and a GPU)")
     for item in items:
-        if "browser" in item.keywords:
+        if item.get_closest_marker("browser") is not None:
             item.add_marker(skip)
 
 
@@ -71,11 +127,22 @@ def browser_out(tmp_path_factory) -> Path:
 def chrome():
     from playwright.sync_api import sync_playwright
 
+    stale = stale_bundles()
+    if stale and os.environ.get("QUANTEM_WIDGET_ALLOW_STALE_BUNDLE") != "1":
+        pytest.fail(
+            f"Stale frontend: {', '.join(stale)}. Rebuild (npm run build, see CONTRIBUTING.md) "
+            "so the browser runs this checkout's frontend; QUANTEM_WIDGET_ALLOW_STALE_BUNDLE=1 skips this check "
+            "(an installed-wheel run)."
+        )
+
     env = dict(os.environ)
     if os.path.exists(NVIDIA_ICD):
         env["VK_ICD_FILENAMES"] = NVIDIA_ICD
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=False, args=CHROME_ARGS, env=env)
+        browser = playwright.chromium.launch(
+            channel="chrome", headless=headless(),
+            args=CHROME_ARGS, env=env,
+        )
         yield browser
         browser.close()
 
@@ -108,9 +175,29 @@ def open_page(chrome):
 @pytest.fixture(scope="session")
 def serve():
     """Serve a directory over HTTP (exports fetch their data; file:// blocks it)."""
-    servers = []
+    servers, processes = [], []
 
     def start(directory: Path) -> str:
+        # An export that ships its own server is opened through it, as its launcher does: a CUDA
+        # ShowPtycho export reads source/bf_columns.qem by byte range, which SimpleHTTPRequestHandler ignores.
+        own_server = Path(directory) / ".viewer" / "serve_range.py"
+        if own_server.exists():
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            process = subprocess.Popen([sys.executable, str(own_server), "--root", str(directory),
+                                        "--host", "127.0.0.1", "--port", str(port)])
+            processes.append(process)
+            url = f"http://127.0.0.1:{port}"
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    urllib.request.urlopen(url + "/index.html", timeout=1).close()
+                    return url
+                except OSError:
+                    if process.poll() is not None or time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.1)
         handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
         handler.log_message = lambda *args: None
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -121,6 +208,9 @@ def serve():
     yield start
     for server in servers:
         server.shutdown()
+    for process in processes:
+        process.terminate()
+        process.wait(timeout=10)
 
 
 @pytest.fixture
@@ -157,6 +247,17 @@ class JupyterLab:
         # An empty config dir keeps the user's Jupyter config (save hooks, extensions) out of the run.
         env = {**os.environ, "JUPYTER_PATH": str(root / "jupyter"), "JUPYTER_RUNTIME_DIR": str(self.runtime),
                "JUPYTER_CONFIG_DIR": str(root / "config"), "JUPYTERLAB_SETTINGS_DIR": str(settings)}
+        # Kernels start in the notebook root, not this cwd: a relative PYTHONPATH (PYTHONPATH=src) would
+        # point nowhere there, and the kernel would import another quantem.widget (an editable install
+        # elsewhere, with older bundles) while the tests import this checkout's.
+        if env.get("PYTHONPATH"):
+            env["PYTHONPATH"] = os.pathsep.join(
+                str(Path(entry).resolve()) for entry in env["PYTHONPATH"].split(os.pathsep) if entry)
+        kernel_import = subprocess.run(
+            [sys.executable, "-c", "import quantem.widget; print(quantem.widget.__file__)"],
+            cwd=root, env=env, capture_output=True, text=True, check=True).stdout.strip()
+        if not Path(kernel_import).resolve().is_relative_to(JS_SOURCES.parent / "src"):
+            pytest.fail(f"The notebook kernel imports quantem.widget from {kernel_import}, not this checkout's src/")
         self.server = subprocess.Popen(
             [sys.executable, "-m", "jupyterlab", "--no-browser", f"--port={port}", "--ip=127.0.0.1",
              "--ServerApp.token=", "--ServerApp.password=", "--ServerApp.disable_check_xsrf=True",
@@ -176,16 +277,26 @@ class JupyterLab:
         notebook.metadata["kernelspec"] = {"name": "quantem-browser-test", "display_name": "quantem-browser-test", "language": "python"}
         nbformat.write(notebook, self.root / name)
 
-    def open(self, open_page, notebook: str, workspace: str, *, webgpu: bool, ready: str, out: Path):
+    def open(self, open_page, notebook: str, workspace: str, *, webgpu: bool, ready: str, out: Path,
+             collapse_input: bool = False):
         """Open the notebook in JupyterLab, run its first cell and wait for ``ready``."""
         page = open_page(f"{self.url}/lab/workspaces/{workspace}/tree/{notebook}", webgpu=webgpu)
         page.wait_for_selector(".jp-Notebook .jp-Cell", timeout=120_000)
         page.wait_for_timeout(3000)
         page.locator(".jp-Cell .cm-content").first.click()
         page.keyboard.press("Shift+Enter")
+        if collapse_input:
+            page.locator(".jp-Cell .jp-InputCollapser").first.click()
         page.mouse.move(5, 300)
         page.screenshot(path=str(out / f"live_{workspace}_running.png"))
-        page.wait_for_selector(ready, timeout=300_000)
+        try:
+            page.wait_for_selector(ready, timeout=300_000)
+        except Exception:
+            page.screenshot(path=str(out / f"live_{workspace}_failed.png"))
+            (out / f"live_{workspace}_errors.json").write_text(json.dumps({
+                "errors": page.errors, "console": page.console,
+            }, indent=2))
+            raise
         page.wait_for_timeout(6000)
         return page
 

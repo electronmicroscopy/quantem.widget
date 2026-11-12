@@ -286,7 +286,7 @@ toolbar (Log, Background, Heatmap / Waterfall, N, Reset), and Export HTML. A
 badge next to the title then lists the damping, k filters, or perpendicular
 line sampling in effect, for example "Damped · Lowpass 0.020".
 
-ShowPDF does not take the shared `ui_mode`, `show_title`, or
+ShowPDF does not take the shared `mode`, `show_title`, or
 `controls_collapsed` names of the [Viewer UI controls](viewer-ui).
 
 ## Errors and limits

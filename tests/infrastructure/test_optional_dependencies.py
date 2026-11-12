@@ -73,7 +73,6 @@ from pathlib import Path
 import h5py
 import hdf5plugin
 import numpy as np
-from ase import Atoms
 
 import quantem.widget as qw
 from quantem.widget import device
@@ -106,17 +105,13 @@ widgets = [
     qw.Show3DSlices(rng.random((8, 8, 8)).astype(np.float32)),
     qw.Show4DSTEM(counts, device="cpu"),
     qw.Show4DSTEM(scan, device="cpu"),
-    qw.ShowDiffraction(rng.random((2, 32, 32)).astype(np.float32), device="cpu"),
-    qw.ShowCIF(Atoms("Si2", scaled_positions=[(0, 0, 0), (0.25, 0.25, 0.25)], cell=[5.43] * 3, pbc=True)),
     qw.Plot2D(image[:4, :6], x=np.arange(6), y=np.arange(4)),
-    qw.ChooseLattice(image),
     qw.ShowPtycho(np.exp(1j * image).astype(np.complex64), sampling=0.2),
 ]
-widgets[6].denoise = "nlm"  # scikit-image, as the ShowDiffraction tutorial uses it
 dense = widgets[5]
 assert dense._session(0).masked_sum(np.ones((16, 16), bool)).tolist() == counts.sum(axis=(2, 3)).astype(np.float32).tolist()
 ptycho = widgets[-1]
-assert not ptycho.ssb_session and np.frombuffer(ptycho.phase_bytes, np.float32).reshape(32, 32).tolist() == np.angle(np.exp(1j * image).astype(np.complex64)).tolist()
+assert not ptycho.ptycho_session and np.frombuffer(ptycho.phase_bytes, np.float32).reshape(32, 32).tolist() == np.angle(np.exp(1j * image).astype(np.complex64)).tolist()
 route = device.gpu_path_hint() or device.no_gpu_path()  # this machine's way to quantem.gpu, or why it has none
 assert route in ptycho.session_note
 try:
@@ -144,15 +139,14 @@ def test_every_widget_imports_and_constructs_without_quantem_or_quantem_gpu(tmp_
 
 
 # Distribution names whose import name differs.
-DISTRIBUTION = {"PIL": "pillow", "skimage": "scikit_image", "yaml": "pyyaml", "IPython": "ipython"}
+DISTRIBUTION = {"PIL": "pillow", "IPython": "ipython"}
 # Imported only inside the function that needs them, with an install message or a fallback.
 OPTIONAL = {
-    "cupy": "gpu_info and vram_status on CUDA, brought by quantem.gpu[cuda]",
     "quantem": "quantem.gpu, and quantem core where it installs, guarded at the top of their adapter modules",
     "ipyfilechooser": "FolderPicker, used by quantem.live",
-    "playwright": "quantem github widget screenshots",
-    "yaml": "dataset.yaml, read by quantem.live",
+    "playwright": "quantem-widget github widget screenshots",
     "tqdm": "progress bars when it is installed",
+    "ase": "DiffractionSim crystals; ASE arrives with quantem core, imported inside the functions that need it",
 }
 # Declared without a Python import: a tifffile codec plugin and the JupyterLab widget manager.
 NOT_IMPORTED = {"imagecodecs", "jupyterlab_widgets"}
@@ -167,6 +161,10 @@ def test_every_import_is_declared_or_optional_and_every_dependency_is_imported()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         in_function = {id(inner) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                        for inner in ast.walk(node)}
+        # `if TYPE_CHECKING:` imports never run; they only name types for annotations
+        in_function |= {id(inner) for node in ast.walk(tree)
+                        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+                        for inner in ast.walk(node)}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]

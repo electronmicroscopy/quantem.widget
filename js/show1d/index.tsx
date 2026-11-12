@@ -7,10 +7,9 @@ import IconButton from "@mui/material/IconButton";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
-import Slider from "@mui/material/Slider";
+import Slider from "../shared/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
-import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -32,7 +31,6 @@ import { applyHannWindow2D, autoEnhanceFFT, getDisplayFFT, nextPow2, shiftedMagn
 import { formatScaleLabel, roundToNiceValue } from "../figure";
 import { useTheme } from "../theme";
 import { compactButton, switchStyles, controlPanel } from "../controlStyles";
-import { EmbeddedWidgetView } from "./embeddedWidget";
 import { exportTitleSlug, formatEstimatedHtmlSize, formatSavedBytes } from "../shared/exportFormat";
 import { HTML_PICKER_TYPE, type PendingSave, pickSaveHandle, useSaveExportPayload } from "../shared/exportSave";
 import { RenderPathBadge } from "../shared/RenderPathBadge";
@@ -42,15 +40,6 @@ import { columnStarts, indexTraces, pointWindow, traceToPath, yExtent } from "./
 // Show1D bundles are smaller than the image widgets, so its export estimate
 // uses a smaller fixed overhead than the shared HTML_EXPORT_OVERHEAD_BYTES.
 const SHOW1D_HTML_EXPORT_OVERHEAD_BYTES = 600_000;
-
-const SHOW1D_TO_SHOW2D_LINKED_TRAITS = [
-  { source: "image_cmap", target: "cmap" },
-  { source: "show_snapshot_fft", target: "show_fft" },
-  { source: "show_stats" },
-  { source: "show_controls" },
-  { source: "controls_collapsed" },
-  { source: "show_scale_bar" },
-];
 
 type ProfilePoint = {
   row?: number;
@@ -120,36 +109,9 @@ type PlotThumbnailHitArea = {
   height: number;
 };
 
-type TrialRanking = {
-  label?: string;
-  trace_index?: number;
-  rank?: number;
-  score?: number;
-  lambda?: number;
-  final_loss?: number;
-  min_loss?: number;
-  rmse?: number;
-  flicker?: number;
-  object_quality?: number;
-  probe_quality?: number;
-  alert_count?: number;
-  starred?: boolean;
-  hidden?: boolean;
-  note?: string;
-  tags?: string[];
-};
-
-type TrialAlert = {
-  label?: string;
-  kind?: string;
-  message?: string;
-};
-
 // The interactive traits Reset puts back to their values when the widget first settled.
 const RESET_TRAITS = [
-  "controls_collapsed", "log_scale", "show_stats", "show_review", "show_legend",
-  "starred_snapshot_image_labels", "trial_notes", "trial_tags", "show_trial_notes", "show_starred_only",
-  "trial_sort_key", "trial_sort_descending", "trial_filter_text", "top_trial_count",
+  "controls_collapsed", "log_scale", "show_stats", "show_legend",
   "plot_height_px", "plot_width_px", "side_panel_width_px", "snapshot_panel_width_px", "focused_trace",
   "x_range", "y_range", "selected_snapshot_idx", "selected_snapshot_group_idx", "bookmarked_snapshot_groups",
   "hidden_snapshot_image_labels", "show_snapshot_histogram", "show_snapshot_fft", "snapshot_fft_layout",
@@ -423,7 +385,8 @@ function labelPositionAwayFromInset(insetPosition: string): "top-left" | "top-ri
   return normaliseSnapshotOverlayPosition(insetPosition).endsWith("right") ? "top-left" : "top-right";
 }
 
-function trialKey(label: string): string {
+// Case- and punctuation-insensitive, so lambda_10 and "Lambda 10" name the same image.
+function labelKey(label: string): string {
   return String(label || "")
     .normalize("NFKC")
     .toLocaleLowerCase()
@@ -442,48 +405,15 @@ function uniqueStrings(values: string[]): string[] {
   return out;
 }
 
-function lookupTrialValue<T>(values: Record<string, T> | null | undefined, label: string): T | undefined {
-  const target = trialKey(label);
-  for (const [key, value] of Object.entries(values ?? {})) {
-    if (trialKey(key) === target) return value;
-  }
-  return undefined;
-}
-
-function parseLambdaLabel(label: string): number {
-  const match = String(label || "").replace(/_/g, " ").match(/lambda\s+([-+]?\d*\.?\d+(?:e[-+]?\d+)?)/i);
-  if (!match) return Number.NaN;
-  return Number(match[1]);
-}
-
 function isReferenceLabel(label: string): boolean {
-  return trialKey(label).includes("reference");
+  return labelKey(label).includes("reference");
 }
 
-// One order for the snapshot grid and the plot thumbnails: reference trials
-// first, then review rank (unranked last), then label.
-function compareSnapshotLabels(aLabel: string, bLabel: string, trialRowByKey: Map<string, TrialRanking>): number {
+// One order for the snapshot grid and the plot thumbnails: reference images
+// first, then label.
+function compareSnapshotLabels(aLabel: string, bLabel: string): number {
   if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-  const aRank = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
-  const bRank = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
-  return (Number.isFinite(aRank) ? aRank : Number.MAX_SAFE_INTEGER)
-    - (Number.isFinite(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
-    || aLabel.localeCompare(bLabel);
-}
-
-function optionalFiniteNumber(value: unknown): number {
-  if (value === null || value === undefined || value === "") return Number.NaN;
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : Number.NaN;
-}
-
-function rankingNumber(row: TrialRanking, key: string): number {
-  const clean = key === "default" ? "final_loss" : key;
-  if (clean === "object_quality" || clean === "probe_quality") {
-    const value = optionalFiniteNumber(row[clean]);
-    return Number.isFinite(value) ? -value : Number.NaN;
-  }
-  return optionalFiniteNumber((row as Record<string, unknown>)[clean]);
+  return aLabel.localeCompare(bLabel);
 }
 
 function trimTrailingZeros(value: string): string {
@@ -2359,9 +2289,6 @@ function Show1DWidget() {
   const [yUnit] = useModelState<string>("y_unit");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
-  const [showReview, setShowReview] = useModelState<boolean>("show_review");
-  const [reviewMode] = useModelState<string>("review_mode");
-  const optimizationReview = String(reviewMode || "trace") === "optimization";
   const [showLegend, setShowLegend] = useModelState<boolean>("show_legend");
   const [showGrid] = useModelState<boolean>("show_grid");
   const [showControls] = useModelState<boolean>("show_controls");
@@ -2391,19 +2318,7 @@ function Show1DWidget() {
   const [snapshotHeights] = useModelState<number[]>("snapshot_heights");
   const [snapshotWidths] = useModelState<number[]>("snapshot_widths");
   const [snapshotImageLabels] = useModelState<string[]>("snapshot_image_labels");
-  const [starredSnapshotImageLabels, setStarredSnapshotImageLabels] = useModelState<string[]>("starred_snapshot_image_labels");
   const [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels] = useModelState<string[]>("hidden_snapshot_image_labels");
-  const [trialNotes, setTrialNotes] = useModelState<Record<string, string>>("trial_notes");
-  const [trialTags, setTrialTags] = useModelState<Record<string, string[]>>("trial_tags");
-  const [showTrialNotes, setShowTrialNotes] = useModelState<boolean>("show_trial_notes");
-  const [showStarredOnly, setShowStarredOnly] = useModelState<boolean>("show_starred_only");
-  const [trialSortKey, setTrialSortKey] = useModelState<string>("trial_sort_key");
-  const [trialSortDescending, setTrialSortDescending] = useModelState<boolean>("trial_sort_descending");
-  const [trialFilterText, setTrialFilterText] = useModelState<string>("trial_filter_text");
-  const [topTrialCount, setTopTrialCount] = useModelState<number>("top_trial_count");
-  const [trialRankings] = useModelState<TrialRanking[]>("trial_rankings");
-  const [trialAlerts] = useModelState<TrialAlert[]>("trial_alerts");
-  const [bestTrialLabel] = useModelState<string>("best_trial_label");
   const [snapshotGroupIndices] = useModelState<number[]>("snapshot_group_indices");
   const [snapshotGroupIterations] = useModelState<number[]>("snapshot_group_iterations");
   const [snapshotGroupLabels] = useModelState<string[]>("snapshot_group_labels");
@@ -2455,10 +2370,6 @@ function Show1DWidget() {
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
-  const [, setHandoffRequest] = useModelState<string>("handoff_request");
-  const [handoffStatus] = useModelState<string>("handoff_status");
-  const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
-  const [preparedViewWidget] = useModelState<string | null>("prepared_view_widget");
   const [transientSnapshotGroupIdx, setTransientSnapshotGroupIdx] = React.useState<number | null>(null);
   const resetBaselineRef = React.useRef<Map<string, unknown> | null>(null);
   const [resetBaselineReady, setResetBaselineReady] = React.useState(false);
@@ -2504,147 +2415,23 @@ function Show1DWidget() {
     () => safeFloat32(profileImageBytes, Math.max(0, profileImageHeight * profileImageWidth)),
     [profileImageBytes, profileImageHeight, profileImageWidth],
   );
-  const hiddenTrialLabels = React.useMemo(() => uniqueStrings(hiddenSnapshotImageLabels ?? []), [hiddenSnapshotImageLabels]);
-  const hiddenTrialKeys = React.useMemo(() => new Set(hiddenTrialLabels.map(trialKey)), [hiddenTrialLabels]);
-  const starredTrialLabels = React.useMemo(() => uniqueStrings(starredSnapshotImageLabels ?? []), [starredSnapshotImageLabels]);
-  const starredTrialKeys = React.useMemo(() => new Set(starredTrialLabels.map(trialKey)), [starredTrialLabels]);
-  const normalisedSortKey = React.useMemo(
-    () => optimizationReview ? String(trialSortKey || "final_loss") : "label",
-    [optimizationReview, trialSortKey],
-  );
-  const baseTrialRows = React.useMemo<TrialRanking[]>(() => {
-    const rowsByKey = new Map<string, TrialRanking>();
-    for (const row of trialRankings ?? []) {
-      const label = String(row.label || "");
-      if (label) rowsByKey.set(trialKey(label), { ...row, label });
-    }
-    for (let idx = 0; idx < nTraces; idx += 1) {
-      const label = labels?.[idx] || `Trace ${idx + 1}`;
-      const key = trialKey(label);
-      const existing = rowsByKey.get(key) ?? {};
-      const offset = idx * nPoints;
-      let finalLoss = optionalFiniteNumber(existing.final_loss);
-      let minLoss = optionalFiniteNumber(existing.min_loss);
-      if (!Number.isFinite(finalLoss) || !Number.isFinite(minLoss)) {
-        finalLoss = Number.NaN;
-        minLoss = Number.POSITIVE_INFINITY;
-        for (let point = 0; point < nPoints; point += 1) {
-          const value = yData[offset + point];
-          if (!Number.isFinite(value)) continue;
-          finalLoss = value;
-          if (value < minLoss) minLoss = value;
-        }
-        if (!Number.isFinite(minLoss)) minLoss = Number.NaN;
-      }
-      rowsByKey.set(key, {
-        ...existing,
-        label,
-        trace_index: idx,
-        lambda: Number.isFinite(optionalFiniteNumber(existing.lambda)) ? optionalFiniteNumber(existing.lambda) : parseLambdaLabel(label),
-        final_loss: finalLoss,
-        min_loss: minLoss,
-        rmse: optionalFiniteNumber(existing.rmse),
-        flicker: optionalFiniteNumber(existing.flicker),
-        object_quality: optionalFiniteNumber(existing.object_quality),
-        probe_quality: optionalFiniteNumber(existing.probe_quality),
-        alert_count: optionalFiniteNumber(existing.alert_count),
-        hidden: hiddenTrialKeys.has(key),
-      });
-    }
-    return Array.from(rowsByKey.values()).filter((row) => Number.isFinite(optionalFiniteNumber(row.trace_index)));
-  }, [hiddenTrialKeys, labels, nPoints, nTraces, trialRankings, yData]);
-  const sortedTrialRows = React.useMemo(() => {
-    const rows = [...baseTrialRows];
-    if (normalisedSortKey === "label") {
-      rows.sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
-    } else {
-      rows.sort((a, b) => {
-        const aScore = rankingNumber(a, normalisedSortKey);
-        const bScore = rankingNumber(b, normalisedSortKey);
-        if (Number.isFinite(aScore) && Number.isFinite(bScore) && aScore !== bScore) return aScore - bScore;
-        if (Number.isFinite(aScore) !== Number.isFinite(bScore)) return Number.isFinite(aScore) ? -1 : 1;
-        return String(a.label || "").localeCompare(String(b.label || ""));
-      });
-    }
-    if (optimizationReview && trialSortDescending) rows.reverse();
-    return rows.map((row, idx) => ({
-      ...row,
-      rank: optimizationReview ? idx + 1 : undefined,
-      score: optimizationReview ? rankingNumber(row, normalisedSortKey) : Number.NaN,
-    }));
-  }, [baseTrialRows, normalisedSortKey, optimizationReview, trialSortDescending]);
-  const trialRowByKey = React.useMemo(() => {
-    const out = new Map<string, TrialRanking>();
-    for (const row of sortedTrialRows) {
-      if (row.label) out.set(trialKey(row.label), row);
-    }
-    return out;
-  }, [sortedTrialRows]);
-  const reviewRows = React.useMemo(() => {
-    if (!showReview) return sortedTrialRows;
-    const filter = String(trialFilterText || "").trim().toLowerCase();
-    let rows = sortedTrialRows.filter((row) => {
-      const label = String(row.label || "");
-      const key = trialKey(label);
-      if (hiddenTrialKeys.has(key)) return false;
-      if (showStarredOnly && !starredTrialKeys.has(key) && !isReferenceLabel(label)) return false;
-      if (!filter) return true;
-      const note = String(lookupTrialValue(trialNotes, label) ?? "");
-      const tags = optimizationReview ? (lookupTrialValue(trialTags, label) ?? []) : [];
-      return `${label} ${note} ${tags.join(" ")}`.toLowerCase().includes(filter);
-    });
-    const top = optimizationReview ? Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0)) : 0;
-    if (top > 0) {
-      const references = rows.filter((row) => isReferenceLabel(String(row.label || "")));
-      rows = [...references, ...rows.filter((row) => !isReferenceLabel(String(row.label || ""))).slice(0, top)];
-    }
-    return rows;
-  }, [
-    hiddenTrialKeys,
-    optimizationReview,
-    showReview,
-    showStarredOnly,
-    sortedTrialRows,
-    starredTrialKeys,
-    topTrialCount,
-    trialFilterText,
-    trialNotes,
-    trialTags,
-  ]);
-  const reviewVisibleTrialKeys = React.useMemo(
-    () => new Set(reviewRows.map((row) => trialKey(String(row.label || "")))),
-    [reviewRows],
-  );
+  const hiddenLabels = React.useMemo(() => uniqueStrings(hiddenSnapshotImageLabels ?? []), [hiddenSnapshotImageLabels]);
+  const hiddenLabelKeys = React.useMemo(() => new Set(hiddenLabels.map(labelKey)), [hiddenLabels]);
   const imageLabelForIndex = React.useCallback(
     (imageIdx: number) => snapshotImageLabels?.[imageIdx] || snapshotLabels?.[imageIdx] || `image ${imageIdx + 1}`,
     [snapshotImageLabels, snapshotLabels],
   );
-  const isSnapshotImageHidden = React.useCallback(
-    (imageIdx: number) => {
-      const label = imageLabelForIndex(imageIdx);
-      return hiddenTrialKeys.has(trialKey(label));
-    },
-    [hiddenTrialKeys, imageLabelForIndex],
+  const isSnapshotImageVisible = React.useCallback(
+    (imageIdx: number) => !hiddenLabelKeys.has(labelKey(imageLabelForIndex(imageIdx))),
+    [hiddenLabelKeys, imageLabelForIndex],
   );
-  const isSnapshotImageVisible = React.useCallback((imageIdx: number) => {
-    if (isSnapshotImageHidden(imageIdx)) return false;
-    if (!showReview) return true;
-    const key = trialKey(imageLabelForIndex(imageIdx));
-    return !trialRowByKey.has(key) || reviewVisibleTrialKeys.has(key);
-  }, [imageLabelForIndex, isSnapshotImageHidden, reviewVisibleTrialKeys, showReview, trialRowByKey]);
-  const hiddenTraceIndices = React.useMemo(
-    () => Array.from({ length: nTraces }, (_, idx) => idx).filter((idx) => {
-      const label = labels?.[idx] || `Trace ${idx + 1}`;
-      return hiddenTrialKeys.has(trialKey(label));
-    }),
-    [hiddenTrialKeys, labels, nTraces],
-  );
-  const hiddenTraceSet = React.useMemo(() => new Set(hiddenTraceIndices), [hiddenTraceIndices]);
+  // A hidden image label also hides the trace of the same name; legend and stats list traces by label.
   const visibleTraceIndices = React.useMemo(
-    () => (showReview ? reviewRows : sortedTrialRows)
-      .map((row) => optionalFiniteNumber(row.trace_index))
-      .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nTraces && !hiddenTraceSet.has(idx)),
-    [hiddenTraceSet, nTraces, reviewRows, showReview, sortedTrialRows],
+    () => Array.from({ length: nTraces }, (_, idx) => ({ idx, label: labels?.[idx] || `Trace ${idx + 1}` }))
+      .filter(({ label }) => !hiddenLabelKeys.has(labelKey(label)))
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map(({ idx }) => idx),
+    [hiddenLabelKeys, labels, nTraces],
   );
   const visibleTraceSet = React.useMemo(() => new Set(visibleTraceIndices), [visibleTraceIndices]);
   const excludedTraceSet = React.useMemo(
@@ -2715,7 +2502,6 @@ function Show1DWidget() {
   const pendingHoverSnapshotGroupRef = React.useRef<number | null | undefined>(undefined);
   const pendingHoverPointerRef = React.useRef<{ clientX: number; clientY: number } | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
-  const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const pendingExportRef = React.useRef<PendingSave | null>(null);
@@ -2799,7 +2585,7 @@ function Show1DWidget() {
   const selectedGroupAllImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
   const selectedGroupImageIndices = selectedGroupAllImageIndices
     .filter((imageIdx) => isSnapshotImageVisible(imageIdx))
-    .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b), trialRowByKey));
+    .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b)));
   const selectedSnapshot = selectedGroupImageIndices.includes(modelSelectedSnapshot)
     ? modelSelectedSnapshot
     : selectedGroupImageIndices[0] ?? -1;
@@ -2818,7 +2604,7 @@ function Show1DWidget() {
   }, [bookmarkedSnapshotGroups, groupCount]);
   const currentSnapshotGroupBookmarked = selectedGroup >= 0
     && normalisedBookmarkedSnapshotGroups.includes(selectedGroup);
-  const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats || showReview;
+  const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats;
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4, SHOW1D_HTML_EXPORT_OVERHEAD_BYTES);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
   const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT));
@@ -2895,7 +2681,7 @@ function Show1DWidget() {
     for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
       const imageIndices = (snapshotGroups[groupIdx] ?? [])
         .filter((idx) => isSnapshotImageVisible(idx))
-        .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b), trialRowByKey));
+        .sort((a, b) => compareSnapshotLabels(imageLabelForIndex(a), imageLabelForIndex(b)));
       const firstImageIdx = imageIndices[0];
       if (firstImageIdx === undefined) continue;
       const iteration = Number.isFinite(snapshotGroupIterations?.[groupIdx])
@@ -2946,7 +2732,6 @@ function Show1DWidget() {
     snapshotWidth,
     snapshotWidths,
     thumbnailSize,
-    trialRowByKey,
   ]);
   const themedSelect = {
     ...controlPanel.select,
@@ -3044,52 +2829,19 @@ function Show1DWidget() {
     return true;
   }, [clearPlotThumbnailPreview, findPlotThumbnailHit, selectSnapshotGroup]);
 
-  const hideTrial = React.useCallback((label: string) => {
+  const hideImageLabel = React.useCallback((label: string) => {
     const clean = String(label || "").trim();
     if (!clean) return;
-    const key = trialKey(clean);
+    const key = labelKey(clean);
     const hidden = uniqueStrings(hiddenSnapshotImageLabels ?? []);
-    if (!hidden.some((value) => trialKey(value) === key)) {
+    if (!hidden.some((value) => labelKey(value) === key)) {
       setHiddenSnapshotImageLabels([...hidden, clean]);
     }
   }, [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels]);
 
-  const showAllTrials = React.useCallback(() => {
+  const showAllImages = React.useCallback(() => {
     setHiddenSnapshotImageLabels([]);
   }, [setHiddenSnapshotImageLabels]);
-
-  const toggleStarTrial = React.useCallback((label: string) => {
-    const clean = String(label || "").trim();
-    if (!clean) return;
-    const key = trialKey(clean);
-    const next = uniqueStrings(starredSnapshotImageLabels ?? []);
-    const existing = next.findIndex((value) => trialKey(value) === key);
-    if (existing >= 0) next.splice(existing, 1);
-    else next.push(clean);
-    setStarredSnapshotImageLabels(next);
-  }, [setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
-
-  const updateTrialNote = React.useCallback((label: string, note: string) => {
-    const next = { ...(trialNotes ?? {}) };
-    for (const key of Object.keys(next)) {
-      if (trialKey(key) === trialKey(label)) delete next[key];
-    }
-    if (note.trim()) next[label] = note;
-    setTrialNotes(next);
-  }, [setTrialNotes, trialNotes]);
-
-  const toggleTrialTag = React.useCallback((label: string, tag: string) => {
-    const next = { ...(trialTags ?? {}) };
-    for (const key of Object.keys(next)) {
-      if (trialKey(key) === trialKey(label)) delete next[key];
-    }
-    const values = uniqueStrings(lookupTrialValue(trialTags, label) ?? []);
-    const existing = values.indexOf(tag);
-    if (existing >= 0) values.splice(existing, 1);
-    else values.push(tag);
-    if (values.length) next[label] = values;
-    setTrialTags(next);
-  }, [setTrialTags, trialTags]);
 
   const toggleCurrentSnapshotGroupBookmark = React.useCallback(() => {
     if (selectedGroup < 0 || selectedGroup >= groupCount) return;
@@ -3801,7 +3553,11 @@ function Show1DWidget() {
     canvas.style.height = `${plotSize.height}px`;
   }, [plotDpr, plotSize.height, plotSize.width]);
 
-  React.useEffect(() => {
+  // The crosshair is drawn straight from the hover frame (before it paints); React state only
+  // carries the text readout. Drawing it from an effect after the commit put the crosshair one
+  // display frame behind the pointer.
+  const paintHoverRef = React.useRef<(value: HoverPoint | null) => void>(() => {});
+  paintHoverRef.current = (hover: HoverPoint | null) => {
     const canvas = plotHoverCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -3831,7 +3587,14 @@ function Show1DWidget() {
       ctx.fill();
       ctx.restore();
     }
-  }, [colors, hover, plotDpr, plotSize.height, plotSize.width, themeColors.textMuted]);
+  };
+  // Hover changes paint from the hover frame (commitScheduledHover); this repaints only when the
+  // canvas size, DPR or colors change, so one pointer move draws the crosshair once.
+  const hoverRef = React.useRef(hover);
+  hoverRef.current = hover;
+  React.useEffect(() => {
+    paintHoverRef.current(hoverRef.current);
+  }, [colors, plotDpr, plotSize.height, plotSize.width, themeColors.textMuted]);
 
   const nearestPoint = React.useCallback((clientX: number, clientY: number): HoverPoint | null => {
     const canvas = canvasRef.current;
@@ -3883,6 +3646,7 @@ function Show1DWidget() {
   }, [groupCount, hasSnapshots, snapshotGroupIterations]);
 
   const commitScheduledHover = React.useCallback((value: HoverPoint | null, snapshotGroupIdx?: number | null) => {
+    paintHoverRef.current(value);
     setHover(value);
     if (snapshotGroupIdx !== undefined && hoverSnapshotGroupRef.current !== snapshotGroupIdx) {
       hoverSnapshotGroupRef.current = snapshotGroupIdx;
@@ -3981,7 +3745,6 @@ function Show1DWidget() {
     setSnapshotFftCacheVersion((value) => value + 1);
     snapshotBounceDirectionRef.current = 1;
     setLocalExportStatus("");
-    setViewMenuAnchor(null);
     setExportAnchor(null);
   }, [model]);
 
@@ -4066,25 +3829,6 @@ function Show1DWidget() {
     setLocalExportStatus(`Preparing ${filename}...`);
     setExportRequest(JSON.stringify({ id, filename, download: true }));
   }, [exportEnabled, labels, nPoints, nTraces, setExportRequest, title, xData, xLabel, xUnit, yData, yLabel, yUnit]);
-
-  const handleHandoffToShow2D = React.useCallback(() => {
-    const images = selectedGroupImageIndices.map((idx) => imageLabelForIndex(idx));
-    setViewMenuAnchor(null);
-    setHandoffRequest(JSON.stringify({
-      mode: "show2d",
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      group: selectedGroup,
-      images,
-      respect_review_filters: false,
-    }));
-  }, [imageLabelForIndex, selectedGroup, selectedGroupImageIndices, setHandoffRequest]);
-
-  const handleClosePreparedView = React.useCallback(() => {
-    setHandoffRequest(JSON.stringify({
-      mode: "clear",
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    }));
-  }, [setHandoffRequest]);
 
   const snapshotSliderMarks = React.useMemo(() => {
     const values = groupCount > 1 && groupCount <= 24
@@ -4211,119 +3955,6 @@ function Show1DWidget() {
           ))}
         </tbody>
       </Box>
-    </Box>
-  ) : null;
-
-  const selectedTopTrialCount = Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0));
-  const topTrialOptions = Array.from(new Set([0, 1, 3, 5, 10, selectedTopTrialCount])).sort((a, b) => a - b);
-  const reviewPanel = showReview ? (
-    <Box data-testid="show1d-review-panel" sx={{ width: "100%", p: 0.75, boxSizing: "border-box", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-      <Stack direction="row" alignItems="center" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", mb: 0.75 }}>
-        <Typography sx={{ fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Review</Typography>
-        <TextField
-          size="small"
-          value={trialFilterText || ""}
-          onChange={(event) => setTrialFilterText(event.target.value)}
-          placeholder="Filter trials"
-          slotProps={{ htmlInput: { "aria-label": "Filter review trials" } }}
-          sx={{ width: 112, "& .MuiInputBase-input": { py: 0.45, px: 0.75, fontSize: 10.5 } }}
-        />
-        {optimizationReview && <Select
-          size="small"
-          value={normalisedSortKey}
-          onChange={(event) => setTrialSortKey(String(event.target.value))}
-          sx={{ ...themedSelect, minWidth: 94, fontSize: 10 }}
-          MenuProps={snapshotControlMenuProps}
-          inputProps={{ "aria-label": "Review ranking objective" }}
-        >
-          <MenuItem value="final_loss">Final loss</MenuItem>
-          <MenuItem value="min_loss">Min loss</MenuItem>
-          <MenuItem value="rmse">RMSE</MenuItem>
-          <MenuItem value="flicker">Flicker</MenuItem>
-          <MenuItem value="lambda">Lambda</MenuItem>
-          <MenuItem value="object_quality">Object quality</MenuItem>
-          <MenuItem value="probe_quality">Probe quality</MenuItem>
-          <MenuItem value="alert_count">Alerts</MenuItem>
-          <MenuItem value="label">Label</MenuItem>
-        </Select>}
-        {optimizationReview && <Button size="small" sx={compactButton} onClick={() => setTrialSortDescending(!trialSortDescending)}>
-          {trialSortDescending ? "Descending" : "Ascending"}
-        </Button>}
-        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
-          <Typography sx={toolbarLabelSx}>Starred</Typography>
-          <Switch size="small" checked={Boolean(showStarredOnly)} onChange={(_, checked) => setShowStarredOnly(checked)} sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show starred trials only" } }} />
-        </Stack>
-        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
-          <Typography sx={toolbarLabelSx}>Notes</Typography>
-          <Switch size="small" checked={Boolean(showTrialNotes)} onChange={(_, checked) => setShowTrialNotes(checked)} sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show trial note editor" } }} />
-        </Stack>
-        {optimizationReview && <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
-          <Typography sx={toolbarLabelSx}>Top</Typography>
-          <Select size="small" value={selectedTopTrialCount} onChange={(event) => setTopTrialCount(Number(event.target.value))} sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }} MenuProps={snapshotControlMenuProps} inputProps={{ "aria-label": "Top ranked trial count" }}>
-            {topTrialOptions.map((value) => <MenuItem key={value} value={value}>{value === 0 ? "All" : value}</MenuItem>)}
-          </Select>
-        </Stack>}
-      </Stack>
-      <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5 }}>
-        {optimizationReview && bestTrialLabel ? `Best ${compactScienceLabel(bestTrialLabel)}` : `${reviewRows.length} visible traces`}
-      </Typography>
-      <Stack spacing={0.35} sx={{ maxHeight: 260, overflowY: "auto" }}>
-        {reviewRows.map((row) => {
-          const traceIndex = optionalFiniteNumber(row.trace_index);
-          const label = String(row.label || `Trace ${Number.isFinite(traceIndex) ? traceIndex + 1 : ""}`);
-          const starred = starredTrialKeys.has(trialKey(label));
-          const note = String(lookupTrialValue(trialNotes, label) ?? "");
-          const tags = lookupTrialValue(trialTags, label) ?? [];
-          const rowAlerts = optimizationReview
-            ? (trialAlerts ?? []).filter((alert) => trialKey(String(alert.label || "")) === trialKey(label))
-            : [];
-          const parsedAlertCount = optionalFiniteNumber(row.alert_count);
-          const alertCount = optimizationReview ? Math.max(Number.isFinite(parsedAlertCount) ? parsedAlertCount : 0, rowAlerts.length) : 0;
-          const score = optionalFiniteNumber(row.score);
-          return (
-            <Box key={label} sx={{ p: 0.5, border: `1px solid ${themeColors.border}`, minWidth: 0 }}>
-              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
-                <IconButton size="small" onClick={() => toggleStarTrial(label)} aria-label={`${starred ? "Unstar" : "Star"} ${label}`} sx={{ p: 0, color: starred ? "#ffc107" : themeColors.textMuted }}>
-                  <Box component="span" sx={{ fontSize: 15 }}>{starred ? "★" : "☆"}</Box>
-                </IconButton>
-                <Typography title={label} sx={{ fontSize: 10.5, fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {row.rank ? `${row.rank}. ` : ""}{compactScienceLabel(label)}
-                </Typography>
-                <Typography sx={{ fontSize: 10, color: themeColors.textMuted, fontVariantNumeric: "tabular-nums" }}>
-                  {Number.isFinite(score) ? formatCompactValue(score, 3) : ""}{alertCount ? ` · ${alertCount} alert${alertCount === 1 ? "" : "s"}` : ""}
-                </Typography>
-                {optimizationReview && <Button size="small" sx={compactButton} onClick={() => hideTrial(label)} aria-label={`Hide trial ${label}`} title={`Hide trial ${label}`}>Hide</Button>}
-              </Stack>
-              {rowAlerts.map((alert, idx) => (
-                <Typography key={`${alert.kind || "alert"}-${idx}`} role="status" sx={{ mt: 0.25, fontSize: 9.5, color: "#b91c1c" }}>
-                  {compactScienceLabel(String(alert.kind || "alert"))}{alert.message ? `: ${alert.message}` : ""}
-                </Typography>
-              ))}
-              {showTrialNotes && (
-                <>
-                  <TextField
-                    size="small"
-                    value={note}
-                    onChange={(event) => updateTrialNote(label, event.target.value)}
-                    placeholder="Review note"
-                    slotProps={{ htmlInput: { "aria-label": `Review note for ${label}` } }}
-                    sx={{ width: "100%", mt: 0.35, "& .MuiInputBase-input": { py: 0.4, px: 0.65, fontSize: 10 } }}
-                  />
-                  {optimizationReview && <Stack direction="row" spacing={0.35} useFlexGap sx={{ flexWrap: "wrap", mt: 0.35 }}>
-                    {["best", "bad start", "probe drift", "object issue"].map((tag) => (
-                      <Button key={tag} size="small" variant={tags.includes(tag) ? "contained" : "outlined"} onClick={() => toggleTrialTag(label, tag)} sx={{ ...compactButton, fontSize: 9, color: tags.includes(tag) ? "#fff" : themeColors.text, borderColor: themeColors.border }}>
-                        {tag}
-                      </Button>
-                    ))}
-                  </Stack>}
-                </>
-              )}
-            </Box>
-          );
-        })}
-        {reviewRows.length === 0 && <Typography sx={{ fontSize: 10.5, color: themeColors.textMuted }}>No trials match the review filters.</Typography>}
-      </Stack>
-      {hiddenTrialLabels.length > 0 && <Button size="small" sx={{ ...compactButton, mt: 0.5 }} onClick={showAllTrials}>Show All Hidden</Button>}
     </Box>
   ) : null;
 
@@ -4457,16 +4088,6 @@ function Show1DWidget() {
         />
       </Stack>
       <Stack direction="row" alignItems="center" spacing={0.5}>
-        <Typography sx={toolbarLabelSx}>Review</Typography>
-        <Switch
-          size="small"
-          checked={Boolean(showReview)}
-          onChange={(_, checked) => setShowReview(checked)}
-          sx={switchStyles.small}
-          slotProps={{ input: { "aria-label": "Show review panel" } }}
-        />
-      </Stack>
-      <Stack direction="row" alignItems="center" spacing={0.5}>
         <Typography sx={toolbarLabelSx}>Legend</Typography>
         <Switch
           size="small"
@@ -4480,53 +4101,6 @@ function Show1DWidget() {
   );
   const topToolbarActions = (
     <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, flexWrap: "wrap", flex: "0 0 auto" }}>
-      {handoffEnabled && hasSnapshots && (
-        <>
-          <Button
-            size="small"
-            sx={compactButton}
-            onClick={(event) => setViewMenuAnchor(event.currentTarget)}
-            aria-label="Open view options"
-            aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
-            aria-expanded={viewMenuAnchor ? "true" : undefined}
-            aria-haspopup="menu"
-            title={handoffStatus || "View options"}
-          >
-            View
-          </Button>
-          <Menu
-            id="show1d-view-menu"
-            anchorEl={viewMenuAnchor}
-            open={Boolean(viewMenuAnchor)}
-            onClose={() => setViewMenuAnchor(null)}
-            slotProps={{ paper: themedTopMenuPaper, list: { "aria-label": "View options" } }}
-            sx={{ zIndex: 9999 }}
-          >
-            <MenuItem
-              onClick={handleHandoffToShow2D}
-              disabled={selectedGroupImageIndices.length === 0}
-              sx={{ fontSize: 12 }}
-            >
-              View selected as 2D
-            </MenuItem>
-          </Menu>
-          {handoffStatus && (
-            <Typography
-              sx={{
-                ...toolbarLabelSx,
-                color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
-                maxWidth: 130,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title={handoffStatus}
-            >
-              {handoffStatus}
-            </Typography>
-          )}
-        </>
-      )}
       <Button
         size="small"
         sx={{ ...compactButton, color: themeColors.accent }}
@@ -4834,7 +4408,6 @@ function Show1DWidget() {
               overscrollBehavior: "contain",
             }}
           >
-            {reviewPanel}
             {hasProfileImage && (
               <Box>
                 <Typography sx={{ fontSize: 12, fontWeight: 600, mb: 0.5 }}>Profile Image</Typography>
@@ -4964,7 +4537,7 @@ function Show1DWidget() {
                           onMouseDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
-                            if (!hideDisabled) hideTrial(imageLabel);
+                            if (!hideDisabled) hideImageLabel(imageLabel);
                           }}
                           aria-label={hideLabel}
                           title={hideLabel}
@@ -5020,11 +4593,11 @@ function Show1DWidget() {
                         border: "none",
                       }}
                     >
-                      <Typography sx={{ fontSize: 12 }}>All trials hidden</Typography>
+                      <Typography sx={{ fontSize: 12 }}>All images hidden</Typography>
                       <Button
                         size="small"
                         variant="outlined"
-                        onClick={showAllTrials}
+                        onClick={showAllImages}
                         sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 28 }}
                       >
                         Show all
@@ -5215,16 +4788,6 @@ function Show1DWidget() {
           </Stack>
         )}
       </Box>
-      {handoffEnabled && preparedViewWidget && (
-        <EmbeddedWidgetView
-          hostModel={model}
-          widgetModel={preparedViewWidget}
-          title="2D view"
-          onClose={handleClosePreparedView}
-          themeColors={themeColors}
-          linkedTraits={SHOW1D_TO_SHOW2D_LINKED_TRAITS}
-        />
-      )}
     </Box>
   );
 }

@@ -26,6 +26,33 @@ def _quantize_u8(values: np.ndarray, low: float, high: float) -> np.ndarray:
     return np.clip((values - low) * (255.0 / (high - low if high > low else 1.0)), 0, 255).astype(np.uint8)
 
 
+def stack_percentiles(frames: list[np.ndarray], low_pct: float, high_pct: float,
+                      bins: int = 1024) -> tuple[float, float] | None:
+    """``(low, high)`` at the percentile sliders from one histogram over every frame; None when non-finite.
+
+    The histogram is accumulated frame by frame so the stack is never joined.
+    Bin ``b`` of ``bins`` maps back to ``minimum + b / (bins - 1) * (maximum - minimum)``.
+    """
+    minimum = min(float(np.min(frame)) for frame in frames)
+    maximum = max(float(np.max(frame)) for frame in frames)
+    total = sum(int(frame.size) for frame in frames)
+    if total <= 0 or not math.isfinite(minimum) or not math.isfinite(maximum):
+        return None
+    if minimum == maximum:
+        return minimum, maximum
+    counts = np.zeros(bins, dtype=np.int64)
+    for frame in frames:
+        counts += np.histogram(frame, bins=bins, range=(minimum, maximum))[0]
+    cumulative = np.cumsum(counts)
+    low_bin = int(np.searchsorted(cumulative, int(total * low_pct / 100.0), side="left"))
+    high_bin = int(np.searchsorted(cumulative, int(np.ceil(total * high_pct / 100.0)), side="left"))
+    last_bin = bins - 1
+    low_bin = max(0, min(last_bin, low_bin))
+    high_bin = max(0, min(last_bin, high_bin))
+    return (minimum + (low_bin / last_bin) * (maximum - minimum),
+            minimum + (high_bin / last_bin) * (maximum - minimum))
+
+
 class Show3DPlayback:
     """Display-stack packing, frame access and contrast ranges."""
 
@@ -129,40 +156,17 @@ class Show3DPlayback:
     def _refresh_auto_contrast_ranges(self) -> None:
         """Precompute one percentile range per stack and per independent panel.
 
-        A panel may be a different physical quantity from its neighbor (SSB
+        A panel may be a different physical quantity from its neighbor (direct ptychography
         phase beside dark-field counts), so each independent panel gets its own
         range over its whole time series. Ranges come from a 1024-bin
         histogram accumulated frame by frame so the stack is never joined.
         """
-        bins = 1024
-
-        def stack_percentiles(frames: list[np.ndarray]) -> tuple[float, float] | None:
-            """``(low, high)`` at the percentile sliders from one histogram over every frame; None when non-finite.
-
-            Bin ``b`` of ``bins`` maps back to ``minimum + b / (bins - 1) * (maximum - minimum)``.
-            """
-            minimum = min(float(np.min(frame)) for frame in frames)
-            maximum = max(float(np.max(frame)) for frame in frames)
-            total = sum(int(frame.size) for frame in frames)
-            if total <= 0 or not math.isfinite(minimum) or not math.isfinite(maximum):
-                return None
-            if minimum == maximum:
-                return minimum, maximum
-            counts = np.zeros(bins, dtype=np.int64)
-            for frame in frames:
-                counts += np.histogram(frame, bins=bins, range=(minimum, maximum))[0]
-            cumulative = np.cumsum(counts)
-            low_bin = int(np.searchsorted(cumulative, int(total * self.percentile_low / 100.0), side="left"))
-            high_bin = int(np.searchsorted(cumulative, int(np.ceil(total * self.percentile_high / 100.0)), side="left"))
-            last_bin = bins - 1
-            low_bin = max(0, min(last_bin, low_bin))
-            high_bin = max(0, min(last_bin, high_bin))
-            return (minimum + (low_bin / last_bin) * (maximum - minimum),
-                    minimum + (high_bin / last_bin) * (maximum - minimum))
-
         stack_range = None
         if self.n_slices > 0 and self.auto_contrast:
-            stack_range = stack_percentiles([np.asarray(self._get_display_frame(i)) for i in range(int(self.n_slices))])
+            stack_range = stack_percentiles(
+                [np.asarray(self._get_display_frame(i)) for i in range(int(self.n_slices))],
+                self.percentile_low, self.percentile_high,
+            )
         if stack_range is None:
             self.auto_vmins = []
             self.auto_vmaxs = []
@@ -174,7 +178,8 @@ class Show3DPlayback:
         if int(self.n_panels) > 1 and not self.shared_panel_source:
             for panel in range(int(self.n_panels)):
                 panel_range = stack_percentiles(
-                    [np.asarray(self._get_display_panel_frame(panel, i)) for i in range(int(self.n_slices))]
+                    [np.asarray(self._get_display_panel_frame(panel, i)) for i in range(int(self.n_slices))],
+                    self.percentile_low, self.percentile_high,
                 )
                 if panel_range is not None:
                     panel_vmins.append(panel_range[0])

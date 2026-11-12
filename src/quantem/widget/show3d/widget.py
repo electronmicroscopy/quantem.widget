@@ -11,7 +11,7 @@ preview.
 import math
 import pathlib
 from collections.abc import Mapping, Sequence
-from typing import Self
+from typing import Literal
 
 import anywidget
 import numpy as np
@@ -19,12 +19,6 @@ import torch
 import traitlets
 
 from quantem.widget.adapters import core as core_adapter
-from quantem.widget.folder_watch_status import FOLDER_WATCH_STATE_VALUES
-from quantem.widget.image_folder import (
-    ImageFolderRecord,
-    WatchedImageFolder,
-    WatchedImageFolderMixin,
-)
 from quantem.widget.colormap import VALID_CMAPS, Colormap, cmap_to_name
 from quantem.widget.export import HtmlExportMixin
 from quantem.widget.fallback import StaticFallbackMixin
@@ -41,15 +35,24 @@ from quantem.widget.show2d.widget import _BROWSER_DENOISE_MODES, _nonnegative_in
 from quantem.widget.show3d.export import Show3DExport
 from quantem.widget.show3d.fallback import Show3DFallback
 from quantem.widget.show3d.playback import Show3DPlayback
+from quantem.widget.show3d.streaming import Show3DStream
 from quantem.widget.utils.array import bin2d, to_numpy
 from quantem.widget.utils.display_filter import format_display_filter_banner
 from quantem.widget.utils.state_io import read_state
 from quantem.widget.state import SavedStateMixin, announce_browser_limit
 from quantem.widget.units import image_axes, per_axis, unit_entry
-from quantem.widget.utils.ui import UiMode, resolve_ui_mode, validate_display_limits
+from quantem.widget.utils.ui import (
+    PANEL_WIDTHS,
+    DisplayMode,
+    ViewerSize,
+    resolve_panel_width,
+    resolve_columns,
+    resolve_mode,
+    validate_display_limits,
+)
 
 
-_MAX_PLAYBACK_FPS = 60.0
+_MAX_PLAYBACK_FPS = 120.0
 
 
 def _all_finite(values: np.ndarray, *, chunk_size: int = 1_000_000) -> bool:
@@ -114,8 +117,40 @@ def _validated_float32(stack: np.ndarray, panel_name: str) -> np.ndarray:
     return stack_f32
 
 
+def drift_corrected(stack: np.ndarray, drift: Mapping, *, frame_times_s: Sequence[float] | None = None) -> np.ndarray:
+    """``stack`` with every frame moved back onto the first frame Find drift picked.
+
+    The picked frames move back by their measured ``shift_px``; the others by the fitted velocity,
+    at their own time when ``frame_times_s`` gives one per frame, else at their frame index.
+    A Fourier shift: sub-pixel, and the edges wrap around.
+
+    Examples
+    --------
+    >>> corrected = drift_corrected(frames, viewer.drift, frame_times_s=viewer.frame_times_s)  # doctest: +SKIP
+    """
+    frames = [int(frame) for frame in drift["frames"]]
+    measured = {frame: shift for frame, shift in zip(frames, drift["shift_px"])}
+    velocity = np.asarray(drift.get("velocity_px_per_frame", (0.0, 0.0)), dtype=np.float64)
+    per_second = drift.get("velocity_px_per_s")
+    timed = frame_times_s is not None and len(frame_times_s) == stack.shape[0] and per_second is not None
+    rows = np.fft.fftfreq(stack.shape[1])[:, None]
+    cols = np.fft.fftfreq(stack.shape[2])[None, :]
+    out = np.empty(stack.shape, dtype=np.float32)
+    for frame in range(stack.shape[0]):
+        if frame in measured:
+            shift = np.asarray(measured[frame], dtype=np.float64)
+        elif timed:
+            shift = np.asarray(per_second, dtype=np.float64) * (frame_times_s[frame] - frame_times_s[frames[0]])
+        else:
+            shift = velocity * (frame - frames[0])
+        # the specimen moved by shift; f(r + shift) <-> F(k) exp(+2 pi i k . shift)
+        phase = np.exp(2j * np.pi * (rows * shift[0] + cols * shift[1]))
+        out[frame] = np.fft.ifft2(np.fft.fft2(stack[frame]) * phase).real
+    return out
+
+
 class Show3D(
-    WatchedImageFolderMixin,
+    Show3DStream,
     Show3DFallback,
     Show3DExport,
     Show3DPlayback,
@@ -145,9 +180,11 @@ class Show3D(
         One label per page for 5D input.
     title : str
         Title above the canvas; a ``Dataset3d`` name is used when empty.
-    ui_mode : {"interactive", "presentation", "report", "minimal"}
-        Chrome preset. ``show_title``, ``show_stats`` and ``show_scale_bar``
-        override the preset when given.
+    mode : {"interactive", "stream", "presentation", "report", "minimal"}
+        Chrome preset. ``"stream"`` is the interactive layout with the frame
+        thumbnail strip, for watching a recording (``Show3D.stream`` opens in
+        it). ``show_title``, ``show_stats``, ``show_scale_bar`` and
+        ``thumbnails`` override the preset when given.
     cmap : str or Colormap
         Colormap for every panel.
     vmin, vmax : float, optional
@@ -175,20 +212,42 @@ class Show3D(
     avg_window : int
         Moving-window frame average shown during scrubbing; 1 shows raw frames.
         Auto contrast keeps the stack-wide window, so averaging only reduces noise.
+    thumbnails : bool, optional
+        Show a scrollable strip of frame thumbnails left of the viewer; on with
+        ``mode="stream"``, off otherwise unless given. Hovering a
+        thumbnail shows that frame; clicking it moves the frame slider there. The
+        thumbnails are drawn on the GPU from the frames already resident for the
+        viewer (no second full-size copy), each panel stretched to its own range;
+        the viewer and the data keep native pixels.
+    thumbnail_columns : {1, 2, 3}, default 2
+        Thumbnails across the strip; the strip header switches it too.
     show_fft : bool
         Show the FFT of the current frame.
     fft_layout : {"bottom", "right", "overlay"}
         Where the FFT is drawn.
     fft_overlay_zoom : float
         Initial FFT magnification, 1 to 32.
-    panel_width_px : int
-        Display width per panel in CSS pixels; 0 uses the frontend default.
-    max_cols : int, optional
-        Panels per row; 0 is one row.
+    size : {"small", "medium", "large", "xlarge"}, default "medium"
+        Width of each image panel: 300, 450, 600 or 900 CSS pixels. Aspect
+        ratio and source resolution are preserved; controls keep the shared font.
+    panel_width_px : int or None, optional
+        Display width per panel in CSS pixels. The medium default is 450 px;
+        this changes display size only. A positive panel_width_px overrides size; 0 uses size.
+    columns : int, optional
+        Image panels across each page; four by default for compatibility.
+        Rows are calculated automatically. Set ``viewer.columns`` to change
+        the layout later without reloading stacks.
+    rows : int, optional
+        Desired initial rows per page; infer columns when supplied alone.
+        If both are supplied, their capacity must hold every panel on a page.
     panel_gap_px : int
         Gap between panels in CSS pixels.
     dim_label : str
         Name of the frame axis in the controls ("Frame", "Slice", ...).
+    frame_times_s : sequence of float, optional
+        When each frame was taken, in seconds, one per frame, increasing. Find drift fits the drift
+        against these times, so unevenly spaced scans give their true velocity; without them it uses
+        frame index x ``dim_sampling`` when ``dim_unit`` is a time.
     display_bin : int
         Spatial mean bin of the browser display stack. The default 1 shows
         native pixels; a larger factor shrinks the payload of a large stack
@@ -214,8 +273,6 @@ class Show3D(
     n_slices = traitlets.Int(1).tag(sync=True)
     folder_waiting = traitlets.Bool(False).tag(sync=True)
     folder_status = traitlets.Unicode("").tag(sync=True)
-    folder_watch_state = traitlets.Enum(values=FOLDER_WATCH_STATE_VALUES, default_value="hidden").tag(sync=True)
-    folder_watch_detail = traitlets.Unicode("").tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
     # Browser-owned display filters. Python only mirrors the state and
@@ -244,6 +301,13 @@ class Show3D(
     show_frequency_filter = traitlets.Bool(False).tag(sync=True)
     subpixel_align_enabled = traitlets.Bool(False).tag(sync=True)
     subpixel_align_reference = traitlets.Int(0).tag(sync=True)
+    # Find drift (thumbnail strip): the frames picked for it, and its result, which the browser writes:
+    # frames, shift_px, velocity_px_per_frame, fit_r2, quality, and with a pixel size and a time frame
+    # axis, shift and velocity (pixel_unit, per second). A result adds a "drift corrected" panel.
+    drift_frames = traitlets.List(traitlets.Int()).tag(sync=True)
+    drift = traitlets.Dict().tag(sync=True)
+    # When each frame was taken (s, one per frame); empty: frame index x dim_sampling.
+    frame_times_s = traitlets.List(traitlets.Float()).tag(sync=True)
     is_rgb = traitlets.Bool(False).tag(sync=True)
     # Bumped on every stack replacement so the frontend re-fires its render
     # effects even when a Bytes trait compares identical.
@@ -294,7 +358,7 @@ class Show3D(
     link_panels = traitlets.Bool(True).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)
     view_state = traitlets.Dict(default_value={}).tag(sync=True)
-    max_cols = traitlets.Int(4).tag(sync=True)
+    columns = traitlets.Int(4).tag(sync=True)
     show_resize_handles = traitlets.Bool(True).tag(sync=True)
     show_zoom_indicator = traitlets.Bool(False).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
@@ -352,7 +416,7 @@ class Show3D(
     roi_list = traitlets.List([]).tag(sync=True)
     roi_selected_idx = traitlets.Int(-1).tag(sync=True)
     roi_plot_data = traitlets.Bytes(b"").tag(sync=True)
-    panel_width_px = traitlets.Int(0).tag(sync=True)  # canvas width per panel in CSS pixels; 0 = frontend default
+    panel_width_px = traitlets.Int(PANEL_WIDTHS["medium"]).tag(sync=True)  # Medium canvas width in CSS pixels
 
     diff_mode = traitlets.Enum(["off", "previous", "first"], default_value="off").tag(sync=True)
     compare_mode = traitlets.Enum(["off", "blink", "difference", "overlay"], default_value="off").tag(sync=True)
@@ -362,6 +426,18 @@ class Show3D(
     compare_background = traitlets.Enum(["light", "dark"], default_value="dark").tag(sync=True)
     panel_annotations = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
     panel_overlays = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
+
+    # Frame thumbnails in a scrollable strip left of the viewer: hover shows a frame, click goes to it.
+    thumbnails = traitlets.Bool(False).tag(sync=True)
+    thumbnail_columns = traitlets.Int(2).tag(sync=True)
+
+    @traitlets.validate("thumbnail_columns")
+    def _validate_thumbnail_columns(self, proposal: dict) -> int:
+        """Thumbnails across the strip: 1, 2 or 3."""
+        value = proposal["value"]
+        if isinstance(value, bool) or int(value) != value or int(value) not in (1, 2, 3):
+            raise traitlets.TraitError(f"thumbnail_columns must be 1, 2 or 3, got {value!r}; use thumbnail_columns=2")
+        return int(value)
 
     show_fft = traitlets.Bool(False).tag(sync=True)
     fft_layout = traitlets.Enum(["bottom", "right", "overlay"], default_value="bottom").tag(sync=True)
@@ -603,6 +679,73 @@ class Show3D(
             raise traitlets.TraitError(f"denoise_bin must be 1, 2, or 4; got {value}")
         return value
 
+    def _reset_panel_settings(self, panel_annotations=None, panel_overlays=None) -> None:
+        """Per-panel denoise, frequency filter, annotations and overlays, one entry per panel."""
+        n_panels = int(self.n_panels)
+        self.denoise_scope = "all" if n_panels <= 1 else "panel"
+        self.frequency_filter_scope = "all" if n_panels <= 1 else "panel"
+        self.denoise_modes = ["none"] * n_panels
+        self.denoise_sigmas = [4.0] * n_panels
+        self.denoise_bins = [1] * n_panels
+        self.denoise_enabled = False
+        self.frequency_filter_modes = ["none"] * n_panels
+        self.frequency_filter_cutoffs = [0.15] * n_panels
+        self.frequency_filter_centers = [0.30] * n_panels
+        self.frequency_filter_widths = [0.12] * n_panels
+        self.panel_annotations = _normalize_panel_annotations(panel_annotations, n_items=n_panels, labels=list(self.panel_titles))
+        self.panel_overlays = _normalize_panel_overlays(panel_overlays, n_items=n_panels, labels=list(self.panel_titles))
+
+    @traitlets.validate("frame_times_s")
+    def _validate_frame_times_s(self, proposal: dict) -> list:
+        """One finite time per frame, increasing; empty clears them."""
+        times = [float(time) for time in proposal["value"]]
+        if not times:
+            return times
+        if len(times) != int(self.n_slices):
+            raise traitlets.TraitError(f"frame_times_s needs one time per frame: {int(self.n_slices)}, got {len(times)}")
+        if not all(np.isfinite(times)) or any(later <= earlier for earlier, later in zip(times, times[1:])):
+            raise traitlets.TraitError("frame_times_s must be finite and increase frame by frame")
+        return times
+
+    @traitlets.observe("drift")
+    def _show_drift_corrected(self, change: dict) -> None:
+        """Show the frames moved back by a Find drift result as a "drift corrected" panel on the right."""
+        drift = change["new"] or {}
+        if not drift.get("shift_px") or self.is_rgb or self._data is None:
+            return
+        if self._drift_source is None:
+            if self.n_panels > 1:
+                source = self._source_panels[0] if self._source_panels is not None else self._data[:, :, : self._panel_width]
+            else:
+                source = self._data
+            given = (self.panel_titles or [""])[0]
+            # a single stack has only the placeholder "Panel 1"; call it what it is beside "drift corrected"
+            title = given if given and not (self.n_panels == 1 and given == "Panel 1") else "frames"
+            self._drift_source = (np.ascontiguousarray(source, dtype=np.float32), title)
+        source, title = self._drift_source
+        corrected = drift_corrected(source, drift, frame_times_s=self.frame_times_s or None)
+        kept = (self.dim_sampling, self.dim_unit, self.slice_idx, list(self.labels))
+        display_bin = max(1, int(self.display_bin))
+        with self.hold_sync():
+            self._load_stack(
+                (source, corrected),
+                labels=kept[3],
+                panel_titles=[title, "drift corrected"],
+                page_labels=None,
+                title=self.title,
+                sampling=self.pixel_size / display_bin if self.pixel_size > 0 else None,
+                units=self.pixel_unit if self.pixel_size > 0 else None,
+                display_bin=display_bin,
+            )
+            self.dim_sampling, self.dim_unit, self.slice_idx = kept[0], kept[1], kept[2]
+            self.panel_cmaps = []
+            self.columns = 2
+            self.link_contrast = True   # one quantity, before and after: the same contrast reads the correction
+            self._reset_panel_settings()
+            self._refresh_auto_contrast_ranges()
+            self._pack_exact_offline_stack()
+            self.frame_seq += 1      # the browser reloads the two-panel stack
+
     @traitlets.observe("denoise", "denoise_sigma", "denoise_bin", "denoise_enabled")
     def _on_denoise_change(self, change: dict) -> None:
         """Announce an active display reduction; the browser applies the filter."""
@@ -614,51 +757,10 @@ class Show3D(
 
     # --- construction ----------------------------------------------------------
 
-    @classmethod
-    def from_folder(
-        cls,
-        path: str | pathlib.Path,
-        *,
-        pattern: str = "*",
-        file_types: str | Sequence[str] | None = None,
-        recursive: bool = False,
-        watch: bool = True,
-        watch_interval: float = 1.0,
-        **kwargs,
-    ) -> Self:
-        """Play naturally ordered folder images as one stack that grows in place.
-
-        Every file is decoded through :func:`quantem.widget.io.read_image`;
-        partially written files stay pending until a later poll. A missing
-        folder is created when ``watch=True``. Frame labels come from the file
-        names so arrivals stay identifiable.
-        """
-        if "labels" in kwargs:
-            raise TypeError("Show3D.from_folder() derives frame labels from file paths; remove labels=.")
-        source = WatchedImageFolder(
-            path,
-            pattern=pattern,
-            file_types=file_types,
-            recursive=recursive,
-            interval=watch_interval,
-            mode="frames",
-            create=watch,
-        )
-        arrays, records = source.read_initial(allow_empty=watch, require_unchanged_followup=watch)
-        explicit_calibration = "sampling" in kwargs or "units" in kwargs
-        kwargs.setdefault("title", source.folder.name)
-        kwargs.setdefault("verbose", False)
-        if arrays:
-            widget = cls(np.stack(arrays, axis=0), labels=[source.label(record.path) for record in records], **kwargs)
-        else:
-            display_bin = kwargs.get("display_bin", 1)
-            side = max(1, int(display_bin)) if isinstance(display_bin, int) else 1
-            widget = cls(np.zeros((1, side, side), dtype=np.float32), labels=[""], **kwargs)
-            widget._set_folder_waiting_empty_state()
-        source.attach(widget, explicit_calibration=explicit_calibration)
-        if watch:
-            widget.watch_folder(interval=watch_interval)
-        return widget
+    @traitlets.validate("columns")
+    def _validate_columns(self, proposal: dict) -> int:
+        """A layout of at least one column: the property it replaced checked the same."""
+        return resolve_columns(1, columns=proposal["value"])
 
     def __init__(
         self,
@@ -667,7 +769,7 @@ class Show3D(
         panel_titles: Sequence[str | Sequence[Mapping[str, object]] | Mapping[str, object] | None] | None = None,
         page_labels: Sequence[str | None] | None = None,
         title: str = "",
-        ui_mode: UiMode = "interactive",
+        mode: DisplayMode | Literal["stream"] = "interactive",
         show_title: bool | None = None,
         show_stats: bool | None = None,
         show_scale_bar: bool | None = None,
@@ -683,13 +785,18 @@ class Show3D(
         panel_overlays: Sequence[object] | Mapping[object, object] | object | None = None,
         fps: float = 30.0,
         avg_window: int = 1,
+        thumbnails: bool | None = None,
+        thumbnail_columns: int = 2,
         show_fft: bool = False,
         fft_layout: str = "bottom",
         fft_overlay_zoom: float = 1.0,
-        panel_width_px: int = 0,
-        max_cols: int | None = None,
+        size: ViewerSize = "medium",
+        panel_width_px: int | None = None,
+        columns: int | None = None,
+        rows: int | None = None,
         panel_gap_px: int = 0,
         dim_label: str = "Frame",
+        frame_times_s: Sequence[float] | None = None,
         display_bin: int = 1,
         save_state: bool = False,
         notebook_preview_format: str | None = "jpeg",
@@ -698,8 +805,13 @@ class Show3D(
         verbose: bool = True,
     ):
         """Validate the display options, open the widget model, then load the stacks in one batched sync."""
-        ui = resolve_ui_mode(
-            ui_mode,
+        # "stream" is Show3D's own preset: the interactive chrome plus the thumbnail strip
+        stream_mode = str(mode or "").strip().lower() == "stream"
+        presets = ("interactive", "stream", "presentation", "report", "minimal")
+        if str(mode or "interactive").strip().lower() not in presets:
+            raise ValueError(f"mode must be one of {', '.join(map(repr, presets))}, got {mode!r}")
+        ui = resolve_mode(
+            "interactive" if stream_mode else mode,
             defaults={
                 "show_title": True,
                 "show_controls": True,
@@ -718,9 +830,7 @@ class Show3D(
         fft_overlay_zoom = float(fft_overlay_zoom)
         if not 1.0 <= fft_overlay_zoom <= 32.0:
             raise ValueError(f"fft_overlay_zoom must be in [1.0, 32.0], got {fft_overlay_zoom}")
-        panel_width_px = int(panel_width_px)
-        if panel_width_px < 0:
-            raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
+        panel_width_px = resolve_panel_width(size, panel_width_px)
         if isinstance(display_bin, bool) or not isinstance(display_bin, int) or display_bin < 1:
             raise ValueError(f"display_bin must be an integer >= 1; got {display_bin!r}")
         self._verbose = bool(verbose)
@@ -734,6 +844,7 @@ class Show3D(
         self._display_data = None
         self._rgb_data = None
         self._source_panels = None
+        self._drift_source = None   # the frames Find drift measured, kept when the corrected panel is added
         self._configure_static_fallback(
             notebook_preview_format=notebook_preview_format,
             notebook_preview_quality=notebook_preview_quality,
@@ -766,8 +877,9 @@ class Show3D(
             )
             self.cmap = cmap_to_name(cmap)
             self.panel_cmaps = []
-            if max_cols is not None:
-                self.max_cols = int(max_cols)
+            self.columns = resolve_columns(
+                self.panels_per_page or self.n_panels, columns=columns, rows=rows, default=4,
+            )
             self.link_contrast = bool(link_contrast) if link_contrast is not None else int(self.n_panels) <= 1
             self.vmin = vmin
             self.vmax = vmax
@@ -775,24 +887,16 @@ class Show3D(
             self.auto_contrast = bool(auto_contrast)
             self.fps = float(fps)
             self.avg_window = int(avg_window)
+            self.thumbnails = stream_mode if thumbnails is None else bool(thumbnails)
+            self.thumbnail_columns = thumbnail_columns
             self.show_fft = bool(show_fft)
             self.fft_layout = fft_layout
             self.fft_overlay_zoom = fft_overlay_zoom
             self.panel_width_px = panel_width_px
             self.dim_label = str(dim_label)
-            n_panels = int(self.n_panels)
-            self.denoise_scope = "all" if n_panels <= 1 else "panel"
-            self.frequency_filter_scope = "all" if n_panels <= 1 else "panel"
-            self.denoise_modes = ["none"] * n_panels
-            self.denoise_sigmas = [4.0] * n_panels
-            self.denoise_bins = [1] * n_panels
-            self.denoise_enabled = False
-            self.frequency_filter_modes = ["none"] * n_panels
-            self.frequency_filter_cutoffs = [0.15] * n_panels
-            self.frequency_filter_centers = [0.30] * n_panels
-            self.frequency_filter_widths = [0.12] * n_panels
-            self.panel_annotations = _normalize_panel_annotations(panel_annotations, n_items=n_panels, labels=list(self.panel_titles))
-            self.panel_overlays = _normalize_panel_overlays(panel_overlays, n_items=n_panels, labels=list(self.panel_titles))
+            if frame_times_s is not None:
+                self.frame_times_s = [float(time) for time in frame_times_s]
+            self._reset_panel_settings(panel_annotations, panel_overlays)
             self._refresh_auto_contrast_ranges()
             self._pack_exact_offline_stack()
         announce_browser_limit("Show3D", len(self._offline_float_stack), int(self.display_bin))
@@ -1081,8 +1185,8 @@ class Show3D(
         announce_browser_limit("Show3D", len(self._offline_float_stack), int(self.display_bin))
         self.frame_seq += 1
 
-    def _set_folder_waiting_empty_state(self) -> None:
-        """Represent a watched folder that has no readable frame yet."""
+    def _set_waiting_empty_state(self) -> None:
+        """Show an empty stack until a stream's first frame arrives (``Show3D.stream()`` without data)."""
         empty = np.empty((0, 0, 0), dtype=np.float32)
         with self.hold_sync():
             self._data = empty
@@ -1109,54 +1213,6 @@ class Show3D(
             self._data_max_off = 0.0
             self.folder_waiting = True
 
-    def _apply_folder_image_records(
-        self,
-        old_records: list[ImageFolderRecord],
-        new_records: list[ImageFolderRecord],
-        changed_arrays: dict[pathlib.Path, np.ndarray],
-    ) -> None:
-        """Replace folder frames while keeping path-addressed viewer state.
-
-        Called by the folder watcher. Frame-indexed state (current frame,
-        bookmarks, star, loop range) is re-keyed by file path so a file that
-        arrives earlier in the natural order does not shift the user's view.
-        """
-        old_paths = [record.path for record in old_records]
-        new_paths = [record.path for record in new_records]
-        old_index = {path: idx for idx, path in enumerate(old_paths)}
-        new_index = {path: idx for idx, path in enumerate(new_paths)}
-        display_bin = max(1, int(self._display_bin))
-        new_labels = [self._folder_source.label(path) for path in new_paths]
-        if not old_paths:
-            self.set_image(np.stack([changed_arrays[path] for path in new_paths], axis=0), labels=new_labels, display_bin=display_bin)
-            return
-        existing = self._rgb_data if (self.is_rgb and self._rgb_data is not None) else self._data
-        stack = np.stack(
-            [changed_arrays[path] if path in changed_arrays else np.asarray(existing[old_index[path]]) for path in new_paths],
-            axis=0,
-        )
-        selected_path = old_paths[int(self.slice_idx)] if 0 <= int(self.slice_idx) < len(old_paths) else old_paths[0]
-        bookmark_paths = {old_paths[idx] for idx in self.bookmarked_frames if 0 <= int(idx) < len(old_paths)}
-        starred_path = old_paths[int(self.starred[0])] if self.starred and 0 <= int(self.starred[0]) < len(old_paths) else None
-        loop_start_path = old_paths[min(max(int(self.loop_start), 0), len(old_paths) - 1)]
-        loop_end_path = None if int(self.loop_end) < 0 else old_paths[int(self.loop_end)]
-        was_playing = bool(self.playing)
-        roi_active, roi_list, roi_selected_idx = bool(self.roi_active), list(self.roi_list), int(self.roi_selected_idx)
-        profile_line = list(self.profile_line)
-        with self.hold_sync():
-            self.set_image(stack, labels=new_labels, display_bin=display_bin)
-            self.slice_idx = new_index.get(selected_path, 0)
-            self.bookmarked_frames = sorted(new_index[path] for path in bookmark_paths if path in new_index)
-            self.starred = [new_index[starred_path] if starred_path in new_index else -1]
-            self.loop_start = 0
-            self.loop_end = -1 if loop_end_path is None else new_index.get(loop_end_path, -1)
-            self.loop_start = new_index.get(loop_start_path, 0)
-            self.roi_active = roi_active
-            self.roi_list = roi_list
-            self.roi_selected_idx = roi_selected_idx
-            self.profile_line = profile_line
-            self.playing = was_playing
-
     def __repr__(self) -> str:
         """Stack shape, current frame and colormap on one line."""
         return f"Show3D({self.n_slices}x{self.height}x{self.width}, frame={self.slice_idx}, cmap={self.cmap})"
@@ -1169,8 +1225,8 @@ class Show3D(
         # the cross-validators accept a round trip in dict order.
         "percentile_high", "percentile_low", "image_vmin_pct", "image_vmax_pct", "contrast_preset",
         "vmin", "vmax", "link_contrast", "link_panels", "view_state", "vmin_per_panel", "vmax_per_panel",
-        "show_title", "show_stats", "show_controls", "controls_collapsed", "max_cols",
-        "panel_gap_px", "show_panel_titles", "show_zoom_indicator", "show_fft", "fft_layout",
+        "show_title", "show_stats", "show_controls", "controls_collapsed", "columns",
+        "panel_gap_px", "show_panel_titles", "show_zoom_indicator", "thumbnails", "thumbnail_columns", "show_fft", "fft_layout",
         "fft_overlay_position", "fft_overlay_size", "fft_overlay_zoom", "show_kymograph", "fft_window",
         "pixel_size", "pixel_unit", "smooth", "image_rotation", "rotation_scope", "frame_rotations",
         "flip_horizontal", "flip_vertical", "show_scale_bar", "panel_width_px", "fps", "avg_window", "loop",
@@ -1184,11 +1240,11 @@ class Show3D(
         "frequency_filter_enabled", "frequency_filter_cutoff", "frequency_filter_cutoffs",
         "frequency_filter_center", "frequency_filter_centers", "frequency_filter_width",
         "frequency_filter_widths", "frequency_filter_scope", "show_frequency_filter",
-        "subpixel_align_enabled", "subpixel_align_reference", "dim_label", "dim_sampling", "dim_unit",
+        "subpixel_align_enabled", "subpixel_align_reference", "dim_label", "dim_sampling", "dim_unit", "frame_times_s",
         "labels", "panel_titles", "panel_title_spans",
     )
     # Keys whose length is tied to the stack; dropped on load when the sizes differ.
-    _FRAME_LENGTH_KEYS = ("labels", "frame_rotations")
+    _FRAME_LENGTH_KEYS = ("labels", "frame_rotations", "frame_times_s")
     _PANEL_LENGTH_KEYS = ("starred", "panel_titles", "panel_title_spans", "panel_cmaps", "vmin_per_panel", "vmax_per_panel", "panel_order")
 
     def state_dict(self) -> dict:
@@ -1293,7 +1349,6 @@ class Show3D(
         ``del widget`` alone does not free memory because traitlets observers
         pin the widget; call this before discarding it. Idempotent.
         """
-        self.stop_folder_watch()
         if self._data is None:
             return
         # Stop frontend playback before the buffers it reads are dropped.

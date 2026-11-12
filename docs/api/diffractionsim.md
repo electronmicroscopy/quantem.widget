@@ -24,9 +24,6 @@ quantem.widget except on Intel Macs and Windows on ARM; there, constructing the
 widget raises an `ImportError` that names this requirement, and the
 DiffractionSim tests are skipped.
 
-This widget is unrelated to [ShowDiffraction](showdiffraction), which measures
-experimental patterns.
-
 ## Reference
 
 ```{eval-rst}
@@ -36,10 +33,10 @@ experimental patterns.
 
 ## Physics
 
-`energy_keV` and `k_max_inv_A` set the reflection list, computed in Python:
+`voltage_kV` and `k_max_inv_A` set the reflection list, computed in Python:
 the reciprocal lattice points within `k_max_inv_A`, each with its kinematical
 `|F_g|^2` (Lobato and Van Dyck factors) and its Bloch coupling `U_g`
-(absorptive Weickenmeier and Kohl factors at `energy_keV`). Changing either
+(absorptive Weickenmeier and Kohl factors at `voltage_kV`). Changing either
 trait recomputes the list.
 
 With `dynamical=True`, reflections within `sg_max_inv_A` of the Ewald sphere
@@ -76,7 +73,7 @@ interpolated; a CIF of the silicon preset reproduces the preset couplings to
 | Control | Trait | Expected effect |
 |---|---|---|
 | Crystal menu | `preset` | Loads the preset and recomputes the reflection list |
-| Energy menu | `energy_keV` | Recomputes the reflection list at the new energy |
+| Energy menu | `voltage_kV` | Recomputes the reflection list at the new energy |
 | Zone axis field, Go | `orientation` | Puts [uvw] (or [uvtw] for hexagonal cells) along the beam |
 | Copy | none | Copies both panels as one PNG |
 | Export | none | PNG of both panels, or a standalone HTML page |

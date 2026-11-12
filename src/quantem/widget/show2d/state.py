@@ -1,6 +1,5 @@
 """Show2D view state: the JSON-safe dict behind ``save`` / ``state=``."""
 
-import math
 import pathlib
 
 from quantem.widget.utils.state_io import read_state
@@ -77,7 +76,7 @@ class Show2DState:
         "marker_colors", "marker_style", "row_markers", "col_markers",
         "labels", "panel_title_spans", "panel_annotations", "panel_overlays",
         "inset_plots", "show_inset_plots",
-        "starred", "n_pages", "page_idx", "panels_per_page", "page_kind",
+        "starred", "n_pages", "page_idx", "panels_per_page",
         "page_labels", "page_starred", "hidden_panels", "hidden_page_slots", "panel_order",
         "panel_frame_indices", "panel_playback_fps",
         "show_panel_titles", "panel_title_font_size", "panel_title_style",
@@ -91,7 +90,7 @@ class Show2DState:
         "scale_bar_length", "scale_bar_label", "scale_bar_style", "show_zoom_indicator",
         "panel_width_px", "smooth", "initial_zoom", "zoom_row", "zoom_col", "view_box",
         "link_zoom", "link_pan", "link_contrast",
-        "diff_mode", "diff_reference", "ncols", "selected_idx", "selected_panels",
+        "diff_mode", "diff_reference", "columns", "selected_idx", "selected_panels",
         "roi_active", "roi_list", "roi_selected_idx", "profile_line",
         "image_rotations", "rotation_scope", "image_flips_horizontal", "image_flips_vertical",
         "denoise", "denoise_sigma", "denoise_bin", "denoise_scope", "show_denoise",
@@ -101,8 +100,6 @@ class Show2DState:
         "frequency_filter_cutoffs", "frequency_filter_centers", "frequency_filter_widths",
         "frequency_filter_scope", "show_frequency_filter",
     )
-    # state_dict also writes the page size of a watched folder, which is not a trait
-    _LOADABLE_KEYS = (*_STATE_KEYS, "folder_page_size")
 
     def state_dict(self) -> dict:
         """JSON-safe view settings (no pixels): what ``save`` writes and
@@ -112,7 +109,6 @@ class Show2DState:
         for key, value in state.items():
             if isinstance(value, (list, dict)):
                 state[key] = type(value)(value)
-        state["folder_page_size"] = self._folder_page_size
         return _rescale_view(state, self._display_bin)
 
     def load_state_dict(self, state: dict | str | pathlib.Path) -> None:
@@ -120,33 +116,21 @@ class Show2DState:
         do not fit this widget's panel count or page layout are skipped rather
         than raising. A key ``state_dict`` does not write raises before
         anything is applied."""
-        state = _rescale_view(dict(read_state(state, "Show2D", self._LOADABLE_KEYS)), 1 / self._display_bin)
+        state = _rescale_view(dict(read_state(state, "Show2D", self._STATE_KEYS)), 1 / self._display_bin)
         n_images = int(self.n_images)
-        page_kind = str(state.get("page_kind", self.page_kind))
-        if page_kind not in {"comparison", "items"}:
-            page_kind = str(self.page_kind)
-            state.pop("page_kind", None)
         saved_n_pages = max(1, int(state.get("n_pages", self.n_pages)))
         saved_panels_per_page = max(0, int(state.get("panels_per_page", self.panels_per_page)))
         valid_pages = saved_n_pages == 1 and saved_panels_per_page == 0
         if saved_n_pages > 1 and saved_panels_per_page > 0:
-            if page_kind == "items":
-                valid_pages = saved_n_pages == math.ceil(n_images / saved_panels_per_page)
-            else:
-                valid_pages = n_images == saved_n_pages * saved_panels_per_page
+            valid_pages = n_images == saved_n_pages * saved_panels_per_page
         if valid_pages:
             # Page index, labels, and hidden-state normalization below all need
             # the saved layout installed before they are validated.
-            self.page_kind = page_kind
             self.n_pages = saved_n_pages
             self.panels_per_page = saved_panels_per_page
         else:
             state.pop("n_pages", None)
             state.pop("panels_per_page", None)
-            state.pop("page_kind", None)
-        folder_page_size = state.pop("folder_page_size", None)
-        if page_kind == "items" and self._folder_source is not None and folder_page_size is not None:
-            self._folder_page_size = max(1, int(folder_page_size))
         n_pages = int(self.n_pages)
         if "page_idx" in state:
             state["page_idx"] = int(max(0, min(int(state["page_idx"]), n_pages - 1)))
@@ -198,7 +182,7 @@ class Show2DState:
             hidden = sorted({int(value) for value in state["hidden_panels"] if 0 <= int(value) < n_images})
             if len(hidden) >= n_images:
                 hidden = hidden[:-1]
-            state["hidden_panels"] = self._normalize_item_page_hidden(hidden, drop_if_full=True)
+            state["hidden_panels"] = hidden
         if "hidden_page_slots" in state and isinstance(state["hidden_page_slots"], list):
             state["hidden_page_slots"] = self._normalize_hidden_page_slots(state["hidden_page_slots"], drop_if_full=True)
         elif n_pages > 1 and "hidden_panels" in state and isinstance(state["hidden_panels"], list):

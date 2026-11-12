@@ -45,14 +45,14 @@ def test_delete_regions_keeps_other_fits_and_can_leave_an_empty_workspace():
     widget = ShowPtycho(np.zeros((64, 64)), local_tilt={
         'scan_shape': [64, 64], 'regions': regions,
         'fits': [{**region, 'sample_tilt_mrad': [1, 2]} for region in regions]})
-    widget.set_region_images({'A · SSB': phase, 'B · SSB': phase + 1}, sampling_A=.2)
+    widget.set_region_images({'A · Direct': phase, 'B · Direct': phase + 1}, sampling_A=.2)
     overview = widget.phase_bytes
     widget.local_tilt_active_region = 'a'
     widget.regions = regions[1:]
     assert widget.local_tilt_active_region == ''
     assert [fit['id'] for fit in widget.region_fits] == ['b']
-    assert list(widget.region_images) == ['B · SSB']
-    np.testing.assert_array_equal(widget.region_images['B · SSB'], phase + 1)
+    assert list(widget.region_images) == ['B · Direct']
+    np.testing.assert_array_equal(widget.region_images['B · Direct'], phase + 1)
     assert widget.local_tilt_request_json == '' and widget.phase_bytes == overview
     widget.regions = []
     assert widget.region_fits == [] and widget.region_images == {}
@@ -63,14 +63,14 @@ def test_delete_regions_keeps_other_fits_and_can_leave_an_empty_workspace():
 
 def test_pair_preserves_native_grids_and_per_image_physical_sampling():
     from quantem.widget.showptycho.local_tilt import _images
-    ssb=np.arange(32*32,dtype=np.float32).reshape(32,32)
+    direct=np.arange(32*32,dtype=np.float32).reshape(32,32)
     ptycho=np.arange(64*64,dtype=np.float32).reshape(64,64)
-    metadata,pixels=_images({'SSB':ssb,'Ptychography':ptycho},{'SSB':.26,'Ptychography':.13})
+    metadata,pixels=_images({'Direct':direct,'Ptychography':ptycho},{'Direct':.26,'Ptychography':.13})
     first,second=json.loads(metadata)
     assert first['shape']==[32,32] and second['shape']==[64,64]
     assert first['shape'][0]*first['sampling_A']==second['shape'][0]*second['sampling_A']
     decoded=np.frombuffer(pixels,np.float32)
-    np.testing.assert_array_equal(decoded[:ssb.size].reshape(ssb.shape),ssb)
+    np.testing.assert_array_equal(decoded[:direct.size].reshape(direct.shape),direct)
     np.testing.assert_array_equal(decoded[second['offset']:].reshape(ptycho.shape),ptycho)
 
 
@@ -79,12 +79,16 @@ def test_invalid_sampling_is_rejected_before_transport():
     from quantem.widget.showptycho.local_tilt import _images
     for sampling in (0,-1,float('nan'),float('inf')):
         with pytest.raises(ValueError,match='positive image sampling'):
-            _images({'SSB':np.ones((32,32))},sampling)
+            _images({'Direct':np.ones((32,32))},sampling)
 
 
-def test_notebook_cells_read_edit_fit_and_reconstruct_current_regions():
+@pytest.mark.parametrize("budget", [{}, {"trials": 12}])
+def test_notebook_cells_read_edit_fit_and_reconstruct_current_regions(budget, monkeypatch):
+    import sys
     import pytest
 
+    # Custom NumPy callbacks work without the optional GPU package installed.
+    monkeypatch.setitem(sys.modules, "quantem.gpu", None)
     regions = [{'id': 'a', 'label': 'A', 'bounds': [0, 32, 0, 32]}]
     phase = np.full((32, 32), 1 + 2**-40, dtype=np.float64)
     def fit(selected):
@@ -96,7 +100,8 @@ def test_notebook_cells_read_edit_fit_and_reconstruct_current_regions():
     assert widget.regions == regions
     with pytest.raises(ValueError, match='unfitted'):
         widget.region_fits
-    fits = widget.fit_regions()
+    fits = widget.fit_regions(**budget)
+    assert widget._region_fit_options == {"trials": 12 if budget else 200}  # quantem.gpu picks the refinement
     assert fits[0]['sample_tilt_mrad'] == [2., -3.]
     np.testing.assert_array_equal(widget.region_images['A'], phase)
     assert widget.region_images['A'].dtype == np.float64
@@ -157,15 +162,15 @@ class _Fit:
     """One seed's joint fit; the tilt identifies which seed was kept."""
     def __init__(self, agreement, seed):
         self.aberrations = {'C10_nm': 3.0, 'C12_nm': 1.0, 'phi12_deg': 10.0}
-        self.sample_tilt_mrad = (float(seed), 0.0)
+        self.sample_tilt_mrad = (float(seed) / 10, 0.0)
         self.depth_spread_nm = 10.0
         self.sample_agreement = agreement
         self.trial_records = ()
-        self.refinement = 'newton'
+        self.refinement = 'bfgs'
 
 
 class _PaddedSession:
-    """quantem.gpu.SSB as fit_regions reads it: a 96 x 80 scan centred in a 128 x 128 grid."""
+    """quantem.gpu.DirectPtycho as fit_regions reads it: a 96 x 80 scan centred in a 128 x 128 grid."""
     scan_region, source_path, backend = None, 'scan.npy', 'mps'
     voltage_kV, semiangle_mrad, scan_sampling_A = 300.0, 20.0, (0.5, 0.5)
     detector_sampling_mrad, bright_field_center_px, bright_field_radius_px = (5.0, 5.0), (7.5, 7.5), 4.0
@@ -180,63 +185,66 @@ class _PaddedSession:
         import contextlib
         return contextlib.nullcontext(self)
 
-    def find_aberrations(self, *, seed, **options):
+    def aberrations(self, *, seed, **options):
         self.seeds.append(seed)
         self.options = options
         return _Fit(self.agreements[len(self.seeds) - 1], seed)
 
-    def preview(self, aberrations, *, upsampling_factor, **options):
-        rows, cols = np.indices((128 * upsampling_factor,) * 2)
+    def preview(self, aberrations, *, upsample, **options):
+        rows, cols = np.indices((128 * upsample,) * 2)
         return (rows * 10000 + cols).astype(np.float32), None
 
 
 def _fit_padded(agreements):
-    from quantem.widget.adapters.gpu import SsbSession
+    from quantem.widget.adapters.gpu import DirectSession
     region = {'id': 'r', 'label': 'R', 'bounds': [8, 40, 4, 36]}
     parameters = {'aberrations': {'C10_nm': 3.0, 'C12_nm': 1.0, 'phi12_deg': 10.0},
                   'scan_detector_rotation_deg': 0.0}
-    return SsbSession(_PaddedSession(agreements)).fit_regions(
-        [region], parameters, upsampling_factor=2, phase_estimator='phase_of_mean')
+    return DirectSession(_PaddedSession(agreements)).fit_regions(
+        [region], parameters, upsample=2)
 
 
-def test_regional_fit_keeps_the_best_finite_seed_and_crops_measured_positions():
-    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's SSB")
-    result = _fit_padded([float('nan'), 0.2, 0.9, float('inf'), 0.5])
+def test_regional_fit_runs_once_and_crops_measured_positions():
+    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's direct ptychography")
+    result = _fit_padded([0.9])
     fit, = result['fits']
-    assert fit['seed'] == 47 and fit['sample_tilt_mrad'] == [47.0, 0.0]  # third seed, agreement 0.9
+    assert fit['seed'] == 42 and fit['sample_tilt_mrad'] == [4.2, 0.0]
+    assert len(fit['fit_record']['fits']) == 1
+    assert fit['seed_sd_mrad'] is None
     # Native bounds shift by the (16, 24) padding before scaling by the factor.
     rows, cols = np.indices((256, 256))
     full = (rows * 10000 + cols).astype(np.float32)
-    np.testing.assert_array_equal(result['images']['R · SSB'], full[(8 + 16) * 2:(40 + 16) * 2, (4 + 24) * 2:(36 + 24) * 2])
+    np.testing.assert_array_equal(result['images']['R · Direct'], full[(8 + 16) * 2:(40 + 16) * 2, (4 + 24) * 2:(36 + 24) * 2])
     assert fit['reconstruction']['scan_offset'] == [16, 24]
     with pytest.raises(ValueError, match='nonfinite fit'):
-        _fit_padded([float('nan')] * 5)
+        _fit_padded([float('nan')])
 
 
-def test_regional_fit_passes_its_trial_count_refinement_and_tilt_limit_to_the_fit():
-    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's SSB")
-    # Fit Regions hard-coded 200 trials and Newton and tested a copied 24.99 mrad tilt bound
-    from quantem.widget.adapters.gpu import REGION_TILT_LIMIT_MRAD, SsbSession
-    session = _PaddedSession([0.5] * 5)
+def test_regional_fit_passes_its_trial_count_and_tilt_limit_to_the_fit():
+    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's direct ptychography")
+    # Fit Regions hard-coded 200 trials and tested a copied 24.99 mrad tilt bound; the refinement is quantem.gpu's
+    from quantem.widget.adapters.gpu import REGION_TILT_LIMIT_MRAD, DirectSession
+    session = _PaddedSession([0.5])
     region = {'id': 'r', 'label': 'R', 'bounds': [8, 40, 4, 36]}
     parameters = {'aberrations': {'C10_nm': 3.0, 'C12_nm': 1.0, 'phi12_deg': 10.0}, 'scan_detector_rotation_deg': 0.0}
-    result = SsbSession(session).fit_regions([region], parameters, upsampling_factor=1, phase_estimator='phase_of_mean',
-                                             num_trials=12, refinement='nelder-mead')
-    assert (session.options['num_trials'], session.options['refinement']) == (12, 'nelder-mead')
+    result = DirectSession(session).fit_regions([region], parameters, upsample=1, trials=12)
+    assert session.options['trials'] == 12 and 'refinement' not in session.options
     assert session.options['tilt_limit_mrad'] == REGION_TILT_LIMIT_MRAD
+    assert session.options['compute_loss'] is False
+    assert session.options['search'] == 'standard'
     fit, = result['fits']
-    assert (fit['fit_record']['num_trials'], fit['fit_record']['refinement']) == (12, 'nelder-mead')
-    assert not fit['bound_hit']  # tilt (11, 0) mrad and depth 10 nm lie inside the limit and DEPTH_SPREAD_RANGE_NM
+    assert fit['fit_record']['trials'] == 12 and fit['refinement'] == 'bfgs'  # the optimizer quantem.gpu ran
+    assert not fit['bound_hit']  # tilt (4.2, 0) mrad and depth 10 nm lie inside the limit and DEPTH_SPREAD_RANGE_NM
 
 
 def test_regional_fit_flags_a_depth_at_the_end_of_quantem_gpus_search_range(monkeypatch):
-    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's SSB")
-    from quantem.gpu.ssb import DEPTH_SPREAD_RANGE_NM
+    pytest.importorskip("quantem.gpu", reason="the regional fit runs quantem.gpu's direct ptychography")
+    from quantem.gpu.direct_ptycho import DEPTH_SPREAD_RANGE_NM
     original = _Fit.__init__
 
     def at_the_bound(self, agreement, seed):
         original(self, agreement, seed)
         self.depth_spread_nm = DEPTH_SPREAD_RANGE_NM[1]
     monkeypatch.setattr(_Fit, '__init__', at_the_bound)
-    fit, = _fit_padded([0.5] * 5)['fits']
+    fit, = _fit_padded([0.5])['fits']
     assert fit['bound_hit'] and fit['depth_spread_nm'] == DEPTH_SPREAD_RANGE_NM[1]

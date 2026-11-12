@@ -1,15 +1,15 @@
 """Show4DSTEM: scan position, virtual detector and diffraction pattern of a 4D-STEM scan.
 
 One class opens every input the tutorials use: a file path (read with
-``read_4dstem``), a ``quantem.gpu.io.Dataset4dstemGPU`` (kept on its GPU, read
+``read_4dstem``), a ``quantem.gpu.io.Dataset4dstem`` (kept on its GPU, read
 in bounded windows), a quantem core ``Dataset4dstem``, a list of either (one
-virtual image per dataset under a shared detector) or ``from_folder``, a NumPy
+virtual image per dataset under a shared detector), a NumPy
 array or a Torch tensor (dense, on the tensor's device), or a folder of linked
 HDF5 masters or .qem acquisitions read by the browser itself (``h5_urls`` or
 ``qem_urls``, the WebGPU folder exports).
 
 quantem.gpu and quantem core are reached only through
-``quantem.widget.adapters``. A file becomes a ``Dataset4dstemGPU`` when
+``quantem.widget.adapters``. A file becomes a ``Dataset4dstem`` when
 quantem.gpu is installed and a GPU is present, else ``show4dstem.reader``
 reads it densely onto the compute device (``read_4dstem`` gives the same
 counts as a quantem core ``Dataset4dstem``); the viewer shows the same numbers
@@ -24,8 +24,9 @@ import math
 import os
 import pathlib
 import threading
-import warnings
+import time
 from collections.abc import Sequence
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Self
 
@@ -43,21 +44,15 @@ from quantem.widget.counts import (
     counts_tensor,
     detector_bin_mean,
     host_dtype_for_torch,
-    tensor_dtype,
 )
 from quantem.widget.device import (
     gpu_notice,
     gpu_path_hint,
     no_gpu_path,
-    print_once,
     resolve_device,
 )
 from quantem.widget.export import HtmlExportMixin, export_slug
 from quantem.widget.fallback import StaticFallbackMixin
-from quantem.widget.folder_watch_status import (
-    FOLDER_WATCH_STATE_VALUES,
-    set_folder_watch_status,
-)
 from quantem.widget.show4dstem import export as html_export
 from quantem.widget.show4dstem import reader
 from quantem.widget.show4dstem.dense import DenseSession
@@ -72,20 +67,23 @@ from quantem.widget.show4dstem.detector import (
 )
 from quantem.widget.show4dstem.preview import static_png_b64
 from quantem.widget.show4dstem.reader import acquisition_name
-from quantem.widget.show4dstem.session import DetectorSessionSource
+from quantem.widget.show4dstem.session import DetectorSessionSource, SessionSeries
+from quantem.widget.show4dstem.streaming import StreamFollower
 from quantem.widget.state import SavedStateMixin
 from quantem.widget.units import acquisition_calibration, per_axis, stated, wrap_degrees
 from quantem.widget.utils.array import device_array
 from quantem.widget.utils.state_io import read_state
-from quantem.widget.utils.ui import UiMode, reject_unknown_kwargs, resolve_ui_mode
+from quantem.widget.utils.ui import (
+    DisplayMode, ViewerSize, reject_unknown_kwargs, resolve_panel_width, resolve_mode,
+)
 
 BRIGHT_FIELD_RADIUS_FRACTION = 0.125  # bright-field radius as a fraction of the detector side before fitting
 DEFAULT_VI_ROI_RATIO = 0.15  # scan ROI radius as a fraction of the scan side
-PRODUCT_LABELS = ("DPC_row", "DPC_col", "SSB")
+PRODUCT_LABELS = ("DPC_row", "DPC_col", "Direct")
 # the calibration a 4D acquisition carries, under the .qem format's flat names
-# Compute SSB's downloadable record; ShowPtycho's calibration.json has another shape and schema
-SSB_CALIBRATION_SCHEMA = "quantem.show4dstem-ssb-calibration/3"
-FROM_TRAIT = object()  # a Compute SSB setting left to its ssb_compute_* trait (None is a value of its own)
+# direct_phase()'s downloadable record; ShowPtycho's calibration.json has another shape and schema
+DIRECT_CALIBRATION_SCHEMA = "quantem.show4dstem-direct-calibration/5"
+FROM_TRAIT = object()  # a direct_phase() setting left to its direct_* trait (None is a value of its own)
 CALIBRATION_KEYS = ("scan_sampling_A", "detector_sampling_mrad", "detector_sampling_inv_A", "voltage_kV", "semiangle_mrad")
 # Soft guide for the inline offline pack: the browser's JSON parse of the embedded
 # base64 is the real ceiling, and gzip keeps a 2 GB uint8 stack under it.
@@ -175,7 +173,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
     ----------
     data
         A file path (``*_master.h5``, HDF5 or ``.npy``), a dataset from
-        ``read_4dstem`` (a ``Dataset4dstemGPU`` or a quantem core
+        ``read_4dstem`` (a ``Dataset4dstem`` or a quantem core
         ``Dataset4dstem``), a list of datasets, a 4D ``(scan_row, scan_col,
         det_row, det_col)`` or 5D ``(n_datasets, ...)`` array or tensor, or a
         3D ``(positions, det_row, det_col)`` flat scan with ``scan_shape``. A
@@ -188,7 +186,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         and supplies bounded detector queries, including distributed CUDA
         sessions. The widget closes that borrowed session on ``free()``;
         close its source acquisition separately. Such sessions require
-        ``offline=False`` and do not expose SSB or source cropping here.
+        ``offline=False`` and do not expose direct ptychography or source cropping here.
         A loaded scan with ``detector_session()`` prepares that session
         automatically; pass the scan directly to ``Show4DSTEM``.
     device
@@ -214,19 +212,25 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         from it, and a keyword that contradicts a recorded value raises.
     bright_field_center_px, bright_field_radius_px
         Bright-field disk centre ``(row, col)`` and edge radius in detector pixels. Omitted, the disk a
-        dataset recorded with ``data.calibration.fit_detector_sampling()``, else that same fit
-        (``quantem.gpu.detector.fit_bright_field_disk``) of the mean pattern: the BF, ABF, ADF and
+        dataset recorded with ``data.calibration.detector_sampling()``, else that same fit
+        (``quantem.gpu.detector.bright_field_disk``) of the mean pattern: the BF, ABF, ADF and
         HAADF presets are multiples of this radius.
     precompute_virtual_images
         Compute the four preset images up front so preset clicks are instant.
+    size, dp_size, image_size
+        Named display widths: ``"small"``, ``"medium"``, ``"large"`` or
+        ``"xlarge"``. ``size`` sets both panels; ``dp_size`` and ``image_size``
+        override diffraction and virtual images independently. Omitted, the
+        diffraction pattern shows at 300 px and the virtual image (or scan grid)
+        fills the rest of the row. Source pixels and scientific precision do not change.
     panel_width_px, dp_panel_width_px, vi_panel_width_px
         Display widths in CSS pixels. The diffraction and virtual-image widths
         override ``panel_width_px`` independently; zero uses the shared default.
         Resizing changes the display only, never the data or detector sampling.
     sync_resize
-        Resize both panels together when dragging a corner (default True).
-        Set False to resize each panel independently.
-    view_mode, compare_cols, compare_grid_width_px, compare_max_panels, compare_group_mode, compare_dp_mode
+        Resize both panels together when dragging a corner. Defaults to True,
+        or False when ``dp_size`` or ``image_size`` is supplied.
+    view_mode, compare_columns, compare_grid_width_px, compare_max_panels, compare_group_mode, compare_dp_mode
         Comparison grid layout for several datasets: ``"multiple"`` shows one
         virtual image per dataset, ``compare_max_panels`` per page, with the
         diffraction pattern of the ``"selected"`` dataset or the ``"average"``.
@@ -243,8 +247,9 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
-    folder_watch_state = traitlets.Enum(FOLDER_WATCH_STATE_VALUES, default_value="hidden").tag(sync=True)
-    folder_watch_detail = traitlets.Unicode("").tag(sync=True)
+    # Live acquisition: the diffraction pattern follows the newest arrived pattern, except while the user
+    # interacts and for STREAM_FOLLOW_PAUSE_S after (drag the probe, let go, and it returns to the newest).
+    stream_follow = traitlets.Bool(True)
     pos_row = traitlets.Int(0).tag(sync=True)
     pos_col = traitlets.Int(0).tag(sync=True)
     shape_rows = traitlets.Int(1).tag(sync=True)
@@ -274,28 +279,25 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
     _h5_urls = traitlets.Unicode("").tag(sync=True)
     _qem_urls = traitlets.Unicode("").tag(sync=True)
     _offline_bad_px = traitlets.Unicode("").tag(sync=True)
-    ssb_compute_request = traitlets.Unicode("").tag(sync=True)
-    ssb_compute_status = traitlets.Unicode("").tag(sync=True)
-    ssb_compute_busy = traitlets.Bool(False).tag(sync=True)
-    ssb_compute_enabled = traitlets.Bool(True).tag(sync=True)
-    ssb_compute_num_trials = traitlets.Int(200).tag(sync=True)
-    # quantem.gpu's default SSB: the model fit with the sample tilt and depth spread; False fits at tilt 0
-    ssb_compute_tilt = traitlets.Bool(True).tag(sync=True)
-    # what the fit optimizes, quantem.gpu's names: the model's agreement with the data (default) or, at tilt 0 only,
-    # the phase variance of the older SSB search
-    ssb_compute_objective = traitlets.Enum(["agreement", "phase_variance"], default_value="agreement").tag(sync=True)
-    # local refinement after the trial search, quantem.gpu's names: "auto" picks the optimizer the fit supports
-    ssb_compute_refinement = traitlets.Enum(["auto", "newton", "nelder-mead"], default_value="auto", allow_none=True).tag(sync=True)
-    ssb_compute_num_bright_field_pixels = traitlets.Int(0).tag(sync=True)
-    ssb_compute_lock_C10 = traitlets.Bool(False).tag(sync=True)
-    ssb_compute_lock_C12 = traitlets.Bool(False).tag(sync=True)
-    ssb_compute_C10_nm = traitlets.Float(0.0).tag(sync=True)
-    ssb_compute_C12_nm = traitlets.Float(0.0).tag(sync=True)
-    ssb_compute_phi12_deg = traitlets.Float(0.0).tag(sync=True)
+    direct_request = traitlets.Unicode("").tag(sync=True)
+    direct_status = traitlets.Unicode("").tag(sync=True)
+    direct_busy = traitlets.Bool(False).tag(sync=True)
+    direct_enabled = traitlets.Bool(True).tag(sync=True)
+    direct_trials = traitlets.Int(200).tag(sync=True)
+    # quantem.gpu's default direct ptychography: the model fit with the sample tilt and depth spread; False fits at tilt 0
+    direct_tilt = traitlets.Bool(True).tag(sync=True)
+    # local refinement after the trial search: "auto", quantem.gpu's exact-derivative refinement, or None for none
+    direct_refinement = traitlets.Enum(["auto"], default_value="auto", allow_none=True).tag(sync=True)
+    direct_bright_field_pixels = traitlets.Int(0).tag(sync=True)
+    direct_lock_C10 = traitlets.Bool(False).tag(sync=True)
+    direct_lock_C12 = traitlets.Bool(False).tag(sync=True)
+    direct_C10_nm = traitlets.Float(0.0).tag(sync=True)
+    direct_C12_nm = traitlets.Float(0.0).tag(sync=True)
+    direct_phi12_deg = traitlets.Float(0.0).tag(sync=True)
     # the physical scan-to-detector rotation in [0, 360): the reversal of the centre of mass is part of the angle
-    ssb_compute_scan_detector_rotation_deg = traitlets.Float(0.0).tag(sync=True)
-    ssb_compute_calibration_json = traitlets.Unicode("").tag(sync=True)
-    ssb_compute_calibration_filename = traitlets.Unicode("").tag(sync=True)
+    direct_scan_detector_rotation_deg = traitlets.Float(0.0).tag(sync=True)
+    direct_calibration_json = traitlets.Unicode("").tag(sync=True)
+    direct_calibration_filename = traitlets.Unicode("").tag(sync=True)
     vi_roi_mode = traitlets.Unicode("off").tag(sync=True)
     vi_roi_center_row = traitlets.Float(0.0).tag(sync=True)
     vi_roi_center_col = traitlets.Float(0.0).tag(sync=True)
@@ -348,13 +350,15 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
     n_frames = traitlets.Int(1).tag(sync=True)
     frame_dim_label = traitlets.Unicode("Frame").tag(sync=True)
     frame_labels = traitlets.List(traitlets.Unicode(), []).tag(sync=True)
+    _stream_source_ids = traitlets.List(traitlets.Unicode(), []).tag(sync=True)
+    _stream_selected_source = traitlets.Unicode("").tag(sync=True)
     frame_playing = traitlets.Bool(False).tag(sync=True)
     frame_loop = traitlets.Bool(True).tag(sync=True)
     frame_fps = traitlets.Float(5.0).tag(sync=True)
     frame_reverse = traitlets.Bool(False).tag(sync=True)
     frame_boomerang = traitlets.Bool(False).tag(sync=True)
     view_mode = traitlets.Unicode("single").tag(sync=True)
-    compare_cols = traitlets.Int(0).tag(sync=True)
+    compare_columns = traitlets.Int(0).tag(sync=True)
     compare_grid_width_px = traitlets.Int(0).tag(sync=True)
     compare_max_panels = traitlets.Int(12).tag(sync=True)
     compare_group_mode = traitlets.Unicode("paged").tag(sync=True)
@@ -367,6 +371,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
     compare_hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     compare_starred_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     compare_virtual_image_bytes = _ImageMemoryView().tag(sync=True)
+    compare_image_revision = traitlets.Int(0).tag(sync=True)
+    _stream_panel_update = traitlets.Dict().tag(sync=True)
     compare_panel_count = traitlets.Int(0).tag(sync=True)
     compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     compare_status = traitlets.Unicode("").tag(sync=True)
@@ -396,13 +402,13 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         frame_dim_label: str | None = None,
         frame_labels: list[str] | None = None,
         view_mode: str | None = None,
-        compare_cols: int = 0,
+        compare_columns: int = 0,
         compare_grid_width_px: int = 0,
         compare_max_panels: int = 12,
         compare_group_mode: str = "paged",
         compare_dp_mode: str | None = None,
         title: str = "",
-        ui_mode: UiMode = "interactive",
+        mode: DisplayMode = "interactive",
         show_title: bool | None = None,
         show_controls: bool | None = None,
         controls_collapsed: bool | None = None,
@@ -413,10 +419,13 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         h5_urls: Sequence[str] | None = None,
         qem_urls: Sequence[str] | None = None,
         show_fft: bool = False,
+        size: ViewerSize | None = None,
+        dp_size: ViewerSize | None = None,
+        image_size: ViewerSize | None = None,
         panel_width_px: int = 0,
         dp_panel_width_px: int = 0,
         vi_panel_width_px: int = 0,
-        sync_resize: bool = True,
+        sync_resize: bool | None = None,
         verbose: bool = False,
         state=None,
         save_state: bool = False,
@@ -432,27 +441,42 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         self._sessions: dict[int, object] = {}  # DenseSession or a quantem.gpu detector session per dataset
         self._compare_session = None
         self._compare_session_indices: tuple[int, ...] = ()
+        self._stream_completed_sources: dict[int, object] = {}
         self._vi_product_maps: dict[str, np.ndarray] = {}
         self._preset_images: dict[str, bytes | memoryview] = {}
         self._suppress_roi_recompute = False
         self._roi_seen: tuple | None = None  # the detector ROI at the last ROI notification
         self._position_seen: tuple | None = None  # the scan position at the last position notification
+        self._last_interaction_at = 0.0
         self._suppress_compare_recompute = False
-        self._folder_source = None
         self._owned_acquisitions = []
-        self._folder_known_masters: set[str] = set()
-        self._folder_ready_probation: dict[str, str] = {}
-        self._folder_fill_thread = None
-        self._folder_fill_stop = threading.Event()
-        self._folder_watch_stop = None
-        self._folder_watch_thread = None
-        self._folder_watch_started = False
-        self._folder_poll_lock = threading.Lock()
+        self._stream_lock = threading.RLock()
+        self._stream_follower = None
+        self._stream_source_serial = 0
+        self._stream_display_view = None
+        self._stream_display_views: dict[str, bool] = {}
+        self._stream_display_negotiated = False
+        self._stream_display_delta = False
+        self._stream_layout_views: set[str] = set()
+        self._stream_display_probe_seq = None
+        self._stream_display_probe_at = 0.0
+        self._stream_display_seq = 0
+        self._stream_display_acknowledged = 0
+        self._stream_display_credits = 2
+        self._stream_display_pending = 0
+        self._stream_display_revision = 0
+        self._stream_display_sent_at = 0.0
+        self._stream_cell_running = False
+        self._stream_cell_hooks = None
+        self._stream_defer_compute = False
+        self._stream_deferred_state: set[str] = set()
+        self._stream_deferred_snapshot: dict | None = None
         self._compare_lock = threading.RLock()
-        self._ssb_compute_flipped: bool | None = None  # the last SSB fit's flip, None before one
+        self._session_lock = threading.RLock()
+        self._direct_flipped: bool | None = None  # the last direct ptychography fit's flip, None before one
         # the last tilt-corrected fit's {sample_tilt_mrad, depth_spread_nm}: a manual recompute keeps the sample model
-        self._ssb_compute_sample: dict | None = None
-        # the bright-field disk the caller gave (Compute SSB uses it); the widget's own disk fit is display only
+        self._direct_sample: dict | None = None
+        # the bright-field disk the caller gave (direct_phase() uses it); the widget's own disk fit is display only
         self._given_bright_field = {"bright_field_center_px": None if bright_field_center_px is None else
                                     tuple(float(value) for value in bright_field_center_px),
                                     "bright_field_radius_px": None if bright_field_radius_px is None else float(bright_field_radius_px)}
@@ -465,8 +489,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             notebook_preview_quality=notebook_preview_quality,
             notebook_preview_max_px=notebook_preview_max_px,
         )
-        ui = resolve_ui_mode(
-            ui_mode,
+        ui = resolve_mode(
+            mode,
             defaults={"show_title": True, "show_controls": True, "controls_collapsed": False,
                       "show_stats": True, "show_scale_bar": True},
             overrides={"show_title": show_title, "show_controls": show_controls,
@@ -482,8 +506,21 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                 f"offline_dtype must be 'uint8' or 'uint16', got {offline_dtype!r}. "
                 "Use 'uint8' for compact browse data or 'uint16' to preserve detector counts."
             )
+        for preset, width, name in ((size, panel_width_px, "size"),
+                                    (dp_size, dp_panel_width_px, "dp_size"),
+                                    (image_size, vi_panel_width_px, "image_size")):
+            if preset is not None and width:
+                raise ValueError(f"Use {name} or its explicit pixel width, not both.")
+        if size is not None:
+            panel_width_px = resolve_panel_width(size)
+        if dp_size is not None:
+            dp_panel_width_px = resolve_panel_width(dp_size)
+        if image_size is not None:
+            vi_panel_width_px = resolve_panel_width(image_size)
+        if sync_resize is None:
+            sync_resize = dp_size is None and image_size is None
         for name, value in (("panel_width_px", panel_width_px), ("dp_panel_width_px", dp_panel_width_px),
-                            ("vi_panel_width_px", vi_panel_width_px), ("compare_cols", compare_cols),
+                            ("vi_panel_width_px", vi_panel_width_px), ("compare_columns", compare_columns),
                             ("compare_grid_width_px", compare_grid_width_px)):
             if int(value) < 0:
                 raise ValueError(f"{name} must be >= 0, got {value}")
@@ -492,6 +529,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         if h5_urls and qem_urls:
             raise ValueError("Pass h5_urls= or qem_urls=, not both: one viewer reads one kind of browser source.")
         browser_urls = h5_urls or qem_urls
+        waiting = data is None and not browser_urls
         if browser_urls and (scan_shape is None or detector_shape is None):
             raise ValueError("Show4DSTEM(..., h5_urls= or qem_urls=...) requires scan_shape=(rows, cols) and detector_shape=(rows, cols).")
 
@@ -518,14 +556,16 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             if not isinstance(data, DetectorSessionSource):
                 raise TypeError("detector_session() must return a DetectorSessionSource with bounded detector queries.")
         prepared = isinstance(data, DetectorSessionSource)
-        if prepared and (scan_region is not None or browser_urls or offline is not False):
-            raise ValueError("A prepared detector session is already scoped to its scan; use offline=False without scan_region or browser URLs.")
         listed = isinstance(data, (list, tuple)) and len(data) > 0
+        prepared_series = listed and all(isinstance(item, DetectorSessionSource)
+                                        or callable(getattr(item, "detector_session", None)) for item in data)
+        if (prepared or prepared_series or waiting) and (scan_region is not None or browser_urls or offline is not False):
+            raise ValueError("A prepared detector session is already scoped to its scan; use offline=False without scan_region or browser URLs.")
         series = listed and any(gpu_adapter.is_acquisition(item) for item in data)
         bounded = gpu_adapter.is_acquisition(data) or series
         datasets = listed and all(core_adapter.is_dataset(item, ndim=4) for item in data)
         recorded = dict.fromkeys(CALIBRATION_KEYS)
-        recorded_disk = None  # the bright-field disk data.calibration.fit_detector_sampling() recorded
+        recorded_disk = None  # the bright-field disk data.calibration.detector_sampling() recorded
         if prepared:
             recorded = {key: data.metadata.get(key) for key in CALIBRATION_KEYS}
             recorded_disk = gpu_adapter.recorded_bright_field_disk(data.metadata)
@@ -548,7 +588,15 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             # (an unknown axis is None) and a quantem core dataset (an unknown axis is 1.0 "pixels")
             recorded = acquisition_calibration(first.sampling, first.units, first.metadata)
             recorded_disk = gpu_adapter.recorded_bright_field_disk(first.metadata)
-        if bounded:
+        if prepared_series or waiting:
+            if prepared_series:
+                data = SessionSeries(data)
+                recorded = {key: data.frames[0].metadata.get(key) for key in CALIBRATION_KEYS}
+            precompute_virtual_images = False
+            frame_dim_label = "Dataset" if frame_dim_label is None else frame_dim_label
+            view_mode = "multiple" if view_mode is None else view_mode
+            compare_dp_mode = "selected" if compare_dp_mode is None else compare_dp_mode
+        elif bounded:
             if series:
                 if scan_region is not None:
                     raise ValueError("Select the same source regions before multi-source comparison.")
@@ -591,16 +639,18 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         if prepared:
             data_device = torch.device(data.device)
             shape = (*data.scan_shape, *data.detector_shape)
+        elif waiting:
+            data_device, shape = torch.device("cpu"), (0, 1, 1, 1, 1)
         elif browser_urls:
             urls = list(dict.fromkeys(str(url) for url in browser_urls))
             data = None
             data_device = torch.device("cpu")
             shape = (len(urls), *scan_shape, *detector_shape) if len(urls) > 1 else (*scan_shape, *detector_shape)
         else:
-            if not isinstance(data, (AcquisitionView, AcquisitionSeries)):
+            if not isinstance(data, (AcquisitionView, AcquisitionSeries, SessionSeries)):
                 data = device_array(data)  # a CuPy array becomes a tensor on its GPU, zero-copy
-            if isinstance(data, (AcquisitionView, AcquisitionSeries)):
-                data_device = data.device
+            if isinstance(data, (AcquisitionView, AcquisitionSeries, SessionSeries)):
+                data_device = torch.device(data.device)
             elif isinstance(data, torch.Tensor):
                 data_device = torch.device(resolve_device(device, data))
                 data = data.to(data_device)
@@ -634,12 +684,12 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         self._offline_dtype = offline_dtype
         self._device = data_device
         self._data = data
-        if prepared:
-            self.ssb_compute_enabled = False
+        if prepared or prepared_series or waiting:
+            self.direct_enabled = False
         self.view_mode = view_mode
         self.compare_dp_mode = compare_dp_mode
         self.compare_group_mode = compare_group_mode
-        self.panel_width_px, self.compare_cols = int(panel_width_px), int(compare_cols)
+        self.panel_width_px, self.compare_columns = int(panel_width_px), int(compare_columns)
         self.dp_panel_width_px, self.vi_panel_width_px = int(dp_panel_width_px), int(vi_panel_width_px)
         self.sync_resize = bool(sync_resize)
         self.compare_grid_width_px, self.compare_max_panels = int(compare_grid_width_px), int(compare_max_panels)
@@ -682,7 +732,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             else:
                 self._qem_urls = json.dumps(urls)
             self.offline = True
-            self.ssb_compute_enabled = False
+            self.direct_enabled = False
             self._set_roi_to_disk()
             self.virtual_image_bytes = np.zeros(self.shape_rows * self.shape_cols, dtype=np.float32).tobytes()
             self.frame_bytes = np.zeros(self.det_rows * self.det_cols, dtype=np.float32).tobytes()
@@ -694,17 +744,19 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                 self.load_state_dict(state)
             return
 
-        if bright_field_center_px is None and bright_field_radius_px is None:
+        if not waiting and bright_field_center_px is None and bright_field_radius_px is None:
             if recorded_disk is not None:
                 (self.bright_field_center_row_px, self.bright_field_center_col_px), self.bright_field_radius_px = recorded_disk
             else:
                 self.bright_field_center_row_px, self.bright_field_center_col_px, self.bright_field_radius_px = fit_disk(
-                    self._session(0).mean_dp(), (self.det_rows, self.det_cols), BRIGHT_FIELD_RADIUS_FRACTION
+                    self._session(0).mean_pattern(), (self.det_rows, self.det_cols), BRIGHT_FIELD_RADIUS_FRACTION
                 )
         if precompute_virtual_images and self.n_frames == 1:
             self._precompute_presets()
         self.on_msg(self._handle_frontend_ready_msg)
         self.on_msg(self._handle_detector_request)
+        self.on_msg(self._handle_detector_radius_request)
+        self.on_msg(self._handle_position_request)
         self.observe(self._on_scan_position_change, names=["pos_row", "pos_col"])
         self.observe(self._on_roi_change, names=["roi_center_col", "roi_center_row", "roi_radius", "roi_radius_inner",
                                                  "roi_active", "roi_mode", "roi_width", "roi_height"])
@@ -717,7 +769,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         self._refresh_compare_virtual_images()
         self._update_frame()
         self.observe(self._on_export_request_change, names=["export_request"])
-        self.observe(self._on_ssb_compute_request_change, names=["ssb_compute_request"])
+        self.observe(self._on_direct_request_change, names=["direct_request"])
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
         self.observe(self._on_preset_request, names=["_preset_request"])
         self.observe(self._on_compare_config_change, names=["view_mode", "compare_max_panels", "n_frames",
@@ -733,179 +785,6 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             self.load_state_dict(state)
         if self._verbose:
             print(f"Show4DSTEM {'x'.join(str(s) for s in shape)} on {self._device}")
-
-    # ------------------------------------------------------------------
-    # Opening a folder of masters
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_folder(
-        cls,
-        folder,
-        *,
-        pattern: str = "*_master.h5",
-        recursive: bool = True,
-        scan_size: int | None = None,
-        max_masters: int | None = None,
-        min_masters: int | None = None,
-        ready_only: bool = True,
-        backend: str = "auto",
-        device: str = "auto",
-        hot_pixel_correction: str = "median",
-        view_mode: str = "multiple",
-        columns: int | None = None,
-        page_size: int | None = None,
-        watch: bool = True,
-        watch_interval: float = 2.0,
-        verbose: bool = False,
-        **viewer_kwargs,
-    ) -> Self:
-        """Open every ready ``*_master.h5`` in a folder as one live comparison viewer.
-
-        With quantem.gpu and a GPU, each acquisition is loaded with
-        ``quantem.gpu.io.load`` into encoded storage at full detector
-        resolution, so the whole folder stays resident. Without them every
-        master is read densely (``show4dstem.reader``) into one 5D tensor on
-        ``device``; that path cannot watch the folder and refuses a folder
-        larger than the memory ceiling.
-        Masters still being written are skipped (``ready_only``), and when the
-        folder mixes geometries the largest group sharing one scan and detector
-        shape is shown. The viewer opens once the first master is loaded; the
-        others join in the background (``wait_for_folder()`` blocks until they
-        have). With ``watch=True`` a master that completes later is appended once
-        its headers are unchanged on two polls, every ``watch_interval`` seconds.
-        ``columns`` sets the grid width and ``page_size`` the datasets per page.
-
-        Examples
-        --------
-        >>> viewer = Show4DSTEM.from_folder("/data/session", scan_size=512)  # doctest: +SKIP
-        """
-        if viewer_kwargs.get("state") is not None:
-            # refused before any acquisition is loaded: the constructor would refuse it with the first one already resident
-            viewer_kwargs["state"] = read_state(viewer_kwargs["state"], "Show4DSTEM", (*cls._STATE_KEYS, *cls._LIST_STATE_KEYS))
-        folder_path = pathlib.Path(folder).expanduser().resolve()
-        scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
-        if not gpu_adapter.accelerator_ready() or str(device).strip().lower() == "cpu":
-            # Dense path: every compatible master read whole into one 5D tensor on the device.
-            gpu_notice()
-            groups: dict[tuple, list] = {}
-            for master in reader.find_masters(folder_path, pattern=pattern, recursive=recursive):
-                layout = reader.master_layout(master)  # None while a linked data file is missing
-                if layout is not None and (scan_shape is None or layout[0] == scan_shape[0] * scan_shape[1]):
-                    groups.setdefault(layout[:2], []).append(master)
-            if not groups:
-                raise ValueError(f"No complete {pattern!r} files found in {folder_path}.")
-            masters = max(groups.values(), key=len)[:max_masters]
-            if min_masters is not None and len(masters) < min_masters:
-                raise ValueError(f"Show4DSTEM.from_folder requires at least {min_masters} compatible master(s), but found {len(masters)}.")
-            if watch:
-                hint = gpu_path_hint()
-                live = f"For live folders: {hint}" if hint else f"{no_gpu_path()}."
-                print_once(f"quantem.widget: watching a folder for new masters needs quantem.gpu; showing the "
-                           f"{len(masters)} present now. {live}")
-            target = torch.device(resolve_device(device))
-            limit = reader.ceiling(target)
-            series_t = None
-            for index, master in enumerate(masters):
-                values_t = reader.read_dense(master, target, scan_shape=scan_shape, verbose=verbose,
-                                             hot_pixel_correction=hot_pixel_correction)
-                if series_t is None:
-                    needed = len(masters) * values_t.numel() * values_t.element_size()
-                    if needed > limit:
-                        hint = gpu_path_hint()
-                        advice = f"keep them encoded on a GPU: {hint}" if hint else "use a machine with more memory."
-                        raise MemoryError(
-                            f"{len(masters)} masters need {needed / 1e9:.1f} GB as one dense series, above the "
-                            f"{limit / 1e9:.1f} GB ceiling on {target}. Nothing was binned or cropped; pass "
-                            f"max_masters= or {advice}")
-                    series_t = torch.empty((len(masters), *values_t.shape), dtype=values_t.dtype, device=target)
-                else:
-                    # A later master can hold larger counts or fractions: the series widens to the narrowest
-                    # dtype holding both exactly (NumPy's promotion rules; torch's refuses uint16).
-                    held = [torch.empty(0, dtype=tensor_t.dtype).numpy().dtype for tensor_t in (series_t, values_t)]
-                    wide = tensor_dtype(np.promote_types(*held))
-                    if wide != series_t.dtype:
-                        series_t = reader.promote(series_t, wide, index, limit, master)
-                series_t[index] = values_t.to(series_t.dtype)
-            return cls(series_t, frame_labels=[acquisition_name(master) for master in masters], frame_dim_label="Dataset",
-                       view_mode=view_mode, compare_cols=3 if columns is None else int(columns),
-                       compare_max_panels=12 if page_size is None else int(page_size), compare_dp_mode="selected",
-                       verbose=verbose, **viewer_kwargs)
-        masters = gpu_adapter.discover_masters(folder_path, pattern=pattern, recursive=recursive, scan_shape=scan_shape)
-        if ready_only:
-            ready = [master for master in masters if gpu_adapter.inspect_master(master).ready]
-            if verbose and len(ready) < len(masters):
-                names = ", ".join(acquisition_name(master) for master in masters if master not in ready)
-                warnings.warn(f"Show4DSTEM.from_folder skipped incomplete master files: {names}.",
-                              RuntimeWarning, stacklevel=2)
-            masters = ready
-        if not masters:
-            raise ValueError(
-                f"No {'ready ' if ready_only else ''}{pattern!r} files found in {folder_path}. Wait for linked "
-                "data files to finish writing, or pass ready_only=False if you know the masters are complete."
-            )
-        if len(masters) > 1:
-            # A comparison needs one geometry; a folder that also holds test scans
-            # of another size would otherwise fail to open at all.
-            groups: dict[tuple, list] = {}
-            for master in masters:
-                report = gpu_adapter.inspect_master(master)
-                groups.setdefault((report.scan_shape, report.detector_shape, report.actual_frames), []).append(master)
-            if len(groups) > 1:
-                key, compatible = max(groups.items(), key=lambda item: len(item[1]))
-                if verbose:
-                    warnings.warn(
-                        "Show4DSTEM.from_folder found mixed 4D-STEM shapes in the folder; using the largest "
-                        f"compatible group ({len(compatible)}/{len(masters)}) with scan_shape={key[0]}, "
-                        f"detector_shape={key[1]}. Skipped {len(masters) - len(compatible)} master file(s). "
-                        "Use scan_size= or a narrower pattern= to select a different group.",
-                        RuntimeWarning, stacklevel=2)
-                masters = compatible
-        if min_masters is not None and len(masters) < min_masters:
-            raise ValueError(f"Show4DSTEM.from_folder requires at least {min_masters} compatible master(s), but found {len(masters)}.")
-        if max_masters is not None:
-            masters = masters[:max_masters]
-        expected = master_contract(masters[0])
-
-        def validate_master(master) -> None:
-            """Reject a watched master whose geometry cannot join the comparison."""
-            contract = master_contract(master)
-            # dtype is not compared: io.load narrows uint32 counts that fit into uint16.
-            mismatches = [name for name in ("scan_shape", "detector_shape", "n_frames") if contract[name] != expected[name]]
-            if mismatches:
-                observed = ", ".join(f"{name}={contract[name]!r}" for name in mismatches)
-                wanted = ", ".join(f"{name}={expected[name]!r}" for name in mismatches)
-                raise ValueError(
-                    f"Incompatible 4D-STEM master {acquisition_name(master)!r}: {observed}; expected {wanted}. "
-                    "Use scan_size= or a narrower pattern= for a uniform folder."
-                )
-
-        target = None if str(device).strip().lower() == "auto" else resolve_device(device)
-
-        def load_master(master):
-            """Load one master into encoded GPU storage on the requested device (also used by the watcher)."""
-            return gpu_adapter.load_acquisition(master, target, backend=backend, hot_pixel_correction=hot_pixel_correction)
-
-        viewer = cls(
-            [load_master(masters[0])],
-            view_mode=view_mode,
-            compare_cols=3 if columns is None else int(columns),
-            compare_max_panels=12 if page_size is None else int(page_size),
-            verbose=verbose,
-            **viewer_kwargs,
-        )
-        viewer._folder_source = {
-            "folder": folder_path, "pattern": str(pattern), "recursive": bool(recursive),
-            "scan_shape": scan_shape, "load_master": load_master, "validate_master": validate_master,
-        }
-        viewer._folder_known_masters = {viewer._master_key(master) for master in masters}
-        # from_folder loaded these acquisitions itself, so free() closes them.
-        viewer._owned_acquisitions = [frame.source for frame in viewer._data.frames]
-        set_folder_watch_status(viewer, "hidden", "")
-        viewer._fill_folder(masters[1:])
-        if watch:
-            viewer.watch_folder(interval=watch_interval)
-        return viewer
 
     # ------------------------------------------------------------------
     # Public API used by the tutorials, the CLI and quantem.live
@@ -984,28 +863,22 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                                                  dataset_scope=dataset_scope, title=title)
         return html_export.write_interactive_html(self, path, dtype=dtype, detector_bin=detector_bin, scan_bin=scan_bin, title=title)
 
-    def compute_ssb(self, *, set_source: bool = True, verbose: bool = False, **kwargs) -> np.ndarray:
-        """Reconstruct the SSB phase of the current dataset and show it as the image.
+    def direct_phase(self, *, set_source: bool = True, verbose: bool = False, **kwargs) -> np.ndarray:
+        """Reconstruct the direct ptychography phase of the current dataset and show it as the image.
 
-        The fit is quantem.gpu's default ``SSB.find_aberrations()``, model-based
-        and tilt-corrected: the SSB model fitted to the data together with the
-        sample tilt and depth spread (C10 is then the defocus at mid-depth). The
-        other two methods take quantem.gpu's names:
+        The fit is quantem.gpu's default ``DirectPtycho.aberrations()``, model-based
+        and tilt-corrected: the direct ptychography model fitted to the data together with the
+        sample tilt and depth spread (C10 is then the defocus at mid-depth).
+        ``direct_phase(tilt=False)`` fits the same model with the tilt held at 0.
 
-        - ``compute_ssb()``: model-based, tilt-corrected, the default for every fit;
-        - ``compute_ssb(tilt=False)``: model-based, tilt held at 0;
-        - ``compute_ssb(tilt=False, objective="phase_variance")``: phase variance,
-          the earlier SSB search, kept as a backup, not an equal alternative (it
-          cannot see sample tilt or thickness).
-
-        ``kwargs`` go to the solver: ``tilt`` (the ``ssb_compute_tilt`` trait,
-        True by default), ``objective`` (the ``ssb_compute_objective`` trait,
-        ``"agreement"`` by default), ``num_trials``, ``refinement`` (quantem.gpu's names:
-        ``"auto"``, the default, ``"newton"``, ``"nelder-mead"`` or None), ``seed``,
+        ``kwargs`` go to the solver: ``tilt`` (the ``direct_tilt`` trait,
+        True by default), ``trials`` (the ``direct_trials`` trait, 200 by default),
+        ``refinement`` (``"auto"``, the default, quantem.gpu's exact-derivative
+        refinement, or None for the best trial without one), ``seed``,
         ``aberrations`` (a dict of ``C10_nm``, ``C12_nm`` and ``phi12_deg``; a
         missing key is 0), ``scan_detector_rotation_deg`` (the physical angle
         in [0, 360); omitted, the rotation the acquisition records, else the
-        centre-of-mass estimate, as quantem.gpu.SSB chooses it),
+        centre-of-mass estimate, as quantem.gpu.DirectPtycho chooses it),
         ``scan_detector_rotation_flipped``, ``bright_field_center_px`` and
         ``bright_field_radius_px`` (omitted, the constructor's, else the disk
         quantem.gpu detects), ``bright_field_intensity_threshold``
@@ -1021,28 +894,28 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         none. The aligned DPC maps from the same data are attached beside the
         phase.
         """
-        if self.ssb_compute_busy:
-            raise RuntimeError("Compute SSB is already running.")
-        self.ssb_compute_busy = True
-        self.ssb_compute_status = "Computing SSB..."
-        self.ssb_compute_calibration_json = ""
-        self.ssb_compute_calibration_filename = ""
+        if self.direct_busy:
+            raise RuntimeError("Direct ptycho is already running.")
+        self.direct_busy = True
+        self.direct_status = "Computing direct ptycho..."
+        self.direct_calibration_json = ""
+        self.direct_calibration_filename = ""
         try:
-            phase, dpc_row, dpc_col = self._ssb_phase(verbose=verbose, **kwargs)
+            phase, dpc_row, dpc_col = self._direct_phase_maps(verbose=verbose, **kwargs)
             self._set_vi_product_map("DPC_row", dpc_row)
             self._set_vi_product_map("DPC_col", dpc_col)
-            self._set_vi_product_map("SSB", phase)
+            self._set_vi_product_map("Direct", phase)
             if set_source:
-                self.vi_source = "SSB"
-            tilt = json.loads(self.ssb_compute_calibration_json or "{}").get("sample_tilt_mrad")
+                self.vi_source = "Direct"
+            tilt = json.loads(self.direct_calibration_json or "{}").get("sample_tilt_mrad")
             sample = "" if tilt is None else f", tilt-corrected: ({tilt[0]:+.1f}, {tilt[1]:+.1f}) mrad"
-            self.ssb_compute_status = f"SSB ready ({phase.shape[0]}x{phase.shape[1]}{sample})"
+            self.direct_status = f"Direct ptycho ready ({phase.shape[0]}x{phase.shape[1]}{sample})"
             return phase
         except (ValueError, RuntimeError, MemoryError) as exc:
-            self.ssb_compute_status = f"SSB failed: {exc}"
+            self.direct_status = f"Direct ptycho failed: {exc}"
             raise
         finally:
-            self.ssb_compute_busy = False
+            self.direct_busy = False
 
     def apply_preset(self, name: str) -> Self:
         """Place the detector ROI on a named preset: ``bf``, ``abf``, ``adf`` or ``haadf``.
@@ -1100,7 +973,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         "fft_vmin_pct", "fft_vmax_pct", "dp_vmin", "dp_vmax", "vi_vmin", "vi_vmax", "fft_auto", "show_fft",
         "fft_window", "show_controls", "controls_collapsed", "show_stats", "show_scale_bar", "panel_width_px",
         "dp_panel_width_px", "vi_panel_width_px", "sync_resize",
-        "dp_show_colorbar", "vi_auto_contrast", "vi_smooth", "view_mode", "compare_cols",
+        "dp_show_colorbar", "vi_auto_contrast", "vi_smooth", "view_mode", "compare_columns",
         "compare_grid_width_px", "compare_max_panels", "compare_group_mode", "compare_page_idx",
         "compare_dp_mode", "profile_width", "frame_idx", "frame_dim_label", "frame_loop", "frame_fps",
         "frame_reverse", "frame_boomerang",
@@ -1146,11 +1019,12 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         """Release the data held by this widget so the stack leaves GPU memory.
 
         Detector sessions cache views of the data, so they close first; the
-        allocator caches of every device the data touched are flushed; the
-        acquisitions ``from_folder`` loaded are closed. Call before loading a
+        allocator caches of every device the data touched are flushed; an
+        acquisition the widget opened from a path is closed. Call before loading a
         new dataset into the same kernel. The packed browser copy of the counts
         (up to the 2 GB offline budget) and the last export go too.
         """
+        self._stop_stream()
         self._release_owned_acquisitions()
         data = self._data
         nbytes = data.nbytes if isinstance(data, torch.Tensor) else 0
@@ -1171,248 +1045,289 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def close(self) -> None:
         """Stop background work, release sessions and close the widget comm."""
+        self._stop_stream()
         self._release_owned_acquisitions()
-        self._close_sessions()
-        super().close()
+        with self._stream_lock:
+            self._close_sessions()
+            self._data = None
+            self._preset_images.clear()
+            super().close()
 
-    # ------------------------------------------------------------------
-    # Watching a folder
-    # ------------------------------------------------------------------
+    def _stop_stream(self) -> None:
+        if self._stream_follower is not None:
+            self._stream_follower.stop()
+            self._stream_follower = None
 
-    def poll_folder(self) -> list[int]:
-        """Append newly completed folder masters to the comparison.
-
-        Only ``from_folder`` widgets watch a folder. A new master must report the
-        same complete header signature on two consecutive polls before it is
-        loaded, so a file still being written is never read. Returns the dataset
-        indices this poll appended.
-        """
-        if self._folder_source is None:
-            raise RuntimeError("poll_folder() is available only on Show4DSTEM.from_folder(...) widgets.")
-        source = self._folder_source
-        watch_active = self._folder_watch_is_alive()
-        waiting: list[str] = []
-        errors: list[str] = []
-        with self._folder_poll_lock:
-            if watch_active:
-                set_folder_watch_status(self, "updating", "Checking the folder for new 4D-STEM data.")
-            # A file listing, not quantem.gpu's discover, which raises on an empty match: a watched
-            # folder with no master yet is an ordinary state. Incomplete candidates stay visible to
-            # the readiness protocol so the badge can say why a matching master has not appeared yet.
-            masters = reader.find_masters(source["folder"], pattern=source["pattern"], recursive=source["recursive"])
-            known = self._folder_known_masters
-            discovered = {self._master_key(master) for master in masters}
-            probation = {key: signature for key, signature in self._folder_ready_probation.items()
-                         if key in discovered and key not in known}
-            accepted = []
-            for master in masters:
-                key = self._master_key(master)
-                if key in known:
-                    continue
-                try:
-                    report = gpu_adapter.inspect_master(master, scan_shape=source["scan_shape"])
-                except (OSError, ValueError, KeyError) as exc:
-                    probation.pop(key, None)
-                    errors.append(self._folder_issue_detail(
-                        master, f"readiness inspection failed ({type(exc).__name__}: {exc})",
-                        "Check file permissions and HDF5 integrity, then retry."))
-                    continue
-                if not report.ready:
-                    probation.pop(key, None)
-                    detail = self._folder_issue_detail(master, report.reason, report.action)
-                    (waiting if readiness_is_waiting(report) else errors).append(detail)
-                    continue
-                signature = json.dumps(report.source_signature, sort_keys=True, separators=(",", ":"), default=str)
-                if probation.get(key) != signature:
-                    probation[key] = signature
-                    waiting.append(self._folder_issue_detail(
-                        master, "complete headers found; waiting for one unchanged follow-up readiness poll",
-                        "Keep the master and linked detector files in place."))
-                    continue
-                try:
-                    source["validate_master"](master)
-                except ValueError as exc:
-                    # The confirmed signature stays so a corrected file retries at once.
-                    errors.append(self._folder_issue_detail(
-                        master, f"incompatible master ({exc})",
-                        "Use a matching scan and detector shape, or move this file out of the watched folder."))
-                    continue
-                probation.pop(key, None)
-                accepted.append(master)
-            self._folder_ready_probation = probation
-            added, load_errors = self._append_folder_masters(accepted)
-            errors.extend(load_errors)
-            if not masters and not known:
-                waiting.append("No matching 4D-STEM master has arrived yet. Keep the watcher running or check the folder and filename pattern.")
-            if self._folder_watch_is_alive():
-                if errors:
-                    set_folder_watch_status(self, "error", errors[0])
-                elif waiting:
-                    set_folder_watch_status(self, "waiting", waiting[0])
-                else:
-                    set_folder_watch_status(self, "watching", "")
-            return added
-
-    def wait_for_folder(self, timeout: float | None = None) -> Self:
-        """Block until the masters found when ``from_folder`` opened are loaded."""
-        if self._folder_fill_thread is not None:
-            self._folder_fill_thread.join(timeout)
-        return self
-
-    def watch_folder(self, *, interval: float = 2.0) -> Self:
-        """Poll the attached folder in the background and append ready masters."""
-        if self._folder_source is None:
-            raise RuntimeError("watch_folder() is available only on Show4DSTEM.from_folder(...) widgets.")
-        interval = float(interval)
-        if not np.isfinite(interval) or interval <= 0:
-            raise ValueError(f"watch interval must be a finite value > 0 seconds, got {interval!r}")
-        self.stop_folder_watch()
-        stop = threading.Event()
-        self._folder_watch_stop = stop
-        self._folder_watch_started = True
-
-        def worker() -> None:
-            """Poll every ``interval`` seconds until stopped, then say on the badge why the watcher ended."""
-            try:
-                while not stop.wait(interval):
-                    try:
-                        self.poll_folder()
-                    except (OSError, ValueError, RuntimeError) as exc:
-                        # A folder that briefly vanishes (network share, renamed
-                        # session) must not kill the viewer: report and retry.
-                        set_folder_watch_status(self, "error", self._compact_folder_watch_detail(
-                            f"{type(exc).__name__}: {exc}. The watcher is still alive and will retry; "
-                            "check the folder, storage, and file permissions."))
-            finally:
-                if self._folder_watch_stop is stop:
-                    self._folder_watch_stop = None
-                if self._folder_watch_thread is threading.current_thread():
-                    self._folder_watch_thread = None
-                if stop.is_set():
-                    set_folder_watch_status(self, "stopped", "Folder watcher stopped.")
-                else:
-                    set_folder_watch_status(self, "error", "Folder watch worker stopped unexpectedly. Call watch_folder() to restart it.")
-
-        thread = threading.Thread(target=worker, name="Show4DSTEM-folder-watch", daemon=True)
-        self._folder_watch_thread = thread
-        thread.start()
-        set_folder_watch_status(self, "watching", "")
-        return self
-
-    def stop_folder_watch(self) -> None:
-        """Stop the background folder watcher, if one was started."""
-        stop, thread = self._folder_watch_stop, self._folder_watch_thread
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join()
-        if self._folder_watch_stop is stop:
-            self._folder_watch_stop = None
-        if self._folder_watch_thread is thread:
-            self._folder_watch_thread = None
-        if self._folder_watch_started:
-            set_folder_watch_status(self, "stopped", "Folder watcher stopped.")
-
-    @staticmethod
-    def _master_key(master) -> str:
-        """Absolute resolved path of a master, so a relative path or a symlink is not loaded twice."""
-        return str(pathlib.Path(master).expanduser().resolve())
-
-    def _folder_watch_is_alive(self) -> bool:
-        """Whether the watcher thread runs; only a running watcher owns the folder badge."""
-        return self._folder_watch_thread is not None and self._folder_watch_thread.is_alive()
-
-    def _compact_folder_watch_detail(self, detail: str, *, limit: int = 480) -> str:
-        """Bounded status text without the watched root path or any host filesystem layout."""
-        text = " ".join(str(detail).split())
-        if self._folder_source is not None:
-            root = str(pathlib.Path(self._folder_source["folder"]))
-            variants = {root, os.path.realpath(root)}
-            variants.update(path[len("/private"):] for path in tuple(variants) if path.startswith("/private/"))
-            for path in sorted(variants, key=len, reverse=True):
-                text = text.replace(f"{path}{os.sep}", "")
-                text = text.replace(path, pathlib.Path(path).name or "watched folder")
-        tokens = []
-        for token in text.split(" "):
-            leading = token[: len(token) - len(token.lstrip("([{<"))]
-            candidate = token[len(leading):]
-            trailing = candidate[len(candidate.rstrip(".,;:)]}>")):]
-            if trailing:
-                candidate = candidate[: len(candidate) - len(trailing)]
-            if candidate.startswith(os.sep) and os.sep in candidate[1:]:
-                candidate = pathlib.Path(candidate).name or "source file"
-            tokens.append(f"{leading}{candidate}{trailing}")
-        text = " ".join(tokens)
-        if len(text) > limit:
-            text = f"{text[: max(0, limit - 1)].rstrip()}…"
-        return text
-
-    def _folder_issue_detail(self, master, reason: str, action: str = "") -> str:
-        """Badge text ``"<file>: <reason>. <action>"`` for one master, compacted so no host path reaches the UI."""
-        name = pathlib.Path(master).name or str(master)
-        reason = str(reason).strip().rstrip(".")
-        detail = f"{name}: {reason}." if reason else f"{name}: not ready."
-        return self._compact_folder_watch_detail(f"{detail} {str(action).strip()}".strip())
-
-    def _append_folder_masters(self, masters) -> tuple[list[int], list[str]]:
-        """Load ready masters into the series and publish them in one update.
-
-        Returns the appended dataset indices and, per master that failed to load,
-        the corrective badge text; a failed master is forgotten so the next poll
-        retries it. Callers hold the folder lock.
-        """
-        old_order = list(self.compare_panel_order)
-        custom_order = sorted(old_order) == list(range(self.n_frames))
-        labels = list(self.frame_labels)
-        added: list[int] = []
-        errors: list[str] = []
-        for master in masters:
-            try:
-                acquisition = self._folder_source["load_master"](master)
-            except (OSError, ValueError, RuntimeError, MemoryError) as exc:
-                self._folder_known_masters.discard(self._master_key(master))
-                errors.append(self._folder_issue_detail(
-                    master, f"could not be loaded ({type(exc).__name__}: {exc})",
-                    "Check that the master and its linked detector files are complete, or move it out of the watched folder."))
-                continue
-            self._data.append(acquisition)
-            self._owned_acquisitions.append(acquisition)
-            self._folder_known_masters.add(self._master_key(master))
-            added.append(len(self._data.frames) - 1)
-            labels.append(acquisition_name(master))
+    def _publish_appended(self, added, labels, old_order, custom_order) -> None:
+        """Show acquisitions appended to the series in one update; n_frames refreshes the comparison grid."""
         if added:
-            # n_frames refreshes the comparison grid once the held changes land.
             with self.hold_trait_notifications():
+                if hasattr(self, "_stream_stop"):
+                    self._stream_source_ids = [*self._stream_source_ids, *self._new_stream_source_ids(len(added))]
                 self.n_frames = len(self._data.frames)
                 self.frame_labels = labels
-                if custom_order:
+                if getattr(self, "_stream_newest_first", False):
+                    order = old_order if custom_order else list(reversed(range(added[0])))
+                    self.compare_panel_order = [*reversed(added), *order]
+                    self.compare_page_idx = 0
+                elif custom_order:
                     self.compare_panel_order = [*old_order, *added]
-        return added, errors
 
-    def _fill_folder(self, masters) -> None:
-        """Load the rest of the opening folder in the background, one master at a time."""
-        stop = self._folder_fill_stop
+    def append(self, acquisitions, labels=None) -> list[int]:
+        """Add resident acquisitions (quantem.gpu datasets of the same scan and detector) to the comparison.
 
-        def worker() -> None:
-            """Append the opening masters one at a time, stopping early once the widget is freed."""
-            errors: list[str] = []
-            for master in masters:
-                if stop.is_set():
-                    return
-                with self._folder_poll_lock:
-                    errors.extend(self._append_folder_masters([master])[1])
-            if errors:
-                set_folder_watch_status(self, "error", errors[0])
+        Works on a viewer of several acquisitions (``Show4DSTEM([a, b])``, ``stream``). The
+        caller keeps ownership: ``free`` does not close them. Returns the new dataset indices.
+        """
+        if not isinstance(self._data, (AcquisitionSeries, SessionSeries)):
+            raise ValueError("append adds to a viewer of several acquisitions: open it with a list, "
+                             "Show4DSTEM([first, ...]), or with Show4DSTEM.stream(recording).")
+        acquisitions = list(acquisitions) if isinstance(acquisitions, (list, tuple)) else [acquisitions]
+        # missing labels fall back to each dataset's own name
+        labels = ([] if labels is None else list(labels)) + [None] * len(acquisitions)
+        old_order = list(self.compare_panel_order)
+        custom_order = sorted(old_order) == list(range(self.n_frames))
+        names, added = list(self.frame_labels), []
+        for acquisition, label in zip(acquisitions, labels):
+            self._data.append(acquisition)
+            added.append(len(self._data.frames) - 1)
+            name = ((acquisition.metadata.get("name") or acquisition.metadata.get("series")) if isinstance(self._data, SessionSeries)
+                    else dataset_name(acquisition))
+            names.append(str(label or name or f"acquisition {added[-1]}"))
+        self._publish_appended(added, names, old_order, custom_order)
+        return added
 
-        self._folder_fill_thread = threading.Thread(target=worker, name="Show4DSTEM-folder-fill", daemon=True)
-        self._folder_fill_thread.start()
+    def refresh(self) -> None:
+        """Refresh arriving counts while preserving the detector, cursor and zoom.
+
+        Use with a mutable prepared session. Completed acquisitions need no
+        refresh; changing a detector already recomputes their images.
+        """
+        if self._data is None:
+            return
+        self._preset_images.clear()
+        with self.hold_sync():
+            if not self._multiple_view_active():
+                self._compute_virtual_image_from_roi()
+            self._refresh_compare_virtual_images()
+            self._update_frame()
+
+    @classmethod
+    def stream(cls, recording, *, refresh_s: float = 1 / 60, labels=None, first_timeout_s: float = 0.0,
+               newest_first: bool = True,
+               **viewer_kwargs) -> Self:
+        """Show arriving scans from a GPU recording, before a whole scan completes.
+
+        The recording retains ANS counts. Missing positions are NaN, not measured
+        zeros. Detector changes query all arrived positions. ``refresh_s`` limits
+        display updates only (at most 60 updates/s by default); no incoming
+        patterns are dropped. At most two display updates await browser
+        acknowledgment; later previews coalesce. During blocking user
+        cells, previews are limited to one every two seconds; interactions wait
+        until the cell returns. Background image
+        transfers coalesce during dragging so cursor requests stay responsive. Older recordings
+        that expose only completed ``datasets`` still append on completion.
+
+        Returns a waiting viewer immediately when the receiver is idle. It does
+        not arm or trigger acquisition. Pass ``first_timeout_s=120`` to wait for
+        the first pattern before returning, as in earlier versions.
+        New scans appear at the top left, three per row (``compare_columns``); the selected scan stays selected.
+        The diffraction pattern and the virtual image resize independently (``sync_resize=False``):
+        drag either corner, or pass ``dp_size``/``image_size``.
+        Set ``newest_first=False`` for chronological display. Data and dataset
+        indices always retain acquisition order.
+
+        Examples
+        --------
+        >>> viewer = Show4DSTEM.stream(recording)  # doctest: +SKIP
+        """
+        if not math.isfinite(refresh_s) or refresh_s <= 0:
+            raise ValueError("refresh_s must be finite and positive.")
+        if not math.isfinite(first_timeout_s) or first_timeout_s < 0:
+            raise ValueError("first_timeout_s must be finite and nonnegative.")
+        viewer_kwargs.setdefault("compare_columns", 3)   # a steady grid while scans arrive; 0 chooses automatically
+        viewer_kwargs.setdefault("sync_resize", False)   # the pattern and the image each keep the size dragged to
+        partial = hasattr(recording, "acquisitions")
+        lock = getattr(recording, "lock", nullcontext())
+
+        def snapshot():
+            return list(recording.acquisitions if partial else recording.datasets)
+
+        pause, waited = threading.Event(), 0.0
+        labels = None if labels is None else list(labels)
+        while True:
+            with lock:
+                sources = snapshot()
+                if sources and (not partial or sources[0].received):
+                    if labels:
+                        first_label = labels[0]
+                    elif partial:
+                        first_label = (sources[0].metadata.get("name")
+                                       or sources[0].metadata.get("series") or "acquisition 0")
+                    else:
+                        first_label = dataset_name(sources[0]) or "acquisition 0"
+                    viewer = cls([sources[0]], frame_labels=[str(first_label)], **viewer_kwargs)
+                    break
+            if recording.error is not None:
+                raise recording.error
+            if first_timeout_s == 0 and recording.receiving:
+                viewer = cls(None, **viewer_kwargs)
+                viewer._replace_stream_sources([], [])
+                viewer.title = "Waiting for acquisition"
+                sources = []
+                break
+            if waited >= first_timeout_s or not recording.receiving:
+                raise TimeoutError(f"No acquisition arrived within {waited:.0f} s.")
+            pause.wait(0.01)
+            waited += 0.01
+        viewer._stream_newest_first = newest_first
+        if partial:
+            viewer.pos_row = viewer.pos_col = 0
+        viewer._stream_stop = threading.Event()
+        viewer._stream_source_ids = viewer._new_stream_source_ids(len(sources[:1]))
+        viewer._stream_selected_source = viewer._stream_source_ids[0] if sources else ""
+        viewer._stream_thread = None
+        viewer.stream_error = None
+        viewer._stream_follower = StreamFollower(
+            viewer, recording, sources, labels=labels, refresh_s=refresh_s, options=viewer_kwargs)
+        try:
+            viewer._stream_follower.start()
+        except Exception:
+            viewer.close()
+            raise
+        return viewer
+
+    def refresh_stream(self, scan_id: str | None = None) -> None:
+        """Refresh a stream after unloading scans, optionally selecting a stable scan ID.
+
+        Examples
+        --------
+        >>> recording.unload(scan_id)
+        >>> viewer.refresh_stream()
+        """
+        with self._stream_lock:
+            update = getattr(self, "_stream_update", None)
+            if update is None:
+                raise ValueError("This viewer is not streaming; use Show4DSTEM.stream(recording).")
+            update(force=True)
+            if scan_id is not None:
+                with self._stream_recording.lock:
+                    sources = list(self._stream_recording.acquisitions)
+                    index = next((i for i, source in enumerate(sources) if source.identifier == scan_id), None)
+                    if index is None:
+                        raise ValueError("This scan is no longer available; refresh the scan list.")
+                    self.frame_idx = index
+
+    def _initialize_stream_geometry(self, source, options) -> None:
+        """Adopt the first real scan's geometry and calibration after an idle start."""
+        self._device = torch.device(self._data.device)
+        self.shape_rows, self.shape_cols, self.det_rows, self.det_cols = self._data.shape[-4:]
+        self.pos_row = self.pos_col = 0
+        self.vi_roi_center_row, self.vi_roi_center_col = self.shape_rows / 2, self.shape_cols / 2
+        self.vi_roi_center = [self.vi_roi_center_row, self.vi_roi_center_col]
+        roi_size = max(3, min(self.shape_rows, self.shape_cols) * DEFAULT_VI_ROI_RATIO)
+        self.vi_roi_radius, self.vi_roi_width, self.vi_roi_height = roi_size, roi_size * 2, roi_size
+        recorded = (acquisition_calibration(source.sampling, source.units, source.metadata)
+                    if gpu_adapter.is_acquisition(source) else source.metadata)
+        calibration = {name: stated(name, options.get(name), recorded.get(name)) for name in CALIBRATION_KEYS}
+        if calibration["detector_sampling_mrad"] is not None and calibration["detector_sampling_inv_A"] is not None:
+            raise ValueError("The input and viewer specify different detector units; leave the calibration keyword out.")
+        for name, value in calibration.items():
+            if name in {"scan_sampling_A", "detector_sampling_mrad", "detector_sampling_inv_A"}:
+                value = [] if value is None or None in per_axis(value, 2) else list(self._positive_pair(value, name))
+            setattr(self, name, value)
+        center = self._given_bright_field["bright_field_center_px"]
+        radius = self._given_bright_field["bright_field_radius_px"]
+        if center is None and radius is None:
+            disk = gpu_adapter.recorded_bright_field_disk(source.metadata)
+            if disk is not None:
+                center, radius = disk
+            else:
+                row, col, radius = fit_disk(self._session(0).mean_pattern(),
+                                            (self.det_rows, self.det_cols), BRIGHT_FIELD_RADIUS_FRACTION)
+                center = (row, col)
+        self.bright_field_center_row_px, self.bright_field_center_col_px = (
+            center if center is not None else (self.det_rows / 2, self.det_cols / 2))
+        self.bright_field_radius_px = (radius if radius is not None else
+                                      min(self.det_rows, self.det_cols) * BRIGHT_FIELD_RADIUS_FRACTION)
+        self._set_roi_to_disk()
+
+    @contextmanager
+    def _defer_stream_observers(self):
+        """Prepare one source topology, then let the caller refresh it once."""
+        previous = self._stream_defer_compute
+        self._stream_defer_compute = True
+        try:
+            yield
+        finally:
+            self._stream_defer_compute = previous
+
+    def _new_stream_source_ids(self, count: int) -> list[str]:
+        """Allocate viewer-local identities that never refer to a replacement scan."""
+        start = self._stream_source_serial
+        self._stream_source_serial += count
+        return [str(index) for index in range(start + 1, start + count + 1)]
+
+    def _replace_stream_sources(self, previous, sources, labels=None) -> None:
+        """Retire old live panels without resetting the detector or surviving query sessions."""
+        with self._compare_lock, self._session_lock:
+            self._stream_completed_sources.clear()
+            if not sources:
+                self._close_sessions()
+                self._data = None
+                self._preset_images.clear()
+                with self.hold_sync():
+                    self.n_frames = 0
+                    self._stream_source_ids = []
+                    self._stream_selected_source = ""
+                    self.frame_labels = []
+                    self.frame_bytes = np.full((self.det_rows, self.det_cols), np.nan, np.float32).tobytes()
+                    self.virtual_image_bytes = np.full((self.shape_rows, self.shape_cols), np.nan, np.float32).tobytes()
+                    self.compare_diffraction_bytes = b""
+                    self._clear_compare_virtual_images("No retained scans. Waiting for another acquisition.")
+                    self.title = "No retained scans"
+                return
+            if not isinstance(self._data, SessionSeries):
+                self._close_sessions()
+                sessions = {}
+            else:
+                sessions = dict(zip(previous, self._data.frames))
+            selected = previous[min(int(self.frame_idx), len(previous) - 1)] if previous else None
+            names = dict(zip(previous, self.frame_labels))
+            identities = dict(zip(previous, self._stream_source_ids))
+            hidden = [previous[i] for i in self.compare_hidden_panels if i < len(previous)]
+            starred = [previous[i] for i in self.compare_starred_panels if i < len(previous)]
+            data = (AcquisitionSeries(sources) if gpu_adapter.is_acquisition(sources[0]) else
+                    SessionSeries([sessions.get(source, source) for source in sources]))
+            if self._compare_session is not None:
+                self._compare_session.close()
+                self._compare_session = None
+                self._compare_session_indices = ()
+            for source, session in sessions.items():
+                if source not in sources:
+                    session.close()
+            self._sessions = {}
+            self._data = data
+            self._preset_images.clear()
+            with self.hold_sync(), self.hold_trait_notifications():
+                self._stream_source_ids = [identities[source] if source in identities else
+                                           self._new_stream_source_ids(1)[0] for source in sources]
+                self.n_frames = len(sources)
+                self.frame_idx = sources.index(selected) if selected in sources else 0
+                self._stream_selected_source = self._stream_source_ids[self.frame_idx]
+                self.frame_labels = [str(labels[i]) if labels and i < len(labels) else
+                                     names.get(source, str(source.metadata.get("name") or
+                                                           source.metadata.get("series", f"acquisition {i}")))
+                                     for i, source in enumerate(sources)]
+                self.compare_panel_order = (list(reversed(range(len(sources))))
+                                            if getattr(self, "_stream_newest_first", False)
+                                            else list(range(len(sources))))
+                self.compare_hidden_panels = [i for i, source in enumerate(sources) if source in hidden]
+                self.compare_starred_panels = [i for i, source in enumerate(sources) if source in starred]
+                self.compare_page_idx = 0
 
     def _release_owned_acquisitions(self) -> None:
-        """Stop folder work and close the acquisitions this widget loaded itself (a path or ``from_folder``)."""
-        self.stop_folder_watch()
-        if self._folder_source is not None:
-            self._folder_fill_stop.set()
-            self.wait_for_folder()
+        """Close the acquisition this widget loaded itself from a path; acquisitions the caller passed stay open."""
         for acquisition in self._owned_acquisitions:
             acquisition.close()
         self._owned_acquisitions = []
@@ -1423,7 +1338,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _frame_source(self, frame_idx: int):
         """The 4D source of one dataset: a bounded view or a tensor."""
-        if isinstance(self._data, AcquisitionSeries):
+        if isinstance(self._data, (AcquisitionSeries, SessionSeries)):
             return self._data.frames[frame_idx]
         if isinstance(self._data, torch.Tensor) and self._data.ndim == 5:
             return self._data[frame_idx]
@@ -1444,13 +1359,18 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _close_sessions(self) -> None:
         """Close every detector session: sessions hold views of the data, so the memory is released only after this."""
-        if self._compare_session is not None:
-            self._compare_session.close()
-            self._compare_session = None
-            self._compare_session_indices = ()
-        for session in self._sessions.values():
-            session.close()
-        self._sessions = {}
+        with self._compare_lock, self._session_lock:
+            self._stream_completed_sources.clear()
+            if self._compare_session is not None:
+                self._compare_session.close()
+                self._compare_session = None
+                self._compare_session_indices = ()
+            sessions = list(self._sessions.values())
+            if isinstance(self._data, SessionSeries):
+                sessions.extend(self._data.frames)
+            for session in {id(session): session for session in sessions}.values():
+                session.close()
+            self._sessions = {}
 
     @property
     def _compute(self):
@@ -1464,7 +1384,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         # the flat index would wrap a column past the edge into the next row's pattern
         if not (0 <= row < self.shape_rows and 0 <= col < self.shape_cols):
             raise IndexError(f"scan position ({row}, {col}) is outside the {self.shape_rows} x {self.shape_cols} scan.")
-        return np.asarray(self._compute.frame(row * self.shape_cols + col), dtype=np.float32)
+        with self._session_lock:
+            return np.asarray(self._compute.frame(row * self.shape_cols + col), dtype=np.float32)
 
     def virtual_image(self) -> np.ndarray:
         """The image panel as float32: the product map in view, else the detector ROI sum."""
@@ -1472,6 +1393,10 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         if product is not None:
             frame = 0 if product.shape[0] == 1 else max(0, min(int(self.frame_idx), product.shape[0] - 1))
             return np.array(product[frame], dtype=np.float32)
+        if self._data is not None and self._multiple_view_active():
+            # Multiple view transports the panel stack, not a duplicate hidden
+            # image. An explicit Python query still returns current counts.
+            return np.array(self._compute.masked_sum(self._current_detector_mask()), dtype=np.float32)
         if len(self.virtual_image_bytes) != self.shape_rows * self.shape_cols * 4:
             return np.zeros((self.shape_rows, self.shape_cols), dtype=np.float32)
         return np.frombuffer(self.virtual_image_bytes, dtype=np.float32).reshape(self.shape_rows, self.shape_cols).copy()
@@ -1552,6 +1477,44 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                 return name
         return None
 
+    def _joint_session(self, indices: Sequence[int]):
+        """Reuse one batched query session for the visible compatible acquisitions."""
+        selected = tuple(int(idx) for idx in indices)
+        sources = ([self._data.frames[idx].source for idx in selected]
+                   if isinstance(self._data, AcquisitionSeries) else
+                   [self._stream_completed_sources[idx] for idx in selected])
+        if gpu_adapter.can_query_together(sources):
+            if selected != self._compare_session_indices:
+                if self._compare_session is not None:
+                    self._compare_session.close()
+                self._compare_session = None
+                self._compare_session_indices = ()
+                self._compare_session = gpu_adapter.prepare_session(sources)
+                self._compare_session_indices = selected
+            return self._compare_session
+        return None
+
+    def _compare_query(self, indices: Sequence[int], method: str, *args) -> np.ndarray:
+        """Batch immutable counts, querying any arriving scans in their original panel order."""
+        with self._compare_lock:
+            completed = (list(indices) if isinstance(self._data, AcquisitionSeries) else
+                         [idx for idx in indices if idx in self._stream_completed_sources])
+            session = self._joint_session(completed) if completed else None
+            if session is None:
+                return np.stack([np.asarray(getattr(self._session(idx), method)(*args), dtype=np.float32)
+                                 for idx in indices])
+            results = np.asarray(getattr(session, method)(*args), dtype=np.float32)
+            if len(completed) == len(indices):
+                return results
+            ready = dict(zip(completed, results))
+            return np.stack([ready[idx] if idx in ready else
+                             np.asarray(getattr(self._session(idx), method)(*args), dtype=np.float32)
+                             for idx in indices])
+
+    def _compare_frames(self, indices: Sequence[int], flat: int) -> np.ndarray:
+        """Read one position across visible acquisitions in a single supported query."""
+        return self._compare_query(indices, "frame", flat)
+
     def _compare_images(self, indices: Sequence[int], mask: np.ndarray) -> np.ndarray:
         """Virtual images of several datasets under one mask, per detector pixel.
 
@@ -1560,24 +1523,9 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         covers more pixels. The single-view image stays a plain sum.
         """
         area = max(1.0, float(np.count_nonzero(mask)))
-        selected = tuple(int(idx) for idx in indices)
-        if isinstance(self._data, AcquisitionSeries):
-            sources = [self._data.frames[idx].source for idx in selected]
-            if gpu_adapter.can_query_together(sources):
-                if selected != self._compare_session_indices:
-                    if self._compare_session is not None:
-                        self._compare_session.close()
-                    self._compare_session = None
-                    self._compare_session_indices = ()
-                    self._compare_session = gpu_adapter.prepare_session(sources)
-                    self._compare_session_indices = selected
-                images = np.ascontiguousarray(self._compare_session.masked_sum(mask), dtype=np.float32)
-                images /= area
-                return images
-        return np.stack([
-            np.ascontiguousarray(self._session(idx).masked_sum(mask), dtype=np.float32) / area
-            for idx in selected
-        ])
+        images = np.ascontiguousarray(self._compare_query(indices, "masked_sum", mask))
+        images /= area
+        return images
 
     def selected_scan_region(self) -> tuple[int, int, int, int]:
         """Return the scan rectangle selected in the virtual image.
@@ -1661,30 +1609,42 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         if self._data is None:
             return
         flat = self.pos_row * self.shape_cols + self.pos_col
-        if self._multiple_view_active() and self.compare_dp_mode == "average":
-            page = self._page_indices() or [int(self.frame_idx)]
-            frame = np.mean([np.asarray(self._session(idx).frame(flat), dtype=np.float32) for idx in page], axis=0)
-        else:
-            frame = np.asarray(self._compute.frame(flat), dtype=np.float32)
+        frames = None
+        with self._compare_lock, self._session_lock:
+            if self._multiple_view_active() and self.compare_dp_mode == "average":
+                page = self._page_indices() or [int(self.frame_idx)]
+                frames = self._compare_frames(page, flat)
+                # A live scan returns an all-NaN pattern until this position
+                # arrives. Average acquired patterns; retain NaN if none exist.
+                acquired = [frame for frame in frames if not np.isnan(frame).all()]
+                frame = (np.mean(acquired, axis=0) if acquired else
+                         np.full((self.det_rows, self.det_cols), np.nan, np.float32))
+            elif (self._multiple_view_active() and self.compare_dp_mode == "all"
+                  and self.vi_roi_mode == "off" and self.compare_panel_indices):
+                panels = list(self.compare_panel_indices)
+                frames = self._compare_frames(panels, flat)
+                frame = (frames[panels.index(self.frame_idx)] if self.frame_idx in panels else
+                         np.asarray(self._compute.frame(flat), dtype=np.float32))
+            else:
+                frame = np.asarray(self._compute.frame(flat), dtype=np.float32)
         self.frame_bytes = frame.tobytes()
         if self.vi_roi_mode != "off":
             self._compute_vi_roi_dp()
         else:
-            self._publish_all_diffraction()
+            self._publish_all_diffraction(frames=frames)
 
-    def _publish_all_diffraction(self, indices=None) -> None:
+    def _publish_all_diffraction(self, indices=None, *, frames=None) -> None:
         """In ``compare_dp_mode="all"`` send every visible dataset's pattern for the one selection."""
         if self._multiple_view_active() and self.compare_dp_mode == "all":
             panels = list(self.compare_panel_indices)
             flat = self.pos_row * self.shape_cols + self.pos_col
-            frames = [
-                self._session(idx).frame(flat) if indices is None else self._session(idx).reduce_frames(indices, self.vi_roi_reduce)
-                for idx in panels
-            ]
-            if frames:
+            if panels:
+                if frames is None:
+                    frames = (self._compare_frames(panels, flat) if indices is None else
+                              np.stack([self._session(idx).reduce_frames(indices, self.vi_roi_reduce) for idx in panels]))
                 with self.hold_sync():
                     self.compare_diffraction_indices = panels
-                    self.compare_diffraction_bytes = np.stack([np.asarray(frame, dtype=np.float32) for frame in frames]).tobytes()
+                    self.compare_diffraction_bytes = np.ascontiguousarray(frames, dtype=np.float32).tobytes()
                 return
         self._clear_all_diffraction()
 
@@ -1695,7 +1655,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             self.compare_diffraction_indices = []
 
     # ------------------------------------------------------------------
-    # Product maps (DPC and SSB phase)
+    # Product maps (DPC and direct ptychography phase)
     # ------------------------------------------------------------------
 
     def _set_vi_product_map(self, label: str, value) -> None:
@@ -1704,7 +1664,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             raise ValueError(f"Unsupported virtual-image product {label!r}. Use one of {PRODUCT_LABELS}.")
         product = np.asarray(value)
         if np.iscomplexobj(product):
-            raise ValueError(f"{label} must be a real-valued map. Pass the SSB phase map rather than a complex reconstruction.")
+            raise ValueError(f"{label} must be a real-valued map. Pass the direct ptychography phase map rather than a complex reconstruction.")
         if product.ndim == 2:
             product = product[None]
         if product.ndim != 3 or product.shape[1:] != (self.shape_rows, self.shape_cols) or product.shape[0] not in (1, self.n_frames):
@@ -1736,11 +1696,11 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         self._refresh_compare_virtual_images()
 
     # ------------------------------------------------------------------
-    # SSB
+    # Direct ptychography
     # ------------------------------------------------------------------
 
-    def _ssb_source(self):
-        """The current dataset in the form quantem.gpu SSB reads without a dense copy."""
+    def _direct_source(self):
+        """The current dataset in the form quantem.gpu direct ptychography reads without a dense copy."""
         frame = self._frame_source(int(self.frame_idx))
         if not isinstance(frame, AcquisitionView):
             return frame
@@ -1750,13 +1710,13 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     @staticmethod
     def _positive_pair(value, name: str) -> tuple[float, float]:
-        """A positive ``(row, col)`` pair from a scalar or a length-2 sequence; zero or negative sampling has no SSB geometry."""
+        """A positive ``(row, col)`` pair from a scalar or a length-2 sequence; zero or negative sampling has no direct ptychography geometry."""
         pair = tuple(float(component) for component in per_axis(value, 2))
         if len(pair) != 2 or pair[0] <= 0 or pair[1] <= 0:
             raise ValueError(f"{name} must be a positive scalar or length-2 pair, got {value!r}.")
         return pair
 
-    def _ssb_phase(
+    def _direct_phase_maps(
         self,
         *,
         bright_field_radius_px: float | None = None,
@@ -1765,9 +1725,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         scan_detector_rotation_deg: float | None = None,
         scan_detector_rotation_flipped: bool | None = None,
         bright_field_intensity_threshold: float | None = None,
-        num_trials: int | None = None,
+        trials: int | None = None,
         tilt: bool | object = FROM_TRAIT,
-        objective: str | object = FROM_TRAIT,
         refinement: str | None | object = FROM_TRAIT,
         lock_aberrations: bool = False,
         lock_C10: bool = False,
@@ -1775,7 +1734,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         seed: int = 42,
         verbose: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run quantem.gpu SSB on the current dataset; returns ``(phase, dpc_row, dpc_col)``.
+        """Run quantem.gpu direct ptychography on the current dataset; returns ``(phase, dpc_row, dpc_col)``.
 
         The DPC centre-of-mass maps are quantem.gpu's aligned fields
         (``dpc.run``) at the solved physical rotation and flip. Without
@@ -1784,52 +1743,45 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
         with the 180-degree choice settled by the fit.
         """
         if self.n_frames != 1:
-            raise ValueError("Compute SSB runs on a single 4D dataset. For a series, open the target dataset as a 4D widget.")
+            raise ValueError("Direct ptycho runs on a single 4D dataset. For a series, open the target dataset as a 4D widget.")
         # the calibration the dataset or file records (or, for an input that records none, the constructor keywords)
         if not self.scan_sampling_A:
-            raise ValueError("Compute SSB needs the scan step in angstrom and the data record none. For an array or an "
+            raise ValueError("Direct ptycho needs the scan step in angstrom and the data record none. For an array or an "
                              "uncalibrated file, construct Show4DSTEM(data, scan_sampling_A=(row_A, col_A)).")
         if self.voltage_kV is None:
-            raise ValueError("Compute SSB needs the accelerating voltage and the data record none. For an array or an "
+            raise ValueError("Direct ptycho needs the accelerating voltage and the data record none. For an array or an "
                              "uncalibrated file, construct Show4DSTEM(data, voltage_kV=300).")
         detector_sampling_mrad = tuple(self.detector_sampling_mrad) or None
         if detector_sampling_mrad is None and self.detector_sampling_inv_A:
-            # SSB takes the detector step in mrad; a step recorded in reciprocal angstrom converts at this voltage
+            # Direct ptychography takes the detector step in mrad; a step recorded in reciprocal angstrom converts at this voltage
             detector_sampling_mrad = gpu_adapter.detector_sampling_mrad_from_inv_A(self.detector_sampling_inv_A, self.voltage_kV)
         semiangle = self.semiangle_mrad
         if semiangle is None:
             if detector_sampling_mrad is None:
-                raise ValueError("Compute SSB needs the convergence semiangle and the data record none. Construct "
+                raise ValueError("Direct ptycho needs the convergence semiangle and the data record none. Construct "
                                  "Show4DSTEM(data, semiangle_mrad=...), or give the detector step in mrad per pixel "
                                  "(detector_sampling_mrad=) so it follows from the bright-field disk edge.")
             # quantem.gpu's rule: the disk edge sits at the semiangle. The equal-area edge radius
             # of an elliptical disk takes the geometric mean of the two detector steps.
-            edge_radius_px = gpu_adapter.disk_edge_radius(self._session(int(self.frame_idx)).mean_dp())
+            edge_radius_px = gpu_adapter.disk_edge_radius(self._session(int(self.frame_idx)).mean_pattern())
             semiangle = edge_radius_px * math.sqrt(detector_sampling_mrad[0] * detector_sampling_mrad[1])
-            print(f"Show4DSTEM: semiangle_mrad is not recorded; Compute SSB uses {semiangle:.3f} mrad, the bright-field "
+            print(f"Show4DSTEM: semiangle_mrad is not recorded; direct ptycho uses {semiangle:.3f} mrad, the bright-field "
                   f"disk edge ({edge_radius_px:.2f} px, quantem.gpu.detector.disk_edge_radius) times the detector step. "
                   "Pass Show4DSTEM(data, semiangle_mrad=...) to set it.")
         if semiangle <= 0:
             raise ValueError(f"semiangle_mrad must be positive, got {semiangle}.")
-        trials = int(self.ssb_compute_num_trials if num_trials is None else num_trials)
+        trials = int(self.direct_trials if trials is None else trials)
         if trials < 0:
-            raise ValueError(f"num_trials must be >= 0, got {trials}.")
-        tilt = bool(self.ssb_compute_tilt if tilt is FROM_TRAIT else tilt)
-        objective = self.ssb_compute_objective if objective is FROM_TRAIT else objective
-        if objective not in ("agreement", "phase_variance"):
-            raise ValueError(f"Compute SSB objective must be 'agreement' or 'phase_variance', got {objective!r}.")
-        if tilt and objective == "phase_variance":
-            # quantem.gpu's rule, said before the data is prepared: the phase variance does not see the sample tilt
-            raise ValueError("objective='phase_variance' is the earlier SSB search, a backup at tilt 0; "
-                             "use tilt=False with it, or the default objective with tilt correction.")
-        refinement = self.ssb_compute_refinement if refinement is FROM_TRAIT else refinement
-        if refinement not in ("auto", "newton", "nelder-mead", None):
-            raise ValueError(f"Compute SSB refinement must be 'auto', 'newton', 'nelder-mead' or None, got {refinement!r}.")
+            raise ValueError(f"trials must be >= 0, got {trials}.")
+        tilt = bool(self.direct_tilt if tilt is FROM_TRAIT else tilt)
+        refinement = self.direct_refinement if refinement is FROM_TRAIT else refinement
+        if refinement not in ("auto", None):
+            raise ValueError(f"Direct ptycho refinement must be 'auto' or None, got {refinement!r}.")
         do_refine = refinement is not None
         fit_options: dict = {}
         if lock_C10 or lock_C12:
             held = {name: float(value) for name, value in {
-                "C10_nm": self.ssb_compute_C10_nm, "C12_nm": self.ssb_compute_C12_nm, "phi12_deg": self.ssb_compute_phi12_deg,
+                "C10_nm": self.direct_C10_nm, "C12_nm": self.direct_C12_nm, "phi12_deg": self.direct_phi12_deg,
                 **(aberrations or {})}.items()}
             if tilt:
                 # quantem.gpu's joint fit holds C10 alone, C12 = 0 alone, or all three (then only tilt and depth are fitted)
@@ -1858,17 +1810,17 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             bright_field_radius_px = self._given_bright_field["bright_field_radius_px"]
         if bright_field_center_px is None:
             bright_field_center_px = self._given_bright_field["bright_field_center_px"]
-        self.ssb_compute_status = "Preparing SSB data..."
-        source = self._ssb_source()
+        self.direct_status = "Preparing direct ptycho data..."
+        source = self._direct_source()
         manual = bool(lock_aberrations and aberrations is not None)
-        with gpu_adapter.SsbSession.open(
+        with gpu_adapter.DirectSession.open(
             source,
             voltage_kV=self.voltage_kV,
             semiangle_mrad=float(semiangle),
             scan_sampling_A=tuple(self.scan_sampling_A),
             detector_sampling_mrad=detector_sampling_mrad,
             scan_shape=(self.shape_rows, self.shape_cols) if source.ndim == 3 else None,
-            # a missing coefficient is 0, as compute_ssb documents; quantem.gpu takes all three and refuses any other key
+            # a missing coefficient is 0, as direct_phase documents; quantem.gpu takes all three and refuses any other key
             aberrations=None if aberrations is None else {"C10_nm": 0.0, "C12_nm": 0.0, "phi12_deg": 0.0, **aberrations},
             scan_detector_rotation_deg=None if scan_detector_rotation_deg is None else float(scan_detector_rotation_deg),
             scan_detector_rotation_flipped=scan_detector_rotation_flipped,
@@ -1877,44 +1829,46 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                else {"bright_field_intensity_threshold": float(bright_field_intensity_threshold)}),
             bright_field_radius_px=None if bright_field_radius_px is None else float(bright_field_radius_px),
             bright_field_center_px=None if bright_field_center_px is None else tuple(float(value) for value in bright_field_center_px),
-        ) as ssb:
-            num_bright_field_pixels = ssb.num_bright_field_pixels
-            bright_field_intensity_threshold = ssb.bright_field_intensity_threshold
+        ) as direct:
+            num_bright_field_pixels = direct.num_bright_field_pixels
+            bright_field_intensity_threshold = direct.bright_field_intensity_threshold
             # the values the session used, also when it detected or estimated them
-            bright_field_radius_px, detector_sampling_mrad = ssb.bright_field_radius_px, ssb.detector_sampling_mrad
-            scan_detector_rotation_flipped = ssb.scan_detector_rotation_flipped
-            self.ssb_compute_num_bright_field_pixels = num_bright_field_pixels
-            if tilt and self._ssb_compute_sample is not None:
+            bright_field_radius_px, detector_sampling_mrad = direct.bright_field_radius_px, direct.detector_sampling_mrad
+            scan_detector_rotation_flipped = direct.scan_detector_rotation_flipped
+            self.direct_bright_field_pixels = num_bright_field_pixels
+            if tilt and self._direct_sample is not None:
                 # a manual recompute, or a refinement without trials, starts from the last tilt-corrected fit's sample
-                ssb.ssb.sample_tilt_mrad = tuple(self._ssb_compute_sample["sample_tilt_mrad"])
-                ssb.ssb.depth_spread_nm = float(self._ssb_compute_sample["depth_spread_nm"])
+                direct.direct.sample_tilt_mrad = tuple(self._direct_sample["sample_tilt_mrad"])
+                direct.direct.depth_spread_nm = float(self._direct_sample["depth_spread_nm"])
             if manual or (trials == 0 and not do_refine):
-                self.ssb_compute_status = f"Reconstructing SSB with the given coefficients ({num_bright_field_pixels} BF pixels)..."
-                result = ssb.reconstruct()
+                self.direct_status = f"Reconstructing direct ptycho with the given coefficients ({num_bright_field_pixels} BF pixels)..."
+                result = direct.run()
             else:
-                method = "with sample tilt" if tilt else "at tilt 0" if objective == "agreement" else "by phase variance"
-                self.ssb_compute_status = (f"Fitting SSB aberrations {method} ({trials} trials"
+                method = "with sample tilt" if tilt else "at tilt 0"
+                self.direct_status = (f"Fitting aberrations {method} ({trials} trials"
                                            f"{', refined' if do_refine else ''}, {num_bright_field_pixels} BF pixels)...")
-                result = ssb.find_aberrations(tilt=tilt, objective=objective, num_trials=trials, refinement=refinement,
-                                              seed=int(seed), verbose=verbose, **fit_options)
-                self._ssb_compute_sample = None if result.get("sample_tilt_mrad") is None else {
+                search = "standard" if tilt and not fit_options and trials > 0 and refinement is not None else "primary"
+                result = direct.aberrations(search=search,
+                                          tilt=tilt, trials=trials, refinement=refinement,
+                                          seed=int(seed), verbose=verbose, show=False, **fit_options)
+                self._direct_sample = None if result.get("sample_tilt_mrad") is None else {
                     "sample_tilt_mrad": result["sample_tilt_mrad"], "depth_spread_nm": result["depth_spread_nm"]}
             # quantem.gpu centres a scan its FFT cannot take in a padded grid; keep the measured positions
             phase = result["phase"]
             if tuple(phase.shape) != (self.shape_rows, self.shape_cols):
-                phase = ssb.crop_native(phase, (0, self.shape_rows, 0, self.shape_cols), 1)
+                phase = direct.crop_native(phase, (0, self.shape_rows, 0, self.shape_cols), 1)
         phase = np.ascontiguousarray(torch.as_tensor(phase).cpu().numpy(), dtype=np.float32)
         if phase.shape != (self.shape_rows, self.shape_cols):
-            raise ValueError(f"SSB result shape {phase.shape} does not match the widget scan shape {self.shape_rows}x{self.shape_cols}.")
-        self.ssb_compute_C10_nm = result["aberrations"]["C10_nm"]
-        self.ssb_compute_C12_nm = result["aberrations"]["C12_nm"]
-        self.ssb_compute_phi12_deg = result["aberrations"]["phi12_deg"]
+            raise ValueError(f"Direct ptychography result shape {phase.shape} does not match the widget scan shape {self.shape_rows}x{self.shape_cols}.")
+        self.direct_C10_nm = result["aberrations"]["C10_nm"]
+        self.direct_C12_nm = result["aberrations"]["C12_nm"]
+        self.direct_phi12_deg = result["aberrations"]["phi12_deg"]
         # the physical angle: a manual recompute sends it back whole, where the folded angle alone lost the reversal
-        self.ssb_compute_scan_detector_rotation_deg = result["scan_detector_rotation_deg"]
+        self.direct_scan_detector_rotation_deg = result["scan_detector_rotation_deg"]
         # a manual recompute sends the angle back; the flip of the same fit goes with it
-        self._ssb_compute_flipped = scan_detector_rotation_flipped
-        self.ssb_compute_calibration_json = json.dumps({
-            "schema": SSB_CALIBRATION_SCHEMA,
+        self._direct_flipped = scan_detector_rotation_flipped
+        self.direct_calibration_json = json.dumps({
+            "schema": DIRECT_CALIBRATION_SCHEMA,
             "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "source": {"widget": "Show4DSTEM", "title": self.title, "acquisition_index": int(self.frame_idx),
                        "scan_shape": [self.shape_rows, self.shape_cols], "detector_shape": [self.det_rows, self.det_cols]},
@@ -1927,7 +1881,7 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             "bright_field_radius_px": None if bright_field_radius_px is None else float(bright_field_radius_px),
             "bright_field_intensity_threshold": float(bright_field_intensity_threshold),
             "num_bright_field_pixels": num_bright_field_pixels,
-            "num_trials": 0 if manual else trials, "refinement": None if manual else result.get("refinement", refinement),
+            "trials": 0 if manual else trials, "refinement": None if manual else result.get("refinement", refinement),
             "manual_locked": manual,
             # the sample model of the phase: the tilt-corrected fit's (scan frame, mrad) or None at tilt 0
             "tilt": result.get("sample_tilt_mrad") is not None, "objective": None if manual else result.get("objective"),
@@ -1935,8 +1889,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             "tilt_fit_gain": result.get("tilt_fit_gain"),
             "seed": int(seed), "loss": result["loss"], "elapsed_s": result["elapsed_s"],
         }, indent=2)
-        self.ssb_compute_calibration_filename = (
-            f"{export_slug(self.title, 'show4dstem')}_{self.shape_rows}x{self.shape_cols}x{self.det_rows}x{self.det_cols}_ssb_calibration.json"
+        self.direct_calibration_filename = (
+            f"{export_slug(self.title, 'show4dstem')}_{self.shape_rows}x{self.shape_cols}x{self.det_rows}x{self.det_cols}_direct_calibration.json"
         )
         dpc_row, dpc_col = gpu_adapter.aligned_center_of_mass(
             source, (self.shape_rows, self.shape_cols),
@@ -1944,59 +1898,57 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             scan_detector_rotation_flipped=scan_detector_rotation_flipped)
         return phase, np.ascontiguousarray(dpc_row, dtype=np.float32), np.ascontiguousarray(dpc_col, dtype=np.float32)
 
-    def _on_ssb_compute_request_change(self, change) -> None:
-        """The frontend's Compute SSB button: run the solver on a worker thread."""
+    def _on_direct_request_change(self, change) -> None:
+        """The frontend's Direct ptycho Calculate Phase button: run the solver on a worker thread."""
         raw = str(change.get("new") or "")
         if not raw:
             return
-        payload = json.loads(raw)  # the frontend sends {"action": "compute_ssb", ...}
-        self.ssb_compute_request = ""  # consume the trigger before any long work
-        if payload.get("action") != "compute_ssb":
-            self.ssb_compute_status = f"SSB failed: unknown request {payload.get('action')!r}"
+        payload = json.loads(raw)  # the frontend sends {"action": "direct_phase", ...}
+        self.direct_request = ""  # consume the trigger before any long work
+        if payload.get("action") != "direct_phase":
+            self.direct_status = f"Direct ptycho failed: unknown request {payload.get('action')!r}"
             return
-        if not self.ssb_compute_enabled:
-            self.ssb_compute_status = "Compute SSB is available only in a live Python kernel. Precompute SSB before exporting standalone HTML."
+        if not self.direct_enabled:
+            self.direct_status = "Direct ptycho is available only in a live Python kernel. Precompute the direct phase before exporting standalone HTML."
             return
-        if self.ssb_compute_busy:
-            self.ssb_compute_status = "SSB compute is already running."
+        if self.direct_busy:
+            self.direct_status = "Direct ptycho is already running."
             return
-        kwargs = {key: payload[key] for key in ("num_trials", "tilt", "objective", "refinement", "lock_aberrations")
+        kwargs = {key: payload[key] for key in ("trials", "tilt", "refinement", "lock_aberrations")
                   if key in payload}
-        if "num_trials" in kwargs:
-            self.ssb_compute_num_trials = int(kwargs["num_trials"])
+        if "trials" in kwargs:
+            self.direct_trials = int(kwargs["trials"])
         if "tilt" in kwargs:
-            self.ssb_compute_tilt = bool(kwargs["tilt"])
-        if "objective" in kwargs:
-            self.ssb_compute_objective = kwargs["objective"]
+            self.direct_tilt = bool(kwargs["tilt"])
         if "refinement" in kwargs:
-            self.ssb_compute_refinement = kwargs["refinement"]
+            self.direct_refinement = kwargs["refinement"]
         manual = bool(kwargs.get("lock_aberrations", False))
         if manual:
             # the sliders' aberrations and the physical rotation, reconstructed as given
             aberrations = payload.get("aberrations", {})
-            self.ssb_compute_C10_nm = float(aberrations.get("C10_nm", self.ssb_compute_C10_nm))
-            self.ssb_compute_C12_nm = float(aberrations.get("C12_nm", self.ssb_compute_C12_nm))
-            self.ssb_compute_phi12_deg = float(aberrations.get("phi12_deg", self.ssb_compute_phi12_deg))
-            self.ssb_compute_scan_detector_rotation_deg = wrap_degrees(
-                payload.get("scan_detector_rotation_deg", self.ssb_compute_scan_detector_rotation_deg))
-            kwargs["aberrations"] = {"C10_nm": self.ssb_compute_C10_nm, "C12_nm": self.ssb_compute_C12_nm,
-                                     "phi12_deg": self.ssb_compute_phi12_deg}
-            kwargs["scan_detector_rotation_deg"] = self.ssb_compute_scan_detector_rotation_deg
-            kwargs["scan_detector_rotation_flipped"] = self._ssb_compute_flipped
-        self.ssb_compute_lock_C10 = bool(payload.get("lock_C10", self.ssb_compute_lock_C10))
-        self.ssb_compute_lock_C12 = bool(payload.get("lock_C12", self.ssb_compute_lock_C12))
+            self.direct_C10_nm = float(aberrations.get("C10_nm", self.direct_C10_nm))
+            self.direct_C12_nm = float(aberrations.get("C12_nm", self.direct_C12_nm))
+            self.direct_phi12_deg = float(aberrations.get("phi12_deg", self.direct_phi12_deg))
+            self.direct_scan_detector_rotation_deg = wrap_degrees(
+                payload.get("scan_detector_rotation_deg", self.direct_scan_detector_rotation_deg))
+            kwargs["aberrations"] = {"C10_nm": self.direct_C10_nm, "C12_nm": self.direct_C12_nm,
+                                     "phi12_deg": self.direct_phi12_deg}
+            kwargs["scan_detector_rotation_deg"] = self.direct_scan_detector_rotation_deg
+            kwargs["scan_detector_rotation_flipped"] = self._direct_flipped
+        self.direct_lock_C10 = bool(payload.get("lock_C10", self.direct_lock_C10))
+        self.direct_lock_C12 = bool(payload.get("lock_C12", self.direct_lock_C12))
         if not manual:
-            kwargs["lock_C10"] = self.ssb_compute_lock_C10
-            kwargs["lock_C12"] = self.ssb_compute_lock_C12
+            kwargs["lock_C10"] = self.direct_lock_C10
+            kwargs["lock_C12"] = self.direct_lock_C12
 
         def worker() -> None:
             """Run the solver off the kernel thread so the frontend stays responsive while it fits."""
             try:
-                self.compute_ssb(verbose=bool(payload.get("verbose", False)), **kwargs)
+                self.direct_phase(verbose=bool(payload.get("verbose", False)), **kwargs)
             except (ValueError, RuntimeError, MemoryError):
-                return  # compute_ssb already published the failure string
+                return  # direct_phase already published the failure string
 
-        threading.Thread(target=worker, name="Show4DSTEM-compute-SSB", daemon=True).start()
+        threading.Thread(target=worker, name="Show4DSTEM-direct-phase", daemon=True).start()
 
     # ------------------------------------------------------------------
     # Offline packing
@@ -2042,14 +1994,223 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _resend_view_state(self) -> None:
         """Re-send the view buffers so a frontend that mounted after ``__init__`` still paints them."""
-        for name in ("virtual_image_bytes", "vi_product_labels", "vi_product_map_frames", "vi_product_maps_bytes",
-                     "frame_bytes", "compare_diffraction_bytes", "compare_diffraction_indices", "compare_virtual_image_bytes"):
-            self.send_state(name)
+        with self._stream_lock:
+            if self._stream_display_pending or (self._stream_display_negotiated
+                                                and self._stream_display_view is None):
+                return
+            with self.hold_sync():
+                # Jupyter deep-compares DataViews. A fresh revision guarantees
+                # a delivery event even when the full image bytes are identical.
+                self.compare_image_revision += 1
+                self._stream_panel_update = {}
+                self._states_to_send.update({
+                    "virtual_image_bytes", "vi_product_labels", "vi_product_map_frames", "vi_product_maps_bytes",
+                    "frame_bytes", "compare_diffraction_bytes", "compare_diffraction_indices",
+                    "compare_virtual_image_bytes", "compare_image_revision"})
+            self._stream_display_barrier()
+
+    def _stream_display_barrier(self) -> None:
+        """Mark the ordered end of an image update; this is transport, not GPU presentation."""
+        if self._stream_display_view is None or not hasattr(self, "_stream_stop"):
+            return
+        self._stream_display_seq += 1
+        self._stream_display_pending = self._stream_display_seq
+        self._stream_display_revision = self.compare_image_revision
+        self._stream_display_sent_at = time.monotonic()
+        self._stream_display_probe_seq = None
+        self._send_stream_display_marker()
+
+    def _send_stream_display_marker(self) -> None:
+        """Transfer a pending receipt to another view without resending images."""
+        self.send({"type": "show4dstem_stream_update", "version": 1,
+                   "view": self._stream_display_view, "seq": self._stream_display_pending,
+                   "revision": self._stream_display_revision})
+
+    def _stream_compare_delta(self, previous, revision):
+        """Send changed panels exactly; retain the complete immutable export snapshot."""
+        current = self.compare_virtual_image_bytes
+        pixels = self.shape_rows * self.shape_cols
+        count = self.compare_panel_count
+        if (self.compare_image_revision == revision or not count
+                or len(previous) != len(current) or len(current) != count * pixels * 4):
+            return None
+        old = np.frombuffer(previous, np.uint32).reshape(count, pixels)
+        new = np.frombuffer(current, np.uint32).reshape(count, pixels)
+        slots = np.flatnonzero(np.any(old != new, axis=1)).tolist()
+        if len(slots) == count:
+            return None
+        # Model traits still hold the full snapshot for export and new views.
+        # Only this ordered background publication omits the unchanged panels.
+        self._stream_panel_update = {"snapshot_pending": True}
+        self._states_to_send.difference_update({"compare_virtual_image_bytes", "compare_image_revision"})
+        message = {"type": "show4dstem_stream_panels", "version": 1, "base": revision,
+                   "revision": self.compare_image_revision, "slots": slots,
+                   "panels": count, "rows": self.shape_rows, "cols": self.shape_cols}
+        buffers = [current[slot * pixels * 4:(slot + 1) * pixels * 4] for slot in slots]
+        return message, buffers
+
+    def _stream_compare_layout(self, previous, revision, previous_ids):
+        """Reuse bit-identical panels by source identity during append or retirement."""
+        pixels = self.shape_rows * self.shape_cols
+        current = self.compare_virtual_image_bytes
+        identities = [self._stream_source_ids[index] for index in self.compare_panel_indices]
+        if (not identities or not previous_ids or self.compare_image_revision == revision
+                or len(previous) != len(previous_ids) * pixels * 4
+                or len(current) != len(identities) * pixels * 4):
+            return
+        old = np.frombuffer(previous, np.uint32).reshape(len(previous_ids), pixels)
+        new = np.frombuffer(current, np.uint32).reshape(len(identities), pixels)
+        lookup = {identity: index for index, identity in enumerate(previous_ids)}
+        reuse = [lookup[identity] if identity in lookup and np.array_equal(old[lookup[identity]], new[index])
+                 else -1 for index, identity in enumerate(identities)]
+        if all(index < 0 for index in reuse):
+            return
+        slots = [index for index, source in enumerate(reuse) if source < 0]
+        # This trait and all changed labels/indices share one remote-state
+        # transaction. New metadata can never be paired with old panel slots.
+        self._stream_panel_update = {
+            "snapshot_pending": True,
+            "base": revision, "revision": self.compare_image_revision,
+            "previous_ids": previous_ids, "source_ids": identities, "reuse": reuse,
+            "rows": self.shape_rows, "cols": self.shape_cols, "slots": slots,
+            "buffers": [current[slot * pixels * 4:(slot + 1) * pixels * 4] for slot in slots],
+        }
+        self._states_to_send.difference_update({"compare_virtual_image_bytes", "compare_image_revision"})
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Keep full snapshots coherent without changing saved-state or targeted-sync policy."""
+        if key is not None:
+            # Workers can publish while holding a session lock. Do not invert
+            # the refresh order (stream lock, then session lock) here.
+            return super().get_state(key=key, drop_defaults=drop_defaults)
+        with self._stream_lock:
+            state = super().get_state(drop_defaults=drop_defaults if self._stream_deferred_snapshot is None else False)
+            # Full mounts and saved notebooks already contain canonical images;
+            # a transport delta must not be replayed or embedded beside them.
+            state.pop("_stream_panel_update", None)
+            if self._stream_deferred_snapshot is None:
+                return state
+            # The shared mixin owns heavy-buffer trimming and previews. Only replace deferred display fields it retained.
+            for name in self._stream_deferred_state.intersection(state):
+                state[name] = self._stream_deferred_snapshot[name]
+            if drop_defaults:
+                traits = self.traits()
+                state = {name: value for name, value in state.items()
+                         if not self._compare(value, traits[name].default_value)}
+            return state
+
+    def set_state(self, sync_data) -> None:
+        """Resolve browser selection by acquisition identity before applying traits."""
+        with self._stream_lock:
+            if self._stream_deferred_state:
+                self._stream_update(force=True)
+            if hasattr(self, "_stream_stop") and ("frame_idx" in sync_data or "_stream_selected_source" in sync_data):
+                source = sync_data.get("_stream_selected_source")
+                if source not in self._stream_source_ids:
+                    self.send_state(["_stream_source_ids", "_stream_selected_source", "frame_idx"])
+                    self.send({"type": "show4dstem_source_receipt", "status": "rejected", "source": source,
+                               "error": "This scan was released. Select a retained scan."})
+                    return
+                sync_data = dict(sync_data, frame_idx=self._stream_source_ids.index(source))
+            super().set_state(sync_data)
+
+    def _interaction_context(self, keys: str) -> list:
+        """A live acquisition keeps its identity when retention changes its index."""
+        return [(self._stream_selected_source or self.frame_idx) if key == "frame_idx" else getattr(self, key)
+                for key in keys.split()]
+
+    def _handle_msg(self, msg) -> None:
+        """Serialize browser edits with arriving scan images and session changes."""
+        # Signal priority before waiting: the current refresh may hold the lock.
+        content = msg.get("content", {}).get("data", {}).get("content", {})
+        display_control = content.get("type") in {
+            "show4dstem_stream_ack", "show4dstem_frontend_ready",
+            "show4dstem_frontend_closed", "show4dstem_stream_alive", "show4dstem_stream_resync"}
+        if not display_control:
+            self._last_interaction_at = time.monotonic()
+        with self._stream_lock:
+            if self._stream_deferred_state and not display_control:
+                self._stream_update(force=True)
+            super()._handle_msg(msg)
 
     def _handle_frontend_ready_msg(self, _widget, content, _buffers) -> None:
         """Answer the frontend's ready message with the view buffers (``_schedule_initial_view_sync``)."""
-        if isinstance(content, dict) and content.get("type") == "show4dstem_frontend_ready" and content.get("version") == 1:
+        if not isinstance(content, dict) or content.get("version") != 1:
+            return
+        kind, view = content.get("type"), content.get("view")
+        if kind == "show4dstem_frontend_ready":
+            if content.get("stream_ack") is True and isinstance(content.get("view"), str):
+                self._stream_display_negotiated = True
+                self._stream_display_views[view] = content.get("stream_delta") is True
+                if content.get("stream_layout") is True:
+                    self._stream_layout_views.add(view)
+                else:
+                    self._stream_layout_views.discard(view)
+                self._stream_display_delta = all(self._stream_display_views.values())
+                self._stream_display_view = view
+                self._stream_display_acknowledged = self._stream_display_seq
+                self._stream_display_pending = 0
+                self._stream_display_probe_seq = None
+            if self._stream_deferred_state:
+                self._stream_update(force=True)
             self._resend_view_state()
+        elif (kind == "show4dstem_stream_ack" and view == self._stream_display_view
+              and type(content.get("seq")) is int
+              and self._stream_display_acknowledged < content["seq"] <= self._stream_display_seq):
+            # The frontend applies ordered deltas before cumulatively acknowledging
+            # the newest revision. Coalescing receipts never discards a sent delta.
+            self._stream_display_acknowledged = content["seq"]
+            if content["seq"] == self._stream_display_seq:
+                self._stream_display_pending = 0
+            self._stream_display_probe_seq = None
+        elif kind == "show4dstem_frontend_closed" and isinstance(view, str):
+            self._stream_display_views.pop(view, None)
+            self._stream_layout_views.discard(view)
+            self._stream_display_delta = bool(self._stream_display_views) and all(self._stream_display_views.values())
+            if view == self._stream_display_view:
+                self._stream_display_view = next(reversed(self._stream_display_views), None)
+                if self._stream_display_view is not None and self._stream_display_pending:
+                    self._send_stream_display_marker()
+        elif (kind == "show4dstem_stream_alive" and isinstance(view, str)
+              and view in self._stream_display_views and self._stream_display_probe_seq is not None
+              and content.get("seq") == self._stream_display_probe_seq):
+            self._stream_display_probe_seq = None
+            self._stream_display_view = view
+            if self._stream_display_pending:
+                self._send_stream_display_marker()
+        elif (kind == "show4dstem_stream_resync" and isinstance(view, str)
+              and view in self._stream_display_views):
+            self._stream_display_view = view
+            self._stream_display_acknowledged = self._stream_display_seq
+            self._stream_display_pending = 0
+            self._resend_view_state()
+
+    def _handle_position_request(self, _widget, content, _buffers) -> None:
+        """Pipeline cursor requests without waiting for the kernel's idle notification."""
+        if not isinstance(content, dict) or content.get("type") != "show4dstem_position":
+            return
+        receipt = {key: content.get(key) for key in ("view", "epoch", "seq")}
+        receipt["type"] = "show4dstem_position_receipt"
+        try:
+            if content.get("version") != 1 or self._data is None or self.comm is None:
+                raise ValueError("The position request is stale; reopen the viewer.")
+            if content.get("context") != self._interaction_context("frame_idx vi_roi_mode compare_dp_mode"):
+                raise ValueError("The selected acquisition or diffraction mode changed.")
+            row, col = content["center"]
+            if not (isinstance(row, (int, float)) and isinstance(col, (int, float))
+                    and math.isfinite(row) and math.isfinite(col)
+                    and 0 <= row < self.shape_rows and 0 <= col < self.shape_cols):
+                raise ValueError("Select a position inside the scan.")
+            self.send(dict(receipt, status="accepted"))
+            self._last_interaction_at = time.monotonic()
+            with self.hold_sync(), self.hold_trait_notifications():
+                self.pos_row, self.pos_col = int(row), int(col)
+            self._on_scan_position_change()
+        except (KeyError, TypeError, ValueError, RuntimeError, MemoryError) as error:
+            self._position_seen = None
+            self.send(dict(receipt, status="rejected", error=str(error)))
+        else:
+            self.send(dict(receipt, status="complete"))
 
     def _handle_detector_request(self, _widget, content, _buffers) -> None:
         """Accept one center request before its synchronous image computation."""
@@ -2061,13 +2222,14 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             context = "frame_idx vi_source view_mode compare_page_idx roi_mode roi_radius roi_radius_inner roi_width roi_height"
             if content.get("version") != 1 or self._data is None or self.comm is None:
                 raise ValueError("The detector request is stale; reopen the viewer.")
-            if content.get("context") != [getattr(self, key) for key in context.split()]:
+            if content.get("context") != self._interaction_context(context):
                 raise ValueError("Detector settings changed before this request was accepted.")
             row, col = map(float, content["center"])
             if not (math.isfinite(row) and math.isfinite(col)
                     and 0 <= row < self.det_rows and 0 <= col < self.det_cols):
                 raise ValueError("The detector center must lie inside the diffraction pattern.")
             self.send(dict(receipt, status="accepted"))
+            self._last_interaction_at = time.monotonic()
             with self.hold_sync(), self.hold_trait_notifications():
                 self.roi_active = True
                 self.roi_center = [row, col]
@@ -2075,6 +2237,40 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
             if self._multiple_view_active() and not self.compare_virtual_image_bytes:
                 raise RuntimeError(self.compare_status)
         except (KeyError, TypeError, ValueError, RuntimeError, MemoryError) as error:
+            self._roi_seen = None
+            self.send(dict(receipt, status="rejected", error=str(error)))
+        else:
+            self.send(dict(receipt, status="complete"))
+
+    def _handle_detector_radius_request(self, _widget, content, _buffers) -> None:
+        """Acknowledge a detector resize before computing its complete image."""
+        if not isinstance(content, dict) or content.get("type") != "show4dstem_detector_radius":
+            return
+        receipt = {key: content.get(key) for key in ("view", "epoch", "seq")}
+        receipt["type"] = "show4dstem_detector_radius_receipt"
+        try:
+            context = (
+                "frame_idx vi_source view_mode compare_page_idx roi_mode "
+                "roi_center_row roi_center_col"
+            )
+            if content.get("version") != 1 or self._data is None or self.comm is None:
+                raise ValueError("The radius request is stale; reopen the viewer.")
+            if content.get("context") != self._interaction_context(context):
+                raise ValueError("Detector settings changed before this radius request was accepted.")
+            outer, inner = map(float, content["radii"])
+            if not (math.isfinite(outer) and math.isfinite(inner) and 0 <= inner < outer):
+                raise ValueError(
+                    f"Use finite detector radii with 0 <= inner < outer; got {inner}, {outer}."
+                )
+            self.send(dict(receipt, status="accepted"))
+            self._last_interaction_at = time.monotonic()
+            with self.hold_sync(), self.hold_trait_notifications():
+                self.roi_radius, self.roi_radius_inner = outer, inner
+                self.roi_active = True
+            self._on_roi_change()
+            if self._multiple_view_active() and not self.compare_virtual_image_bytes:
+                raise RuntimeError(self.compare_status)
+        except (KeyError, TypeError, ValueError, OverflowError, RuntimeError, MemoryError) as error:
             self._roi_seen = None
             self.send(dict(receipt, status="rejected", error=str(error)))
         else:
@@ -2166,6 +2362,10 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _on_frame_idx_change(self, change=None) -> None:
         """React to a dataset switch: the cached presets belong to the old dataset, so drop them and repaint."""
+        if self._stream_source_ids:
+            self._stream_selected_source = self._stream_source_ids[self.frame_idx]
+        if self._stream_defer_compute:
+            return
         if self.n_frames <= 1:
             return
         self._preset_images = {}
@@ -2197,6 +2397,8 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _on_compare_config_change(self, change=None) -> None:
         """React to a grid layout change: normalise it, keep one panel visible, rebuild the grid, keep the dataset in view."""
+        if self._stream_defer_compute:
+            return
         if change and change.get("name") == "view_mode":
             self.view_mode = self._normalize_view_mode(change.get("new", "single"))
         if change and change.get("name") == "compare_group_mode":
@@ -2312,8 +2514,10 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
 
     def _clear_compare_virtual_images(self, status: str = "") -> None:
         """Empty the comparison grid and show ``status`` (after ``free``, or when the grid has nothing to draw)."""
-        with self.hold_trait_notifications():
+        with self.hold_sync(), self.hold_trait_notifications():
             self.compare_virtual_image_bytes = b""
+            self._stream_panel_update = {}
+            self.compare_image_revision += 1
             self.compare_panel_count = 0
             self.compare_panel_indices = []
             self.compare_status = status
@@ -2344,8 +2548,10 @@ class Show4DSTEM(SavedStateMixin, HtmlExportMixin, StaticFallbackMixin, anywidge
                 return
             with self._compare_lock:
                 images = self._compare_images(indices, self._current_detector_mask())
-            with self.hold_trait_notifications():
+            with self.hold_sync(), self.hold_trait_notifications():
                 self.compare_virtual_image_bytes = memoryview(images).cast("B")
+                self._stream_panel_update = {}
+                self.compare_image_revision += 1
                 self.compare_panel_count = len(indices)
                 self.compare_panel_indices = indices
                 self.compare_status = self._compare_status(indices)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quantem.widget"
-version = "0.0.1rc43"
+version = "0.0.1rc44.dev0"
 description = "Interactive custom Python widgets for electron microscopy"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -26,7 +26,6 @@ dependencies = [
     "Pillow>=10.0.0",
     "matplotlib>=3.7.0",
     "scipy>=1.10.0",
-    "scikit-image>=0.22",  # ShowDiffraction denoise="nlm" (non-local means)
     "h5py>=3.8",  # Show4DSTEM dense reader, EMD images
     # bitshuffle-LZ4 detector files. Windows on ARM has no wheel and the sdist needs MSVC, so it
     # is skipped there (x64 Python on Windows on ARM also reports ARM64); the reader names it
@@ -44,7 +43,6 @@ dependencies = [
     # NumPy 2 (no Intel Mac wheel) and hdf5plugin 6 (no Windows on ARM wheel); there the widget's
     # stand-in carries the same attributes (adapters/core.py).
     "quantem>=0.1.10; (sys_platform != 'darwin' or platform_machine != 'x86_64') and (sys_platform != 'win32' or platform_machine != 'ARM64')",
-    "ase>=3.22",  # ShowCIF reads crystal structures
 ]
 
 [project.optional-dependencies]
@@ -52,14 +50,11 @@ dependencies = [
 # loading. [cuda]: NVIDIA (CuPy). [mps]: Apple silicon (Metal, MLX). [cpu]: no GPU, or an Intel
 # Mac, which cannot install quantem.gpu (torch 2.3+). A wrong pick installs nothing harmful.
 cpu = []
-cuda = ["quantem.gpu[cuda]>=0.0.1rc17,<0.0.1rc18; sys_platform != 'darwin'"]
-mps = ["quantem.gpu[mps]>=0.0.1rc17,<0.0.1rc18; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+cuda = ["quantem.gpu[cuda]>=0.0.1rc18.dev0,<0.0.1rc19; sys_platform != 'darwin'"]
+mps = ["quantem.gpu[mps]>=0.0.1rc18.dev0,<0.0.1rc19; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # Uploading new tutorial datasets to the shared Hugging Face hub (downloads need
 # only huggingface_hub). quantem.data is not on PyPI, so it stays an extra.
 hub = ["quantem.data>=0.0.1rc1"]
-# ShowCIF and DiffractionSim need only the base dependencies (ASE, and quantem for the Lobato and
-# Weickenmeier-Kohl scattering factors). The extra is kept, empty, so existing install lines keep working.
-crystal = []
 test = [
     "ipykernel>=6",
     "pytest>=8",
@@ -71,7 +66,7 @@ test = [
 testpaths = ["tests"]
 
 [project.scripts]
-quantem = "quantem.widget.cli:main"
+quantem-widget = "quantem.widget.cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

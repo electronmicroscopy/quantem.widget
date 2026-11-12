@@ -30,10 +30,10 @@ visit(tree);
 const code = ts.transpileModule(`const render = ${callback};`, {
   compilerOptions: {target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None},
 }).outputText;
-function renderedRanges(absoluteMin: number | null, absoluteMax: number | null, scaleMode = "linear") {
+function renderedRanges(absoluteMin: number | null, absoluteMax: number | null, scaleMode = "linear", gpuBytesCurrent = false) {
   const ranges: {vmin: number; vmax: number}[] = [];
   const bindings = {
-    absoluteMin, absoluteMax, displayLog, colormap: "RdBu_r", COLORMAPS,
+    absoluteMin, absoluteMax, displayLog, colormap: "RdBu_r", COLORMAPS, gpuBytesCurrent,
     gpuEngine: {uploadLUT(_name: string, lut: Uint8Array) {
       expect(lut).toBe(COLORMAPS.RdBu_r);
       expect(lut.length).toBe(256 * 3);
@@ -41,6 +41,12 @@ function renderedRanges(absoluteMin: number | null, absoluteMax: number | null, 
       return {unconfigure() {}};
     }, renderPanelSlotsDirectToCanvas(_slots: unknown, limits: {vmin: number; vmax: number}) {
       ranges.push(limits);
+    }, renderSlotsDirectWithGpuRangeToCanvases(slots: number[], contexts: unknown[], low: number, high: number) {
+      expect(slots).toEqual([0, 1]);
+      expect(contexts).toHaveLength(2);
+      // Represent the new dark-field images, far below the previous ranges.
+      ranges.push(...[0.001, 0.002].map(max => ({vmin: max * low / 100, vmax: max * high / 100})));
+      return slots.length;
     }},
     gpuSlots: new Map([[0, 0], [1, 1]]),
     gpuRanges: new Map([[0, {min: -8, max: 2}], [1, {min: -1, max: 3}]]),
@@ -54,6 +60,14 @@ function renderedRanges(absoluteMin: number | null, absoluteMax: number | null, 
 }
 
 describe("signed comparison limits", () => {
+  it("uses the arriving image's GPU range during a bright-to-dark detector drag", () => {
+    expect(renderedRanges(null, null, "linear", true)).toEqual([
+      {vmin: 0, vmax: 0.001}, {vmin: 0, vmax: 0.002},
+    ]);
+    expect(renderedRanges(-10, 10, "linear", true)).toEqual([
+      {vmin: -10, vmax: 10}, {vmin: -10, vmax: 10},
+    ]);
+  });
   it("sends one symmetric range to every tile and keeps zero at the midpoint", () => {
     const ranges = renderedRanges(-10, 10);
     expect(ranges).toEqual([{vmin: -10, vmax: 10}, {vmin: -10, vmax: 10}]);

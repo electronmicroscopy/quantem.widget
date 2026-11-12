@@ -65,7 +65,7 @@ QUANTEM_COLORMAPS = ("turbo_black", "turbo_black_r")
 _STATE_KEYS = (
     "title",
     "preset",
-    "energy_keV",
+    "voltage_kV",
     "k_max_inv_A",
     "orientation",
     "mode",
@@ -102,7 +102,7 @@ _STATE_KEYS = (
 
 # (low, high, unit, low inclusive) of the scalar range validators.
 _RANGES: dict[str, tuple[float, float, str, bool]] = {
-    "energy_keV": (0.0, 1000.0, "keV", False),
+    "voltage_kV": (0.0, 1000.0, "kV", False),
     "k_max_inv_A": (0.2, 8.0, "1/Å", True),
     "thickness_A": (0.0, 1e4, "Å", False),
     "semiangle_mrad": (0.0, 50.0, "mrad", False),
@@ -201,8 +201,8 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
     zone_axis : sequence of 3 float, optional
         Initial zone axis [uvw] along the beam. ``None`` keeps the identity
         orientation (c axis along the beam).
-    energy_keV : float, default 200
-        Beam energy in keV, above 0 and up to 1000. Changing it recomputes the
+    voltage_kV : float, default 200
+        Accelerating voltage in kV (the beam energy in keV), above 0 and up to 1000. Changing it recomputes the
         reflection list.
     k_max_inv_A : float, default 4
         Largest scattering vector of the reflection list, in 1/Å, from 0.2
@@ -350,7 +350,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
         sync=True
     )
     preset = traitlets.Unicode("").tag(sync=True)
-    energy_keV = traitlets.Float(200.0).tag(sync=True)
+    voltage_kV = traitlets.Float(200.0).tag(sync=True)
     k_max_inv_A = traitlets.Float(4.0).tag(sync=True)
     orientation = traitlets.List(
         trait=traitlets.Float(), default_value=[1.0, 0.0, 0.0, 0.0]
@@ -399,7 +399,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
         crystal: quantem.diffraction.crystal.Crystal | Atoms | str | pathlib.Path | None = None,
         *,
         zone_axis: Sequence[float] | None = None,
-        energy_keV: float = 200.0,
+        voltage_kV: float = 200.0,
         k_max_inv_A: float = 4.0,
         pattern_range_inv_A: float | None = None,
         mode: str = "nanobeam",
@@ -451,7 +451,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
             self.widget_version = resolve_widget_version()
             self.cmap_luts = quantem_colormap_luts()
             self.title = title
-            self.energy_keV = energy_keV
+            self.voltage_kV = voltage_kV
             self.k_max_inv_A = k_max_inv_A
             self.pattern_range_inv_A = (
                 min(3.0, self.k_max_inv_A) if pattern_range_inv_A is None else pattern_range_inv_A
@@ -491,7 +491,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
             if saved is not None:
                 self.load_state_dict(saved)
         self.observe(self._on_preset, names="preset")
-        self.observe(self._on_physics, names=["energy_keV", "k_max_inv_A"])
+        self.observe(self._on_physics, names=["voltage_kV", "k_max_inv_A"])
         self.observe(self._on_export_request_change, names=["export_request"])
         self.on_msg(self._on_message)
 
@@ -747,11 +747,11 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
             raise ValueError(f"angle_step_mrad must be positive; got {angle_step_mrad!r}.")
         if not (math.isfinite(k_max_inv_A) and k_max_inv_A > 0):
             raise ValueError(f"k_max_inv_A must be positive; got {k_max_inv_A!r}.")
-        key = (round(self.energy_keV * 1e3), tuple(thicknesses), angle_step_mrad, k_max_inv_A)
+        key = (round(self.voltage_kV * 1e3), tuple(thicknesses), angle_step_mrad, k_max_inv_A)
         if key not in self._kossel_cache:
             self.status = "computing Kikuchi reference pattern..."
             self._kossel_cache[key] = prepare_kossel_reference(
-                self._crystal, self.energy_keV * 1e3, thicknesses, angle_step_mrad, k_max_inv_A
+                self._crystal, self.voltage_kV * 1e3, thicknesses, angle_step_mrad, k_max_inv_A
             )
             self.status = ""
         self.kossel_json = json.dumps(self._kossel_cache[key])
@@ -759,7 +759,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
 
     def _update_crystal_json(self) -> None:
         self.crystal_json = json.dumps(
-            prepare_crystal(self._crystal, self.energy_keV * 1e3, self.k_max_inv_A)
+            prepare_crystal(self._crystal, self.voltage_kV * 1e3, self.k_max_inv_A)
         )
         self.kossel_json = "{}"
 
@@ -845,12 +845,12 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
         values = {k: v for k, v in state.items() if k in _STATE_KEYS}
         physics_changed = any(
             key in values and values[key] != getattr(self, key)
-            for key in ("energy_keV", "k_max_inv_A")
+            for key in ("voltage_kV", "k_max_inv_A")
         )
         with self.hold_sync():
             self._recompute_paused = True
             try:
-                for key in ("energy_keV", "k_max_inv_A"):
+                for key in ("voltage_kV", "k_max_inv_A"):
                     if key in values:
                         setattr(self, key, values[key])
                 preset = values.get("preset", "")
@@ -861,7 +861,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
             finally:
                 self._recompute_paused = False
             for key, value in values.items():
-                if key in ("energy_keV", "k_max_inv_A", "preset"):
+                if key in ("voltage_kV", "k_max_inv_A", "preset"):
                     continue
                 setattr(self, key, list(value) if isinstance(value, tuple) else value)
         return self
@@ -954,7 +954,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
         state.pop("preset")
         # save_state=True keeps the Kikuchi reference in the embedded state
         clone = type(self)(self._crystal, state=state, save_state=True)
-        energy_ev = self.energy_keV * 1e3
+        energy_ev = self.voltage_kV * 1e3
         embedded = {
             name: prepare_crystal(preset_crystal(name), energy_ev, self.k_max_inv_A)
             for name in presets
@@ -981,7 +981,7 @@ class DiffractionSim(StaticFallbackMixin, HtmlExportMixin, anywidget.AnyWidget):
         name = self._crystal.name if self._crystal is not None else "?"
         return (
             f"DiffractionSim(crystal={name!r}, mode={self.mode!r}, "
-            f"energy_keV={self.energy_keV:g}, thickness_A={self.thickness_A:g})"
+            f"voltage_kV={self.voltage_kV:g}, thickness_A={self.thickness_A:g})"
         )
 
 

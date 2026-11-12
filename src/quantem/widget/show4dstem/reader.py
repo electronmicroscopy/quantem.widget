@@ -1,7 +1,7 @@
 """Read a 4D-STEM file into the dataset type of this machine.
 
 ``read_4dstem`` loads a file through quantem.gpu when it is installed and a
-GPU works: a ``quantem.gpu.io.Dataset4dstemGPU`` whose counts stay encoded on
+GPU works: a ``quantem.gpu.io.Dataset4dstem`` whose counts stay encoded on
 the GPU and load in seconds. Everywhere else (a CPU-only machine, an Intel Mac,
 a GPU box without the [cuda] or [mps] extra, or ``device="cpu"``) ``read_dense``
 reads the file with h5py and hdf5plugin: into host memory for ``read_4dstem``,
@@ -57,7 +57,7 @@ FLOAT_TYPES = (np.dtype(np.float16), np.dtype(np.float32), np.dtype(np.float64))
 
 def read_4dstem(path, device: str = "auto", *, scan_shape: tuple[int, int] | None = None,
                 max_bytes: int | None = None, verbose: bool = True, hot_pixel_correction: str = "median"):
-    """Read a 4D-STEM file: a ``Dataset4dstemGPU`` on a GPU, a quantem core ``Dataset4dstem`` otherwise.
+    """Read a 4D-STEM file: a ``Dataset4dstem`` on a GPU, a quantem core ``Dataset4dstem`` otherwise.
 
     With quantem.gpu installed (``quantem.widget[cuda]`` or ``[mps]``) and a
     CUDA or Metal GPU working, ``quantem.gpu.io.load`` keeps the counts

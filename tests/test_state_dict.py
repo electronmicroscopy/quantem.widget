@@ -12,10 +12,13 @@ updating the state_dict roundtrip path.
 """
 import json
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
-from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction
+from quantem.widget import Plot2D, Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM
 from quantem.widget.show4dstem.export import export_clone
 
 
@@ -64,7 +67,6 @@ STATE_WIDGETS = {
     "Show3D": (lambda: Show3D(np.arange(256, dtype=np.float32).reshape(4, 8, 8), verbose=False), "cmap", "viridis"),
     "Show3DSlices": (lambda: Show3DSlices(np.arange(256, dtype=np.float32).reshape(4, 8, 8)), "cmap", "viridis"),
     "Show4DSTEM": (lambda: Show4DSTEM(np.ones((4, 4, 8, 8), dtype=np.uint16), verbose=False), "dp_colormap", "viridis"),
-    "ShowDiffraction": (lambda: ShowDiffraction(np.ones((16, 16), dtype=np.float32), verbose=False), "dp_colormap", "viridis"),
 }
 
 
@@ -78,7 +80,7 @@ def test_save_file_round_trips_and_only_the_current_schema_loads(tmp_path, name)
     widget.save(tmp_path / "view.json")
     envelope = json.loads((tmp_path / "view.json").read_text())
     assert set(envelope) == {"schema", "widget_name", "widget_version", "state"}
-    assert (envelope["schema"], envelope["widget_name"]) == ("quantem.widget-state/2", name)
+    assert (envelope["schema"], envelope["widget_name"]) == ("quantem.widget-state/3", name)
     restored = build()
     restored.load_state_dict(tmp_path / "view.json")
     assert restored.state_dict() == widget.state_dict()
@@ -87,7 +89,7 @@ def test_save_file_round_trips_and_only_the_current_schema_loads(tmp_path, name)
     before = untouched.state_dict()
     earlier = {"metadata_version": "1.0", "widget_name": name, "widget_version": "0.0.1rc42", "state": envelope["state"]}
     (tmp_path / "earlier.json").write_text(json.dumps(earlier))
-    with pytest.raises(ValueError, match=r"earlier\.json has schema None; .* reads 'quantem\.widget-state/2' only"):
+    with pytest.raises(ValueError, match=r"earlier\.json has schema None; .* reads 'quantem\.widget-state/3' only"):
         untouched.load_state_dict(tmp_path / "earlier.json")
     with pytest.raises(ValueError, match="has schema 'quantem.widget-state/1'"):
         untouched.load_state_dict({**envelope, "schema": "quantem.widget-state/1"})
@@ -120,14 +122,6 @@ def test_a_refused_state_keyword_leaves_no_widget_behind(tmp_path):
     assert browser.dp_colormap == "viridis"
     with pytest.raises(ValueError, match="does not save"):
         Show4DSTEM(None, h5_urls=["scan_master.h5"], scan_shape=(4, 4), detector_shape=(8, 8), state={"not_a_key": 1}, verbose=False)
-    # a folder gallery restores its page: the state was loaded before the folder pages existed
-    for index in range(5):
-        np.save(tmp_path / f"frame_{index}.npy", np.full((6, 8), index, dtype=np.float32))
-    paged = Show2D.from_folder(tmp_path, page_size=2, watch=False)
-    paged.page_idx = 2
-    restored = Show2D.from_folder(tmp_path, page_size=2, watch=False, state=paged.state_dict())
-    assert (restored.n_pages, restored.page_idx) == (3, 2)
-    assert Show2D.from_folder(tmp_path, watch=False, state=paged.state_dict()).state_dict() == paged.state_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +209,7 @@ def test_show4dstem_save_and_load(tmp_path, show4dstem_widget):
     payload = json.loads(path.read_text())
     assert payload["widget_name"] == "Show4DSTEM"
     assert set(payload) == {"schema", "widget_name", "widget_version", "state"}
-    assert payload["schema"] == "quantem.widget-state/2"
+    assert payload["schema"] == "quantem.widget-state/3"
 
     data = np.random.default_rng(0).poisson(5, (8, 8, 16, 16)).astype(np.uint16)
     data[:, :, 6:10, 6:10] += 500
@@ -265,25 +259,25 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     assert "Show controls" not in state
 
 
-def test_show4dstem_ui_mode_presets_and_overrides():
+def test_show4dstem_mode_presets_and_overrides():
     rng = np.random.default_rng(2)
     data = rng.integers(0, 100, (4, 4, 8, 8), dtype=np.uint16)
 
-    presentation = Show4DSTEM(data, ui_mode="presentation", verbose=False)
+    presentation = Show4DSTEM(data, mode="presentation", verbose=False)
     assert presentation.show_title is True
     assert presentation.show_controls is True
     assert presentation.controls_collapsed is True
     assert presentation.show_stats is False
     assert presentation.show_scale_bar is True
 
-    report = Show4DSTEM(data, ui_mode="report", verbose=False)
+    report = Show4DSTEM(data, mode="report", verbose=False)
     assert report.show_title is True
     assert report.show_controls is False
     assert report.controls_collapsed is False
     assert report.show_stats is False
     assert report.show_scale_bar is True
 
-    minimal = Show4DSTEM(data, ui_mode="minimal", verbose=False)
+    minimal = Show4DSTEM(data, mode="minimal", verbose=False)
     assert minimal.show_title is False
     assert minimal.show_controls is False
     assert minimal.controls_collapsed is False
@@ -292,7 +286,7 @@ def test_show4dstem_ui_mode_presets_and_overrides():
 
     override = Show4DSTEM(
         data,
-        ui_mode="minimal",
+        mode="minimal",
         show_title=True,
         show_controls=True,
         controls_collapsed=True,
@@ -424,3 +418,27 @@ def test_show3d_per_panel_cmap_state_roundtrip():
     fresh.load_state_dict(widget.state_dict())
     assert fresh.cmap == "inferno"
     assert fresh.panel_cmaps == ["inferno", "viridis"]
+
+
+def test_the_rewrite_script_carries_a_layout_2_save_to_layout_3(tmp_path):
+    # /2 named the grid ncols (Show2D), max_cols (Show3D) and compare_cols (Show4DSTEM) and saved keys of removed features
+    script = Path(__file__).resolve().parents[1] / "scripts" / "rewrite_widget_state.py"
+    files = {
+        "show2d.json": ("Show2D", {"ncols": 2, "cmap": "gray", "folder_page_size": 12, "page_kind": "comparison"}),
+        "show3d.json": ("Show3D", {"max_cols": 3, "log_scale": True}),
+        "show1d.json": ("Show1D", {"show_review": True, "trial_notes": {"a": "b"}, "log_scale": True}),
+    }
+    for name, (widget, state) in files.items():
+        (tmp_path / name).write_text(json.dumps({"schema": "quantem.widget-state/2", "widget_name": widget,
+                                                 "widget_version": "0.0.1rc43", "state": state}))
+    with pytest.raises(ValueError, match="rewrite_widget_state.py"):
+        Show2D(np.ones((8, 8), np.float32), state=tmp_path / "show2d.json", verbose=False)
+    subprocess.run([sys.executable, str(script), *(str(tmp_path / name) for name in files)], check=True, capture_output=True)
+    states = {name: json.loads((tmp_path / name).read_text()) for name in files}
+    assert {state["schema"] for state in states.values()} == {"quantem.widget-state/3"}
+    assert states["show2d.json"]["state"] == {"columns": 2, "cmap": "gray"}
+    assert states["show3d.json"]["state"] == {"columns": 3, "log_scale": True}
+    assert states["show1d.json"]["state"] == {"log_scale": True}
+    assert json.loads((tmp_path / "show2d.json.before").read_text())["state"]["ncols"] == 2
+    restored = Show2D([np.ones((8, 8), np.float32)] * 4, state=tmp_path / "show2d.json", verbose=False)
+    assert restored.columns == 2 and restored.cmap == "gray"

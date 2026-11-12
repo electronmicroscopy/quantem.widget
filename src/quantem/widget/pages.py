@@ -22,16 +22,7 @@ def resolve_page_labels(page_labels: Sequence[str | None] | None, inferred: Sequ
 
 
 class PagesMixin(traitlets.HasTraits):
-    """Validators and star helpers over the synced page traits.
-
-    A widget whose pages are folder items (Show2D ``page_kind == "items"``)
-    hides absolute panels rather than reusable slots and says so through
-    ``_uses_item_pages``.
-    """
-
-    def _uses_item_pages(self) -> bool:
-        """Whether pages are folder items, whose hidden panels are absolute indices rather than per-page slots."""
-        return False
+    """Validators and star helpers over the synced page traits."""
 
     @traitlets.validate("page_idx")
     def _validate_page_idx(self, proposal: dict) -> int:
@@ -59,7 +50,7 @@ class PagesMixin(traitlets.HasTraits):
         drop_if_full: bool = False,
     ) -> list[int]:
         """Normalize reusable hidden panel slots for paged galleries."""
-        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0 or self._uses_item_pages():
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
             return []
         n_slots = int(self.panels_per_page)
         clean_set: set[int] = set()
@@ -89,7 +80,7 @@ class PagesMixin(traitlets.HasTraits):
         drop_if_full: bool = False,
     ) -> list[int]:
         """Map absolute hidden panel indices to reusable page slots."""
-        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0 or self._uses_item_pages():
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
             return []
         n_panels = self._panel_count()
         per_page = int(self.panels_per_page)

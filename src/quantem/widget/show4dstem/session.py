@@ -32,7 +32,7 @@ class DetectorSessionSource(Protocol):
         """
         ...
 
-    def mean_dp(self):
+    def mean_pattern(self):
         """Return the mean of every diffraction pattern."""
         ...
 
@@ -43,3 +43,32 @@ class DetectorSessionSource(Protocol):
     def close(self) -> None:
         """Release session resources without closing the source acquisition."""
         ...
+
+
+class SessionSeries:
+    """Prepared query sessions of equal geometry, including scans still arriving."""
+
+    def __init__(self, sources):
+        self.frames = []
+        for source in sources:
+            self.append(source)
+
+    @property
+    def shape(self):
+        first = self.frames[0]
+        return (len(self.frames), *first.scan_shape, *first.detector_shape)
+
+    @property
+    def device(self):
+        return self.frames[0].device
+
+    def append(self, source):
+        session = source.detector_session() if callable(getattr(source, "detector_session", None)) else source
+        if not isinstance(session, DetectorSessionSource):
+            raise TypeError("A session series requires prepared detector queries.")
+        if self.frames and (session.scan_shape != self.frames[0].scan_shape
+                            or session.detector_shape != self.frames[0].detector_shape
+                            or str(session.device) != str(self.device)):
+            session.close()
+            raise ValueError("Live sessions must share scan/detector shape and device.")
+        self.frames.append(session)

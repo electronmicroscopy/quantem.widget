@@ -1,5 +1,6 @@
 """Download one shared dataset from the public Hugging Face hub."""
 
+import contextlib
 import inspect
 import os
 import time
@@ -15,6 +16,23 @@ _DATA_SUFFIXES = {
     ".jpeg",
 }
 _SIDECAR_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+@contextlib.contextmanager
+def _hub_progress_bars(verbose: bool):
+    """Hide the Hugging Face progress bars when verbose is False, then restore the caller's setting."""
+    if verbose:
+        yield
+        return
+    from huggingface_hub.utils import are_progress_bars_disabled, disable_progress_bars, enable_progress_bars
+
+    already_disabled = are_progress_bars_disabled()
+    disable_progress_bars()
+    try:
+        yield
+    finally:
+        if not already_disabled:
+            enable_progress_bars()
 
 
 def _shared_download(name: str, **kwargs) -> Path | None:
@@ -74,6 +92,14 @@ def download(
     --------
     >>> folder = download("4dstem/gold_128_npy_bin8", revision="5925e4b49b2ca28ff82d6d5a6b9a8bfea9edfb20")
     """
+    with _hub_progress_bars(verbose):
+        return _download(
+            name, repo=repo, out=out, verbose=verbose, revision=revision,
+            cache_dir=cache_dir, force_download=force_download,
+        )
+
+
+def _download(name, *, repo, out, verbose, revision, cache_dir, force_download) -> Path:
     from huggingface_hub import list_repo_files, snapshot_download
 
     repo_id = repo or os.environ.get("QUANTEM_DATA_REPO") or DEFAULT_REPO

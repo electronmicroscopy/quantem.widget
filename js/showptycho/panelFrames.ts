@@ -6,6 +6,7 @@ export type PanelFrame = {
   min: number;
   max: number;
   displayBins: number[] | null;
+  finiteCount?: number;
 };
 
 const EMPTY: PanelFrame = { data: null, min: 0, max: 1, displayBins: null };

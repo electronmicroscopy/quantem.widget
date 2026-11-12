@@ -758,26 +758,26 @@ function linearFit(sliceIndices: number[], shifts: number[]): { slope: number; i
 
 /**
  * Unwrap a correlation peak's flat index into a signed (row, col) shift, then
- * round it onto the 1/UPSAMPLE_FACTOR grid the subpixel refinement starts from.
+ * round it onto the 1/upsample grid the subpixel refinement starts from.
  * Indices past the midpoint are negative shifts wrapped around the FFT frame.
  */
-function coarseShift(peakIndex: number, paddedWidth: number, paddedHeight: number): [number, number] {
+function coarseShift(peakIndex: number, paddedWidth: number, paddedHeight: number, upsample: number): [number, number] {
   let shiftRow = Math.floor(peakIndex / paddedWidth);
   let shiftCol = peakIndex % paddedWidth;
   if (shiftRow > Math.trunc(paddedHeight / 2)) shiftRow -= paddedHeight;
   if (shiftCol > Math.trunc(paddedWidth / 2)) shiftCol -= paddedWidth;
   return [
-    Math.round(shiftRow * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR,
-    Math.round(shiftCol * UPSAMPLE_FACTOR) / UPSAMPLE_FACTOR,
+    Math.round(shiftRow * upsample) / upsample,
+    Math.round(shiftCol * upsample) / upsample,
   ];
 }
 
 /**
  * Subpixel (row, col) correction from the upsampled region: the brightest
  * |value|^2 sample (first one on ties), offset from the region center and
- * divided by UPSAMPLE_FACTOR.
+ * divided by upsample.
  */
-function subpixelOffset(refined: Float32Array, region: number, dftShift: number): [number, number] {
+function subpixelOffset(refined: Float32Array, region: number, dftShift: number, upsample: number): [number, number] {
   let bestIndex = 0;
   let bestValue = -1;
   for (let i = 0; i < region * region; i++) {
@@ -785,8 +785,8 @@ function subpixelOffset(refined: Float32Array, region: number, dftShift: number)
     if (magnitude > bestValue) { bestValue = magnitude; bestIndex = i; }
   }
   return [
-    (Math.floor(bestIndex / region) - dftShift) / UPSAMPLE_FACTOR,
-    ((bestIndex % region) - dftShift) / UPSAMPLE_FACTOR,
+    (Math.floor(bestIndex / region) - dftShift) / upsample,
+    ((bestIndex % region) - dftShift) / upsample,
   ];
 }
 
@@ -828,6 +828,7 @@ async function estimateResident(
   numSlices: number,
   fft: WebGPUFFT,
   gpu: SliceAlignmentGPU,
+  upsample: number,
 ): Promise<SliceAlignmentEstimate> {
   const planeSize = numCols * numRows;
   const paddedWidth = nextPow2(numCols);
@@ -869,7 +870,7 @@ async function estimateResident(
     return energy;
   };
 
-  const region = Math.ceil(UPSAMPLE_FACTOR * DFT_REGION_FACTOR);
+  const region = Math.ceil(upsample * DFT_REGION_FACTOR);
   const dftShift = Math.trunc(region / 2.0);
   const adjacent: number[][] = [];
   const quality: number[] = [];
@@ -890,17 +891,17 @@ async function estimateResident(
     gpu.copyBuffer(productBuffer, correlationBuffer, complexCount * 2 * 4);
     await fft.fft2DResident(correlationBuffer, paddedWidth, paddedHeight, true);
     const peak = await gpu.peakResident(correlationBuffer, complexCount);
-    const [refinedRow, refinedCol] = coarseShift(peak.index, paddedWidth, paddedHeight);
+    const [refinedRow, refinedCol] = coarseShift(peak.index, paddedWidth, paddedHeight, upsample);
     // The refinement samples conj(product), exactly as the CPU path does.
     // conj(ref * conj(mov)) == mov * conj(ref), so the same cross-power kernel
     // with the operands swapped produces it without a dedicated conjugate pass.
     gpu.crossPowerResident(movBuffer, refBuffer, conjugateBuffer, complexCount);
     const refined = await gpu.upsampledDftResident(
-      conjugateBuffer, paddedHeight, paddedWidth, region, UPSAMPLE_FACTOR,
-      dftShift - refinedRow * UPSAMPLE_FACTOR,
-      dftShift - refinedCol * UPSAMPLE_FACTOR,
+      conjugateBuffer, paddedHeight, paddedWidth, region, upsample,
+      dftShift - refinedRow * upsample,
+      dftShift - refinedCol * upsample,
     );
-    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift);
+    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift, upsample);
     adjacent.push([refinedRow + rowCorrection, refinedCol + colCorrection]);
     const norm = Math.sqrt(previousEnergy * movEnergy);
     quality.push(norm > 0 ? Math.sqrt(peak.value) / norm : 0);
@@ -919,6 +920,8 @@ async function estimateResident(
  * @param volume Contiguous slice-major float volume (numSlices planes of numRows x numCols).
  * @param device The page's hardware WebGPU device (getHardwareGPUDevice) for the
  *   GPU-resident estimate, or null for the CPU path.
+ * @param upsample Subpixel refinement grid, 1/upsample px: 20 matches alignment.py
+ *   (Show3DSlices); Show3D's drift uses 100, the 1/100 px of quantem.gpu's registration.
  */
 export async function estimateSliceAlignment(
   volume: Float32Array,
@@ -926,9 +929,10 @@ export async function estimateSliceAlignment(
   numRows: number,
   numSlices: number,
   device: GPUDevice | null,
+  upsample: number = UPSAMPLE_FACTOR,
 ): Promise<SliceAlignmentEstimate> {
   if (numSlices < 2) throw new Error("slice alignment requires at least 2 slices");
-  if (device) return estimateResident(volume, numCols, numRows, numSlices, await requireWebGPUFFT("Slice alignment"), new SliceAlignmentGPU(device));
+  if (device) return estimateResident(volume, numCols, numRows, numSlices, await requireWebGPUFFT("Slice alignment"), new SliceAlignmentGPU(device), upsample);
   const planeSize = numCols * numRows;
 
   const spectra: { real: Float32Array; imag: Float32Array }[] = [];
@@ -949,7 +953,7 @@ export async function estimateSliceAlignment(
     spectra.push({ real, imag });
   }
 
-  const region = Math.ceil(UPSAMPLE_FACTOR * DFT_REGION_FACTOR);
+  const region = Math.ceil(upsample * DFT_REGION_FACTOR);
   const dftShift = Math.trunc(region / 2.0);
   const adjacent: number[][] = [];
   const quality: number[] = [];
@@ -979,7 +983,7 @@ export async function estimateSliceAlignment(
       const magnitude = corrReal[i] * corrReal[i] + corrImag[i] * corrImag[i];
       if (magnitude > peakValue) { peakValue = magnitude; peakIndex = i; }
     }
-    const [refinedRow, refinedCol] = coarseShift(peakIndex, paddedWidth, paddedHeight);
+    const [refinedRow, refinedCol] = coarseShift(peakIndex, paddedWidth, paddedHeight, upsample);
     // Refine against conj(product) and conjugate back, matching the Python
     // path; only the peak location is used, so the conjugation is about
     // keeping the sampled grid identical rather than the values themselves.
@@ -989,10 +993,10 @@ export async function estimateSliceAlignment(
       conjugated[i * 2 + 1] = -productImag[i];
     }
     const refined = upsampledDftCpu(
-      conjugated, paddedHeight, paddedWidth, region, UPSAMPLE_FACTOR,
-      dftShift - refinedRow * UPSAMPLE_FACTOR, dftShift - refinedCol * UPSAMPLE_FACTOR,
+      conjugated, paddedHeight, paddedWidth, region, upsample,
+      dftShift - refinedRow * upsample, dftShift - refinedCol * upsample,
     );
-    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift);
+    const [rowCorrection, colCorrection] = subpixelOffset(refined, region, dftShift, upsample);
     adjacent.push([refinedRow + rowCorrection, refinedCol + colCorrection]);
     const norm = Math.sqrt(energies[sliceIndex] * energies[sliceIndex + 1]);
     quality.push(norm > 0 ? Math.sqrt(peakValue) / norm : 0);

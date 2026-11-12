@@ -1,12 +1,66 @@
 """Shared viewer UI chrome presets, constructor keyword checks and display-limit validation."""
 
+import json
 import math
+import numbers
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal
 
 import traitlets
 
-UiMode = Literal["interactive", "presentation", "report", "minimal"]
+DisplayMode = Literal["interactive", "presentation", "report", "minimal"]
+ViewerSize = Literal["small", "medium", "large", "xlarge"]
+PANEL_WIDTHS: dict[str, int] = json.loads(
+    (Path(__file__).parent.parent / "panel_sizes.json").read_text(encoding="utf-8")
+)
+
+
+def resolve_columns(count: int, *, columns: int | None = None, rows: int | None = None, default: int = 2) -> int:
+    """Columns of a gallery of ``count`` panels: ``columns`` as given, else enough for ``rows``, else ``default``."""
+    for name, value in (("columns", columns), ("rows", rows)):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 1
+        ):
+            raise ValueError(f"{name} must be a positive integer; use {name}=2, got {value!r}.")
+    if rows is not None and columns is not None and rows * columns < count:
+        raise ValueError(
+            f"rows={rows} and columns={columns} cannot hold {count} panels; "
+            "increase the layout or omit rows to calculate it automatically."
+        )
+    if columns is None:
+        columns = max(1, math.ceil(count / rows)) if rows is not None else default
+    return int(columns)
+
+
+def resolve_panel_width(size: ViewerSize, panel_width_px: int | None = None) -> int:
+    """Resolve a named image-panel size, with an optional explicit CSS width.
+
+    A positive ``panel_width_px`` overrides the preset. ``None`` or the legacy
+    value 0 uses the preset. This changes display geometry, never source pixels.
+
+    Parameters
+    ----------
+    size : {"small", "medium", "large", "xlarge"}
+        Named panel width.
+    panel_width_px : int or None, optional
+        Explicit CSS width, or 0 to use the named preset.
+
+    Returns
+    -------
+    int
+        Resolved width in CSS pixels.
+    """
+    if not isinstance(size, str):
+        raise TypeError("size must be 'small', 'medium', 'large' or 'xlarge'; use panel_width_px for a pixel width.")
+    if size not in PANEL_WIDTHS:
+        raise ValueError(f"Unknown size {size!r}; choose 'small', 'medium', 'large' or 'xlarge'.")
+    if panel_width_px is None:
+        return PANEL_WIDTHS[size]
+    if isinstance(panel_width_px, bool) or not isinstance(panel_width_px, numbers.Integral) or panel_width_px < 0:
+        raise ValueError("panel_width_px must be an integer >= 0; use size='medium' for the default.")
+    return int(panel_width_px) or PANEL_WIDTHS[size]
+
 
 UI_MODE_DEFAULTS: dict[str, dict[str, bool]] = {
     "interactive": {},
@@ -39,22 +93,22 @@ UI_MODE_DEFAULTS: dict[str, dict[str, bool]] = {
 }
 
 
-def resolve_ui_mode(
-    ui_mode: UiMode | str,
+def resolve_mode(
+    mode: DisplayMode | str,
     *,
     defaults: Mapping[str, object],
     overrides: Mapping[str, object],
 ) -> dict[str, object]:
     """Resolve a viewer UI preset with explicit keyword overrides.
 
-    ``ui_mode`` applies broad defaults first. Values in ``overrides`` win when
+    ``mode`` applies broad defaults first. Values in ``overrides`` win when
     they are not ``None`` so callers can use a preset and still opt individual
     controls back in.
     """
-    mode = str(ui_mode or "interactive").strip().lower()
+    mode = str(mode or "interactive").strip().lower()
     if mode not in UI_MODE_DEFAULTS:
         choices = ", ".join(repr(choice) for choice in UI_MODE_DEFAULTS)
-        raise ValueError(f"ui_mode must be one of {choices}, got {ui_mode!r}")
+        raise ValueError(f"mode must be one of {choices}, got {mode!r}")
 
     resolved = dict(defaults)
     resolved.update(

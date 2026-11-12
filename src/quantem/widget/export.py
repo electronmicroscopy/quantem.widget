@@ -20,7 +20,7 @@ import tempfile
 import traitlets
 
 VENDOR = pathlib.Path(__file__).parent / "vendor"
-_RUNTIME_LOADER = """<script>
+_RUNTIME_LOADER = """<script id="quantem-widget-runtime-loader">
 (async () => {
   // require.js, anywidget and the jupyter-widgets manager travel gzipped in this page, so it opens offline
   for (const packed of document.querySelectorAll('script[type="application/gzip"][id^="quantem-widget-runtime-"]')) {

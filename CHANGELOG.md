@@ -6,10 +6,197 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+### Renamed: SSB is direct ptychography (no aliases)
+
+The maintainer, 11 Nov 2026: "we don't want to use the term SSB, use Direct Ptycho". Every
+name quantem.widget owns now says direct ptychography; the old names are removed, nothing is
+accepted under two spellings, and the readers read only the new record ids. Names shared with
+quantem.gpu (`quantem.ssb-calibration/8`, `quantem.ssb-browser-calibration/3`, `ssb_upsample_factor`,
+`WebGPUSSBBackend` and the vendored `js/.generated/`) follow quantem.gpu's own rename.
+
+| Old | New | Where |
+|---|---|---|
+| `Show4DSTEM.compute_ssb()` | `Show4DSTEM.direct_phase()` | method |
+| traits `ssb_compute_request`, `ssb_compute_status`, `ssb_compute_busy`, `ssb_compute_enabled`, `ssb_compute_trials`, `ssb_compute_tilt`, `ssb_compute_refinement` | `direct_request`, `direct_status`, `direct_busy`, `direct_enabled`, `direct_trials`, `direct_tilt`, `direct_refinement` | Show4DSTEM Python traits and browser model keys |
+| traits `ssb_compute_num_bright_field_pixels`, `ssb_compute_C10_nm`, `ssb_compute_C12_nm`, `ssb_compute_phi12_deg`, `ssb_compute_lock_C10`, `ssb_compute_lock_C12`, `ssb_compute_scan_detector_rotation_deg` | `direct_bright_field_pixels`, `direct_C10_nm`, `direct_C12_nm`, `direct_phi12_deg`, `direct_lock_C10`, `direct_lock_C12`, `direct_scan_detector_rotation_deg` | Show4DSTEM Python traits and browser model keys |
+| traits `ssb_compute_calibration_json`, `ssb_compute_calibration_filename` | `direct_calibration_json`, `direct_calibration_filename` | Show4DSTEM Python traits and browser model keys |
+| request action `"compute_ssb"`, product-map source and label `"SSB"` | `"direct_phase"`, source `"Direct"` (shown as "Direct ptycho") | Show4DSTEM browser request, `vi_source`, `vi_product_labels` |
+| download `<title>_<shape>_ssb_calibration.json` | `<title>_<shape>_direct_calibration.json` | Show4DSTEM calibration download |
+| `ShowPtycho.ssb_session` (trait), `ShowPtycho.ssb_parameters` | `ptycho_session`, `ptycho_parameters` | Python and browser model key |
+| region label `"<label> · SSB"`, export record key `ssb_phase` | `"<label> · Direct"`, `direct_phase` | `region_images`, region export records |
+| browser message `"ssb-preview"` | `"direct-preview"` | ShowPtycho kernel messages |
+| `adapters.gpu.is_ssb`, `DirectSession.ssb` | `is_direct_ptycho`, `DirectSession.direct` | `quantem.widget.adapters.gpu` |
+| env `QUANTEM_SSB_RELEASE`, `QUANTEM_SSB_RELEASE_SOURCE`, `QUANTEM_SSB_RELEASE_CALIBRATION`, `QUANTEM_SSB_RELEASE_BACKEND` | `QUANTEM_DIRECT_RELEASE`, `QUANTEM_DIRECT_RELEASE_SOURCE`, `QUANTEM_DIRECT_RELEASE_CALIBRATION`, `QUANTEM_DIRECT_RELEASE_BACKEND` | release gate, `.github/workflows/widget-release.yml` |
+| `scripts/rewrite_ssb_calibration.py` | `scripts/rewrite_direct_calibration.py` | repository script |
+| `docs/maintainer/ssb-release-check.md`, `docs/tutorials/ssb_workflow.ipynb` | `docs/maintainer/direct-ptycho-release-check.md`, `docs/tutorials/direct_ptycho_workflow.ipynb` | docs |
+| UI: "SSB" reconstruction menu item, "Sample tilt (thick SSB)", "SSB Crop", "Refit SSB (200 trials)", "SSB refit complete" | "Phase of mean", "Sample tilt", "Direct ptycho crop", "Refit (200 trials)", "Refit complete" | ShowPtycho |
+| UI: "SSB" panel, "Running SSB...", "SSB calibration", aria-labels "SSB fit", "SSB refinement", "SSB lock C10/C12" | "Direct ptycho", "Running direct ptycho...", "Direct ptycho calibration", "Direct ptycho fit", ... | Show4DSTEM |
+
+Saved records, each one version past the id it replaces; `scripts/rewrite_direct_calibration.py`
+carries an earlier file over and keeps `<name>.before`:
+
+| Old | New |
+|---|---|
+| `quantem.ssb-stars/5` | `quantem.direct-stars/6` |
+| `quantem.ssb-snapshots/2` | `quantem.direct-snapshots/3` |
+| `quantem.ssb-browser-folder/3` | `quantem.direct-browser-folder/4` |
+| `quantem.show4dstem-ssb-calibration/4` | `quantem.show4dstem-direct-calibration/5` |
+| `quantem.ssb-calibration/8` (script only; ShowPtycho still writes it until quantem.gpu renames it) | `quantem.direct-calibration/9` |
+| `quantem.ssb-browser-calibration/3` (script only, as above) | `quantem.direct-browser-calibration/4` |
+
+### Renamed (no aliases)
+
+quantem.widget now uses quantem.gpu's names for direct ptychography. The old
+names are removed; nothing is accepted under two spellings.
+
+| Old | New | Where |
+|---|---|---|
+| `ShowPtycho(upsampling=)`, traits `upsampling`, `auto_upsampling`, `upsampling_available` | `upsample=`, `upsample`, `auto_upsample`, `upsample_available` | keyword, Python traits and browser model keys (the browser read the old keys after the Python traits had been renamed) |
+| `ShowPtycho(phase_damping=, amplitude_damping=)`, traits `phase_damping`, `amplitude_damping` | `phase_damp=`, `amplitude_damp=`, traits `phase_damp`, `amplitude_damp` | keyword, traits, browser requests |
+| `ShowPtycho(method="ssb")`, trait value `"ssb"` | `method="phase_of_mean"` | keyword and trait value (the menu label stays SSB) |
+| `DirectSession.fit_aberrations()`, `DirectSession.reconstruct` alias | `DirectSession.aberrations()`, `DirectSession.run()` | `quantem.widget.adapters.gpu` |
+| calls to quantem.gpu `SSB`, `fit_aberrations()`, `aberrations(num_trials=)`, `reconstruct()`, `session.aberrations`, `upsampling=`, `phase_damping=`, `amplitude_damping=`, `method="ssb"` | `DirectPtycho`, `aberrations()`, `aberrations(trials=)`, `run()`, `session.known_aberrations`, `upsample=`, `phase_damp=`, `amplitude_damp=`, `method="phase_of_mean"` | Show4DSTEM Compute SSB, ShowPtycho, tests, docs |
+| `quantem.gpu.optics.physics.ssb_upsampling_factor` | `ssb_upsample_factor` | docs and tests |
+| the adapter's private option translation (`_library_options`) | removed | widget options reach quantem.gpu unchanged |
+| quantem.gpu WebGPU engine option `upsampling`; the release-time loss sent `phaseEstimator: "mean_phase"` | `upsample`; the loss request sends `upsample: 1` and no estimator | `js/showptycho/engineAdapter.ts` (gpu-ref.txt pins the quantem.gpu commit with the new option) |
+| Show4DSTEM `compute_ssb(num_trials=)`, trait `ssb_compute_num_trials`, request and record key `num_trials` | `compute_ssb(trials=)`, `ssb_compute_trials`, `trials` | keyword, Python trait and browser model key, Compute SSB record |
+| ShowPtycho `fit_regions(num_trials=)`, `DirectSession.fit_regions(num_trials=)`, Crop+Refit request and regional fit record key `num_trials` | `trials=`, `trials` | keyword, browser requests and progress, `local_tilt` fit records |
+| calls to quantem.gpu `Dataset4dstemGPU`, `detector.fit_bright_field_disk`, `calibration.fit_detector_sampling()`, `session.mean_dp()`, `io.load(backend=)`, `detector.fit_probe` | `Dataset4dstem`, `detector.bright_field_disk`, `calibration.detector_sampling()`, `session.mean_pattern()`, `io.load(device=)`, `detector.bright_field_disk` | adapter, Show4DSTEM, docs and tests (gpu-ref.txt pins quantem.gpu 5496e33d) |
+| `adapters.gpu.fit_bright_field_disk`, `show4dstem.detector.fit_bright_field_disk`, the dense and encoded sessions' `mean_dp()` | `bright_field_disk`, `mean_pattern()` | widget internals that follow quantem.gpu |
+| `Show4DSTEM.from_folder(backend=)`, `adapters.gpu.load_acquisition(backend=)` | removed: `device=` | keyword |
+
+Removed (no replacement): ShowPtycho's `phase_estimator=` keyword (SSB has one
+estimator, the phase of the mean wave; the method is `method="phase_of_mean"`),
+the restore path for a save naming the retired `"mean_phase"` or
+`"complex_wave"`, and `fit_regions(refinement=)`; Show4DSTEM's
+`compute_ssb(objective=)` and the earlier optimizer names `"newton"`, `"bfgs"`
+and `"nelder-mead"` for `refinement` (it takes `"auto"` or None). Each raises
+instead of printing a line.
+
+An installed quantem.gpu is imported without an `except ImportError`: a renamed or broken name now fails at import
+instead of reading as "quantem.gpu not installed", which had sent ShowPtycho sessions down the array path.
+
+Saved records: ShowPtycho's `calibration.json` is `quantem.ssb-calibration/8`
+and `showptycho_stars.json` is `quantem.ssb-stars/5`. They name the output
+factor `upsample` with `upsample_mode`, the method `"phase_of_mean"` (in
+`reconstruction.method`, and in `reconstruction_method` of a file written by
+quantem.gpu's `save_calibration`), and the strengths `phase_damp` and
+`amplitude_damp`; regional fit records name `trials`, and calibration /8 holds
+no `phase_estimator`. ShowPtycho reads /8 only, with its one `reconstruction` dict (quantem.gpu's
+`save_calibration` writes the same dict now; a /8 file it wrote earlier with `reconstruction_method` beside
+`reconstruction_options` is folded into it by the rewrite script). Rewrite an earlier file once (the
+earlier file is kept as `<name>.before`):
+
+    python scripts/rewrite_ssb_calibration.py --dry-run path/to/calibration.json
+    python scripts/rewrite_ssb_calibration.py path/to/calibration.json path/to/showptycho_stars.json
+
+The script carries calibration /4 to /7 and stars /1 to /4 over (a /5
+calibration with a session identity needs its data beside it or `--data PATH`),
+and Show4DSTEM's Compute SSB record to `quantem.show4dstem-ssb-calibration/4`
+(`num_trials` is `trials`). No number changes. The exported
+`quantem.ssb-snapshots/2` and `quantem.ssb-browser-calibration/3` hold none of
+the renamed names and keep their versions.
+
+### Renamed (no aliases), second pass
+
+| Old | New | Where |
+|---|---|---|
+| `Show2D(ncols=)`, trait `ncols`, state key `ncols` | `columns=`, trait `columns`, state key `columns` | keyword, Python trait and browser model key, `save()` files |
+| `Show3D(max_cols=)`, trait `max_cols`, state key `max_cols` | `columns=`, trait `columns`, state key `columns` | keyword, trait and model key, `save()` files |
+| `Show4DSTEM(compare_cols=)`, trait `compare_cols`, state key | `compare_columns=`, `compare_columns` | keyword, trait and model key, `save()` files, exported pages |
+| `ui_mode=` on Show1D, Show2D, Show3D and Show4DSTEM | `mode=` | keyword |
+| `free_gpu()` | `release_cached_memory()`, quantem.gpu's name | function |
+| `quantem show4dstem --out`, `quantem github --timeout` | `--save-dir`, `--timeout-s` | CLI flags |
+| the `quantem` command (`quantem show4dstem`, `quantem github`) | `quantem-widget` (`quantem-widget show4dstem`, ...), named for its package like `quantem-gpu` and `quantem-data`; errors start `quantem-widget:` | console script |
+| `Show1D` snapshot labels: `trialKey`-keyed hide and star | hide only (`hidden_snapshot_image_labels`); `starred_snapshot_image_labels` removed | traits, state |
+
+### Removed
+
+- ShowCIF, ShowDiffraction (with `Phase` and `library_phase`) and ChooseLattice, their tutorials and API pages; the
+  `ase` and `scikit-image` dependencies and the `crystal` extra. The display filter has no `"nlm"` mode.
+- Show1D's trial review and monitor file: `from_monitor_file`, `watch_run`, `append_monitor_event`, `stop_monitor`,
+  `goto_snapshot`, `to_show2d`, the Review panel and its traits. `Show1D.live`, `append`, `extend` and `snapshot` stay.
+- Folder watching: `from_folder`, `watch_folder`, `poll_folder` and `stop_folder_watch` on Show2D, Show3D and
+  Show4DSTEM (with Show2D's item pages, trait `page_kind`), and `quantem show4dstem --watch`, `--watch-interval` and
+  `--scan-size`. `read_image_stack` still reads a folder once; `quantem show4dstem <folder>` writes a notebook that
+  opens every master it finds with `read_4dstem`.
+- `gpu_info` and `vram_status` (`quantem.widget.gpu`); quantem.live keeps its own copy.
+- ShowPDF's table of hints for removed constructor keywords; an unknown keyword raises the generic TypeError.
+- Python `Show2D.export_svg`; the Export menu's SVG is the one SVG writer.
+- `quantem.widget.io.metadata` (the dataset.yaml reader) and `io.hdf5_family.collect_hdf5_family`; `docs/api/load.md`.
+- ShowPtycho's `request_json` trait: slider requests arrive only as messages.
+- Synced traits no browser code read (ShowPDF `mask_bytes`, `n_points_*`, `nav_data_min/max`, `widget_version`;
+  Show4DSTEM `stream_follow`; ShowPtycho `calibration_image_path`, `local_tilt_can_reconstruct`) are plain Python
+  traits now.
+
+### Added
+
 - DiffractionSim coordination polyhedra: in a compound, centres bond only to the most numerous species and get a polyhedron for 4 to 8 ligands, so SrTiO3 shows TiO6 octahedra instead of a cube of Sr around each Ti. An elemental crystal gets polyhedra on one set of a two-set neighbour network, which gives Si four SiSi4 tetrahedra inside the cell instead of interpenetrating tetrahedra on all eight atoms, and fcc, bcc and hcp metals get none.
 - Add `DiffractionSim`: rotate a unit cell and see its nanobeam, CBED or Kikuchi pattern update live, with kinematical or Bloch wave intensities computed in the browser, state save/load, and HTML export. It needs quantem 0.1.10 or later (`quantem.diffraction.Crystal` and `bloch`).
 - Add `quantem.diffsim`, a separate PyPI package with no dependencies, built from `packages/quantem.diffsim`: the browser build of DiffractionSim (`npm run build:web`) for web pages and Dash apps, with `settings()` and `save_html()` for pymatgen, ASE or CIF structures and `quantem.diffsim.dash` for Dash. A page can pass its structure as CIF text, which replaces the structure menu, and shows a "Powered by quantEM" link to the quantEM documentation. CIFs loaded in the browser now get the absorptive Weickenmeier-Kohl couplings with a Debye-Waller factor, ported from quantem, instead of an absorption fixed at 8 % of the elastic coupling, which was up to 5 times too strong for the low-order reflections of light elements and up to 4 times too weak for the high-order reflections of gold.
-- Drop abTEM. The ShowCIF potential preview takes its Lobato scattering factors from quantem (the tables agree with abTEM's to 1e-4), so the `crystal` extra is now empty and kept only so existing install lines work.
+
+### Fixed
+
+- Show3D with Link contrast labelled the colorbar 0 to 1 on a multi-panel stack; it shows the stack's range.
+- Show3D thumbnail strip: no seam between cells and no black empty slots; More > Thumbnails brings back a strip
+  closed with its x.
+- Show3D frame counter kept the old total while frames streamed in and the view stayed on an earlier frame; it now
+  updates with every append.
+- A binned Show3D HTML export called its binned pixels "Original"; the header names the original stack and the mean
+  bin (for example 4096x4096, 4x4 mean bin to 1024x1024).
+- An empty `Show3D.stream()` showed "Original: 1 frames x 1x1"; it shows only its waiting panel until the first frame.
+- `io.download(verbose=False)` printed the Hugging Face progress bars; they are hidden for that call.
+- Show2D scale, denoise mode, sigma, bin, ROI size and FFT controls had no accessible names; each has one.
+- Show3D's magnifier lens indexed the colormap with rounding where the image truncates, so it could show the next
+  color entry; it now uses the display shader's float32 normalize and truncation.
+- Show4DSTEM ignored `fft_window` on the full-image FFT (it applied only to an ROI crop); the Hann window now applies
+  to both.
+- Show3D and Show3DSlices: Left / Right step the frame after a click or drag on the frame slider. Focus stayed on the
+  page (the arrows did nothing) or on the loop-start handle (the arrows moved the loop start); only a click on the
+  image let the arrows through.
+- Show3D playback ran at the display rate at most: on a 60 Hz screen fps 90 and 120 both played 60 frames a second.
+  Playback now advances by elapsed time, so 30 / 60 / 90 / 120 play 30 / 60 / 89 / 120 frames a second.
+- Show3DSlices redrew its 3D view at full resolution on every playback step on top of the live preview draw, and
+  resized and reconfigured the canvas twice a frame.
+
+### Saved records
+
+`save()` files are `quantem.widget-state/3`; the widgets read /3 only. A /2 file is carried over once (the earlier file
+is kept as `<name>.before`):
+
+    python scripts/rewrite_widget_state.py --dry-run path/to/view.json
+    python scripts/rewrite_widget_state.py path/to/view.json
+
+It renames `ncols`, `max_cols` and `compare_cols` and drops the keys of removed features (Show2D `folder_page_size`
+and `page_kind`, Show1D's review keys and `starred_snapshot_image_labels`). No number changes. A
+notebook's own saved widget state (`metadata.widgets`) holding `ncols` or `max_cols` is refreshed by running the
+notebook again.
+
+### Other changes
+
+- Interactive display runs on WebGPU at display rate in Show1D, Show2D, Show3D and Show3DSlices. Sliders follow the
+  pointer with no position easing (every widget slider comes from `js/shared/Slider`). Show3D draws frame scrub,
+  histogram, moving-average and settled frames on the GPU at any zoom and with Smooth, where non-integer zooms fell
+  back to a CPU colormap; a slider move answers in about 1 ms with every move drawn, also with the CPU slowed 4x
+  (was ~25 ms with up to half the moves dropped). Histogram drags and the moving-average slider paint from live
+  values and write `image_vmin_pct`, `vmin_per_panel` or `avg_window` once on release. Show2D's contrast drag
+  colormaps on the GPU instead of recoloring canvas pixels on the CPU. Show1D draws its hover crosshair before the
+  frame paints. Saved frames reuse configured offscreen canvases and GPU bindings instead of creating them per frame.
+  Show3D's fps slider reaches 120; GIF export stays at most 50 fps, the GIF format's limit.
+- Show2D galleries draw each panel straight into a WebGPU canvas for contrast drags, zoom, pan and the settled frame (one shader, so a held drag and its release show the same pixels), binned galleries and their full-resolution detail tiles included; a 48-panel histogram drag draws every move in the frame it arrives, about 1 ms after the input with the CPU slowed 4x, and writes `auto_contrast` and `contrast_preset` once on release instead of on the first move.
+- `quantem-widget show2d` and `quantem-widget show3d` write image files, a stack or a folder of images as one Show2D or Show3D HTML page (the page `export_html` writes), lossless by default: exact float32, no binning. `--encoding uint8`, `--image-bin` and `--max-mb` choose a smaller page explicitly; `--no-link-contrast` gives each panel its own range. Each run prints `wrote <path> (<size> MB, <packing>)`, or one `quantem-widget: ...` line naming the flag that fixes the problem.
+- Show3D draws a strip of square frame thumbnails beside the viewer: `thumbnails=True`, `thumbnail_columns=1|2|3`, or `mode="stream"` (the interactive layout with the strip), which `Show3D.stream()` now opens in. Hovering a thumbnail shows that frame, clicking moves the slider there, and the highlight follows playback. Thumbnails are drawn on the GPU from the resident frames (no second full-size copy), only near the view, and freed when scrolled away.
+- Show2D exports color (RGB) panels as true color with `encoding="full"`, from `export_html`, the toolbar and `quantem-widget show2d`; the export menu was hidden for a gallery with a color panel. `encoding="uint8"` holds grayscale panels only and refuses a color gallery in one line.
+- An exported page saved again from its own Export menu ("This page as HTML") opens: the copy kept only the widget state and dropped the inline offline runtime, so it opened blank. An exported Show2D page lists only the exports it can make (SVG and the page itself); the greyed "requires backend" and "not embedded" items are gone.
+- `gpu-ref.txt` pins quantem.gpu main `2786134a`. ShowPtycho's launch table shows quantem.gpu's two calibration columns, `Value` (with its unit) and `Source`; the tests no longer expect the retired `Value used`, `Unit` and `File value` columns.
+- Show3D draws true-color (RGB) stacks on WebGPU whenever the browser has an adapter: the frames are resident on the GPU like grayscale ones, and scrub, playback (60 fps), multi-panel layouts and the moving average draw them through a direct true-color pass. It drew them on the CPU canvas behind a `WebGPU` badge. The title badge now names the path that drew the frame (`CPU` only on a page without WebGPU, where the status line says why), and both paths give the same bytes, round(value × 255) per channel.
+- Show2D packs color panels on WebGPU whenever the browser has an adapter, through the colormap engine like its grayscale panels (the Canvas2D engine on a page without WebGPU); a JavaScript loop packed them on every page. The title badge names the path that packed them.
+- `Show3D.stream()` returns a viewer that grows by `view.append(image, label=...)`, and `Show2D.stream()` one whose images `view.update(images, labels)` replaces. Each call copies its images and returns; a worker thread sends only the new frame (Show3D) or the changed panels (Show2D), with Show4DSTEM.stream's limit of two transfers awaiting browser acknowledgment, so either may be called from a background thread while the notebook stays interactive. Show3D follows the newest frame unless the user moved to an earlier one and never drops a frame; Show2D coalesces so the newest update wins. Pixels stay native (`display_bin=1`).
+- ShowPtycho takes `phase_damping` and `amplitude_damping` (were `phase_regularization` and `amplitude_regularization`), the Tikhonov damping strengths of quantem.gpu's direct solve; the sliders read **Phase damping** and **Amplitude damping**. The synced traits are `phase_damping`, `amplitude_damping`, `upsampling` and `auto_upsampling` (were `phase_regularization`, `amplitude_regularization`, `upsampling_factor`, `auto_upsampling_factor`). The old keywords keep working with a `DeprecationWarning`; both spellings raise `TypeError`. `calibration.json` is `quantem.ssb-calibration/7` (key `upsampling`, damping strengths) and stars `quantem.ssb-stars/4`; a `/6` calibration still restores, and `scripts/rewrite_ssb_calibration.py` carries `/6` and stars `/3` over.
+- Removed dead code: ShowPtycho's legacy `num_drag_bright_field_pixels` trait (always the full bright-field count), and the adapter's unused `preview_context`, `reconstruct` alias and `SsbSession` alias (use `DirectSession`). Tests call quantem.gpu's `run()` instead of the deprecated `reconstruct()`.
+- Show4DSTEM Compute SSB retires the phase-variance fit and the optimizer choice: the **Fit** menu loses **Phase variance (backup)** (Tilt-corrected and Tilt 0 remain), the `ssb_compute_objective` trait is removed, and `ssb_compute_refinement` is `"auto"` or None. `compute_ssb(objective=...)` and `compute_ssb(refinement="newton" | "nelder-mead")` print one line and run the model fit with quantem.gpu's exact-derivative refinement.
+- ShowPtycho retires its last SSB choices: `phase_estimator="phase_of_mean"` and `fit_regions(refinement=...)` print one line ("... is retired; ...") and change nothing; the retired estimators still raise. Fit Regions now runs quantem.gpu's default exact-gradient fifth-order refinement; it asked for the finite-difference Newton. Its progress reads "200 trials + refinement" instead of "+ Newton". Browser export accepts a review opened with `phase_estimator="phase_of_mean"`. `calibration.json` keeps `"phase_estimator": "phase_of_mean"`; its `reconstruction` for SSB is `{"method": "ssb"}`. Removed the unused `has_higher_order`.
+- ShowPtycho follows quantem.gpu's one SSB estimator, the phase of the mean wave: `phase_estimator` accepts only `"phase_of_mean"` (or nothing), and the retired `"mean_phase"` and `"complex_wave"` raise. A `calibration.json` saved with a retired estimator still restores its optics, with one printed line; the file keeps its label until the next Save, which records `phase_of_mean`.
 - ShowPtycho's trial strip lists the default fit's trials (model agreement, each with its own sample tilt and depth spread) as well as phase-variance ones; it showed only phase-variance trials, so it was empty for every default fit. Each tile names its objective and score (agreement higher is better, phase variance lower), trials rank within one objective, and clicking a trial applies its optics and sample model.
 - Show4DSTEM Compute SSB runs quantem.gpu's default fit, the SSB model with the sample tilt and depth spread (tilt-corrected); it ran the tilt-0 fit with Nelder-Mead. `compute_ssb(tilt=False)` fits the same model at tilt 0 and `compute_ssb(tilt=False, objective="phase_variance")` is the older phase-variance SSB; the new **Fit** menu (`ssb_compute_tilt`, `ssb_compute_objective`) picks one of the three, and the record names the `objective`. `refinement` takes quantem.gpu's `"auto"` (default), `"newton"`, `"nelder-mead"` or None, and the record names the optimizer that ran. Locks in the tilt-corrected fit are quantem.gpu's `fixed_aberrations` (C10 alone, C12 at 0 alone, or both locks for all three). A manual recompute keeps the fitted tilt and depth spread. Record `quantem.show4dstem-ssb-calibration/3` adds `tilt`, `sample_tilt_mrad`, `depth_spread_nm` and `tilt_fit_gain`; `scripts/rewrite_ssb_calibration.py` carries /2 files over as tilt 0.
 - Show4DSTEM places its BF, ABF, ADF and HAADF presets on the bright-field disk `data.calibration.fit_detector_sampling()` recorded, else on the same fit (`quantem.gpu.detector.fit_bright_field_disk`): the radius is now the disk edge, where the convergence semiangle sits, instead of the equal-area circle above mean + std (the presets of a blurred disk move by a few percent). A disk given as `bright_field_center_px` / `bright_field_radius_px` still wins.
@@ -208,8 +395,8 @@ Changed:
   `[mps]` pins still name rc17, which predates it, until that release;
   `gpu-ref.txt` names the quantem.gpu main commit the bundles build against.
   `SsbSession.open(source, **parameters)` and
-  `SsbSession.find_aberrations(**options)` take quantem.gpu's keywords;
-  `find_aberrations` keywords `refine` to `refinement` (`"nelder-mead"` or
+  `SsbSession.fit_aberrations(**options)` take quantem.gpu's keywords;
+  `fit_aberrations` keywords `refine` to `refinement` (`"nelder-mead"` or
   None), `locked` to `refine_lock`, `sample_tilt` to `tilt`.
   `SsbSession.engine_aberrations`, `SsbSession.vocabulary_aberrations` and
   `adapters.gpu.HIGHER_ORDER_LAYOUT` are removed. In TypeScript,

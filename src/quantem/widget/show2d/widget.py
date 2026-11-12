@@ -2,10 +2,9 @@
 
 One image or a gallery of images (each panel may be its own frame stack),
 with FFT and histogram analysis, ROIs, line profiles, linked zoom/pan and
-contrast, paged galleries, and watched-folder updates. Rendering runs in the
-browser from the synced traits below; this module owns the Python side:
-input normalization, the frame byte packing, the folder watcher hooks and the
-observers that answer the browser.
+contrast, and paged galleries. Rendering runs in the browser from the synced
+traits below; this module owns the Python side: input normalization, the
+frame byte packing and the observers that answer the browser.
 """
 
 import json
@@ -23,7 +22,6 @@ import traitlets
 from PIL import Image
 
 from quantem.widget.adapters import core as core_adapter
-from quantem.widget.folder_watch_status import FOLDER_WATCH_STATE_VALUES
 from quantem.widget.colormap import Colormap, cmap_to_name, colorize, contrast_uint8, is_cmap_sequence, signed_log1p
 from quantem.widget.export import HtmlExportMixin
 from quantem.widget.fallback import StaticFallbackMixin
@@ -32,7 +30,6 @@ from quantem.widget.panels import PanelsMixin
 from quantem.widget.render.figure import format_scale_label, round_to_nice
 from quantem.widget.state import SavedStateMixin, announce_browser_limit
 from quantem.widget.units import image_axes, per_axis, unit_entry
-from quantem.widget.image_folder import ImageFolderRecord, WatchedImageFolder, WatchedImageFolderMixin
 from quantem.widget.io.image import RgbImage
 from quantem.widget.show2d.options import (
     _expand_title_spans_for_flattened_labels,
@@ -50,11 +47,19 @@ from quantem.widget.show2d.options import (
 from quantem.widget.show2d.export import Show2DExport
 from quantem.widget.show2d.fallback import Show2DStaticPng
 from quantem.widget.show2d.state import Show2DState, _rescale_view
+from quantem.widget.show2d.streaming import Show2DStream
 from quantem.widget.utils.array import _b64_safe, _resize_image, bin2d, to_numpy
 from quantem.widget.utils.state_io import read_state
-from quantem.widget.utils.ui import UiMode, reject_unknown_kwargs, resolve_ui_mode
+from quantem.widget.utils.ui import (
+    PANEL_WIDTHS,
+    DisplayMode,
+    ViewerSize,
+    reject_unknown_kwargs,
+    resolve_columns,
+    resolve_panel_width,
+    resolve_mode,
+)
 
-_DEFAULT_FOLDER_PAGE_SIZE = 20
 _MAX_PANEL_PLAYBACK_FPS = 30.0
 # Rec. 709 luma weights: the standard perceptual grayscale reduction of RGB.
 _RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
@@ -362,7 +367,7 @@ def _quantize_uint8(values: np.ndarray) -> tuple[np.ndarray, float, float]:
 
 
 class Show2D(
-    WatchedImageFolderMixin,
+    Show2DStream,
     Show2DExport,
     Show2DState,
     Show2DStaticPng,
@@ -392,8 +397,8 @@ class Show2D(
     title : str, optional
         Gallery title above the panels.
     show_title : bool, optional
-        Draw the title; the ``ui_mode`` preset decides when omitted.
-    ui_mode : {"interactive", "presentation", "report"}, default "interactive"
+        Draw the title; the ``mode`` preset decides when omitted.
+    mode : {"interactive", "presentation", "report"}, default "interactive"
         Preset for which controls are shown; the ``show_*`` flags override it.
     cmap : str or list of str, default "inferno"
         Colormap, or one per panel.
@@ -432,10 +437,19 @@ class Show2D(
         Galleries link zoom and pan by default; a single image never does.
     link_contrast : bool, default True
         One shared contrast window across panels.
-    ncols : int, default 3
-        Gallery columns.
-    panel_width_px : int, default 0
-        Panel canvas width in CSS px (0 = frontend default).
+    columns : int, optional
+        Image panels across each page; three by default for compatibility.
+        Rows are calculated automatically. For example, ``columns=2`` places
+        five images in three rows. Set ``viewer.columns`` to change it later.
+    rows : int, optional
+        Desired initial rows per page; infer columns when supplied alone.
+        If both are supplied, their capacity must hold every panel on a page.
+    size : {"small", "medium", "large", "xlarge"}, default "medium"
+        Width of each image panel: 300, 450, 600 or 900 CSS pixels. Aspect
+        ratio and source resolution are preserved; controls keep the shared font.
+    panel_width_px : int or None, optional
+        Panel canvas width in CSS px. The medium default is 450 px per image;
+        this changes display size only. A positive panel_width_px overrides size; 0 uses size.
     smooth : bool, default False
         Bilinear instead of nearest-neighbor magnification.
     zoom : float, default 1.0
@@ -547,25 +561,13 @@ class Show2D(
     _panel_stacks: list = []
     _display_panel_stacks: list = []
     _updating_panel_frames = False
-    _folder_source: WatchedImageFolder | None = None
-    _folder_page_size: int | None = None
-    _folder_display_bin_request: int | str = 1
 
     n_images = traitlets.Int(1).tag(sync=True)
     folder_waiting = traitlets.Bool(False).tag(sync=True)
     folder_status = traitlets.Unicode("").tag(sync=True)
-    folder_watch_state = traitlets.Enum(
-        values=FOLDER_WATCH_STATE_VALUES,
-        default_value="hidden",
-    ).tag(sync=True)
-    folder_watch_detail = traitlets.Unicode("").tag(sync=True)
     n_pages = traitlets.Int(1).tag(sync=True)
     page_idx = traitlets.Int(0).tag(sync=True)
     panels_per_page = traitlets.Int(0).tag(sync=True)
-    page_kind = traitlets.Enum(
-        ["comparison", "items"],
-        default_value="comparison",
-    ).tag(sync=True)
     page_labels = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     page_starred = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
@@ -604,6 +606,10 @@ class Show2D(
     # Python then drops the synced pixel buffers from the saved-notebook state.
     _js_rendered = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # Show2D.stream: the base revision the browser patches changed panels onto,
+    # and the acknowledgment number of the last full-image publication.
+    _stream_revision = traitlets.Int(0).tag(sync=True)
+    _stream_seq = traitlets.Int(0).tag(sync=True)
     # Optional per-panel frame stacks. Static panels keep count=1 and are not
     # duplicated in panel_stack_bytes; offsets are -1 for those panels.
     panel_frame_counts = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
@@ -652,8 +658,10 @@ class Show2D(
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     panel_cmaps = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     panel_cmaps_memory = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
-    ncols = traitlets.Int(3).tag(sync=True)
+    columns = traitlets.Int(3).tag(sync=True)
     log_scale = traitlets.Bool(False).tag(sync=True)
+    # Flip: show -image (a phase with atoms as minima reads with atoms as maxima); stats and export follow
+    value_flip = traitlets.Bool(False).tag(sync=True)
     auto_contrast = traitlets.Bool(False).tag(sync=True)
     contrast_preset = traitlets.Unicode("custom").tag(sync=True)
     vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
@@ -678,7 +686,7 @@ class Show2D(
     scale_bar_label = traitlets.Unicode("").tag(sync=True)
     scale_bar_style = traitlets.Dict(default_value={}).tag(sync=True)
     show_zoom_indicator = traitlets.Bool(False).tag(sync=True)
-    panel_width_px = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
+    panel_width_px = traitlets.Int(PANEL_WIDTHS["medium"]).tag(sync=True)  # Medium canvas width in CSS pixels
     smooth = traitlets.Bool(False).tag(sync=True)
     initial_zoom = traitlets.Float(1.0).tag(sync=True)
     zoom_row = traitlets.Float(None, allow_none=True).tag(sync=True)
@@ -711,108 +719,10 @@ class Show2D(
     image_flips_horizontal = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
     image_flips_vertical = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
 
-    @classmethod
-    def from_folder(
-        cls,
-        path: str | pathlib.Path,
-        *,
-        pattern: str = "*",
-        recursive: bool = False,
-        watch: bool = True,
-        watch_interval: float = 1.0,
-        page_size: int | None = _DEFAULT_FOLDER_PAGE_SIZE,
-        **kwargs,
-    ) -> Self:
-        """Display readable folder images as a paged full-resolution gallery.
-
-        Files are ordered naturally (``image_2`` before ``image_10``) and read
-        through :func:`quantem.widget.io.read_image`, including EMD, TIFF, PNG,
-        NPY, and DM calibration paths. The same widget is updated when stable
-        files are added. Unreadable files remain retryable. At most
-        ``page_size`` panels are visible at once; pass ``None`` to keep one
-        unpaged gallery.
-
-        Parameters
-        ----------
-        path : str or pathlib.Path
-            Folder containing independent 2D image files.
-        pattern : str, default "*"
-            Glob selecting files within ``path``.
-        recursive : bool, default False
-            Search matching files below subdirectories as well.
-        watch : bool, default True
-            Start background polling immediately.
-        watch_interval : float, default 1.0
-            Seconds between background polls.
-        page_size : int or None, default 20
-            Maximum visible panels per page. Paging appears only after the
-            ready image count exceeds this value. Pass ``None`` to disable
-            automatic folder paging.
-        **kwargs
-            Normal :class:`Show2D` options. File-derived labels and data are
-            managed by the folder source.
-        """
-        if "labels" in kwargs:
-            raise TypeError(
-                "Show2D.from_folder() derives labels from file paths so new files "
-                "remain identifiable; remove labels= or construct Show2D directly."
-            )
-        if "page_labels" in kwargs or "page_kind" in kwargs:
-            raise TypeError(
-                "Show2D.from_folder() manages page labels and folder-page "
-                "semantics as files arrive; remove page_labels=/page_kind= and "
-                "use page_size= to configure the gallery"
-            )
-        if page_size is not None and (isinstance(page_size, bool) or not isinstance(page_size, (int, np.integer)) or int(page_size) < 1):
-            raise ValueError(
-                f"page_size must be a positive integer or None, got {page_size!r}; "
-                "use None to display the folder as one unpaged gallery"
-            )
-        resolved_page_size = None if page_size is None else int(page_size)
-        # The saved view is applied once the folder pages exist: loaded inside the constructor it lost
-        # its page size and its page, which the folder layout below then overwrote. It is checked first.
-        state = kwargs.pop("state", None)
-        state = None if state is None else read_state(state, "Show2D", cls._LOADABLE_KEYS)
-        source = WatchedImageFolder(
-            path,
-            pattern=pattern,
-            recursive=recursive,
-            interval=watch_interval,
-            mode="panels",
-        )
-        arrays, records = source.read_initial(
-            allow_empty=watch,
-            require_unchanged_followup=watch,
-        )
-        explicit_calibration = "sampling" in kwargs or "units" in kwargs
-        kwargs.setdefault("title", source.folder.name)
-        kwargs.setdefault("verbose", False)
-        if arrays:
-            initial_data = arrays
-            initial_labels = [source.label(record.path) for record in records]
-        else:
-            display_bin = kwargs.get("display_bin", 1)
-            placeholder_side = (
-                max(1, int(display_bin))
-                if isinstance(display_bin, int) and not isinstance(display_bin, bool)
-                else 1
-            )
-            initial_data = [np.zeros((placeholder_side, placeholder_side), dtype=np.float32)]
-            initial_labels = [""]
-        widget = cls(initial_data, labels=initial_labels, **kwargs)
-        widget._folder_display_bin_request = kwargs.get("display_bin", 1)
-        widget._folder_page_size = resolved_page_size
-        with widget.hold_sync():
-            widget.page_kind = "items"
-            if not arrays:
-                widget._set_folder_waiting_empty_state()
-            widget._sync_folder_pages(anchor_panel=0)
-        source.attach(widget, explicit_calibration=explicit_calibration)
-        if state is not None:
-            widget.load_state_dict(state)
-        if watch:
-            widget.watch_folder(interval=watch_interval)
-        return widget
+    @traitlets.validate("columns")
+    def _validate_columns(self, proposal: dict) -> int:
+        """A layout of at least one column: the property it replaced checked the same."""
+        return resolve_columns(1, columns=proposal["value"])
 
     def __init__(
         self,
@@ -822,7 +732,7 @@ class Show2D(
         page_labels: Sequence[str | None] | None = None,
         title: str = "",
         show_title: bool | None = None,
-        ui_mode: UiMode = "interactive",
+        mode: DisplayMode = "interactive",
         cmap: str | Colormap | Sequence[str | Colormap] = Colormap.INFERNO,
         sampling: float | tuple[float, float] | list[float] | None = None,
         units: str | list[str] | None = None,
@@ -842,14 +752,17 @@ class Show2D(
         panel_title_font_size: int = 11,
         panel_title_style: Mapping[str, object] | None = None,
         log_scale: bool = False,
+        value_flip: bool = False,
         auto_contrast: bool = False,
         vmin: float | list | None = None,
         vmax: float | list | None = None,
         link_zoom: bool | None = None,
         link_pan: bool | None = None,
         link_contrast: bool = True,
-        ncols: int = 3,
-        panel_width_px: int = 0,
+        columns: int | None = None,
+        rows: int | None = None,
+        size: ViewerSize = "medium",
+        panel_width_px: int | None = None,
         smooth: bool = False,
         zoom: float = 1.0,
         center: Sequence[float] | None = None,
@@ -909,12 +822,7 @@ class Show2D(
             n_pages=n_pages,
             panels_per_page=panels_per_page,
         )
-        panel_width_px = int(panel_width_px)
-        if panel_width_px < 0:
-            raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
-        ncols = int(ncols)
-        if ncols < 1:
-            raise ValueError(f"ncols must be >= 1, got {ncols}")
+        panel_width_px = resolve_panel_width(size, panel_width_px)
         panel_gap_px = 0 if panel_gap_px is None else _nonnegative_int(panel_gap_px, name="panel_gap_px")
         inter_panel_gap_color = "" if inter_panel_gap_color is None else str(inter_panel_gap_color)
         gallery_outer_border_px = (
@@ -933,8 +841,8 @@ class Show2D(
                 "scale_bar_position must be 'bottom-right' or 'bottom-left'; "
                 f"got {scale_bar_position!r}"
             )
-        ui = resolve_ui_mode(
-            ui_mode,
+        ui = resolve_mode(
+            mode,
             defaults={
                 "show_title": True,
                 "show_controls": True,
@@ -957,7 +865,7 @@ class Show2D(
         # embeds only light traits + a static image preview, so a 5-panel 4k
         # gallery does not bake ~1 GB into the .ipynb.
         # a state this widget cannot load is refused before the model opens: a registered widget stays alive, holding its data
-        state = None if state is None else read_state(state, "Show2D", self._LOADABLE_KEYS)
+        state = None if state is None else read_state(state, "Show2D", self._STATE_KEYS)
         self._save_state = bool(save_state)
         self._configure_static_fallback()
         super().__init__(**kwargs)
@@ -1198,11 +1106,6 @@ class Show2D(
                 # no silent reduction: name the quantization and the way back to float32
                 print(f"Show2D packs {self.n_images} panel(s) as uint8 over each panel's own range (256 levels); "
                       "offline=False keeps float32.")
-            # Standalone HTML export packs panels through the grayscale stack
-            # machinery, which cannot carry (H, W, 3) pixels: hide the export menu
-            # and reject programmatic export instead of corrupting RGB panels.
-            if any(self.is_rgb):
-                self.export_enabled = False
             # Scalar OR list for vmin/vmax. List -> per-image (vmins/vmaxs).
             if isinstance(vmin, (list, tuple)) or isinstance(vmax, (list, tuple)):
                 n_images = self.n_images
@@ -1227,7 +1130,9 @@ class Show2D(
             else:
                 self.vmin = vmin
                 self.vmax = vmax
-            self.ncols = ncols
+            self.columns = resolve_columns(
+                self.panels_per_page or self.n_images, columns=columns, rows=rows, default=3,
+            )
             self.panel_playback_fps = panel_playback_fps
             # Browser display denoise: a scalar knob applies to every panel, a
             # sequence gives each panel its own (a raw vs filtered A/B gallery).
@@ -1295,6 +1200,8 @@ class Show2D(
         self.observe(self._on_first_render, names=["_js_rendered"])
         self.observe(self._on_export_request_change, names=["export_request"])
         self.observe(self._on_detail_request_change, names=["_detail_request"])
+        if value_flip:
+            self.value_flip = True
 
     @traitlets.validate("starred")
     def _validate_starred(self, proposal: dict) -> list[int]:
@@ -1393,15 +1300,11 @@ class Show2D(
             raise traitlets.TraitError(
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
-        return self._normalize_item_page_hidden(hidden)
+        return hidden
 
     def _panel_count(self) -> int:
         """Number of panels the shared panel-reference helpers resolve against."""
         return int(self.n_images)
-
-    def _uses_item_pages(self) -> bool:
-        """Whether pages hold distinct files (a folder gallery) rather than one comparison layout repeated per page."""
-        return str(self.page_kind) == "items"
 
     def _panel_title_for_index(self, panel: int) -> str:
         """Return the user-facing label for a Show2D image panel."""
@@ -1423,8 +1326,8 @@ class Show2D(
     def _panel_display_order(self) -> list[int]:
         """``panel_order`` when it is a complete permutation of the panels, else the natural order.
 
-        A partial or stale order (files just arrived) must never drop or
-        duplicate a panel, so anything but a full permutation is ignored.
+        A partial or stale order (the panel count just changed) must never drop
+        or duplicate a panel, so anything but a full permutation is ignored.
         """
         n_images = int(self.n_images)
         order = list(self.panel_order or [])
@@ -1432,73 +1335,8 @@ class Show2D(
             return order
         return list(range(n_images))
 
-    def _normalize_item_page_hidden(
-        self,
-        values: Sequence[int],
-        *,
-        drop_if_full: bool = False,
-    ) -> list[int]:
-        """Keep at least one concrete item visible on every folder page."""
-        hidden = {int(value) for value in values}
-        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0 or not self._uses_item_pages():
-            return sorted(hidden)
-        order = self._panel_display_order()
-        page_size = int(self.panels_per_page)
-        for page_index, start in enumerate(range(0, len(order), page_size)):
-            page = order[start : start + page_size]
-            if page and all(panel in hidden for panel in page):
-                if not drop_if_full:
-                    raise traitlets.TraitError(
-                        "hidden_panels cannot hide every panel on folder page "
-                        f"{page_index + 1}; "
-                        "leave at least one source image visible"
-                    )
-                hidden.discard(page[-1])
-        return sorted(hidden)
-
-    def _sync_folder_pages(
-        self,
-        *,
-        anchor_panel: int | None = None,
-        preferred_page: int | None = None,
-    ) -> None:
-        """Recompute sequential folder pages without rebuilding the widget."""
-        page_size = self._folder_page_size
-        n_images = int(self.n_images)
-        old_page = int(self.page_idx) if preferred_page is None else int(preferred_page)
-        old_starred = list(self.page_starred or [])
-
-        if page_size is None or n_images <= int(page_size):
-            n_pages = 1
-            panels_per_page = 0
-            page_labels: list[str] = []
-            next_page = 0
-        else:
-            panels_per_page = int(page_size)
-            n_pages = int(math.ceil(n_images / panels_per_page))
-            page_labels = [
-                f"Images {start + 1}\u2013{min(n_images, start + panels_per_page)}"
-                for start in range(0, n_images, panels_per_page)
-            ]
-            next_page = max(0, min(old_page, n_pages - 1))
-            order = self._panel_display_order()
-            if anchor_panel is not None and int(anchor_panel) in order:
-                next_page = min(n_pages - 1, order.index(int(anchor_panel)) // panels_per_page)
-
-        next_starred = [1 if index < len(old_starred) and int(old_starred[index]) else 0 for index in range(n_pages)]
-
-        with self.hold_sync():
-            self.page_kind = "items"
-            self.n_pages = n_pages
-            self.panels_per_page = panels_per_page
-            self.page_labels = page_labels
-            self.page_starred = next_starred
-            self.page_idx = next_page
-            # Folder pages hide concrete files, not a repeated comparison slot.
-            self.hidden_page_slots = []
-
-    def _set_folder_waiting_empty_state(self) -> None:
-        """Represent an acquisition folder with no readable image yet."""
+    def _set_waiting_empty_state(self) -> None:
+        """Show an empty gallery until a stream's first image arrives (``Show2D.stream()`` without data)."""
         empty = np.empty((0, 0, 0), dtype=np.float32)
         with self.hold_sync():
             self._data = empty
@@ -1600,6 +1438,7 @@ class Show2D(
         if labels is not None and len(labels) != int(data.shape[0]):
             raise ValueError(f"labels length ({len(labels)}) must match n_images ({int(data.shape[0])})")
         previous_shape = (int(self.n_images), int(self.height), int(self.width))
+        same_layout = tuple(self._data.shape) == tuple(data.shape) and not any(self.is_rgb)
         # the frame observer would rebuild the old stacks while the new ones are installed; every
         # check has passed by here, so the flag is always cleared below
         self._updating_panel_frames = True
@@ -1618,24 +1457,29 @@ class Show2D(
             self._rgb_frames_original = list(self._rgb_frames)
             self._display_rgb = self._rgb_frames
             self.is_rgb = [False] * int(data.shape[0])
-            self.n_pages = 1
-            self.page_idx = 0
-            self.panels_per_page = 0
-            self.page_labels = []
-            self.page_starred = [0]
-            self.image_rotations = [0] * self.n_images
-            self.starred = [0] * self.n_images
-            self.hidden_panels = []
-            self.panel_order = []
-            self.labels = ([f"Image {i + 1}" for i in range(self.n_images)] if labels is None
-                           else ["" if label is None else str(label) for label in labels])
-            self.selected_idx = min(int(self.selected_idx), self.n_images - 1)
-            self.roi_list = []
-            self.roi_selected_idx = -1
-            self.profile_line = []
+            if labels is not None:
+                self.labels = ["" if label is None else str(label) for label in labels]
+            if not same_layout:
+                # what the user drew or set on the old panels does not fit the new ones; a live frame
+                # replaced with the same layout keeps it, so a profile survives each update
+                self.n_pages = 1
+                self.page_idx = 0
+                self.panels_per_page = 0
+                self.page_labels = []
+                self.page_starred = [0]
+                self.image_rotations = [0] * self.n_images
+                self.starred = [0] * self.n_images
+                self.hidden_panels = []
+                self.panel_order = []
+                if labels is None:
+                    self.labels = [f"Image {i + 1}" for i in range(self.n_images)]
+                self.selected_idx = min(int(self.selected_idx), self.n_images - 1)
+                self.roi_list = []
+                self.roi_selected_idx = -1
+                self.profile_line = []
+                self.vmins = None
+                self.vmaxs = None
             self._clear_detail_tiles()
-            self.vmins = None
-            self.vmaxs = None
             if self.n_images != previous_shape[0]:
                 # per-panel settings of the old panels do not belong to the new ones
                 self.panel_cmaps = []
@@ -1668,132 +1512,9 @@ class Show2D(
             self._compute_all_stats()
             self._update_all_frames()
             announce_browser_limit("Show2D", len(self.frame_bytes) + len(self.panel_stack_bytes), self.display_bin)
+            if self.value_flip:
+                self._negate_pixels()
         self._updating_panel_frames = False
-
-    def _apply_folder_image_records(
-        self,
-        old_records: list[ImageFolderRecord],
-        new_records: list[ImageFolderRecord],
-        changed_arrays: dict[pathlib.Path, np.ndarray],
-    ) -> None:
-        """Replace folder panels while remapping panel state through file paths."""
-        old_paths = [record.path for record in old_records]
-        new_paths = [record.path for record in new_records]
-        old_page_idx = int(self.page_idx)
-        old_index = {path: index for index, path in enumerate(old_paths)}
-        new_index = {path: index for index, path in enumerate(new_paths)}
-        old_display_bin = max(1, int(self._display_bin))
-        if self._folder_display_bin_request == "auto":
-            sample_image = changed_arrays.get(new_paths[0])
-            if sample_image is None and old_paths:
-                sample_image = np.asarray(self._panel_stacks_original[old_index[new_paths[0]]][0])
-            if sample_image is not None:
-                self._display_bin = self._auto_display_bin(
-                    len(new_paths),
-                    int(sample_image.shape[-2]),
-                    int(sample_image.shape[-1]),
-                )
-        new_display_bin = max(1, int(self._display_bin))
-        if new_display_bin != old_display_bin and new_display_bin > 1:
-            print(f"Show2D display bin {new_display_bin}x (auto, over the display budget); pass display_bin=1 for native pixels")
-        coordinate_scale = old_display_bin / new_display_bin
-
-        if not old_paths:
-            self.set_image(
-                [changed_arrays[path] for path in new_paths],
-                labels=[self._folder_source.label(path) for path in new_paths],
-            )
-            self._sync_folder_pages(anchor_panel=0)
-            return
-
-        # Unchanged files keep the pixels already loaded (frame 0 of their original stack).
-        arrays = [
-            changed_arrays[path] if path in changed_arrays else np.asarray(self._panel_stacks_original[old_index[path]][0])
-            for path in new_paths
-        ]
-        selected_path = (
-            old_paths[int(self.selected_idx)]
-            if 0 <= int(self.selected_idx) < len(old_paths)
-            else old_paths[0]
-        )
-        starred_by_path = {
-            path: bool(self.starred[index])
-            for index, path in enumerate(old_paths)
-            if index < len(self.starred)
-        }
-        hidden_paths = {
-            old_paths[index]
-            for index in self.hidden_panels
-            if 0 <= int(index) < len(old_paths)
-        }
-        rotations_by_path = {
-            path: int(self.image_rotations[index])
-            for index, path in enumerate(old_paths)
-            if index < len(self.image_rotations)
-        }
-
-        ordered_paths: list[pathlib.Path] = []
-        if self.panel_order:
-            ordered_paths.extend(
-                old_paths[index]
-                for index in self.panel_order
-                if 0 <= int(index) < len(old_paths)
-            )
-            ordered_paths.extend(path for path in new_paths if path not in ordered_paths)
-
-        roi_active = bool(self.roi_active)
-        roi_list = list(self.roi_list)
-        roi_selected_idx = int(self.roi_selected_idx)
-        profile_line = list(self.profile_line)
-        view_box = [float(value) * coordinate_scale for value in self.view_box]
-        zoom_row = (
-            None if self.zoom_row is None else float(self.zoom_row) * coordinate_scale
-        )
-        zoom_col = (
-            None if self.zoom_col is None else float(self.zoom_col) * coordinate_scale
-        )
-
-        def remap_panel_values(values):
-            """Per-panel values (e.g. ``vmins``) re-keyed from the old file order to the new; None when they do not fit."""
-            if values is None or len(values) != len(old_paths):
-                return None
-            by_path = {path: values[index] for index, path in enumerate(old_paths)}
-            return [by_path.get(path) for path in new_paths]
-
-        vmins = remap_panel_values(self.vmins)
-        vmaxs = remap_panel_values(self.vmaxs)
-
-        with self.hold_sync():
-            self.set_image(
-                arrays,
-                labels=[self._folder_source.label(path) for path in new_paths],
-            )
-            self.image_rotations = [rotations_by_path.get(path, 0) for path in new_paths]
-            self.starred = [int(starred_by_path.get(path, False)) for path in new_paths]
-            self.panel_order = [new_index[path] for path in ordered_paths if path in new_index]
-            self.selected_idx = new_index.get(selected_path, 0)
-            # ``set_image`` resets paging traits. Keep the page the scientist
-            # was reviewing even when selection lives on a different page.
-            self._sync_folder_pages(preferred_page=old_page_idx)
-            self.hidden_panels = self._normalize_item_page_hidden(
-                [
-                    new_index[path]
-                    for path in hidden_paths
-                    if path in new_index
-                ],
-                drop_if_full=True,
-            )
-            self.roi_active = roi_active
-            self.roi_list = roi_list
-            self.roi_selected_idx = roi_selected_idx
-            self.profile_line = profile_line
-            self.view_box = view_box
-            self.zoom_row = zoom_row
-            self.zoom_col = zoom_col
-            if vmins is not None:
-                self.vmins = vmins
-            if vmaxs is not None:
-                self.vmaxs = vmaxs
 
     def _auto_display_bin(self, n_images: int, height: int, width: int) -> int:
         """Preview bin factor for ``display_bin="auto"``: the smallest of 1/2/4/8
@@ -1813,7 +1534,7 @@ class Show2D(
         panel_bytes = height * width * 4
         if panel_bytes > self._WIRE_BUDGET_BYTES_PER_PANEL:
             preview_floor_px = 512.0 if int(n_images) >= 16 else 1024.0
-            canvas_css_px = float(self.panel_width_px) if int(self.panel_width_px) > 0 else 300.0 if int(n_images) > 1 else 500.0
+            canvas_css_px = float(self.panel_width_px) if int(self.panel_width_px) > 0 else float(PANEL_WIDTHS["medium"])
             preview_px = max(preview_floor_px, 2.0 * canvas_css_px)
             wire_bin = max(2, math.ceil(max(height, width) / preview_px))
             while panel_bytes / (wire_bin * wire_bin) > self._WIRE_BUDGET_BYTES_PER_PANEL:
@@ -2002,14 +1723,12 @@ class Show2D(
         if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
             start = int(self.page_idx) * int(self.panels_per_page)
             stop = min(start + int(self.panels_per_page), int(self.n_images))
-            if self._uses_item_pages():
-                return self._panel_display_order()[start:stop]
             return list(range(start, stop))
         return self._panel_display_order()
 
     def _visible_panels(self) -> list[int]:
         """Zero-based image panel indices currently visible in the gallery."""
-        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0 and not self._uses_item_pages():
+        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
             # Comparison pages hide a slot (the same position on every page), not one image.
             hidden_slots = set(
                 self.hidden_page_slots
@@ -2194,6 +1913,32 @@ class Show2D(
             (self.image_rotations[panel] if panel < len(self.image_rotations) else 0) % 4
             for panel in range(n_panels)
         ]
+
+    @traitlets.observe("value_flip")
+    def _on_value_flip(self, change):
+        if bool(change["new"]) != bool(change["old"]):
+            self._negate_pixels()
+
+    def _negate_pixels(self):
+        """Negate the widget's own pixel copies (never the caller's array) once each, swap the contrast limits,
+        and resend. Views of an array already negated are skipped."""
+        done = []
+        arrays = [self._data, getattr(self, "_display_data", None),
+                  *(getattr(self, "_panel_stacks", None) or []), *(getattr(self, "_display_panel_stacks", None) or [])]
+        for array in arrays:
+            if not isinstance(array, np.ndarray) or array.size == 0 or array.dtype.kind != "f":
+                continue
+            if any(np.shares_memory(array, other) for other in done):
+                continue
+            np.negative(array, out=array)
+            done.append(array)
+        if self.vmin is not None or self.vmax is not None:
+            self.vmin, self.vmax = (None if self.vmax is None else -self.vmax), (None if self.vmin is None else -self.vmin)
+        if self.vmins is not None and self.vmaxs is not None:
+            self.vmins, self.vmaxs = ([None if v is None else -v for v in self.vmaxs],
+                                      [None if v is None else -v for v in self.vmins])
+        self._compute_all_stats()
+        self._update_all_frames()
 
     @traitlets.observe("image_rotations")
     def _on_image_rotations_changed(self, change):

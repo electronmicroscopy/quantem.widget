@@ -53,7 +53,7 @@ class Show3DFallback:
             frames = [np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32) for panel in panels]
         vmin = [self.vmin_per_panel[panel] for panel in panels] if any(bound is not None for bound in self.vmin_per_panel) else self.vmin
         vmax = [self.vmax_per_panel[panel] for panel in panels] if any(bound is not None for bound in self.vmax_per_panel) else self.vmax
-        ncols = int(self.max_cols) if int(self.max_cols) > 0 else len(frames)
+        columns = int(self.columns)
         preview = Show2D(
             frames,
             labels=[self._static_panel_title(panel, idx) for panel in panels],
@@ -70,7 +70,7 @@ class Show3DFallback:
             auto_contrast=self.auto_contrast,
             vmin=vmin,
             vmax=vmax,
-            ncols=max(1, min(ncols, len(frames))),
+            columns=max(1, min(columns, len(frames))),
             panel_width_px=int(self.panel_width_px or 0),
             smooth=self.smooth,
             zoom=1.0,

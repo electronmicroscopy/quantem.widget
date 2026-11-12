@@ -4,6 +4,10 @@
  */
 
 import { useState, useEffect, useMemo } from "react";
+import PANEL_WIDTHS from "../src/quantem/widget/panel_sizes.json";
+
+// Shared with Python: widths refer to individual image panels, never data pixels.
+export { PANEL_WIDTHS };
 
 // The existing Show2D / Show4DSTEM control scale, shared by viewer controls.
 export const WIDGET_UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";

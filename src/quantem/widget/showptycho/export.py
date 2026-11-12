@@ -5,7 +5,7 @@ The folder holds ``index.html`` (the widget with its state embedded and WebGPU s
 (the exact bright-field counts when the source cannot be reused), ``snapshots/`` (the calibration
 the browser kernels start from, a manifest and the saved aberration states) and a double-click
 ``ShowPtycho.command`` that serves the folder. No float32 image, complex reducer or copy of the raw
-HDF5 acquisition is written: the browser rebuilds the SSB reducers from the counts on its own GPU.
+HDF5 acquisition is written: the browser rebuilds the direct ptychography reducers from the counts on its own GPU.
 """
 
 import json
@@ -24,14 +24,14 @@ BROWSER_SCAN_SIZES = (128, 256, 512, 1024)
 # Minimum resident scan-spectra budget in GiB; larger scans retain every BF pixel.
 BROWSER_GPU_MEMORY_GB = 4.5
 # every stored record names its layout (js/showptycho/engineAdapter.ts reads the same strings)
-BROWSER_CALIBRATION_SCHEMA = "quantem.ssb-browser-calibration/3"
-BROWSER_FOLDER_SCHEMA = "quantem.ssb-browser-folder/3"
-SNAPSHOTS_SCHEMA = "quantem.ssb-snapshots/2"
+BROWSER_CALIBRATION_SCHEMA = "quantem.direct-browser-calibration/4"
+BROWSER_FOLDER_SCHEMA = "quantem.direct-browser-folder/4"
+SNAPSHOTS_SCHEMA = "quantem.direct-snapshots/3"
 # live-session traits the embedded page overrides; they are restored after the page is written
 LIVE_TRAITS = (
     "webgpu_preview_enabled", "webgpu_standalone", "webgpu_cal_json", "webgpu_h5_source_json", "webgpu_preview_status",
     "phase_bytes", "phase_width", "phase_height", "stars_path", "calibration_path", "crop_refit_available",
-    "auto_upsampling_factor",
+    "auto_upsample",
 )
 
 
@@ -66,12 +66,12 @@ def _link_counts(source: pathlib.Path, target: pathlib.Path) -> str:
 
 def write_showptycho_folder(widget, path: str | pathlib.Path | None, title: str | None) -> pathlib.Path:
     """Write the review folder for ``widget`` and return its path (see the module docstring for the layout)."""
-    if widget.upsampling_factor == 3:
+    if widget.upsample == 3:
         raise ValueError("WebGPU supports 1, 2, 4 or 8x sampling. Select Auto before exporting a 3x review.")
-    ssb = widget._ssb
-    ssb.set_scan_detector_rotation(float(widget.scan_detector_rotation_deg))
-    session = ssb.state()
-    state = ssb.browser_state()
+    direct = widget._direct
+    direct.set_scan_detector_rotation(float(widget.scan_detector_rotation_deg))
+    session = direct.state()
+    state = direct.browser_state()
     rows, cols = state["scan_shape"]
     if rows != cols or rows not in BROWSER_SCAN_SIZES:
         raise NotImplementedError(f"ShowPtycho WebGPU folder export supports square 128, 256, 512, or 1024 crops; got {rows}x{cols}.")
@@ -100,15 +100,15 @@ def write_showptycho_folder(widget, path: str | pathlib.Path | None, title: str 
         else:
             source_dir.unlink()
     if qem_source is None and session["backend"] == "cuda" and not (counts_path is not None and counts_path.suffix == ".qem" and counts_path.exists()):
-        ssb.export_bright_field(source_dir / "bf_columns.qem")
-        state = ssb.browser_state()
+        direct.export_bright_field(source_dir / "bf_columns.qem")
+        state = direct.browser_state()
         counts_path = state["bright_field_source_path"]
     elif qem_source is None and session["backend"] == "mps" and not (counts_path is not None and counts_path.exists()):
-        ssb.export_bright_field(source_dir / "bf_columns")
-        state = ssb.browser_state()
+        direct.export_bright_field(source_dir / "bf_columns")
+        state = direct.browser_state()
         counts_path = state["bright_field_source_path"]
     if counts_path is None or (qem_source is None and state["bright_field_source_dtype"] is None):
-        raise RuntimeError("ShowPtycho export needs exact bright-field counts: open the acquisition with SSB.open(...) or provide counts through a CUDA or MPS session.")
+        raise RuntimeError("ShowPtycho export needs exact bright-field counts: open the acquisition with DirectPtycho.open(...) or provide counts through a CUDA or MPS session.")
 
     num_bright_field_pixels = state["num_bright_field_pixels"]
     # geometry arrays are stored in the browser kernels' int32 / float32, the values they compute with
@@ -118,7 +118,7 @@ def write_showptycho_folder(widget, path: str | pathlib.Path | None, title: str 
         "scan_region": list(widget._scan_region),
         "scan_shape": [rows, cols],
         "source_scan_shape": list(widget._source_scan_shape),
-        # the storage the browser SSB kernels compute in; they refuse a calibration that names another
+        # the storage the browser direct ptychography kernels compute in; they refuse a calibration that names another
         "precision": {"real_dtype": "float32", "complex_dtype": "complex64"},
         "num_bright_field_pixels": num_bright_field_pixels,
         "g_shape": [num_bright_field_pixels, rows, cols],
@@ -229,11 +229,12 @@ def write_showptycho_folder(widget, path: str | pathlib.Path | None, title: str 
     live_values = {name: getattr(widget, name) for name in LIVE_TRAITS}
     try:
         # WebGPU's FFT supports powers of two; round the shared support target up, and say so.
-        browser_factor = next(factor for factor in (1, 2, 4, 8) if factor >= widget.auto_upsampling_factor)
-        if widget.upsampling_factor == "auto" and browser_factor != widget.auto_upsampling_factor:
-            print(f"ShowPtycho export: automatic sampling is {widget.auto_upsampling_factor}x here; the browser's "
+        # The browser never auto-picks above 4×; 8× stays an explicit choice.
+        browser_factor = next(factor for factor in (1, 2, 4) if factor >= min(widget.auto_upsample, 4))
+        if widget.upsample == "auto" and browser_factor != widget.auto_upsample:
+            print(f"ShowPtycho export: automatic sampling is {widget.auto_upsample}x here; the browser's "
                   f"WebGPU FFT takes 1, 2, 4 or 8x, so the exported review shows {browser_factor}x.")
-        widget.auto_upsampling_factor = browser_factor
+        widget.auto_upsample = browser_factor
         widget.webgpu_preview_enabled = True
         widget.webgpu_standalone = True
         widget.crop_refit_available = False  # refitting needs the live Python session

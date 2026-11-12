@@ -22,6 +22,8 @@ export interface DisplayColormapEngine {
   computeHistogramWithRange(idx: number, dmin: number, dmax: number, logScale?: boolean): Promise<number[]>;
   renderSlotsToImageBitmapAsync(indices: number[], ranges: { vmin: number; vmax: number }[], logScale: boolean, lutName: string, lut: Uint8Array): Promise<ImageBitmap[] | null>;
   renderSlotScaledToImageBitmapAsync(idx: number, range: { vmin: number; vmax: number }, logScale: boolean, outW: number, outH: number, lutName: string, lut: Uint8Array): Promise<ImageBitmap | null>;
+  /** A true-color frame (interleaved RGB floats in [0, 1]) as a bitmap, round(clamp(v, 0, 1) * 255) per channel. */
+  renderRgbToImageBitmapAsync(rgb: Float32Array, width: number, height: number): Promise<ImageBitmap | null>;
   destroy(): void;
 }
 
@@ -98,6 +100,22 @@ export function colormapSampledPixels(
   target: ImageData,
 ): void {
   colormapPixels(new Uint32Array(target.data.buffer), data, sourceIndex, range, logScale, packedLut(lut));
+}
+
+/**
+ * RGBA bytes of `count` interleaved RGB floats: round(clamp(v, 0, 1) * 255) per
+ * channel, NaN to 0, opaque. The JavaScript twin of RGB_PASSTHROUGH_SHADER and
+ * DIRECT_SLOT_RGB_SHADER, for a page without WebGPU.
+ */
+export function packRgbPixels(rgb: Float32Array, count: number): Uint8ClampedArray<ArrayBuffer> {
+  const pixels = new Uint8ClampedArray(count * 4);
+  for (let k = 0; k < count; k++) {
+    pixels[4 * k] = Math.round(rgb[3 * k] * 255);
+    pixels[4 * k + 1] = Math.round(rgb[3 * k + 1] * 255);
+    pixels[4 * k + 2] = Math.round(rgb[3 * k + 2] * 255);
+    pixels[4 * k + 3] = 255;
+  }
+  return pixels;
 }
 
 class CPUColormapEngine implements DisplayColormapEngine {
@@ -183,6 +201,11 @@ class CPUColormapEngine implements DisplayColormapEngine {
     const slot = this.slots[idx];
     if (!slot) return null;
     return this.paint(slot, range, logScale, Math.max(1, Math.round(outW)), Math.max(1, Math.round(outH)), lut);
+  }
+
+  async renderRgbToImageBitmapAsync(rgb: Float32Array, width: number, height: number): Promise<ImageBitmap | null> {
+    if (width <= 0 || height <= 0 || rgb.length < width * height * 3) return null;
+    return createImageBitmap(new ImageData(packRgbPixels(rgb, width * height), width, height));
   }
 
   destroy(): void {

@@ -54,22 +54,19 @@ def test_show2d_reads_rgb_png_as_color(tmp_path: Path):
     assert float(right[..., 1].mean()) > 0.5
 
 
-def test_show2d_from_folder_rgb(tmp_path: Path):
-    folder = tmp_path / "frames"
-    folder.mkdir()
-    _write_rgb_png(folder / "a.png")
-    _write_rgb_png(folder / "b.png", h=24, w=32)
-    w = Show2D.from_folder(folder, watch=False, verbose=False)
+def test_show2d_gallery_of_rgb_pngs(tmp_path: Path):
+    _write_rgb_png(tmp_path / "a.png")
+    _write_rgb_png(tmp_path / "b.png", h=24, w=32)
+    w = Show2D([io.read_image(tmp_path / "a.png"), io.read_image(tmp_path / "b.png")], verbose=False)
     assert w.n_images == 2
     assert list(w.is_rgb) == [True, True]
 
 
 def test_show3d_rgb_stack_from_pngs(tmp_path: Path):
-    folder = tmp_path / "stack"
-    folder.mkdir()
-    _write_rgb_png(folder / "f0.png")
-    _write_rgb_png(folder / "f1.png")
-    w = Show3D.from_folder(folder, watch=False, verbose=False)
+    _write_rgb_png(tmp_path / "f0.png")
+    _write_rgb_png(tmp_path / "f1.png")
+    stack = np.stack([io.read_image(tmp_path / name).array for name in ("f0.png", "f1.png")])
+    w = Show3D(stack, verbose=False)
     assert w.is_rgb is True
     assert w.n_slices == 2
     assert w.height == 24 and w.width == 32

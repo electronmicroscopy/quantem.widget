@@ -10,6 +10,7 @@ where the two paths must agree exactly.
 import gzip
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -21,11 +22,11 @@ import pytest
 import torch
 from PIL import Image
 
-from quantem.widget import Show4DSTEM, ShowDiffraction, device
+from quantem.widget import Show4DSTEM, device
 from quantem.widget.adapters import gpu as gpu_adapter
 from quantem.widget.adapters.core import make_dataset
 from quantem.widget.show4dstem import preview, reader
-from quantem.widget.show4dstem.detector import detector_mask, fit_bright_field_disk, roi_mask
+from quantem.widget.show4dstem.detector import detector_mask, bright_field_disk, roi_mask
 from quantem.widget.counts import tensor_dtype
 from quantem.widget.show4dstem import export as html_export
 from quantem.widget.show4dstem.export import bundle_master_urls, check_html_payload, export_data_array, write_webgpu_bundle
@@ -129,7 +130,7 @@ def _bf(counts: np.ndarray, center, radius: float, inner: float = 0.0) -> np.nda
     return counts[..., mask].sum(axis=-1, dtype=np.uint64).astype(np.float32)
 
 
-def _mean_dp(counts: np.ndarray) -> np.ndarray:
+def _mean_pattern(counts: np.ndarray) -> np.ndarray:
     """NumPy reference mean pattern: exact integer total divided once in float64."""
     flat = counts.reshape(-1, *counts.shape[-2:])
     return (flat.sum(axis=0, dtype=np.uint64) / len(flat)).astype(np.float32)
@@ -148,13 +149,80 @@ def _pattern(widget) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def test_stream_opens_on_the_first_acquisition_and_appends_the_rest_as_they_complete(tmp_path, accelerator):
+    # A live recording grows its datasets list from another thread; stream shows each one as it arrives,
+    # labelled in arrival order, and append leaves ownership with the caller.
+    import threading
+    from types import SimpleNamespace
+
+    loaded = [gpu_adapter.load_acquisition(_write_master(tmp_path, f"tilt{index}", _counts(index))) for index in range(3)]
+    recording = SimpleNamespace(datasets=[loaded[0]], error=None, receiving=True)
+
+    def arrive():
+        for acquisition in loaded[1:]:
+            time.sleep(0.2)
+            recording.datasets.append(acquisition)
+        recording.receiving = False
+
+    threading.Thread(target=arrive, daemon=True).start()
+    widget = Show4DSTEM.stream(recording, refresh_s=0.05, labels=["-17x", "0x", "17x"], verbose=False)
+    try:
+        widget._stream_thread.join(timeout=5)
+        assert widget.n_frames == 3 and widget.frame_labels == ["-17x", "0x", "17x"]
+        assert [frame.source for frame in widget._data.frames] == loaded and not widget._owned_acquisitions
+    finally:
+        widget.close()
+        for acquisition in loaded:
+            acquisition.close()
+
+
+def test_stream_retires_old_scans_without_resetting_detector_or_cursor(accelerator, live_recording):
+    if not torch.cuda.is_available():
+        pytest.skip("Live ANS acquisition is CUDA only")
+    import cupy as cp
+
+    recording = live_recording()
+    widget = None
+
+    def arrive(index):
+        recording.add(cp.asarray(_counts(index)).reshape(-1, *DET), SCAN, str(index))
+
+    try:
+        arrive(0)
+        widget = Show4DSTEM.stream(recording, refresh_s=0.01, verbose=False)
+        assert widget.frame_labels == ["0"]
+        widget.apply_preset("adf")
+        widget.pos_row, widget.pos_col = 2, 3
+        detector = (widget.roi_radius_inner, widget.roi_radius)
+        oldest = recording.acquisitions[0]
+        for index in range(1, 5):
+            arrive(index)
+            if len(recording.datasets) > 2:
+                recording.discard(recording.datasets[0])
+            deadline = time.monotonic() + 5
+            while widget.frame_labels[-1] != str(index) or widget.n_frames != min(index + 1, 2):
+                assert time.monotonic() < deadline and widget.stream_error is None
+                time.sleep(0.01)
+            assert widget.frame_labels == [str(number) for number in range(max(0, index - 1), index + 1)]
+        assert oldest.source.is_released
+        assert len(recording.datasets) == len(recording.acquisitions) == 2
+        assert (widget.roi_radius_inner, widget.roi_radius) == detector
+        assert (widget.pos_row, widget.pos_col) == (2, 3)
+        widget.frame_idx = 1
+        np.testing.assert_array_equal(widget.pattern(2, 3), _counts(4)[2, 3])
+    finally:
+        if widget is not None:
+            widget.close()
+        recording.release()
+
+
 def test_encoded_master_opens_with_detector_products(tmp_path, accelerator):
     counts = _counts(0)
     master = _write_master(tmp_path, "gold", counts)
     with gpu_adapter.load_acquisition(master) as loaded:
         widget = Show4DSTEM(loaded)
         try:
-            center, radius = fit_bright_field_disk(_mean_dp(counts))
+            center, radius = bright_field_disk(_mean_pattern(counts))
             assert (widget.bright_field_center_row_px, widget.bright_field_center_col_px) == pytest.approx(center)
             assert widget.bright_field_radius_px == pytest.approx(radius)
             np.testing.assert_array_equal(_image(widget), _bf(counts, center, radius))
@@ -177,7 +245,7 @@ def test_encoded_master_opens_with_detector_products(tmp_path, accelerator):
 
 
 def test_show4dstem_presets_use_the_recorded_bright_field_disk(tmp_path, accelerator):
-    """data.calibration.fit_detector_sampling() is the one disk fit: the viewer reads it and its calibrated axes.
+    """data.calibration.detector_sampling() is the one disk fit: the viewer reads it and its calibrated axes.
 
     The presets are multiples of the recorded edge radius around the recorded centre; a disk given by hand wins.
     """
@@ -185,8 +253,8 @@ def test_show4dstem_presets_use_the_recorded_bright_field_disk(tmp_path, acceler
     master = _write_master(tmp_path, "gold", counts)
     with gpu_adapter.load_acquisition(master) as loaded:
         loaded.calibration.semiangle_mrad = 30
-        fit = loaded.calibration.fit_detector_sampling()
-        assert (fit.bright_field_center_px, fit.bright_field_edge_radius_px) == fit_bright_field_disk(_mean_dp(counts))
+        fit = loaded.calibration.detector_sampling()
+        assert (fit.bright_field_center_px, fit.bright_field_edge_radius_px) == bright_field_disk(_mean_pattern(counts))
         # a disk recorded with the dataset is read, not fitted again
         loaded.metadata["bright_field_disk"] = {**loaded.metadata["bright_field_disk"],
                                                 "bright_field_center_px": [7.0, 8.0], "bright_field_edge_radius_px": 3.25}
@@ -283,38 +351,15 @@ def test_many_encoded_acquisitions_drag_reorder_hide_and_retain_exact_images(tmp
             source.close()
 
 
-def test_from_folder_fills_two_masters_and_free_closes_them(tmp_path, accelerator):
-    counts = [_counts(seed) for seed in range(2)]
-    for idx, values in enumerate(counts):
-        _write_master(tmp_path, f"scan_{idx:02d}", values)
-    widget = Show4DSTEM.from_folder(tmp_path, watch=False)
+def test_free_closes_the_acquisition_a_path_opened(tmp_path, accelerator):
+    widget = Show4DSTEM(_write_master(tmp_path, "scan_00", _counts(0)))
     try:
-        widget.wait_for_folder()
-        assert widget.n_frames == 2
-        assert list(widget.frame_labels) == ["scan_00", "scan_01"]
-        assert widget.compare_panel_indices == [0, 1]
         acquisitions = list(widget._owned_acquisitions)
+        assert len(acquisitions) == 1
         widget.free()
         assert widget._owned_acquisitions == []
         with pytest.raises((RuntimeError, ValueError)):
             gpu_adapter.prepare_session(acquisitions[0]).masked_sum(np.ones(DET, bool))
-    finally:
-        widget.close()
-    with pytest.raises(ValueError, match="at least 3"):
-        Show4DSTEM.from_folder(tmp_path, watch=False, min_masters=3)
-
-
-def test_a_watched_folder_emptied_of_masters_polls_without_error(tmp_path, accelerator, monkeypatch):
-    _write_master(tmp_path, "scan_00", _counts(0))
-    widget = Show4DSTEM.from_folder(tmp_path, watch=False)
-    try:
-        widget.wait_for_folder()
-        for path in tmp_path.iterdir():
-            path.unlink()
-        # the poll lists the folder itself; quantem.gpu's discover raises on an empty match
-        monkeypatch.setattr(gpu_adapter, "discover_masters", lambda *args, **kwargs: pytest.fail("discover called"))
-        assert widget.poll_folder() == []
-        assert widget.n_frames == 1
     finally:
         widget.close()
 
@@ -634,7 +679,7 @@ def test_refused_argument_raises_without_a_cleanup_traceback():
 
 
 def test_widget_calls_only_functions_its_export_module_defines():
-    """compute_ssb replaces _ssb_phase in the tests below, so a stale export name there never ran in CI."""
+    """direct_phase replaces _direct_phase_maps in the tests below, so a stale export name there never ran in CI."""
     import inspect
     import re
 
@@ -645,19 +690,19 @@ def test_widget_calls_only_functions_its_export_module_defines():
     assert called and called <= set(dir(html_export)), sorted(called - set(dir(html_export)))
 
 
-def test_product_map_from_compute_ssb_becomes_the_image(monkeypatch):
+def test_product_map_from_direct_phase_becomes_the_image(monkeypatch):
     counts = _counts(3)
     phase = np.linspace(-1, 1, counts[..., 0, 0].size, dtype=np.float32).reshape(SCAN)
     widget = Show4DSTEM(counts, precompute_virtual_images=False)
     try:
-        monkeypatch.setattr(type(widget), "_ssb_phase", lambda self, **kwargs: (phase, phase * 2, phase * 3))
-        np.testing.assert_array_equal(widget.compute_ssb(), phase)
-        assert widget.vi_source == "SSB"
-        assert widget.vi_product_labels == ["DPC_row", "DPC_col", "SSB"]
+        monkeypatch.setattr(type(widget), "_direct_phase_maps", lambda self, **kwargs: (phase, phase * 2, phase * 3))
+        np.testing.assert_array_equal(widget.direct_phase(), phase)
+        assert widget.vi_source == "Direct"
+        assert widget.vi_product_labels == ["DPC_row", "DPC_col", "Direct"]
         np.testing.assert_array_equal(widget.virtual_image(), phase)
         stack = np.frombuffer(widget.vi_product_maps_bytes, np.float32).reshape(3, *SCAN)
         np.testing.assert_array_equal(stack[2], phase)
-        assert widget.ssb_compute_status.startswith("SSB ready")
+        assert widget.direct_status.startswith("Direct ptycho ready")
         widget.vi_source = "roi"
         np.testing.assert_array_equal(_image(widget), _bf(counts, (widget.bright_field_center_row_px, widget.bright_field_center_col_px), widget.bright_field_radius_px))
     finally:
@@ -682,8 +727,8 @@ def test_master_read_densely_matches_numpy(tmp_path, monkeypatch, capsys):
         stored = str(tensor_dtype(np.uint16)).removeprefix("torch.")
         assert f"read flagged_master.h5 densely on the CPU into cpu: (6, 6, 16, 16) {stored}" in capsys.readouterr().out
         assert widget.title == "flagged" and widget._device.type == "cpu"
-        np.testing.assert_array_equal(widget._session(0).mean_dp(), _mean_dp(expected))
-        center, radius = fit_bright_field_disk(_mean_dp(expected))
+        np.testing.assert_array_equal(widget._session(0).mean_pattern(), _mean_pattern(expected))
+        center, radius = bright_field_disk(_mean_pattern(expected))
         assert (widget.bright_field_center_row_px, widget.bright_field_center_col_px, widget.bright_field_radius_px) == pytest.approx((*center, radius))
         np.testing.assert_array_equal(_image(widget), _bf(expected, center, radius))
         widget.apply_preset("adf")
@@ -774,39 +819,6 @@ def test_refusal_states_the_size_the_read_needs(tmp_path):
         assert expected in str(refusal.value)
 
 
-def test_from_folder_reads_masters_densely_without_quantem_gpu(tmp_path, monkeypatch, capsys):
-    counts = [_counts(seed) for seed in range(2)]
-    for idx, values in enumerate(counts):
-        _write_master(tmp_path, f"scan_{idx:02d}", values)
-    monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
-    widget = Show4DSTEM.from_folder(tmp_path, device="cpu", verbose=False)
-    try:
-        assert "watching a folder for new masters needs quantem.gpu" in capsys.readouterr().out
-        assert widget.n_frames == 2 and list(widget.frame_labels) == ["scan_00", "scan_01"]
-        widget.frame_idx = 1
-        widget.pos_row, widget.pos_col = 2, 1
-        np.testing.assert_array_equal(_pattern(widget), counts[1][2, 1])
-    finally:
-        widget.close()
-
-
-@pytest.mark.parametrize("first, second", [
-    (_counts(5).astype(np.uint32) + 70000, _counts(6).astype(np.float32) + 0.25),  # int64 counts, then fractions
-    (_counts(5), _counts(6).astype(np.float16) + 0.5),  # uint16 counts, then float16 of the same width
-])
-def test_from_folder_holds_a_float_master_after_integer_counts_exactly(tmp_path, monkeypatch, first, second):
-    for idx, values in enumerate((first, second)):
-        _write_master(tmp_path, f"scan_{idx:02d}", values)
-    monkeypatch.setattr(gpu_adapter, "accelerator_ready", lambda: False)
-    widget = Show4DSTEM.from_folder(tmp_path, device="cpu", watch=False, verbose=False)
-    try:
-        for idx, values in enumerate((first, second)):
-            widget.frame_idx = idx
-            np.testing.assert_array_equal(widget.pattern(2, 1), values[2, 1].astype(np.float32))
-    finally:
-        widget.close()
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_dense_and_encoded_paths_agree(tmp_path, accelerator, device):
     if device == "cuda" and not torch.cuda.is_available():
@@ -816,7 +828,7 @@ def test_dense_and_encoded_paths_agree(tmp_path, accelerator, device):
     encoded = Show4DSTEM(master)
     try:
         assert encoded._owned_acquisitions and isinstance(dense._data, torch.Tensor) and dense._device.type == device
-        np.testing.assert_array_equal(dense._session(0).mean_dp(), encoded._session(0).mean_dp())
+        np.testing.assert_array_equal(dense._session(0).mean_pattern(), encoded._session(0).mean_pattern())
         for preset in ("bf", "abf", "adf", "haadf"):
             dense.apply_preset(preset)
             encoded.apply_preset(preset)
@@ -977,7 +989,7 @@ def test_qem_bundle_links_acquisitions_for_a_streaming_viewer(tmp_path):
     page = (viewer / ".viewer" / "Show4DSTEM.html").read_text()
     assert '\\"../qem/tilt_a.qem\\", \\"../qem/tilt_b.qem\\"' in page
     assert "+17 mrad" in page and "__QT_H5_DECODE_DTYPE ??=" not in page
-    assert '\"compare_cols\": 2' in page
+    assert '\"compare_columns\": 2' in page
     # the page draws the calibration the headers record (it showed 1.0 px scale bars before)
     assert re.search(r'"scan_sampling_A": \[\s*0\.4,\s*0\.6\s*\]', page)
     assert re.search(r'"detector_sampling_mrad": \[\s*1\.5,\s*2(\.0)?\s*\]', page)
@@ -986,9 +998,9 @@ def test_qem_bundle_links_acquisitions_for_a_streaming_viewer(tmp_path):
         write_qem_bundle([data / "tilt_a.qem", data / "wide.qem"], tmp_path / "other")
 
 
-def test_compute_ssb_accepts_a_1024_scan(monkeypatch):
+def test_direct_phase_accepts_a_1024_scan(monkeypatch):
     # B-1: the scan guard allowed 128, 256 and 512, although quantem.gpu reconstructs 1024 x 1024 scans.
-    pytest.importorskip("quantem.gpu", reason="the SSB phase also takes quantem.gpu's centre of mass")
+    pytest.importorskip("quantem.gpu", reason="the direct ptychography phase also takes quantem.gpu's centre of mass")
     import types
 
     from quantem.widget.show4dstem import widget as widget_module
@@ -1008,15 +1020,15 @@ def test_compute_ssb_accepts_a_1024_scan(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def reconstruct(self):
+        def run(self):
             return types.SimpleNamespace(phase=np.ones((1024, 1024), np.float32), aberrations={"C10_nm": 0.0, "C12_nm": 0.0, "phi12_deg": 0.0},
                                          scan_detector_rotation_deg=0.0, loss=None, elapsed_s=None, sample_tilt_mrad=None)
 
-    monkeypatch.setattr(widget_module.gpu_adapter, "SSB", Session)  # stands in for quantem.gpu's class behind the adapter
+    monkeypatch.setattr(widget_module.gpu_adapter, "DirectPtycho", Session)  # stands in for quantem.gpu's class behind the adapter
     widget = Show4DSTEM(np.ones((1024, 1024, 4, 4), np.uint16), precompute_virtual_images=False, voltage_kV=300,
                         semiangle_mrad=20, scan_sampling_A=0.5, detector_sampling_mrad=1.0)
     try:
-        phase, dpc_row, _ = widget._ssb_phase(aberrations={"C10_nm": 0.0}, lock_aberrations=True)
+        phase, dpc_row, _ = widget._direct_phase_maps(aberrations={"C10_nm": 0.0}, lock_aberrations=True)
         assert phase.shape == dpc_row.shape == (1024, 1024)
     finally:
         widget.close()
@@ -1053,15 +1065,15 @@ def test_a_dataset_is_the_source_of_the_calibration():
     with pytest.raises(ValueError, match="Unknown unit 'furlong'"):
         Show4DSTEM(make_dataset(counts, sampling=(1, 1, 1, 1), units=("furlong",) * 4))
     # the removed spellings are refused by name; backend="webgpu" was checked and then never used
-    for removed in ("ssb_voltage_kV", "ssb_semiangle_mrad", "ssb_scan_sampling_A", "ssb_det_sampling_mrad", "sampling", "units",
+    for removed in ("direct_voltage_kV", "direct_semiangle_mrad", "direct_scan_sampling_A", "direct_det_sampling_mrad", "sampling", "units",
                     "backend"):
         with pytest.raises(TypeError, match=removed):
             Show4DSTEM(counts, **{removed: 1.0})
 
 
-def test_compute_ssb_reads_the_optics_the_dataset_records(monkeypatch, tmp_path):
-    # Compute SSB raised "needs ssb_voltage_kV" for a dataset that records the voltage
-    pytest.importorskip("quantem.gpu", reason="the SSB phase also takes quantem.gpu's centre of mass")
+def test_direct_phase_reads_the_optics_the_dataset_records(monkeypatch, tmp_path):
+    # direct_phase() raised "needs direct_voltage_kV" for a dataset that records the voltage
+    pytest.importorskip("quantem.gpu", reason="the direct ptychography phase also takes quantem.gpu's centre of mass")
     import types
 
     from quantem.widget.show4dstem import widget as widget_module
@@ -1084,25 +1096,25 @@ def test_compute_ssb_reads_the_optics_the_dataset_records(monkeypatch, tmp_path)
         def __exit__(self, *exc):
             return False
 
-        def reconstruct(self):
+        def run(self):
             # a fit on the reversed branch: quantem.gpu reports the physical angle, here above 180
             return types.SimpleNamespace(phase=np.ones((128, 128), np.float32), aberrations={"C10_nm": 12.0, "C12_nm": 3.0, "phi12_deg": 30.0},
                                          scan_detector_rotation_deg=345.5, loss=0.25, elapsed_s=1.5, sample_tilt_mrad=None)
 
-    monkeypatch.setattr(widget_module.gpu_adapter, "SSB", Session)  # stands in for quantem.gpu's class behind the adapter
+    monkeypatch.setattr(widget_module.gpu_adapter, "DirectPtycho", Session)  # stands in for quantem.gpu's class behind the adapter
     dataset = make_dataset(np.ones((128, 128, 4, 4), np.uint16), sampling=(0.4, 0.6, 1.5, 1.5), units=("angstrom", "angstrom", "mrad", "mrad"))
     dataset.metadata.update(voltage_kV=300.0, semiangle_mrad=20.0)
     widget = Show4DSTEM(dataset, precompute_virtual_images=False)
-    widget._ssb_phase(aberrations={"C10_nm": 0.0}, lock_aberrations=True)
+    widget._direct_phase_maps(aberrations={"C10_nm": 0.0}, lock_aberrations=True)
     assert (seen["voltage_kV"], seen["semiangle_mrad"], seen["scan_sampling_A"]) == (300.0, 20.0, (0.4, 0.6))
-    # a missing coefficient is 0, as compute_ssb documents: quantem.gpu refuses a mapping without all three
+    # a missing coefficient is 0, as direct_phase documents: quantem.gpu refuses a mapping without all three
     assert seen["aberrations"] == {"C10_nm": 0.0, "C12_nm": 0.0, "phi12_deg": 0.0}
     # the trait and the calibration file hold the physical angle, so the reversal survives: a manual
     # recompute sent the angle below 180 back without the flag, 180 degrees off
-    assert widget.ssb_compute_scan_detector_rotation_deg == 345.5
-    saved = json.loads(widget.ssb_compute_calibration_json)
+    assert widget.direct_scan_detector_rotation_deg == 345.5
+    saved = json.loads(widget.direct_calibration_json)
     # its own schema: the record differs from ShowPtycho's calibration.json (source, no session_identity)
-    assert saved["schema"] == "quantem.show4dstem-ssb-calibration/3"
+    assert saved["schema"] == "quantem.show4dstem-direct-calibration/5"
     assert (saved["scan_detector_rotation_deg"], saved["scan_detector_rotation_flipped"]) == (345.5, True)
     assert saved["aberrations"] == {"C10_nm": 12.0, "C12_nm": 3.0, "phi12_deg": 30.0}
     assert (saved["scan_sampling_A"], saved["detector_sampling_mrad"], saved["voltage_kV"]) == ([0.4, 0.6], [1.5, 1.5], 300.0)
@@ -1115,15 +1127,15 @@ def test_compute_ssb_reads_the_optics_the_dataset_records(monkeypatch, tmp_path)
     from quantem.widget.showptycho.widget import CALIBRATION_SCHEMA
 
     downloaded = tmp_path / "calibration.json"
-    downloaded.write_text(widget.ssb_compute_calibration_json)
-    with pytest.raises(ValueError, match="quantem.show4dstem-ssb-calibration/3' is not ShowPtycho's"):
-        read_calibration(downloaded, {}, (0, 128, 0, 128), None, CALIBRATION_SCHEMA)
-    widget._ssb_phase(aberrations=saved["aberrations"], scan_detector_rotation_deg=saved["scan_detector_rotation_deg"], lock_aberrations=True)
+    downloaded.write_text(widget.direct_calibration_json)
+    with pytest.raises(ValueError, match="quantem.show4dstem-direct-calibration/5' is not ShowPtycho's"):
+        read_calibration(downloaded, {}, (0, 128, 0, 128), CALIBRATION_SCHEMA)
+    widget._direct_phase_maps(aberrations=saved["aberrations"], scan_detector_rotation_deg=saved["scan_detector_rotation_deg"], lock_aberrations=True)
     assert seen["scan_detector_rotation_deg"] == 345.5 and seen["aberrations"] == {"C10_nm": 12.0, "C12_nm": 3.0, "phi12_deg": 30.0}
     widget.close()
     bare = Show4DSTEM(np.ones((128, 128, 4, 4), np.uint16), precompute_virtual_images=False)
     with pytest.raises(ValueError, match="needs the scan step in angstrom and the data record none"):
-        bare._ssb_phase()
+        bare._direct_phase_maps()
     bare.close()
 
 
@@ -1157,46 +1169,46 @@ def _rotated_counts(rotation_deg: float, *, flipped: bool = False, scan: int = 1
     return values.swapaxes(-1, -2).copy() if flipped else values
 
 
-def _require_ssb() -> None:
+def _require_direct() -> None:
     """Skip without quantem.gpu or without CUDA or MPS."""
-    pytest.importorskip("quantem.gpu", reason="Compute SSB runs quantem.gpu")
+    pytest.importorskip("quantem.gpu", reason="direct_phase() runs quantem.gpu")
     try:
-        pytest.importorskip("quantem.gpu.device").detect()
+        pytest.importorskip("quantem.gpu.device").resolve("auto")
     except RuntimeError as exc:
-        pytest.skip(f"SSB needs CUDA or MPS: {exc}")
+        pytest.skip(f"Direct ptychography needs CUDA or MPS: {exc}")
 
 
-def _ssb_widget(counts: np.ndarray) -> Show4DSTEM:
+def _direct_widget(counts: np.ndarray) -> Show4DSTEM:
     """A calibrated Show4DSTEM over ``counts``, or a skip without CUDA or MPS."""
-    _require_ssb()
+    _require_direct()
     return Show4DSTEM(counts, precompute_virtual_images=False, voltage_kV=300, semiangle_mrad=20,
                       scan_sampling_A=0.5, detector_sampling_mrad=20 / 6)
 
 
-def test_compute_ssb_uses_the_estimated_rotation_rather_than_zero():
-    # Compute SSB passed scan_detector_rotation_deg=0.0, so the fit could only pick 0 or 180 degrees
-    widget = _ssb_widget(_rotated_counts(30.0))
+def test_direct_phase_uses_the_estimated_rotation_rather_than_zero():
+    # direct_phase() passed scan_detector_rotation_deg=0.0, so the fit could only pick 0 or 180 degrees
+    widget = _direct_widget(_rotated_counts(30.0))
     try:
-        widget.compute_ssb(num_trials=4, refinement=None)
-        rotation = widget.ssb_compute_scan_detector_rotation_deg
+        widget.direct_phase(trials=4, refinement=None)
+        rotation = widget.direct_scan_detector_rotation_deg
         assert min(abs(rotation - 30.0), abs(rotation - 210.0)) < 1.0
-        assert json.loads(widget.ssb_compute_calibration_json)["scan_detector_rotation_flipped"] is False
+        assert json.loads(widget.direct_calibration_json)["scan_detector_rotation_flipped"] is False
     finally:
         widget.close()
 
 
 @pytest.mark.parametrize("flipped", [False, True])
-def test_compute_ssb_dpc_maps_follow_the_scan_axes_for_a_flipped_detector(flipped):
+def test_direct_phase_dpc_maps_follow_the_scan_axes_for_a_flipped_detector(flipped):
     # the DPC alignment copied quantem.gpu's rotation without its axis swap, so a flipped
     # detector gave DPC_row correlated -0.87 with the scan-row gradient and 0.50 with the column one
-    _require_ssb()
+    _require_direct()
     from quantem.gpu import dpc
 
     counts = _rotated_counts(30.0, flipped=flipped)
-    widget = _ssb_widget(counts)
+    widget = _direct_widget(counts)
     try:
-        widget.compute_ssb(num_trials=4, refinement=None)
-        record = json.loads(widget.ssb_compute_calibration_json)
+        widget.direct_phase(trials=4, refinement=None)
+        record = json.loads(widget.direct_calibration_json)
         assert record["scan_detector_rotation_flipped"] is flipped
         maps = np.frombuffer(widget.vi_product_maps_bytes, np.float32).reshape(-1, 128, 128)
         dpc_row, dpc_col = (maps[widget.vi_product_labels.index(label)] for label in ("DPC_row", "DPC_col"))
@@ -1212,32 +1224,32 @@ def test_compute_ssb_dpc_maps_follow_the_scan_axes_for_a_flipped_detector(flippe
         widget.close()
 
 
-def test_compute_ssb_selects_bright_field_pixels_with_the_quantem_gpu_default_threshold():
+def test_direct_phase_selects_bright_field_pixels_with_the_quantem_gpu_default_threshold():
     # Show4DSTEM passed threshold 0.5 where quantem.gpu defaults to 0.0: with a given 7 px radius on this
-    # soft-edged disk it kept 120 of the 156 bright-field pixels a plain SSB session uses
-    _require_ssb()
-    from quantem.gpu import SSB
+    # soft-edged disk it kept 120 of the 156 bright-field pixels a plain direct ptychography session uses
+    _require_direct()
+    from quantem.gpu import DirectPtycho
 
     rows, cols = np.indices((24, 24))
     pattern = np.round(40 * np.clip((8 - np.hypot(rows - 11.5, cols - 11.5)) / 4, 0, 1)).astype(np.uint16) + 1
     counts = np.broadcast_to(pattern, (128, 128, 24, 24)).copy()
-    widget = _ssb_widget(counts)
+    widget = _direct_widget(counts)
     try:
-        widget.compute_ssb(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0,
+        widget.direct_phase(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0,
                            bright_field_radius_px=7.0)
-        with SSB(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=(0.5, 0.5), detector_sampling_mrad=(20 / 6, 20 / 6),
+        with DirectPtycho(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=(0.5, 0.5), detector_sampling_mrad=(20 / 6, 20 / 6),
                  scan_detector_rotation_deg=0.0, bright_field_radius_px=7.0) as plain:
-            assert widget.ssb_compute_num_bright_field_pixels == plain.num_bright_field_pixels == 156
-        record = json.loads(widget.ssb_compute_calibration_json)
+            assert widget.direct_bright_field_pixels == plain.num_bright_field_pixels == 156
+        record = json.loads(widget.direct_calibration_json)
         assert (record["bright_field_intensity_threshold"], record["num_bright_field_pixels"]) == (0.0, 156)
     finally:
         widget.close()
 
 
-def test_compute_ssb_derives_a_missing_semiangle_with_the_quantem_gpu_disk_edge_rule(capsys):
+def test_direct_phase_derives_a_missing_semiangle_with_the_quantem_gpu_disk_edge_rule(capsys):
     # the fallback multiplied the widget's equal-area disk radius by the column detector step only:
     # 20.62 mrad for this 20 mrad aperture imaged at (2.0, 2.2) mrad per pixel, now 20.22
-    _require_ssb()
+    _require_direct()
     from quantem.gpu import detector
 
     sampling = (2.0, 2.2)
@@ -1250,8 +1262,8 @@ def test_compute_ssb_derives_a_missing_semiangle_with_the_quantem_gpu_disk_edge_
     try:
         assert widget.semiangle_mrad is None
         capsys.readouterr()
-        widget.compute_ssb(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0)
-        semiangle = json.loads(widget.ssb_compute_calibration_json)["semiangle_mrad"]
+        widget.direct_phase(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0)
+        semiangle = json.loads(widget.direct_calibration_json)["semiangle_mrad"]
         edge = detector.disk_edge_radius(np.asarray(pattern, np.float64))
         assert semiangle == pytest.approx(edge * np.sqrt(sampling[0] * sampling[1]))
         assert semiangle == pytest.approx(20.0, rel=0.02)
@@ -1262,8 +1274,8 @@ def test_compute_ssb_derives_a_missing_semiangle_with_the_quantem_gpu_disk_edge_
         widget.close()
 
 
-def test_compute_ssb_converts_a_detector_step_in_reciprocal_angstrom(monkeypatch):
-    # a recorded detector_sampling_inv_A was dropped: SSB then estimated the step from the disk edge instead
+def test_direct_phase_converts_a_detector_step_in_reciprocal_angstrom(monkeypatch):
+    # a recorded detector_sampling_inv_A was dropped: Direct ptychography then estimated the step from the disk edge instead
     pytest.importorskip("quantem.gpu", reason="the conversion uses quantem.gpu's wavelength")
     import types
 
@@ -1288,111 +1300,109 @@ def test_compute_ssb_converts_a_detector_step_in_reciprocal_angstrom(monkeypatch
         def __exit__(self, *exc):
             return False
 
-        def reconstruct(self):
+        def run(self):
             return types.SimpleNamespace(phase=np.ones((128, 128), np.float32), aberrations={"C10_nm": 0.0, "C12_nm": 0.0, "phi12_deg": 0.0},
                                          scan_detector_rotation_deg=0.0, loss=None, elapsed_s=None, sample_tilt_mrad=None)
 
-    monkeypatch.setattr(widget_module.gpu_adapter, "SSB", Session)
+    monkeypatch.setattr(widget_module.gpu_adapter, "DirectPtycho", Session)
     dataset = make_dataset(np.ones((128, 128, 4, 4), np.uint16), sampling=(0.5, 0.5, 0.02, 0.025),
                            units=("angstrom", "angstrom", "1/angstrom", "1/angstrom"))
     dataset.metadata.update(voltage_kV=300.0, semiangle_mrad=20.0)
     widget = Show4DSTEM(dataset, precompute_virtual_images=False)
     try:
         assert (widget.detector_sampling_mrad, widget.detector_sampling_inv_A) == ([], [0.02, 0.025])
-        widget._ssb_phase(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0)
+        widget._direct_phase_maps(aberrations={"C10_nm": 0.0}, lock_aberrations=True, scan_detector_rotation_deg=0.0)
         expected = (0.02 * wavelength_A_from_kV(300.0) * 1e3, 0.025 * wavelength_A_from_kV(300.0) * 1e3)
         assert seen["detector_sampling_mrad"] == pytest.approx(expected)
         assert expected[0] == pytest.approx(0.3937, abs=1e-4)
-        assert json.loads(widget.ssb_compute_calibration_json)["detector_sampling_mrad"] == pytest.approx(list(expected))
+        assert json.loads(widget.direct_calibration_json)["detector_sampling_mrad"] == pytest.approx(list(expected))
     finally:
         widget.close()
 
 
-def test_compute_ssb_reconstructs_a_rectangular_scan_that_quantem_gpu_pads():
-    # Compute SSB refused every scan but square 128, 256, 512 and 1024, although quantem.gpu pads other shapes
-    _require_ssb()
-    from quantem.gpu import SSB
+def test_direct_phase_reconstructs_a_rectangular_scan_that_quantem_gpu_pads():
+    # direct_phase() refused every scan but square 128, 256, 512 and 1024, although quantem.gpu pads other shapes
+    _require_direct()
+    from quantem.gpu import DirectPtycho
 
     counts = _rotated_counts(30.0)[:96, :80].copy()
-    widget = _ssb_widget(counts)
+    widget = _direct_widget(counts)
     optics = {"C10_nm": 2.0, "C12_nm": 0.5, "phi12_deg": 10.0}
     try:
-        phase = widget.compute_ssb(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
+        phase = widget.direct_phase(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
         assert phase.shape == (96, 80)
-        with SSB(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, detector_sampling_mrad=20 / 6,
-                 aberrations=optics, scan_detector_rotation_deg=30.0) as ssb:
-            full = np.asarray(torch.as_tensor(ssb.reconstruct().phase).cpu())
-            top, left = ((padded - measured) // 2 for padded, measured in zip(ssb.scan_shape, ssb.input_scan_shape))
+        with DirectPtycho(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, detector_sampling_mrad=20 / 6,
+                 aberrations=optics, scan_detector_rotation_deg=30.0) as direct:
+            full = np.asarray(torch.as_tensor(direct.run().phase).cpu())
+            top, left = ((padded - measured) // 2 for padded, measured in zip(direct.scan_shape, direct.input_scan_shape))
         np.testing.assert_array_equal(phase, full[top:top + 96, left:left + 80])
     finally:
         widget.close()
 
 
-def test_compute_ssb_uses_the_given_bright_field_disk_and_records_the_one_used():
-    # bright_field_center_px= and bright_field_radius_px= never reached SSB, and the record wrote
+def test_direct_phase_uses_the_given_bright_field_disk_and_records_the_one_used():
+    # bright_field_center_px= and bright_field_radius_px= never reached direct ptychography, and the record wrote
     # None for the radius and the detector step whenever quantem.gpu found them itself
-    _require_ssb()
-    from quantem.gpu import SSB, detector
+    _require_direct()
+    from quantem.gpu import DirectPtycho, detector
 
     counts = _rotated_counts(30.0)
     optics = {"C10_nm": 0.0, "C12_nm": 0.0, "phi12_deg": 0.0}
-    _require_ssb()
+    _require_direct()
     found = Show4DSTEM(counts, precompute_virtual_images=False, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5)
     given = Show4DSTEM(counts, precompute_virtual_images=False, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5,
                        bright_field_center_px=(11.0, 12.0), bright_field_radius_px=4.0)
     try:
-        found.compute_ssb(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
-        record = json.loads(found.ssb_compute_calibration_json)
-        with SSB(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, scan_detector_rotation_deg=30.0) as plain:
+        found.direct_phase(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
+        record = json.loads(found.direct_calibration_json)
+        with DirectPtycho(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, scan_detector_rotation_deg=30.0) as plain:
             plain.num_bright_field_pixels
             expected_radius = plain.browser_state().brightfield.bright_field_radius_px
         assert record["bright_field_radius_px"] == pytest.approx(expected_radius)
         mean = np.asarray(counts, np.float64).mean(axis=(0, 1))
         assert record["detector_sampling_mrad"] == pytest.approx(list(detector.detector_sampling_mrad(mean, 20.0)))
-        given.compute_ssb(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
-        with SSB(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, scan_detector_rotation_deg=30.0,
+        given.direct_phase(aberrations=optics, lock_aberrations=True, scan_detector_rotation_deg=30.0)
+        with DirectPtycho(counts, voltage_kV=300, semiangle_mrad=20, scan_sampling_A=0.5, scan_detector_rotation_deg=30.0,
                  bright_field_center_px=(11.0, 12.0), bright_field_radius_px=4.0) as plain:
-            assert given.ssb_compute_num_bright_field_pixels == plain.num_bright_field_pixels
-        assert given.ssb_compute_num_bright_field_pixels != found.ssb_compute_num_bright_field_pixels
-        assert json.loads(given.ssb_compute_calibration_json)["bright_field_radius_px"] == 4.0
+            assert given.direct_bright_field_pixels == plain.num_bright_field_pixels
+        assert given.direct_bright_field_pixels != found.direct_bright_field_pixels
+        assert json.loads(given.direct_calibration_json)["bright_field_radius_px"] == 4.0
     finally:
         found.close()
         given.close()
 
 
-def test_compute_ssb_names_its_refinement_as_quantem_gpu_does():
-    # the trait ssb_compute_refine and the record key "refine" were booleans; quantem.gpu calls it refinement,
+def test_direct_phase_names_its_refinement_as_quantem_gpu_does(capsys):
+    # the trait direct_refine and the record key "refine" were booleans; quantem.gpu calls it refinement,
     # and "auto" (its default) is recorded as the optimizer it selected
-    widget = _ssb_widget(_rotated_counts(30.0))
+    widget = _direct_widget(_rotated_counts(30.0))
     try:
-        assert (widget.ssb_compute_refinement, widget.ssb_compute_tilt) == ("auto", True)
-        widget.compute_ssb(num_trials=2)
-        record = json.loads(widget.ssb_compute_calibration_json)
-        assert record["refinement"] == "newton" and record["tilt"] is True  # the tilt-corrected fit refines with Newton
+        assert (widget.direct_refinement, widget.direct_tilt) == ("auto", True)
+        widget.direct_phase(trials=2)
+        record = json.loads(widget.direct_calibration_json)
+        # the tilt-corrected fit refines with quantem.gpu's exact-gradient fifth-order refinement
+        assert record["refinement"] == "bfgs" and record["tilt"] is True
         assert len(record["sample_tilt_mrad"]) == 2 and record["depth_spread_nm"] >= 0.0
-        widget.ssb_compute_refinement = None
-        widget.compute_ssb(num_trials=2, tilt=False)
-        record = json.loads(widget.ssb_compute_calibration_json)
+        widget.direct_refinement = None
+        widget.direct_phase(trials=2, tilt=False)
+        record = json.loads(widget.direct_calibration_json)
         assert record["refinement"] is None and record["tilt"] is False and record["sample_tilt_mrad"] is None
         assert record["objective"] == "agreement"
-        widget.ssb_compute_refinement = "auto"
-        widget.compute_ssb(num_trials=2, tilt=False, objective="phase_variance")
-        record = json.loads(widget.ssb_compute_calibration_json)
-        assert (record["objective"], record["refinement"], record["tilt"]) == ("phase_variance", "nelder-mead", False)
-        with pytest.raises(ValueError, match="refinement must be 'auto', 'newton', 'nelder-mead' or None"):
-            widget.compute_ssb(num_trials=2, refinement="lbfgs")
-        assert not hasattr(widget, "ssb_compute_refine")
+        widget.direct_refinement = "auto"
+        with pytest.raises(ValueError, match="refinement must be 'auto' or None"):
+            widget.direct_phase(trials=2, refinement="lbfgs")
+        assert not hasattr(widget, "direct_refine") and not hasattr(widget, "direct_objective")
     finally:
         widget.close()
 
 
-def test_compute_ssb_fits_tilt_corrected_by_default_and_tilt_false_on_request(monkeypatch):
-    """Compute SSB is quantem.gpu's default fit (model with sample tilt and depth spread); tilt=False fits at tilt 0.
+def test_direct_phase_fits_tilt_corrected_by_default_and_tilt_false_on_request(monkeypatch, capsys):
+    """direct_phase() is quantem.gpu's default fit (model with sample tilt and depth spread); tilt=False fits at tilt 0.
 
-    It ran find_aberrations(tilt=False, refinement="nelder-mead") whatever the user asked, the one SSB entry point
+    It ran aberrations(tilt=False, refinement="nelder-mead") whatever the user asked, the one direct ptychography entry point
     that did not default to the tilt-corrected fit.
     """
-    pytest.importorskip("quantem.gpu", reason="the SSB phase also takes quantem.gpu's centre of mass")
+    pytest.importorskip("quantem.gpu", reason="the direct ptychography phase also takes quantem.gpu's centre of mass")
     import types
 
     from quantem.widget.show4dstem import widget as widget_module
@@ -1407,7 +1417,7 @@ def test_compute_ssb_fits_tilt_corrected_by_default_and_tilt_false_on_request(mo
 
         def __init__(self, source, **kwargs):
             self.detector_sampling_mrad = kwargs.get("detector_sampling_mrad")
-            self.aberrations = kwargs.get("aberrations")
+            self.known_aberrations = kwargs.get("aberrations")
             self.sample_tilt_mrad = self.depth_spread_nm = None
 
         def __enter__(self):
@@ -1423,103 +1433,98 @@ def test_compute_ssb_fits_tilt_corrected_by_default_and_tilt_false_on_request(mo
                 sample_tilt_mrad=(1.5, -2.0) if tilt else None, depth_spread_nm=6.0 if tilt else None,
                 tilt_fit_gain=0.1 if tilt else None)
 
-        def find_aberrations(self, **options):
+        def aberrations(self, **options):
             calls.append(("fit", options))
             result = self._result(options["tilt"], "newton" if options["refinement"] == "auto" else options["refinement"])
-            result.objective = options["objective"]
+            result.objective = "agreement"
             return result
 
-        def reconstruct(self):
-            calls.append(("reconstruct", {"aberrations": self.aberrations, "sample_tilt_mrad": self.sample_tilt_mrad,
+        def run(self):
+            calls.append(("run", {"aberrations": self.known_aberrations, "sample_tilt_mrad": self.sample_tilt_mrad,
                                           "depth_spread_nm": self.depth_spread_nm}))
             return self._result(self.sample_tilt_mrad is not None, None)
 
-    monkeypatch.setattr(widget_module.gpu_adapter, "SSB", Session)  # stands in for quantem.gpu's class behind the adapter
+    monkeypatch.setattr(widget_module.gpu_adapter, "DirectPtycho", Session)  # stands in for quantem.gpu's class behind the adapter
     widget = Show4DSTEM(np.ones((128, 128, 4, 4), np.uint16), precompute_virtual_images=False, voltage_kV=300,
                         semiangle_mrad=20, scan_sampling_A=0.5, detector_sampling_mrad=1.0)
     try:
-        widget.compute_ssb()
+        widget.direct_phase()
         kind, options = calls[-1]
-        assert kind == "fit" and options["tilt"] is True and options["refinement"] == "auto" and options["num_trials"] == 200
-        assert options["objective"] == "agreement"
+        assert kind == "fit" and options["tilt"] is True and options["refinement"] == "auto" and options["trials"] == 200
+        assert "objective" not in options  # quantem.gpu's one objective, the model's agreement
+        assert options["search"] == "standard"
         assert not {"search_ranges", "refine_lock", "fixed_aberrations"} & set(options)
-        record = json.loads(widget.ssb_compute_calibration_json)
-        assert record["schema"] == "quantem.show4dstem-ssb-calibration/3" and record["objective"] == "agreement"
+        record = json.loads(widget.direct_calibration_json)
+        assert record["schema"] == "quantem.show4dstem-direct-calibration/5" and record["objective"] == "agreement"
         assert (record["tilt"], record["sample_tilt_mrad"], record["depth_spread_nm"], record["tilt_fit_gain"]) == (True, [1.5, -2.0], 6.0, 0.1)
         assert record["refinement"] == "newton"  # what quantem.gpu selected, never "auto"
-        assert "tilt-corrected: (+1.5, -2.0) mrad" in widget.ssb_compute_status
+        assert "tilt-corrected: (+1.5, -2.0) mrad" in widget.direct_status
         # a manual recompute from the sliders keeps the fitted sample model
-        widget.compute_ssb(aberrations={"C10_nm": 9.0, "C12_nm": 1.0, "phi12_deg": 20.0}, lock_aberrations=True)
+        widget.direct_phase(aberrations={"C10_nm": 9.0, "C12_nm": 1.0, "phi12_deg": 20.0}, lock_aberrations=True)
         kind, state = calls[-1]
-        assert kind == "reconstruct" and state["sample_tilt_mrad"] == (1.5, -2.0) and state["depth_spread_nm"] == 6.0
-        assert json.loads(widget.ssb_compute_calibration_json)["tilt"] is True
+        assert kind == "run" and state["sample_tilt_mrad"] == (1.5, -2.0) and state["depth_spread_nm"] == 6.0
+        assert json.loads(widget.direct_calibration_json)["tilt"] is True
         # in the joint fit a lock is quantem.gpu's fixed_aberrations: C10 alone, C12 = 0 alone, or all three;
         # the held values are the sliders' (a fit moves the sliders to its result)
         def sliders(C10_nm, C12_nm, phi12_deg):
-            widget.ssb_compute_C10_nm, widget.ssb_compute_C12_nm, widget.ssb_compute_phi12_deg = C10_nm, C12_nm, phi12_deg
+            widget.direct_C10_nm, widget.direct_C12_nm, widget.direct_phi12_deg = C10_nm, C12_nm, phi12_deg
 
         sliders(5.0, 0.0, 0.0)
-        widget.compute_ssb(lock_C10=True)
+        widget.direct_phase(lock_C10=True)
         assert calls[-1][1]["fixed_aberrations"] == {"C10_nm": 5.0} and "check_rotation" not in calls[-1][1]
         sliders(5.0, 0.0, 0.0)
-        widget.compute_ssb(lock_C12=True)
+        widget.direct_phase(lock_C12=True)
         assert calls[-1][1]["fixed_aberrations"] == {"C12_nm": 0.0}
         sliders(5.0, 2.0, 15.0)
-        widget.compute_ssb(lock_C10=True, lock_C12=True)
+        widget.direct_phase(lock_C10=True, lock_C12=True)
         assert calls[-1][1]["fixed_aberrations"] == {"C10_nm": 5.0, "C12_nm": 2.0, "phi12_deg": 15.0}
         assert calls[-1][1]["check_rotation"] is False
         fits = len(calls)
         sliders(5.0, 2.0, 15.0)
         with pytest.raises(ValueError, match="holds C12 alone only at 0"):
-            widget.compute_ssb(lock_C12=True)
-        assert len(calls) == fits and widget.ssb_compute_status.startswith("SSB failed")
+            widget.direct_phase(lock_C12=True)
+        assert len(calls) == fits and widget.direct_status.startswith("Direct ptycho failed")
         # tilt=False: the model at tilt 0, with the standard fit's search ranges and refinement locks
         sliders(5.0, 2.0, 15.0)
-        widget.compute_ssb(tilt=False, lock_C10=True)
+        widget.direct_phase(tilt=False, lock_C10=True)
         kind, options = calls[-1]
         assert options["tilt"] is False and options["refine_lock"] == ["C10_nm"]
         assert options["search_ranges"] == {"C10_nm": 5.0, "C12_nm": (0.0, 10.0), "phi12_deg": (-90.0, 90.0)}
-        record = json.loads(widget.ssb_compute_calibration_json)
+        record = json.loads(widget.direct_calibration_json)
         assert (record["tilt"], record["sample_tilt_mrad"], record["depth_spread_nm"]) == (False, None, None)
         # after a tilt-0 fit a manual recompute has no sample model to keep
-        widget.compute_ssb(aberrations={"C10_nm": 5.0}, lock_aberrations=True)
+        widget.direct_phase(aberrations={"C10_nm": 5.0}, lock_aberrations=True)
         assert calls[-1][1]["sample_tilt_mrad"] is None
-        assert json.loads(widget.ssb_compute_calibration_json)["objective"] is None
-        # the third method, quantem.gpu's names: tilt=False, objective="phase_variance"; it cannot fit a tilt
-        widget.compute_ssb(tilt=False, objective="phase_variance")
-        assert (calls[-1][1]["tilt"], calls[-1][1]["objective"]) == (False, "phase_variance")
-        assert json.loads(widget.ssb_compute_calibration_json)["objective"] == "phase_variance"
-        fits = len(calls)
-        with pytest.raises(ValueError, match="earlier SSB search, a backup at tilt 0"):
-            widget.compute_ssb(objective="phase_variance")
-        with pytest.raises(ValueError, match="objective must be 'agreement' or 'phase_variance'"):
-            widget.compute_ssb(tilt=False, objective="variance")
-        assert len(calls) == fits
+        assert json.loads(widget.direct_calibration_json)["objective"] is None
+        # objective= and the earlier optimizer names are gone: quantem.gpu has one objective and one refinement
+        with pytest.raises(TypeError, match="objective"):
+            widget.direct_phase(tilt=False, objective="phase_variance")
+        with pytest.raises(ValueError, match="refinement must be 'auto' or None"):
+            widget.direct_phase(tilt=False, refinement="nelder-mead")
         # the frontend sends the switch with its request
-        widget.ssb_compute_request = json.dumps({"action": "compute_ssb", "num_trials": 20, "tilt": False,
-                                                 "objective": "phase_variance", "refinement": None})
+        widget.direct_request = json.dumps({"action": "direct_phase", "trials": 20, "tilt": False,
+                                                 "refinement": None})
         deadline = time.time() + 10
-        while widget.ssb_compute_busy or not calls[-1][1].get("num_trials") == 20:
+        while widget.direct_busy or not calls[-1][1].get("trials") == 20:
             assert time.time() < deadline
             time.sleep(0.01)
-        assert (widget.ssb_compute_tilt, widget.ssb_compute_objective) == (False, "phase_variance")
-        assert calls[-1][1]["tilt"] is False and calls[-1][1]["objective"] == "phase_variance"
-        assert calls[-1][1]["refinement"] is None
+        assert widget.direct_tilt is False
+        assert calls[-1][1]["tilt"] is False and calls[-1][1]["refinement"] is None
     finally:
         widget.close()
 
 
-def test_compute_ssb_refuses_an_unknown_aberration_key():
+def test_direct_phase_refuses_an_unknown_aberration_key():
     # an aberration under another name ({"C10": 5.0}) was dropped without a message and the phase reconstructed at C10 0
     pytest.importorskip("quantem.gpu", reason="the session that refuses the key is quantem.gpu's")
     try:
-        pytest.importorskip("quantem.gpu.device").detect()
+        pytest.importorskip("quantem.gpu.device").resolve("auto")
     except RuntimeError as exc:
-        pytest.skip(f"SSB needs CUDA or MPS: {exc}")
+        pytest.skip(f"Direct ptychography needs CUDA or MPS: {exc}")
     widget = Show4DSTEM(np.ones((128, 128, 4, 4), np.uint16), precompute_virtual_images=False, voltage_kV=300,
                         semiangle_mrad=20, scan_sampling_A=0.5, detector_sampling_mrad=1.0)
     with pytest.raises(ValueError, match=r"unknown \['C10'\]"):
-        widget.compute_ssb(aberrations={"C10": 5.0}, lock_aberrations=True)
+        widget.direct_phase(aberrations={"C10": 5.0}, lock_aberrations=True)
     widget.close()
 
 
@@ -1527,39 +1532,29 @@ def test_the_bright_field_radius_has_one_name_in_keyword_trait_and_state():
     # keyword, trait and state key were bf_radius; the name every package uses is bright_field_radius_px (detector pixels)
     counts = _counts(3, scan=(4, 4))
     viewer = Show4DSTEM(counts, bright_field_center_px=(7.5, 7.5), bright_field_radius_px=3.0, precompute_virtual_images=False)
-    pattern = ShowDiffraction(counts[0, 0].astype(np.float32), bright_field_center_px=(7.5, 7.5), bright_field_radius_px=3.0, verbose=False)
-    for widget in (viewer, pattern):
-        assert widget.bright_field_radius_px == 3.0 and widget.state_dict()["bright_field_radius_px"] == 3.0
-        assert "bright_field_radius_px" in widget.get_state() and not widget.has_trait("bf_radius")
-        with pytest.raises(ValueError, match=r"does not save: \['bf_radius'\]"):
-            widget.load_state_dict({"bf_radius": 2.0})
+    assert viewer.bright_field_radius_px == 3.0 and viewer.state_dict()["bright_field_radius_px"] == 3.0
+    assert "bright_field_radius_px" in viewer.get_state() and not viewer.has_trait("bf_radius")
+    with pytest.raises(ValueError, match=r"does not save: \['bf_radius'\]"):
+        viewer.load_state_dict({"bf_radius": 2.0})
     viewer.close()
-    for Widget, data in ((Show4DSTEM, counts), (ShowDiffraction, counts[0, 0].astype(np.float32))):
-        with pytest.raises(TypeError, match="unexpected keyword argument 'bf_radius'"):
-            Widget(data, bf_radius=3.0)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'bf_radius'"):
+        Show4DSTEM(counts, bf_radius=3.0)
 
 
-def test_the_bright_field_centre_has_one_name_in_keyword_traits_and_state(tmp_path):
+def test_the_bright_field_centre_has_one_name_in_keyword_traits_and_state():
     # keyword center=(row, col) with traits and state keys center_row, center_col; the vocabulary name is bright_field_center_px
     counts = _counts(3, scan=(4, 4))
     viewer = Show4DSTEM(counts, bright_field_center_px=(6.5, 8.5), bright_field_radius_px=3.0, precompute_virtual_images=False)
-    pattern = ShowDiffraction(counts[0, 0].astype(np.float32), bright_field_center_px=(6.5, 8.5), bright_field_radius_px=3.0, verbose=False)
-    for widget in (viewer, pattern):
-        assert (widget.bright_field_center_row_px, widget.bright_field_center_col_px) == (6.5, 8.5)
-        state = widget.state_dict()
-        assert (state["bright_field_center_row_px"], state["bright_field_center_col_px"]) == (6.5, 8.5)
-        assert {"bright_field_center_row_px", "bright_field_center_col_px"} <= set(widget.get_state())
-        assert not widget.has_trait("center_row") and not widget.has_trait("center_col")
-        with pytest.raises(ValueError, match=r"does not save: \['center_row', 'center_col'\]"):
-            widget.load_state_dict({"center_row": 2.0, "center_col": 2.0})
+    assert (viewer.bright_field_center_row_px, viewer.bright_field_center_col_px) == (6.5, 8.5)
+    state = viewer.state_dict()
+    assert (state["bright_field_center_row_px"], state["bright_field_center_col_px"]) == (6.5, 8.5)
+    assert {"bright_field_center_row_px", "bright_field_center_col_px"} <= set(viewer.get_state())
+    assert not viewer.has_trait("center_row") and not viewer.has_trait("center_col")
+    with pytest.raises(ValueError, match=r"does not save: \['center_row', 'center_col'\]"):
+        viewer.load_state_dict({"center_row": 2.0, "center_col": 2.0})
     viewer.close()
-    for Widget, data in ((Show4DSTEM, counts), (ShowDiffraction, counts[0, 0].astype(np.float32))):
-        with pytest.raises(TypeError, match="unexpected keyword argument 'center'"):
-            Widget(data, center=(6.5, 8.5))
-    # the measurements file names the two coordinates the same way
-    pattern.save(tmp_path / "state.json")
-    metadata = json.loads(ShowDiffraction.measurements_from_state(tmp_path / "state.json", tmp_path / "measurements.json").read_text())["metadata"]
-    assert (metadata["bright_field_center_row_px"], metadata["bright_field_center_col_px"]) == (6.5, 8.5) and "center_row" not in metadata
+    with pytest.raises(TypeError, match="unexpected keyword argument 'center'"):
+        Show4DSTEM(counts, center=(6.5, 8.5))
 
 
 def test_static_preview_labels_the_detector_bar_in_its_own_unit(monkeypatch):

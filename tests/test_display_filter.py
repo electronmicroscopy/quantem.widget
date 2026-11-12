@@ -1,6 +1,6 @@
 """Display-filter contract: view transforms only, raw counts stay intact.
 
-The helper backs the ShowDiffraction denoise views and is the reference for the
+The helper is the reference for the
 Show2D/Show3D browser filter, so these tests are the workflows a microscopist
 actually runs: leave the default alone and see raw counts, turn on a binned
 Anscombe smooth for a sparse map and see speckle drop.

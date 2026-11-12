@@ -10,9 +10,7 @@ const INITIAL: Record<string, unknown> = {
   x_bytes: new DataView(new ArrayBuffer(0)),
   n_traces: 2, n_points: 4, labels: ["particle", "support"], colors: ["#0072B2", "#D55E00"],
   show_grid: true, show_controls: true, line_width: 1.5, x_label: "angle", x_unit: "mrad", y_label: "I", y_unit: "",
-  controls_collapsed: false, log_scale: false, show_stats: false, show_review: false, show_legend: true,
-  starred_snapshot_image_labels: [], trial_notes: {}, trial_tags: {}, show_trial_notes: false, show_starred_only: false,
-  trial_sort_key: "label", trial_sort_descending: false, trial_filter_text: "", top_trial_count: 0,
+  controls_collapsed: false, log_scale: false, show_stats: false, show_legend: true,
   plot_height_px: 320, plot_width_px: 400, side_panel_width_px: 360, snapshot_panel_width_px: 0, focused_trace: -1,
   x_range: [], y_range: [], selected_snapshot_idx: -1, selected_snapshot_group_idx: -1, bookmarked_snapshot_groups: [],
   hidden_snapshot_image_labels: [], show_snapshot_histogram: true, show_snapshot_fft: false, snapshot_fft_layout: "overlay",
@@ -79,7 +77,7 @@ it("restores the settled values and is enabled only while one differs", async ()
   act(() => {
     model.set("log_scale", true);
     model.set("x_range", [1, 2]);
-    model.set("trial_notes", { particle: "drifted" });
+    model.set("hidden_snapshot_image_labels", ["particle"]);
     model.set("image_cmap", "magma");
     model.set("snapshot_profile_line", [{ row: 1, col: 2 }, { row: 3, col: 4 }]);
   });
@@ -87,7 +85,7 @@ it("restores the settled values and is enabled only while one differs", async ()
   expect(resetButton().disabled).toBe(false);
   act(() => resetButton().click());
   await settle();
-  for (const key of ["log_scale", "x_range", "trial_notes", "image_cmap", "snapshot_profile_line"]) {
+  for (const key of ["log_scale", "x_range", "hidden_snapshot_image_labels", "image_cmap", "snapshot_profile_line"]) {
     expect(model.get(key), key).toEqual(INITIAL[key]);
   }
   expect(model.save_changes).toHaveBeenCalled();
